@@ -1,0 +1,18 @@
+# Supply-chain hardening: no dependency version younger than 7 days may be
+# installed (smash-and-grab compromised releases are usually yanked within hours).
+# Applies to transitive dependencies too. See the project security policy.
+minimumReleaseAge: 10080 # 7 days, in minutes
+minimumReleaseAgeStrict: true # FAIL install if no version is old enough (no silent fallback)
+minimumReleaseAgeExclude: [] # only add a package here with a written, reviewed reason
+
+# Pin exact versions on `pnpm add` so dependency updates are always deliberate.
+savePrefix: ''
+
+# Allow-list of dependencies permitted to run install/build scripts (pnpm blocks
+# all by default as a supply-chain measure). Only well-known build tooling here.
+onlyBuiltDependencies:
+  - esbuild
+
+
+allowBuilds:
+  esbuild: true

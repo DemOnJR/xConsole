@@ -1,0 +1,15 @@
+# Supply-chain cooldown policy for Cargo dependencies, consumed by `cargo-cooldown`.
+# Run via:  cargo cooldown build   (and check / test / run)
+#
+# 7-day cooldown: do not adopt crate versions published less than 7 days ago.
+# Most malicious releases are detected and yanked within hours, so a one-week
+# window filters out smash-and-grab supply-chain attacks. Applies transitively.
+[registry]
+global-min-publish-age = "7 days"
+
+[cooldown]
+# Fail closed: never silently use a too-fresh crate.
+incompatible-publish-age = "deny"
+publish-age = "deny"
+# Treat the already-committed Cargo.lock as the protected version floor.
+lockfile-baseline = "floor"

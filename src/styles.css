@@ -1,0 +1,169 @@
+@import "tailwindcss";
+@import "@xterm/xterm/css/xterm.css";
+@import "@xyflow/react/dist/style.css";
+
+@import "highlight.js/styles/github-dark.min.css";
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: #0b0f17;
+  color: #e5e7eb;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  overflow: hidden;
+}
+
+/* React Flow dark canvas tuning */
+.react-flow__attribution {
+  display: none;
+}
+
+.xterm-host {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.xterm {
+  height: 100%;
+}
+
+.xterm .xterm-viewport {
+  background-color: transparent !important;
+}
+
+/* Custom scrollbars */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #2a3344;
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Agent activity blocks — Cursor-style thin scroll inside cards */
+.agent-activity-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #2a3344 transparent;
+}
+.agent-activity-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.agent-activity-scroll::-webkit-scrollbar-thumb {
+  background: #2a3344;
+  border-radius: 3px;
+}
+.agent-activity-scroll::-webkit-scrollbar-thumb:hover {
+  background: #3d4a61;
+}
+
+/* Syntax highlight blocks in agent activity */
+.agent-hl .hljs {
+  background: transparent !important;
+  padding: 0 !important;
+}
+
+.agent-hl-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+/* Markdown fenced blocks — inherit github-dark token colors */
+.agent-hl .hljs,
+.agent-hl-code.hljs {
+  color: #c9d1d9;
+}
+
+.agent-console .ansi-default,
+.agent-console .log-default {
+  color: #9ca3af;
+}
+.agent-console .ansi-red,
+.agent-console .log-error {
+  color: #fca5a5;
+}
+.agent-console .ansi-green,
+.agent-console .log-info {
+  color: #86efac;
+}
+.agent-console .ansi-yellow,
+.agent-console .log-warn {
+  color: #fde047;
+}
+.agent-console .ansi-blue {
+  color: #93c5fd;
+}
+.agent-console .ansi-cyan {
+  color: #67e8f9;
+}
+.agent-console .ansi-magenta {
+  color: #d8b4fe;
+}
+.agent-console .ansi-bold {
+  font-weight: 600;
+}
+.agent-console .ansi-bright-red {
+  color: #f87171;
+}
+.agent-console .ansi-bright-green {
+  color: #4ade80;
+}
+.agent-console .ansi-bright-yellow {
+  color: #facc15;
+}
+.agent-console .ansi-bright-blue {
+  color: #60a5fa;
+}
+.agent-console .ansi-bright-cyan {
+  color: #22d3ee;
+}
+.agent-console .ansi-white,
+.agent-console .ansi-bright-white {
+  color: #e5e7eb;
+}
+.context-hourglass {
+  transition: transform 0.72s cubic-bezier(0.45, 0.05, 0.2, 1);
+  transform-origin: center center;
+}
+
+.context-hourglass-flip {
+  filter: drop-shadow(0 0 4px rgba(251, 191, 36, 0.45));
+}
+
+@keyframes context-sand-fall {
+  0% {
+    transform: translateY(-1px);
+    opacity: 0;
+  }
+  25% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(2px);
+    opacity: 0;
+  }
+}
+
+.context-hourglass-grain {
+  animation: context-sand-fall 1.1s ease-in infinite;
+}
+
+.context-hourglass-grain-2 {
+  animation-delay: 0.35s;
+}
+
+.context-hourglass-grain-3 {
+  animation-delay: 0.7s;
+}
