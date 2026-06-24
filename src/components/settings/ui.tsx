@@ -46,7 +46,7 @@ export function Field({
 }
 
 const inputClass =
-  "w-full rounded-md border border-[#1f2737] bg-[#0b0f17] px-2.5 py-1.5 text-sm text-gray-200 outline-none focus:border-blue-500 disabled:opacity-50";
+  "w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-2.5 py-1.5 text-sm text-gray-200 outline-none focus:border-blue-500 disabled:opacity-50";
 
 export function TextInput(props: InputHTMLAttributes<HTMLInputElement>) {
   return <input {...props} className={`${inputClass} ${props.className ?? ""}`} />;
@@ -82,7 +82,7 @@ export function Toggle({
     >
       <span
         className={`relative inline-flex h-5 w-9 items-center rounded-full transition ${
-          checked ? "bg-blue-600" : "bg-[#1f2737]"
+          checked ? "bg-blue-600" : "bg-[var(--border)]"
         }`}
       >
         <span
@@ -106,9 +106,9 @@ export function Button({
   const variants: Record<ButtonVariant, string> = {
     primary: "bg-blue-600 text-white hover:bg-blue-500",
     ghost:
-      "border border-[#1f2737] text-gray-300 hover:bg-[#1f2737] hover:text-gray-100",
+      "border border-[var(--border)] text-gray-300 hover:bg-[var(--border)] hover:text-gray-100",
     danger:
-      "border border-[#1f2737] text-gray-400 hover:bg-red-500/10 hover:text-red-300 hover:border-red-500/40",
+      "border border-[var(--border)] text-gray-400 hover:bg-red-500/10 hover:text-red-300 hover:border-red-500/40",
   };
   return (
     <button
@@ -179,7 +179,7 @@ export function DocEditor({
 export function Card({ children, className = "" }: { children: ReactNode; className?: string }) {
   return (
     <div
-      className={`rounded-lg border border-[#1f2737] bg-[#0b0f17] p-3 ${className}`}
+      className={`rounded-lg border border-[var(--border)] bg-[var(--bg)] p-3 ${className}`}
     >
       {children}
     </div>

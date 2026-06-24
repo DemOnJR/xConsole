@@ -22,10 +22,19 @@ pub struct OpenAiProvider {
 
 impl OpenAiProvider {
     pub fn new(api_key: String, base_url: Option<String>) -> Self {
+        // A bounded connect timeout + short idle-pool so we don't reuse a stale
+        // keep-alive connection a cloud host (e.g. Groq) has already closed —
+        // which surfaces as a spurious "could not reach the server" error.
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .pool_idle_timeout(std::time::Duration::from_secs(15))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
         Self {
             api_key,
             base_url: base_url.filter(|s| !s.is_empty()).unwrap_or_else(|| DEFAULT_BASE.to_string()),
-            http: reqwest::Client::new(),
+            http,
         }
     }
 
@@ -99,40 +108,104 @@ impl Provider for OpenAiProvider {
         sink: Option<&EventSink>,
     ) -> Result<ChatResponse, String> {
         let url = join_url(&self.base_url, "chat/completions");
-        let mut body = json!({
-            "model": req.model,
-            "max_tokens": req.max_tokens,
-            "temperature": req.temperature,
-            "stream": true,
-            "messages": Self::build_messages(req),
-        });
         let tools = Self::build_tools(req);
-        if !tools.is_empty() {
-            body["tools"] = json!(tools);
-        }
 
-        let resp = self
-            .http
-            .post(url)
-            .bearer_auth(&self.api_key)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("openai request failed: {e}"))?;
+        // Send the request. If the model rejects tool calling (e.g. some hosted
+        // Groq models), retry once WITHOUT tools so plain chat still works — and
+        // tell the user, since the agent can't run commands without tools.
+        let mut send_tools = !tools.is_empty();
+        let resp = loop {
+            let mut body = json!({
+                "model": req.model,
+                "max_tokens": req.max_tokens,
+                "temperature": req.temperature,
+                "stream": true,
+                "messages": Self::build_messages(req),
+            });
+            if send_tools {
+                body["tools"] = json!(tools);
+            }
 
-        if !resp.status().is_success() {
+            // Send with a small retry on transient connection failures — a stale
+            // pooled keep-alive connection to a cloud host closes intermittently.
+            let is_local = url.contains("127.0.0.1") || url.contains("localhost");
+            let mut attempt = 0u8;
+            let resp = loop {
+                let mut builder = self
+                    .http
+                    .post(&url)
+                    .header("content-type", "application/json");
+                // Self-hosted llama.cpp servers need no key; only send auth when present.
+                if !self.api_key.is_empty() {
+                    builder = builder.bearer_auth(&self.api_key);
+                }
+                match builder.json(&body).send().await {
+                    Ok(r) => break r,
+                    Err(e)
+                        if (e.is_connect() || e.is_timeout() || e.is_request()) && attempt < 2 =>
+                    {
+                        attempt += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            300 * attempt as u64,
+                        ))
+                        .await;
+                    }
+                    Err(e) => {
+                        return Err(if (e.is_connect() || e.is_timeout()) && is_local {
+                            format!(
+                                "could not reach the local model server at {url} — is it running? \
+                                 (llama.cpp: `llama-server -m <model.gguf> --port 8080`)"
+                            )
+                        } else if e.is_connect() || e.is_timeout() {
+                            format!(
+                                "could not reach {url} — check your internet connection or the \
+                                 provider's status, and that the Base URL is correct."
+                            )
+                        } else {
+                            format!("request failed: {e}")
+                        });
+                    }
+                }
+            };
+
+            if resp.status().is_success() {
+                break resp;
+            }
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            if send_tools
+                && status.as_u16() == 400
+                && text.to_lowercase().contains("tool")
+            {
+                emit(
+                    sink,
+                    StreamEvent::Status(
+                        "This model doesn't support tool calling — replying without tools. \
+                         For SSH/VPS actions pick a tool-capable model (e.g. Groq \
+                         `llama-3.3-70b-versatile`, or OpenAI/Anthropic/Cursor)."
+                            .into(),
+                    ),
+                );
+                send_tools = false;
+                continue;
+            }
             return Err(format!("openai error {status}: {text}"));
-        }
+        };
 
         let mut out = ChatResponse::default();
         let mut sse = SseBuffer::new();
         let mut tools_acc: Vec<ToolAcc> = Vec::new();
+        // Reasoning models (gpt-oss, qwen3, … on Groq) stream their text in a
+        // separate `reasoning` field and may leave `content` empty.
+        let mut reasoning = String::new();
 
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
+            // User pressed Stop — abort the in-flight response immediately.
+            if req.is_cancelled() {
+                emit(sink, StreamEvent::Status("Stopped.".into()));
+                break;
+            }
             let chunk = chunk.map_err(|e| format!("openai stream error: {e}"))?;
             let text = String::from_utf8_lossy(&chunk);
             for payload in sse.push(&text) {
@@ -152,6 +225,13 @@ impl Provider for OpenAiProvider {
                     if !t.is_empty() {
                         out.content.push_str(t);
                         emit(sink, StreamEvent::Text(t.to_string()));
+                    }
+                }
+                for key in ["reasoning", "reasoning_content"] {
+                    if let Some(t) = delta.get(key).and_then(|v| v.as_str()) {
+                        if !t.is_empty() {
+                            reasoning.push_str(t);
+                        }
                     }
                 }
                 if let Some(tcs) = delta.get("tool_calls").and_then(|v| v.as_array()) {
@@ -192,6 +272,13 @@ impl Provider for OpenAiProvider {
             let tc = ToolCall { id: acc.id, name: acc.name, arguments };
             emit(sink, StreamEvent::ToolCall(tc.clone()));
             out.tool_calls.push(tc);
+        }
+
+        // Reasoning model emitted only `reasoning` (no content, no tools) — surface
+        // it so the reply isn't blank.
+        if out.content.trim().is_empty() && out.tool_calls.is_empty() && !reasoning.trim().is_empty() {
+            emit(sink, StreamEvent::Text(reasoning.clone()));
+            out.content = reasoning;
         }
 
         Ok(out)

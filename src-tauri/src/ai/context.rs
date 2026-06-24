@@ -59,29 +59,63 @@ pub struct PromptContext<'a> {
     pub target_selection_note: Option<String>,
     /// Ponytail-minimal tiers when context is tight (Hermes auto-compact).
     pub force_minimal_prompt: bool,
+    /// Plan mode: instruct the agent to investigate then present a plan first.
+    pub plan_mode: bool,
+    /// Per-workspace project context (brief + scoped memory + project agent files),
+    /// injected into the context tier when a workspace is active.
+    pub workspace_context: Option<String>,
+    /// Live canvas: the terminals / SFTP panels the user has open right now (with a
+    /// tail of each terminal's scrollback). Injected into the context tier.
+    pub canvas_context: Option<String>,
 }
 
 /// Guidance injected when the agent has command/file tools available.
-const TOOL_GUIDANCE: &str = "You can act on the user's servers through your tools. \
+const TOOL_GUIDANCE: &str = "You can act on the user's servers AND on their local machine through your tools. \
 Prefer running a real command/tool over describing what you would do. Inspect \
 before you change, make minimal reversible edits, and verify the result. \
+For the user's own PC (when they say 'my pc', 'locally', 'this machine', or ask about local software \
+such as local docker containers), use the local_* tools (local_run_command, local_read_file, \
+local_write_file, local_list_dir). For a remote server use run_command and the file tools. \
+Move files between the two with upload_file / download_file. \
+If the user has terminals or SFTP panels open, they're shown under '# Live canvas' with each \
+terminal's recent output — read that directly; use terminal_capture for full scrollback, \
+terminal_send to run a command in a terminal, and read_file/write_file to edit a file the user is \
+browsing in an SFTP panel (use that panel's path). \
+To replace a server's password login with secure key-based auth, use ssh_setup_key_auth. \
 For infrastructure, load skills meta/ponytail and the matching infra/terraform-* skill first, \
-then use project_*, cloud_*, tfc_*, and terraform_* tools. When a task is complete, stop.";
+then use project_*, cloud_*, tfc_*, and terraform_* tools. \
+When a request is ambiguous or needs a decision only the user can make, call ask_user (offer options). \
+For a large, multi-step, or destructive task, first call present_plan with a numbered plan and wait for \
+approval before making changes. When a task is complete, stop.";
 
 const VPS_TOOL_GUIDANCE: &str = "You can act on the user's VPS targets through your tools. \
 When the user asks about both/all/each server, use run_command_all (one call covers every selected target). \
 Live SSH commands may already have run — see snapshot and live command sections below. \
+If the user has terminals/SFTP open, a '# Live canvas' section shows them with each terminal's \
+recent output — answer about it directly (use terminal_capture for more, terminal_send to run a \
+command, read_file/write_file to edit a file shown in an SFTP panel). \
 Summarize that output directly; NEVER say you will run commands or ask to confirm read-only checks. \
 For uptime/reboot: use the INTERPRETATION line (e.g. '20:59' = ~21 hours) — never invent calendar dates. \
 For write_file on Linux VPS as root: use /root/ or /tmp/ paths (e.g. /root/hello.py) — never /home/root/. \
 Use underscores in filenames (hello.py not hello world.py) unless the user asked for spaces. \
 Do not SSH or write files when the user only asked for example code in chat — answer in the message instead. \
+For the user's OWN PC (they say 'my pc', 'locally', 'this machine', or ask about local software), use the \
+local_* tools instead of run_command. \
+When a request is ambiguous, call ask_user; for a large or destructive multi-step task, call present_plan \
+and wait for approval before changing anything. \
 When a task is complete, stop.";
 
-const WEB_GUIDANCE: &str = "You have internet access via web_search and web_fetch. Use them for current \
-facts (weather, news, prices, live docs) — never claim you cannot access the web. \
-For weather: web_search the city, or web_fetch https://wttr.in/City?format=3 (URL-encode the city name). \
-Prefer a tool call over guessing when the answer depends on real-time data.";
+/// Injected when plan mode is on: investigate read-only, then present a plan.
+const PLAN_MODE_GUIDANCE: &str = "PLAN MODE IS ON. Do not change anything yet. Investigate using only \
+read-only tools (read_file, local_read_file, local_list_dir, list_vps_targets, read-only commands, \
+web_*). When you understand the task, call present_plan with a clear numbered plan and STOP — wait for \
+the user to approve it. Only after they approve may you run commands or edit/write files. If they \
+request changes, revise and call present_plan again.";
+
+const WEB_GUIDANCE: &str = "You have internet access via web_search, web_fetch, and geo_locate — \
+use them only when a request actually needs current or external data (docs, prices, news, etc.) \
+instead of guessing or claiming you cannot access the web. For a location-relative request, \
+geo_locate resolves the user's city. Don't volunteer web lookups the user didn't ask for.";
 
 const CASUAL_GUIDANCE: &str = "The user sent a greeting or casual message. Reply briefly and naturally. \
 Do not mention VPS, servers, RAM, disk, or offer infrastructure checks unless they asked.";
@@ -108,8 +142,11 @@ fixes) with the memory tool; keep entries terse. Do not store secrets verbatim."
 
 fn safety_guidance(safety: &str) -> &'static str {
     match safety {
-        "full" => "Safety mode: FULL AUTONOMY. You may run any command without \
-asking, but remain careful with destructive operations.",
+        "full" => "Safety mode: FULL AUTONOMY. The user has authorized you to act without \
+asking. Never ask for permission and never say things like 'do you want me to proceed?', \
+'shall I continue?', or 'let me know if you'd like me to run this' — just call the tool and do \
+it. The only time you pause is to call present_plan for a genuinely large or destructive \
+multi-step task, or ask_user when a requirement is truly ambiguous. Otherwise act.",
         "allowlist" => "Safety mode: ALLOWLIST. Read-only/safe commands run \
 automatically; destructive or unknown commands require user approval before \
 execution.",
@@ -154,6 +191,9 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
             rules.push(MEMORY_GUIDANCE.to_string());
         }
         rules.push(safety_guidance(ctx.safety).to_string());
+        if ctx.plan_mode {
+            rules.push(PLAN_MODE_GUIDANCE.to_string());
+        }
     }
     if ctx.force_minimal_prompt {
         rules.push(PONYTAIL_COMPACT_GUIDANCE.to_string());
@@ -175,6 +215,12 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
     };
 
     let mut infra_parts: Vec<String> = Vec::new();
+    if let Some(ws) = ctx.workspace_context.as_ref().filter(|s| !s.trim().is_empty()) {
+        infra_parts.push(ws.clone());
+    }
+    if let Some(canvas) = ctx.canvas_context.as_ref().filter(|s| !s.trim().is_empty()) {
+        infra_parts.push(canvas.clone());
+    }
     if !ctx.casual_turn && !ctx.target_ids.is_empty() {
         let catalog = crate::ai::tools::format_targets_catalog(ctx.db, ctx.target_ids);
         if !catalog.is_empty() {
@@ -202,20 +248,16 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
         .unwrap_or_default();
 
     PromptParts {
-        rules_tokens: estimate_tokens_from_chars(rules.join("\n\n").len()),
-        skills_tokens: estimate_tokens_from_chars(skills_text.len()),
-        memory_tokens: estimate_tokens_from_chars(mem.len()),
-        infra_tokens: estimate_tokens_from_chars(infra_parts.join("\n\n").len()),
-        summary_tokens: estimate_tokens_from_chars(summary.len()),
+        rules_tokens: count_tokens(&rules.join("\n\n")),
+        skills_tokens: count_tokens(&skills_text),
+        memory_tokens: count_tokens(&mem),
+        infra_tokens: count_tokens(&infra_parts.join("\n\n")),
+        summary_tokens: count_tokens(&summary),
     }
 }
 
-fn estimate_tokens_from_chars(chars: usize) -> u32 {
-    if chars == 0 {
-        0
-    } else {
-        ((chars as f64) / 4.0).ceil() as u32
-    }
+fn count_tokens(text: &str) -> u32 {
+    crate::ai::text::count_tokens(text) as u32
 }
 
 fn join_tiers(tiers: [Vec<String>; 3]) -> String {
@@ -254,6 +296,9 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
             stable.push(MEMORY_GUIDANCE.to_string());
         }
         stable.push(safety_guidance(ctx.safety).to_string());
+        if ctx.plan_mode {
+            stable.push(PLAN_MODE_GUIDANCE.to_string());
+        }
     }
     if ctx.force_minimal_prompt {
         stable.push(PONYTAIL_COMPACT_GUIDANCE.to_string());
@@ -271,6 +316,12 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
     }
 
     let mut context: Vec<String> = Vec::new();
+    if let Some(ws) = ctx.workspace_context.as_ref().filter(|s| !s.trim().is_empty()) {
+        context.push(ws.clone());
+    }
+    if let Some(canvas) = ctx.canvas_context.as_ref().filter(|s| !s.trim().is_empty()) {
+        context.push(canvas.clone());
+    }
     if !ctx.casual_turn && !ctx.target_ids.is_empty() {
         let catalog = crate::ai::tools::format_targets_catalog(ctx.db, ctx.target_ids);
         if !catalog.is_empty() {
@@ -317,9 +368,9 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
     }
     if ctx.target_count == 0 {
         runtime.push_str(if ctx.vps_tools_only {
-            "\nNo VPS targets selected: SSH tools unavailable this turn."
+            "\nNo VPS targets selected: remote SSH tools unavailable this turn, but local_* tools (this PC) still work."
         } else {
-            "\nNo VPS targets selected: SSH tools unavailable; use project_*, cloud_*, tfc_*, terraform_* for infra."
+            "\nNo VPS targets selected: remote SSH tools unavailable. You can still use local_* tools (this PC) and project_*, cloud_*, tfc_*, terraform_* for infra."
         });
     }
     volatile.push(runtime);

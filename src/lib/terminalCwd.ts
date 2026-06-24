@@ -56,9 +56,10 @@ export function extractCwdFromOutput(chunk: string): string | null {
 
 /** Detect a completed `cd` command from terminal input. */
 export function cwdFromCdInput(line: string, cwd: string | undefined): string | null {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith("cd")) return null;
-  const rest = trimmed.slice(2).trim();
+  // Require `cd` as a whole word so `cdrom …` / `cdtest` don't match.
+  const m = line.trim().match(/^cd(?:\s+(.*))?$/);
+  if (!m) return null;
+  const rest = (m[1] ?? "").trim();
   if (!rest) return null; // cd with no args → home; wait for OSC 7
   const unquoted = rest.replace(/^['"]|['"]$/g, "");
   return resolveCd(cwd ?? "/", unquoted);

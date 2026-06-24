@@ -4,12 +4,9 @@ use std::collections::HashMap;
 
 use crate::ai::AgentHome;
 use crate::secrets;
+use crate::ssh::shell_quote;
 use crate::storage::models::CloudAccount;
 use crate::storage::Db;
-
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
 
 /// Parse AWS secret: `key_id\nsecret` or JSON with access_key_id/secret_access_key.
 pub(crate) fn parse_aws_secret_for_api(raw: &str) -> Result<(String, String), String> {

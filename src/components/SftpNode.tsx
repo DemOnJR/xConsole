@@ -4,14 +4,17 @@ import {
   NodeResizer,
   Position,
   useReactFlow,
+  useStore,
   type NodeProps,
 } from "@xyflow/react";
 import { api, type SftpEntry } from "../lib/tauri";
 import { useCanvasStore, type SftpNode as SftpNodeType } from "../stores/canvasStore";
 import { useSessionStore } from "../stores/sessionStore";
+import { dialog } from "../stores/dialogStore";
 import { ChevronUpIcon, FolderIcon } from "./icons";
 import { SftpContextMenu, type SftpMenuState } from "./SftpContextMenu";
 import { SftpPermissionsDialog } from "./SftpPermissionsDialog";
+import { SftpCodeEditor } from "./SftpCodeEditor";
 
 type ConnState = "connecting" | "connected" | "error" | "disconnected";
 
@@ -83,7 +86,7 @@ function TreeNode({
   return (
     <div>
       <div
-        className={`flex items-center gap-0.5 rounded px-1 py-0.5 hover:bg-[#11161f] ${
+        className={`flex items-center gap-0.5 rounded px-1 py-0.5 hover:bg-[var(--surface)] ${
           isActive ? "bg-cyan-950/40 text-cyan-300" : "text-gray-400"
         }`}
         style={{ paddingLeft: `${depth * 10 + 4}px` }}
@@ -110,7 +113,7 @@ function TreeNode({
   );
 }
 
-export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
+export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeType>) {
   const focus = useCanvasStore((s) => s.focus);
   const removeNode = useCanvasStore((s) => s.removeNode);
   const updateNodeData = useCanvasStore((s) => s.updateNodeData);
@@ -121,6 +124,8 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
   const terminalCwd = useSessionStore((s) =>
     linkedTerminalId ? s.sessions[linkedTerminalId]?.cwd : undefined,
   );
+  const setSessionInfo = useSessionStore((s) => s.setInfo);
+  const removeSessionInfo = useSessionStore((s) => s.remove);
 
   const sessionRef = useRef<string | null>(null);
   const lastSyncedCwd = useRef<string | null>(null);
@@ -138,6 +143,7 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
   const [loadingPaths, setLoadingPaths] = useState<Set<string>>(() => new Set());
   const [menu, setMenu] = useState<SftpMenuState | null>(null);
   const [propsEntry, setPropsEntry] = useState<SftpEntry | null>(null);
+  const [editEntry, setEditEntry] = useState<SftpEntry | null>(null);
 
   const loadDir = useCallback(async (sessionId: string, dir: string) => {
     setLoading(true);
@@ -182,6 +188,13 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
     void fetchTreeDir(sid, path);
     void fetchTreeDir(sid, "/");
   }, [path, loadDir, fetchTreeDir]);
+
+  // Publish this panel's live path + status to the session store (keyed by node id)
+  // so the agent's per-turn canvas snapshot knows what the user is browsing.
+  useEffect(() => {
+    setSessionInfo(id, { status, sftpPath: path });
+  }, [id, status, path, setSessionInfo]);
+  useEffect(() => () => removeSessionInfo(id), [id, removeSessionInfo]);
 
   useEffect(() => {
     let mounted = true;
@@ -260,7 +273,15 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
 
   const handleDelete = async (entry: SftpEntry) => {
     const label = entry.is_dir ? "directory and all contents" : "file";
-    if (!window.confirm(`Delete ${label}?\n\n${entry.path}`)) return;
+    if (
+      !(await dialog.confirm({
+        title: "Delete",
+        message: `Delete ${label}?\n\n${entry.path}`,
+        danger: true,
+        confirmText: "Delete",
+      }))
+    )
+      return;
     try {
       await api.vpsFileDelete(data.vpsId, entry.path, entry.is_dir);
       refreshListing();
@@ -270,7 +291,12 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
   };
 
   const handleRename = async (entry: SftpEntry) => {
-    const newName = window.prompt("Rename to:", entry.name);
+    const newName = await dialog.prompt({
+      title: "Rename",
+      label: "New name",
+      defaultValue: entry.name,
+      confirmText: "Rename",
+    });
     if (!newName?.trim() || newName.trim() === entry.name) return;
     const to = joinRemotePath(parentDirOf(entry.path), newName.trim());
     try {
@@ -282,7 +308,11 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
   };
 
   const handleNewFolder = async () => {
-    const name = window.prompt("New directory name:");
+    const name = await dialog.prompt({
+      title: "New folder",
+      label: "Directory name",
+      confirmText: "Create",
+    });
     if (!name?.trim()) return;
     try {
       await api.vpsFileMkdir(data.vpsId, joinRemotePath(path, name.trim()));
@@ -293,7 +323,11 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
   };
 
   const handleNewFile = async () => {
-    const name = window.prompt("New file name:");
+    const name = await dialog.prompt({
+      title: "New file",
+      label: "File name",
+      confirmText: "Create",
+    });
     if (!name?.trim()) return;
     try {
       await api.vpsFileTouch(data.vpsId, joinRemotePath(path, name.trim()));
@@ -410,19 +444,29 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
       ));
   };
 
+  // Freeform: scale with the canvas (shrink on zoom out). Tile/snap: keep a
+  // constant on-screen size by countering the zoom.
+  const layoutMode = useCanvasStore((s) => s.layoutMode);
+  const freeform = layoutMode === "freeform";
+  const tiled = layoutMode === "tile";
+  const zoom = useStore((s) => s.transform[2]);
+
   return (
     <div
-      className={`flex h-full w-full flex-col overflow-hidden rounded-lg border bg-[#0b0f17] shadow-lg ${
-        selected ? "border-cyan-500" : "border-[#1f2737]"
-      }`}
+      className={`group flex h-full w-full flex-col overflow-hidden border bg-[var(--bg)] shadow-lg ${
+        tiled ? "rounded-none" : "rounded-lg"
+      } ${selected ? "border-cyan-500" : "border-[var(--border)]"}`}
+      style={freeform ? undefined : { transform: `scale(${1 / zoom})`, transformOrigin: "top left" }}
       onMouseDown={() => focus(id)}
     >
       <Handle
         type="source"
         position={Position.Left}
         id="path-out"
-        className="!h-3 !w-3 !border-2 !border-cyan-400 !bg-[#0b0f17]"
-        title="Drag to SSH terminal to sync path"
+        className={`!h-3 !w-3 !border-2 !border-cyan-400 !bg-[var(--bg)] !opacity-0 transition-opacity ${
+          dragging ? "" : "group-hover:!opacity-100"
+        }`}
+        data-tooltip="Drag this onto an SSH terminal so this panel follows its folder"
       />
 
       <NodeResizer
@@ -434,7 +478,7 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
       />
 
       <div
-        className="flex cursor-move items-center gap-2 border-b border-[#1f2737] bg-[#11161f] px-3 py-1.5 text-xs"
+        className="flex cursor-move items-center gap-2 border-b border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs"
         onDoubleClick={() => {
           focus(id);
           fitView({ nodes: [{ id }], duration: 300, padding: 0.1 });
@@ -443,7 +487,7 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
         <span
           className="inline-block h-2.5 w-2.5 rounded-full"
           style={{ background: STATUS_COLOR[status] }}
-          title={status}
+          data-tooltip={status}
         />
         <FolderIcon size={14} className="shrink-0 text-cyan-400" />
         <span className="truncate font-medium text-gray-200">{data.name}</span>
@@ -454,9 +498,9 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
             className={`rounded px-1.5 py-0.5 text-[10px] ${
               followTerminal
                 ? "bg-cyan-900/50 text-cyan-300"
-                : "text-gray-500 hover:bg-[#1f2737]"
+                : "text-gray-500 hover:bg-[var(--border)]"
             }`}
-            title={
+            data-tooltip={
               followTerminal
                 ? "Following SSH path — click to pause"
                 : "Paused — click to follow SSH path"
@@ -471,8 +515,8 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
         )}
         <div className="ml-auto flex items-center gap-1">
           <button
-            className="rounded px-1.5 py-0.5 text-gray-400 hover:bg-[#1f2737] hover:text-gray-200"
-            title="Close SFTP"
+            className="rounded px-1.5 py-0.5 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+            data-tooltip="Close SFTP"
             onClick={(e) => {
               e.stopPropagation();
               closeNode();
@@ -484,11 +528,11 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
       </div>
 
       <div className="nodrag nowheel flex min-h-0 flex-1 flex-col">
-        <div className="flex items-center gap-1 border-b border-[#1f2737]/80 px-2 py-1">
+        <div className="flex items-center gap-1 border-b border-[var(--border)]/80 px-2 py-1">
           <button
             type="button"
-            className="rounded p-0.5 text-gray-400 hover:bg-[#1f2737] hover:text-gray-200 disabled:opacity-40"
-            title="Up"
+            className="rounded p-0.5 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 disabled:opacity-40"
+            data-tooltip="Up"
             disabled={path === "/" || loading}
             onClick={goUp}
           >
@@ -496,7 +540,7 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
           </button>
           <button
             type="button"
-            className="rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-[#1f2737] hover:text-gray-200"
+            className="rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
             onClick={refresh}
             disabled={loading}
           >
@@ -505,16 +549,16 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
           <button
             type="button"
             className={`rounded px-1.5 py-0.5 text-[10px] ${
-              showTree ? "bg-[#1f2737] text-gray-200" : "text-gray-400 hover:bg-[#1f2737]"
+              showTree ? "bg-[var(--border)] text-gray-200" : "text-gray-400 hover:bg-[var(--border)]"
             }`}
-            title="Toggle directory tree"
+            data-tooltip="Toggle directory tree"
             onClick={() => setShowTree((v) => !v)}
           >
             Tree
           </button>
           <input
             type="text"
-            className="min-w-0 flex-1 rounded border border-[#1f2737] bg-[#0b0f17] px-1.5 py-0.5 font-mono text-[10px] text-gray-300 outline-none focus:border-cyan-600"
+            className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 font-mono text-[10px] text-gray-300 outline-none focus:border-cyan-600"
             value={pathInput}
             spellCheck={false}
             onChange={(e) => setPathInput(e.target.value)}
@@ -522,7 +566,7 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
               if (e.key === "Enter") navigateToPath();
             }}
             onBlur={() => setPathInput(path)}
-            title="Remote path — press Enter to go"
+            data-tooltip="Remote path — press Enter to go"
           />
         </div>
 
@@ -568,9 +612,9 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
                   role="separator"
                   aria-orientation="vertical"
                   aria-valuenow={treeWidth}
-                  title="Drag to resize tree"
+                  data-tooltip="Drag to resize tree"
                   className={`nodrag nowheel shrink-0 cursor-col-resize touch-none select-none ${
-                    treeResizing ? "bg-cyan-500/50" : "bg-[#1f2737]/80 hover:bg-cyan-500/40"
+                    treeResizing ? "bg-cyan-500/50" : "bg-[var(--border)]/80 hover:bg-cyan-500/40"
                   }`}
                   style={{ width: treeResizing ? 3 : 2 }}
                   onMouseDown={startTreeResize}
@@ -590,7 +634,7 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
                 entries.map((entry) => (
                   <div
                     key={entry.path}
-                    className="group flex items-center gap-2 rounded px-2 py-1 hover:bg-[#11161f]"
+                    className="group flex items-center gap-2 rounded px-2 py-1 hover:bg-[var(--surface)]"
                     onContextMenu={(e) => showContextMenu(e, entry)}
                   >
                     <button
@@ -612,7 +656,7 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
                     {!entry.is_dir && (
                       <button
                         type="button"
-                        className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-gray-500 opacity-0 hover:bg-[#1f2737] hover:text-gray-200 group-hover:opacity-100"
+                        className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-gray-500 opacity-0 hover:bg-[var(--border)] hover:text-gray-200 group-hover:opacity-100"
                         onClick={() => void downloadFile(entry)}
                       >
                         ↓
@@ -631,6 +675,7 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
           menu={menu}
           onClose={() => setMenu(null)}
           onOpen={openEntry}
+          onEdit={(e) => setEditEntry(e)}
           onDownload={(e) => void downloadFile(e)}
           onProperties={(e) => setPropsEntry(e)}
           onRename={(e) => void handleRename(e)}
@@ -648,6 +693,15 @@ export function SftpNode({ id, data, selected }: NodeProps<SftpNodeType>) {
           vpsId={data.vpsId}
           onClose={() => setPropsEntry(null)}
           onApplied={refreshListing}
+        />
+      )}
+
+      {editEntry && sessionRef.current && (
+        <SftpCodeEditor
+          sessionId={sessionRef.current}
+          entry={editEntry}
+          onClose={() => setEditEntry(null)}
+          onSaved={refreshListing}
         />
       )}
     </div>

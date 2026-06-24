@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, type Skill } from "../../../lib/tauri";
+import { dialog } from "../../../stores/dialogStore";
 import { PlusIcon, TrashIcon } from "../../icons";
 import { Button, Card, Field, SectionHeader, TextArea, TextInput } from "../ui";
 
@@ -47,7 +48,7 @@ function SkillEditor({
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-6"
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="w-[min(680px,92vw)] rounded-xl border border-[#1f2737] bg-[#0d121b] p-5 shadow-2xl">
+      <div className="w-[min(680px,92vw)] rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-5 shadow-2xl">
         <h3 className="mb-4 text-sm font-semibold text-gray-100">
           {initial ? "Edit skill" : "New skill"}
         </h3>
@@ -162,7 +163,14 @@ export function SkillsSection() {
                   <Button
                     variant="danger"
                     onClick={async () => {
-                      if (confirm(`Delete skill "${s.category}/${s.name}"?`)) {
+                      if (
+                        await dialog.confirm({
+                          title: "Delete skill",
+                          message: `Delete skill "${s.category}/${s.name}"?`,
+                          danger: true,
+                          confirmText: "Delete",
+                        })
+                      ) {
                         await api.deleteSkill(s.category, s.name);
                         load();
                       }

@@ -66,7 +66,9 @@ interface CanvasState {
   setLayout: (mode: LayoutMode) => void;
   focus: (id: string | null) => void;
   isWebgl: (id: string) => boolean;
-  arrangeTiles: () => void;
+  /** Arrange nodes into a grid. With `dims` (the canvas pane size in px) each node
+   *  is resized to fill an equal cell so N terminals split the window evenly. */
+  arrangeTiles: (dims?: { width: number; height: number }) => void;
   clear: () => void;
 }
 
@@ -148,7 +150,7 @@ export const useCanvasStore = create<CanvasState>()(
               id: edgeId,
               source: sftpId,
               target: terminalId,
-              type: "smoothstep",
+              type: "floating",
               animated: true,
               style: { stroke: "#22d3ee", strokeWidth: 2 },
               data: { kind: "sftp-terminal" },
@@ -221,7 +223,15 @@ export const useCanvasStore = create<CanvasState>()(
 
       removeNode: (id) =>
         set((s) => ({
-          nodes: s.nodes.filter((n) => n.id !== id),
+          // Drop the node, and unlink any SFTP node that followed it so it isn't
+          // left with a dangling linkedTerminalId / followTerminal=true.
+          nodes: s.nodes
+            .filter((n) => n.id !== id)
+            .map((n) =>
+              n.type === "sftp" && n.data.linkedTerminalId === id
+                ? { ...n, data: { ...n.data, linkedTerminalId: undefined, followTerminal: false } }
+                : n,
+            ),
           edges: s.edges.filter((e) => e.source !== id && e.target !== id),
           webglIds: s.webglIds.filter((w) => w !== id),
           focusedId: s.focusedId === id ? null : s.focusedId,
@@ -244,11 +254,37 @@ export const useCanvasStore = create<CanvasState>()(
 
       isWebgl: (id) => get().webglIds.includes(id),
 
-      arrangeTiles: () =>
+      arrangeTiles: (dims) =>
         set((s) => {
           const n = s.nodes.length;
           if (n === 0) return {};
           const cols = Math.ceil(Math.sqrt(n));
+          const rows = Math.ceil(n / cols);
+
+          // With pane dimensions, resize every node to fill an equal cell so the
+          // terminals split the window edge-to-edge (2 → 50/50, 4 → 2×2, etc.),
+          // with no gaps or top/bottom margin.
+          if (dims && dims.width > 0 && dims.height > 0) {
+            const baseW = Math.floor(dims.width / cols);
+            const baseH = Math.floor(dims.height / rows);
+            const nodes = s.nodes.map((node, i) => {
+              const col = i % cols;
+              const row = Math.floor(i / cols);
+              // The last column/row absorbs the rounding remainder so the grid
+              // fills the pane exactly — no seam on the right or bottom edge.
+              const w = col === cols - 1 ? dims.width - baseW * (cols - 1) : baseW;
+              const h = row === rows - 1 ? dims.height - baseH * (rows - 1) : baseH;
+              return {
+                ...node,
+                position: { x: col * baseW, y: row * baseH },
+                width: w,
+                height: h,
+              };
+            });
+            return { nodes };
+          }
+
+          // Fallback (no dims): grid-position at each node's current size.
           const nodes = s.nodes.map((node, i) => {
             const col = i % cols;
             const row = Math.floor(i / cols);

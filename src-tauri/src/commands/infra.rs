@@ -3,7 +3,7 @@
 use tauri::State;
 
 use crate::ai::AgentHome;
-use crate::infra::projects::{project_dir, scaffold, slugify};
+use crate::infra::projects::{project_dir, project_slug, scaffold, slugify};
 use crate::storage::models::{InfraProject, InfraProjectInput};
 use crate::storage::Db;
 
@@ -24,6 +24,12 @@ pub fn save_infra_project(
             .map(|p| p.slug)
             .ok_or_else(|| "project not found".to_string())?
     } else {
+        // New project: refuse before scaffolding if the slug is taken, so we
+        // never overwrite an existing project's files.
+        let slug = project_slug(&input)?;
+        if db.get_infra_project(&slug).map_err(|e| e.to_string())?.is_some() {
+            return Err(format!("a project named '{slug}' already exists"));
+        }
         scaffold(&home, &input)?
     };
     db.upsert_infra_project(&input, &slug)

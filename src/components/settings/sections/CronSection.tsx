@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useCronStore } from "../../../stores/cronStore";
 import { useVpsStore } from "../../../stores/vpsStore";
+import { dialog } from "../../../stores/dialogStore";
 import type { CronJob, CronJobInput } from "../../../lib/tauri";
 import { PlusIcon, TrashIcon } from "../../icons";
 import { Button, Card, Field, SectionHeader, Select, TextArea, TextInput, Toggle } from "../ui";
@@ -75,7 +76,7 @@ function CronForm({
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-6"
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="w-[min(560px,92vw)] rounded-xl border border-[#1f2737] bg-[#0d121b] p-5 shadow-2xl">
+      <div className="w-[min(560px,92vw)] rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-5 shadow-2xl">
         <h3 className="mb-4 text-sm font-semibold text-gray-100">
           {initial ? "Edit job" : "New cron job"}
         </h3>
@@ -145,7 +146,7 @@ function CronForm({
                 className={`rounded-full border px-2 py-0.5 text-[10px] ${
                   targets.includes(v.id)
                     ? "border-blue-500 bg-blue-600/30 text-blue-100"
-                    : "border-[#1f2737] text-gray-400 hover:bg-[#1f2737]"
+                    : "border-[var(--border)] text-gray-400 hover:bg-[var(--border)]"
                 }`}
               >
                 {v.name}
@@ -214,7 +215,7 @@ export function CronSection() {
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <span className="truncate text-sm text-gray-200">{j.name}</span>
-                <span className="rounded bg-[#1f2737] px-1.5 py-0.5 text-[10px] text-gray-400">
+                <span className="rounded bg-[var(--border)] px-1.5 py-0.5 text-[10px] text-gray-400">
                   {j.schedule}
                 </span>
                 {!j.enabled && (
@@ -241,8 +242,16 @@ export function CronSection() {
             </Button>
             <Button
               variant="danger"
-              onClick={() => {
-                if (confirm(`Delete job "${j.name}"?`)) remove(j.id);
+              onClick={async () => {
+                if (
+                  await dialog.confirm({
+                    title: "Delete cron job",
+                    message: `Delete job "${j.name}"?`,
+                    danger: true,
+                    confirmText: "Delete",
+                  })
+                )
+                  remove(j.id);
               }}
             >
               <TrashIcon size={14} />

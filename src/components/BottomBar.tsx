@@ -10,31 +10,18 @@ import {
   strToB64,
 } from "../lib/tauri";
 import { useVpsStore } from "../stores/vpsStore";
-import { useWorkspaceStore } from "../stores/workspaceStore";
+import { useWorkspaceStore, parseSavedNodes } from "../stores/workspaceStore";
 import { useCanvasStore } from "../stores/canvasStore";
 import { useUiStore } from "../stores/uiStore";
 import type { ConnState } from "../stores/sessionStore";
 import { useXtermScaleFix } from "../hooks/useXtermScaleFix";
+import { useThemeStore } from "../stores/themeStore";
 import {
   ChevronDownIcon,
   ChevronUpIcon,
   PlugIcon,
   TerminalIcon,
 } from "./icons";
-const THEME = {
-  background: "#0b0f17",
-  foreground: "#d6deeb",
-  cursor: "#7aa2f7",
-  selectionBackground: "#283457",
-  red: "#f7768e",
-  green: "#9ece6a",
-  yellow: "#e0af68",
-  blue: "#7aa2f7",
-  magenta: "#bb9af7",
-  cyan: "#7dcfff",
-  white: "#a9b1d6",
-};
-
 const STATUS_COLOR: Record<ConnState, string> = {
   connecting: "#e0af68",
   connected: "#9ece6a",
@@ -48,12 +35,6 @@ const ALL_CTX = "__all__";
 const PANEL_H = 320;
 
 interface Target {
-  vpsId: string;
-  name: string;
-  host: string;
-}
-
-interface SavedNodeLite {
   vpsId: string;
   name: string;
   host: string;
@@ -87,8 +68,17 @@ function ConsolePane({
   const fitRef = useRef<FitAddon | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const [status, setStatus] = useState<ConnState>("connecting");
+  const themeId = useThemeStore((s) => s.themeId);
+  const customVars = useThemeStore((s) => s.customVars);
 
-  useXtermScaleFix(containerRef, fitRef);
+  // The console drawer is never under a canvas zoom transform, so it's always 1:1
+  // (the hook is a no-op at scale 1, but kept consistent for future-proofing).
+  const scaleRef = useRef(1);
+  useXtermScaleFix(termRef, scaleRef);
+
+  useEffect(() => {
+    if (termRef.current) termRef.current.options.theme = useThemeStore.getState().xterm();
+  }, [themeId, customVars]);
 
   useEffect(() => {
     let mounted = true;
@@ -100,7 +90,7 @@ function ConsolePane({
       fontSize: 12,
       cursorBlink: true,
       scrollback: 8000,
-      theme: THEME,
+      theme: useThemeStore.getState().xterm(),
       allowProposedApi: true,
     });
     const fit = new FitAddon();
@@ -219,18 +209,18 @@ function ConsolePane({
   }, [visible]);
 
   return (
-    <div className="flex min-w-[260px] flex-1 flex-col overflow-hidden rounded-md border border-[#1f2737]">
-      <div className="flex items-center gap-1.5 border-b border-[#1f2737] bg-[#11161f] px-2 py-1 text-[11px]">
+    <div className="flex min-w-[260px] flex-1 flex-col overflow-hidden rounded-md border border-[var(--border)]">
+      <div className="flex items-center gap-1.5 border-b border-[var(--border)] bg-[var(--surface)] px-2 py-1 text-[11px]">
         <span
           className="inline-block h-2 w-2 rounded-full"
           style={{ background: STATUS_COLOR[status] }}
-          title={status}
+          data-tooltip={status}
         />
         <span className="truncate font-medium text-gray-200">{target.name}</span>
         <span className="truncate text-gray-500">{target.host}</span>
         <button
-          className="ml-auto rounded px-1 text-gray-500 hover:bg-[#1f2737] hover:text-gray-200"
-          title="Close this terminal"
+          className="ml-auto rounded px-1 text-gray-500 hover:bg-[var(--border)] hover:text-gray-200"
+          data-tooltip="Close this terminal"
           onClick={() => onClose(target.vpsId)}
         >
           ✕
@@ -286,9 +276,7 @@ export function BottomBar() {
       ids = vpsList.map((v) => v.id);
     } else {
       const ws = workspaces.find((w) => w.id === contextId);
-      const saved: SavedNodeLite[] = ws?.nodes_json
-        ? JSON.parse(ws.nodes_json)
-        : [];
+      const saved = parseSavedNodes(ws?.nodes_json).nodes;
       ids = Array.from(new Set(saved.map((s) => s.vpsId)));
     }
     return ids
@@ -364,13 +352,13 @@ export function BottomBar() {
 
   return (
     <div
-      className="flex shrink-0 flex-col border-t border-[#1f2737] bg-[#0d121b]"
+      className="flex shrink-0 flex-col border-t border-[var(--border)] bg-[var(--surface-2)]"
       style={{ height: open ? PANEL_H : 36 }}
     >
       <div className="flex items-center gap-2 px-2 py-1.5">
         <button
-          className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-xs text-gray-200 hover:bg-[#1f2737]"
-          title={open ? "Collapse console height" : "Expand console height"}
+          className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-xs text-gray-200 hover:bg-[var(--border)]"
+          data-tooltip={open ? "Collapse console height" : "Expand console height"}
           onClick={() => toggleConsoleExpanded()}
         >
           <TerminalIcon size={15} />
@@ -378,13 +366,13 @@ export function BottomBar() {
           {open ? <ChevronDownIcon size={14} /> : <ChevronUpIcon size={14} />}
         </button>
 
-        <div className="mx-0.5 h-5 w-px bg-[#1f2737]" />
+        <div className="mx-0.5 h-5 w-px bg-[var(--border)]" />
 
         <select
           value={contextId}
           onChange={(e) => setContextId(e.target.value)}
-          title="Which servers this console can target"
-          className="rounded-md border border-[#1f2737] bg-[#0b0f17] px-2 py-1 text-xs text-gray-200 outline-none focus:border-blue-500"
+          data-tooltip="Which servers this console can target"
+          className="rounded-md border border-[var(--border)] bg-[var(--bg)] px-2 py-1 text-xs text-gray-200 outline-none focus:border-blue-500"
         >
           <option value={CANVAS_CTX}>
             Canvas{activeId ? " (current)" : ""}
@@ -408,9 +396,9 @@ export function BottomBar() {
           className={`rounded-md border px-2 py-1 text-xs ${
             allMode
               ? "border-blue-500 bg-blue-600 text-white"
-              : "border-[#1f2737] text-gray-300 hover:bg-[#1f2737]"
+              : "border-[var(--border)] text-gray-300 hover:bg-[var(--border)]"
           }`}
-          title="Open a terminal for every server in this context"
+          data-tooltip="Open a terminal for every server in this context"
         >
           All ({targets.length})
         </button>
@@ -422,11 +410,11 @@ export function BottomBar() {
               <button
                 key={t.vpsId}
                 onClick={() => toggleTarget(t.vpsId)}
-                title={`${t.name} (${t.host})`}
+                data-tooltip={`${t.name} (${t.host})`}
                 className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] ${
                   on
                     ? "border-blue-500 bg-blue-600/30 text-blue-100"
-                    : "border-[#1f2737] text-gray-400 hover:bg-[#1f2737]"
+                    : "border-[var(--border)] text-gray-400 hover:bg-[var(--border)]"
                 }`}
               >
                 {t.name}
@@ -447,9 +435,9 @@ export function BottomBar() {
           className={`rounded-md border px-2 py-1 text-[11px] ${
             broadcast && effectiveTargets.length > 1
               ? "border-amber-500 bg-amber-600/30 text-amber-200"
-              : "border-[#1f2737] text-gray-400 hover:bg-[#1f2737] disabled:opacity-40"
+              : "border-[var(--border)] text-gray-400 hover:bg-[var(--border)] disabled:opacity-40"
           }`}
-          title="When on, keystrokes are sent to every open terminal at once"
+          data-tooltip="When on, keystrokes are sent to every open terminal at once"
         >
           Broadcast {broadcast ? "on" : "off"}
         </button>
@@ -457,8 +445,8 @@ export function BottomBar() {
         {activeCount > 0 && (
           <button
             onClick={disconnectAll}
-            className="flex items-center gap-1 rounded-md border border-[#1f2737] px-1.5 py-1 text-[11px] text-gray-400 hover:bg-[#1f2737] hover:text-gray-200"
-            title="Close all console SSH sessions"
+            className="flex items-center gap-1 rounded-md border border-[var(--border)] px-1.5 py-1 text-[11px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+            data-tooltip="Close all console SSH sessions"
           >
             <PlugIcon size={13} />
             {activeCount}

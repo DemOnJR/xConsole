@@ -107,8 +107,8 @@ function FileEditCard({ item }: { item: AgentActivityItem }) {
   const hunks = item.hunks ?? [];
 
   return (
-    <div className="overflow-hidden rounded-lg border border-[#1f2737] bg-[#0d1118]">
-      <div className="flex items-center gap-2 border-b border-[#1f2737]/80 px-2.5 py-1.5">
+    <div className="overflow-hidden rounded-lg border border-[var(--border)] bg-[#0d1118]">
+      <div className="flex items-center gap-2 border-b border-[var(--border)]/80 px-2.5 py-1.5">
         <SettingsIcon size={12} className="shrink-0 text-gray-500" />
         <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-gray-300">
           {fileName}
@@ -168,10 +168,10 @@ function CommandCard({ item }: { item: AgentActivityItem }) {
   return (
     <div
       className={`overflow-hidden rounded-lg border bg-[#0d1118] ${
-        failed ? "border-red-900/50" : "border-[#1f2737]"
+        failed ? "border-red-900/50" : "border-[var(--border)]"
       }`}
     >
-      <div className="flex items-center gap-2 border-b border-[#1f2737]/80 px-2.5 py-1.5">
+      <div className="flex items-center gap-2 border-b border-[var(--border)]/80 px-2.5 py-1.5">
         <TerminalIcon size={12} className="shrink-0 text-gray-500" />
         <span className="min-w-0 flex-1 truncate text-[11px] text-gray-400">
           {commandTitle(item)}
@@ -186,7 +186,7 @@ function CommandCard({ item }: { item: AgentActivityItem }) {
           <ShellCommand code={cmd} className="min-w-0 flex-1" />
         </div>
         {output && !running && (
-          <div className="mt-2 border-t border-[#1f2737]/60 pt-2">
+          <div className="mt-2 border-t border-[var(--border)]/60 pt-2">
             <ConsoleOutput text={output} />
           </div>
         )}

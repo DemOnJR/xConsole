@@ -9,8 +9,10 @@ use serde_json::{json, Value};
 use crate::ai::memory;
 use crate::ai::safety;
 use crate::ai::skills;
+use crate::ai::workspace_context;
 use crate::ai::AgentHome;
 use crate::ssh::command::run_vps_command;
+use crate::ssh::shell_quote;
 use crate::storage::Db;
 
 struct McpSession {
@@ -18,7 +20,14 @@ struct McpSession {
     home: AgentHome,
     targets: Vec<String>,
     safety: String,
+    /// Active workspace id (empty if none) — for the project brief / scoped memory.
+    workspace_id: String,
+    /// Shared dir the running app watches; canvas actions are dropped here as files
+    /// (the MCP process can't emit Tauri events directly).
+    queue_dir: PathBuf,
 }
+
+static CANVAS_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl McpSession {
     fn from_env() -> Result<Self, String> {
@@ -34,6 +43,7 @@ impl McpSession {
             .map(String::from)
             .collect();
         let safety = std::env::var("XCONSOLE_SAFETY").unwrap_or_else(|_| "approve".into());
+        let workspace_id = std::env::var("XCONSOLE_WORKSPACE_ID").unwrap_or_default();
 
         let db_path = PathBuf::from(&data_dir).join("xconsole.db");
         let db = Db::open(&db_path).map_err(|e| format!("failed to open db: {e}"))?;
@@ -43,7 +53,26 @@ impl McpSession {
             home: AgentHome::new(agent_home),
             targets,
             safety,
+            workspace_id,
+            queue_dir: PathBuf::from(&data_dir).join("canvas-queue"),
         })
+    }
+
+    /// Drop a canvas action file for the running app to pick up and forward.
+    fn enqueue_canvas(&self, payload: Value) -> (String, bool) {
+        if let Err(e) = std::fs::create_dir_all(&self.queue_dir) {
+            return (format!("error: couldn't queue canvas action: {e}"), true);
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let n = CANVAS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = self.queue_dir.join(format!("{nanos}-{n}.json"));
+        match std::fs::write(&path, serde_json::to_vec(&payload).unwrap_or_default()) {
+            Ok(()) => ("done — updating the canvas now.".into(), false),
+            Err(e) => (format!("error: couldn't queue canvas action: {e}"), true),
+        }
     }
 
     fn tool_list(&self) -> Value {
@@ -131,6 +160,58 @@ impl McpSession {
                         },
                         "required": ["entry"]
                     }
+                },
+                {
+                    "name": "set_project_brief",
+                    "description": "Write/replace the active workspace's project brief (CONTEXT.md) — \
+                                    a concise overview of the project the agent keeps up to date. Use \
+                                    this to initialize the brief on the first task in a workspace.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "content": { "type": "string" } },
+                        "required": ["content"]
+                    }
+                },
+                {
+                    "name": "canvas_open_terminal",
+                    "description": "Open a live terminal for a server on the xConsole canvas so the user can watch it.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "vps_id": { "type": "string" } },
+                        "required": []
+                    }
+                },
+                {
+                    "name": "canvas_open_sftp",
+                    "description": "Open an SFTP file-browser panel for a server on the xConsole canvas.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "vps_id": { "type": "string" } },
+                        "required": []
+                    }
+                },
+                {
+                    "name": "canvas_tile",
+                    "description": "Arrange the open canvas panels into a grid that fills the window.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "canvas_close",
+                    "description": "Close a canvas panel. Pass node_id for one specific panel, or vps_id for all panels of a server.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "node_id": { "type": "string" }, "vps_id": { "type": "string" } },
+                        "required": []
+                    }
+                },
+                {
+                    "name": "canvas_refresh",
+                    "description": "Reconnect a terminal on the canvas (e.g. after the server rebooted). Pass node_id or vps_id.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "node_id": { "type": "string" }, "vps_id": { "type": "string" } },
+                        "required": []
+                    }
                 }
             ]
         })
@@ -155,18 +236,34 @@ impl McpSession {
         }
     }
 
-    fn allow_command(&self, command: &str, _vps_id: Option<&str>) -> Result<(), String> {
-        let mode = self.safety.as_str();
-        match mode {
+    /// Effective safety mode for a target, honoring per-VPS overrides over the
+    /// session default (so a server pinned to "approve" stays gated even when the
+    /// global mode is "full"/"allowlist").
+    fn effective_safety(&self, vps_id: Option<&str>) -> String {
+        match vps_id {
+            Some(id) => safety::effective_mode(&self.db, &self.safety, id),
+            None => self.safety.clone(),
+        }
+    }
+
+    fn allow_command(&self, command: &str, vps_id: Option<&str>) -> Result<(), String> {
+        match self.effective_safety(vps_id).as_str() {
             "full" => Ok(()),
+            "allowlist" if safety::is_allowlisted(command) => Ok(()),
             "allowlist" => {
-                if safety::is_read_only(command) || safety::is_terraform_readonly(command) {
-                    Ok(())
-                } else {
-                    Err("command blocked by allowlist safety mode (use Full autonomy in xConsole)".into())
-                }
+                Err("command blocked by allowlist safety mode (use Full autonomy in xConsole)".into())
             }
-            _ => Err("command blocked: xConsole safety is Approve mode; switch to Full or Allowlist for Cursor MCP".into()),
+            _ => Err(APPROVE_BLOCKED.into()),
+        }
+    }
+
+    /// Authorize a read-only action (e.g. read_file). Gated on intent rather than
+    /// re-parsing an assembled shell string, so paths containing shell
+    /// metacharacters are read normally under allowlist mode.
+    fn allow_read(&self, vps_id: Option<&str>) -> Result<(), String> {
+        match self.effective_safety(vps_id).as_str() {
+            "full" | "allowlist" => Ok(()),
+            _ => Err(APPROVE_BLOCKED.into()),
         }
     }
 
@@ -219,7 +316,7 @@ impl McpSession {
                     Err(e) => return (format!("error: {e}"), true),
                 };
                 let cmd = format!("cat -- {}", shell_quote(path));
-                if let Err(e) = self.allow_command(&cmd, Some(&vps_id)) {
+                if let Err(e) = self.allow_read(Some(&vps_id)) {
                     return (format!("error: {e}"), true);
                 }
                 match run_vps_command(&self.db, &vps_id, &cmd).await {
@@ -298,9 +395,57 @@ impl McpSession {
                 if entry.trim().is_empty() {
                     return ("error: missing entry".into(), true);
                 }
-                match memory::append_memory(&self.home, entry) {
-                    Ok(_) => ("saved to memory".into(), false),
+                // Scope to the active workspace when there is one (else global memory).
+                let result = if self.workspace_id.is_empty() {
+                    memory::append_memory(&self.home, entry).map(|_| ())
+                } else {
+                    workspace_context::append_memory(&self.home, &self.workspace_id, entry)
+                };
+                match result {
+                    Ok(()) => ("saved to memory".into(), false),
                     Err(e) => (format!("error: {e}"), true),
+                }
+            }
+            "set_project_brief" => {
+                let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                if self.workspace_id.is_empty() {
+                    return (
+                        "error: no active workspace — the project brief is per-workspace. Ask the \
+                         user to select a workspace first."
+                            .into(),
+                        true,
+                    );
+                }
+                match workspace_context::save_brief(&self.home, &self.workspace_id, content) {
+                    Ok(()) => ("saved the project brief for this workspace".into(), false),
+                    Err(e) => (format!("error: {e}"), true),
+                }
+            }
+            "canvas_open_terminal" | "canvas_open_sftp" => {
+                let action = if name == "canvas_open_terminal" {
+                    "open_terminal"
+                } else {
+                    "open_sftp"
+                };
+                match self.resolve_vps(args) {
+                    Ok(vps_id) => self.enqueue_canvas(json!({ "action": action, "vps_id": vps_id })),
+                    Err(e) => (format!("error: {e}"), true),
+                }
+            }
+            "canvas_tile" => self.enqueue_canvas(json!({ "action": "tile" })),
+            "canvas_close" | "canvas_refresh" => {
+                let action = if name == "canvas_close" { "close" } else { "reconnect" };
+                if let Some(node_id) =
+                    args.get("node_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+                {
+                    self.enqueue_canvas(json!({ "action": action, "node_id": node_id }))
+                } else {
+                    match self.resolve_vps(args) {
+                        Ok(vps_id) => {
+                            self.enqueue_canvas(json!({ "action": action, "vps_id": vps_id }))
+                        }
+                        Err(e) => (format!("error: {e}"), true),
+                    }
                 }
             }
             other => (format!("error: unknown tool '{other}'"), true),
@@ -308,9 +453,8 @@ impl McpSession {
     }
 }
 
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
+const APPROVE_BLOCKED: &str =
+    "command blocked: xConsole safety is Approve mode; switch to Full or Allowlist for Cursor MCP";
 
 pub fn run_stdio_server() -> Result<(), String> {
     let session = Arc::new(McpSession::from_env()?);
@@ -325,7 +469,21 @@ pub fn run_stdio_server() -> Result<(), String> {
         if line.is_empty() {
             continue;
         }
-        let msg: Value = serde_json::from_str(line).map_err(|e| format!("invalid json: {e}"))?;
+        // A malformed line must not kill the server: reply with a JSON-RPC
+        // parse error and keep serving (a fatal return here exits the process).
+        let msg: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                let resp = json_response(
+                    Value::Null,
+                    None,
+                    Some(json!({ "code": -32700, "message": format!("parse error: {e}") })),
+                );
+                writeln!(stdout, "{}", resp).map_err(|e| e.to_string())?;
+                stdout.flush().map_err(|e| e.to_string())?;
+                continue;
+            }
+        };
         if let Some(resp) = handle_message(&session, &msg, &rt) {
             writeln!(stdout, "{}", resp).map_err(|e| e.to_string())?;
             stdout.flush().map_err(|e| e.to_string())?;

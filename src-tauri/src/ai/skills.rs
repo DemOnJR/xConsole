@@ -94,9 +94,15 @@ pub fn system_index_minimal(home: &AgentHome) -> String {
     out
 }
 
-/// Read a skill's full SKILL.md body.
+/// Read a skill's full SKILL.md body. Category and name are slugified (mirroring
+/// `save_skill`) so model/IPC/MCP input can't traverse out of the skills tree.
 pub fn read_skill(home: &AgentHome, category: &str, name: &str) -> Option<String> {
-    let path = home.skills_dir().join(category).join(name).join("SKILL.md");
+    let cat = slug(category);
+    let nm = slug(name);
+    if cat.is_empty() || nm.is_empty() {
+        return None;
+    }
+    let path = home.skills_dir().join(cat).join(nm).join("SKILL.md");
     std::fs::read_to_string(path).ok()
 }
 
@@ -165,6 +171,12 @@ pub fn ensure_bundled(home: &AgentHome) {
         ),
     ];
     for (cat, name, body) in SKILLS {
+        // Only seed when missing: the agent is invited to edit bundled skills,
+        // and re-saving on every launch would silently clobber those edits.
+        let dir = home.skills_dir().join(slug(cat)).join(slug(name));
+        if dir.join("SKILL.md").exists() {
+            continue;
+        }
         let _ = save_skill(home, cat, name, body);
     }
 }

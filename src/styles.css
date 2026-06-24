@@ -6,6 +6,17 @@
 
 :root {
   color-scheme: dark;
+  /* Theme tokens (defaults = Tokyo Night). Overridden at runtime by themeStore. */
+  --bg: #0b0f17;
+  --surface: #11161f;
+  --surface-2: #0d121b;
+  --border: #1f2737;
+  --border-strong: #2a3344;
+  --text: #e5e7eb;
+  --text-dim: #9ca3af;
+  --text-faint: #6b7280;
+  --accent: #3b82f6;
+  --accent-fg: #ffffff;
 }
 
 html,
@@ -13,8 +24,8 @@ body,
 #root {
   height: 100%;
   margin: 0;
-  background: #0b0f17;
-  color: #e5e7eb;
+  background: var(--bg);
+  color: var(--text);
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   overflow: hidden;
 }
@@ -22,6 +33,60 @@ body,
 /* React Flow dark canvas tuning */
 .react-flow__attribution {
   display: none;
+}
+
+/* Our node components draw their own rounded card; strip React Flow's default
+   node wrapper chrome so nothing (white selection box / square wrapper bg) peeks
+   at the corners when a window is selected. */
+.react-flow__node {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+.react-flow__node:focus,
+.react-flow__node:focus-visible,
+.react-flow__node.selected {
+  outline: none;
+  box-shadow: none;
+}
+
+/* React Flow ships white (#fff) defaults for handle borders and resize controls.
+   On a square (tile) window those showed as white dots flush in the corners.
+   Theme them so nothing white peeks at a window's corners. */
+.react-flow {
+  --xy-handle-border-color-default: var(--accent);
+  --xy-node-background-color-default: transparent;
+}
+.react-flow__resize-control.handle {
+  border: none !important;
+  background: var(--accent) !important;
+  border-radius: 2px;
+}
+.react-flow__resize-control.line {
+  border-color: var(--accent) !important;
+}
+
+/* Zoom / fit / lock controls — match the dark theme (default is white) */
+.react-flow__controls {
+  border: 1px solid #1f2737;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+.react-flow__controls-button {
+  background: #11161f;
+  border-bottom: 1px solid #1f2737;
+  color: #cbd5e1;
+}
+.react-flow__controls-button:hover {
+  background: #1f2737;
+}
+.react-flow__controls-button svg {
+  fill: #cbd5e1;
+}
+.react-flow__controls-button:hover svg {
+  fill: #ffffff;
 }
 
 .xterm-host {

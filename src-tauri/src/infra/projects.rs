@@ -101,8 +101,9 @@ fn walk_files(base: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), Stri
     Ok(())
 }
 
-/// Scaffold a new project on disk. Returns the slug used.
-pub fn scaffold(home: &AgentHome, input: &InfraProjectInput) -> Result<String, String> {
+/// The on-disk slug for a project input: the explicit `slug` if set, else the
+/// slugified name. Errors when neither yields any usable characters.
+pub fn project_slug(input: &InfraProjectInput) -> Result<String, String> {
     let slug = input
         .slug
         .as_deref()
@@ -113,6 +114,12 @@ pub fn scaffold(home: &AgentHome, input: &InfraProjectInput) -> Result<String, S
     if slug.is_empty() {
         return Err("project name must contain at least one letter or digit".into());
     }
+    Ok(slug)
+}
+
+/// Scaffold a new project on disk. Returns the slug used.
+pub fn scaffold(home: &AgentHome, input: &InfraProjectInput) -> Result<String, String> {
+    let slug = project_slug(input)?;
     let dir = project_dir(home, &slug);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
@@ -177,7 +184,10 @@ terraform {
 
 variable "vps_host" { type = string }
 variable "vps_user" { type = string }
-variable "vps_port" { type = number default = 22 }
+variable "vps_port" {
+  type    = number
+  default = 22
+}
 
 resource "null_resource" "web" {
   connection {

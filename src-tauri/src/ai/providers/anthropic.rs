@@ -46,6 +46,11 @@ impl AnthropicProvider {
                             "input": tc.arguments,
                         }));
                     }
+                    // The Messages API rejects an assistant turn with empty
+                    // content; skip it so the next request isn't 400'd.
+                    if blocks.is_empty() {
+                        continue;
+                    }
                     out.push(json!({"role": "assistant", "content": blocks}));
                 }
                 "tool" => {
@@ -123,10 +128,14 @@ impl Provider for AnthropicProvider {
         let mut sse = SseBuffer::new();
         // Tool-call accumulation: index -> (id, name, json string)
         let mut tool_acc: Vec<(String, String, String)> = Vec::new();
-        let mut cur_block_is_tool = false;
 
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
+            // User pressed Stop — abort the in-flight response immediately.
+            if req.is_cancelled() {
+                emit(sink, StreamEvent::Status("Stopped.".into()));
+                break;
+            }
             let chunk = chunk.map_err(|e| format!("anthropic stream error: {e}"))?;
             let text = String::from_utf8_lossy(&chunk);
             for payload in sse.push(&text) {
@@ -141,14 +150,11 @@ impl Provider for AnthropicProvider {
                     "content_block_start" => {
                         let block = &ev["content_block"];
                         if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                            cur_block_is_tool = true;
                             tool_acc.push((
                                 block["id"].as_str().unwrap_or("").to_string(),
                                 block["name"].as_str().unwrap_or("").to_string(),
                                 String::new(),
                             ));
-                        } else {
-                            cur_block_is_tool = false;
                         }
                     }
                     "content_block_delta" => {
@@ -170,9 +176,6 @@ impl Provider for AnthropicProvider {
                             _ => {}
                         }
                     }
-                    "content_block_stop" => {
-                        cur_block_is_tool = false;
-                    }
                     "message_delta" => {
                         if let Some(sr) = ev["delta"].get("stop_reason").and_then(|v| v.as_str()) {
                             out.stop_reason = sr.to_string();
@@ -180,7 +183,6 @@ impl Provider for AnthropicProvider {
                     }
                     _ => {}
                 }
-                let _ = cur_block_is_tool;
             }
         }
 

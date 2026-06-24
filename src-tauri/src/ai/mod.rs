@@ -4,22 +4,35 @@
 use std::path::PathBuf;
 
 pub mod agent;
+pub mod canvas_context;
 pub mod context;
 pub mod context_compact;
 pub mod context_usage;
 pub mod conversations;
 pub mod cron;
+pub mod edits;
 pub mod infra_tools;
+pub mod interaction;
+pub mod llama;
 pub mod memory;
+pub mod models;
 pub mod provider;
 pub mod providers;
 pub mod vps_snapshot;
 pub mod registry;
 pub mod safety;
+pub mod skill_install;
+pub mod skill_scan;
 pub mod skills;
 pub mod soul;
+pub mod edge_tts;
+pub mod parakeet;
+pub mod piper;
+pub mod text;
 pub mod tools;
+pub mod voice;
 pub mod web_tools;
+pub mod workspace_context;
 
 /// Filesystem home for the agent's editable, Hermes-format files
 /// (SOUL.md / MEMORY.md / USER.md / skills/ / cron/). Managed as Tauri state.
@@ -45,5 +58,9 @@ impl AgentHome {
     }
     pub fn projects_dir(&self) -> PathBuf {
         self.0.join("projects")
+    }
+    /// Per-workspace agent files (CONTEXT.md brief + MEMORY.md), one dir per workspace.
+    pub fn workspaces_dir(&self) -> PathBuf {
+        self.0.join("workspaces")
     }
 }

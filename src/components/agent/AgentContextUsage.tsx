@@ -102,7 +102,7 @@ export function AgentContextUsageButton({
       ? createPortal(
           <div
             ref={popoverRef}
-            className="fixed z-[9999] w-[280px] rounded-lg border border-[#1f2737] bg-[#0d121b] p-3 shadow-xl"
+            className="fixed z-[9999] w-[280px] rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-3 shadow-xl"
             style={{
               top: anchor.top,
               left: anchor.left,
@@ -126,7 +126,7 @@ export function AgentContextUsageButton({
               <button
                 type="button"
                 onClick={onClose}
-                className="rounded p-0.5 text-gray-500 hover:bg-[#1f2737] hover:text-gray-300"
+                className="rounded p-0.5 text-gray-500 hover:bg-[var(--border)] hover:text-gray-300"
                 aria-label="Close"
               >
                 ✕
@@ -135,12 +135,12 @@ export function AgentContextUsageButton({
 
             {usage ? (
               <>
-                <div className="mb-3 flex h-2 overflow-hidden rounded-full bg-[#1f2737]">
+                <div className="mb-3 flex h-2 overflow-hidden rounded-full bg-[var(--border)]">
                   {barSegments.map((s) => (
                     <div
                       key={s.key}
                       style={{ width: `${s.widthPct}%`, backgroundColor: s.color }}
-                      title={`${s.label}: ${formatTokenCount(s.tokens)}`}
+                      data-tooltip={`${s.label}: ${formatTokenCount(s.tokens)}`}
                     />
                   ))}
                 </div>
@@ -188,11 +188,11 @@ export function AgentContextUsageButton({
         className={`flex flex-col items-center gap-1 rounded-md transition-colors ${
           placement === "composer"
             ? `px-1.5 py-1 hover:text-gray-200 ${open ? "text-gray-100" : "text-gray-400"}`
-            : `px-1.5 py-1 font-mono text-[10px] tabular-nums hover:bg-[#1f2737] hover:text-gray-200 ${
-                open ? "bg-[#1f2737] text-gray-100" : "text-gray-400"
+            : `px-1.5 py-1 font-mono text-[10px] tabular-nums hover:bg-[var(--border)] hover:text-gray-200 ${
+                open ? "bg-[var(--border)] text-gray-100" : "text-gray-400"
               }`
         }`}
-        title={
+        data-tooltip={
           usage
             ? `Context ${pct}% full — click for breakdown`
             : "Context usage — click for breakdown"

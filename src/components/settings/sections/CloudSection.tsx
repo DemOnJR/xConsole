@@ -56,7 +56,7 @@ function CloudForm({
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-6"
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="w-[min(520px,92vw)] rounded-xl border border-[#1f2737] bg-[#0d121b] p-5 shadow-2xl">
+      <div className="w-[min(520px,92vw)] rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-5 shadow-2xl">
         <h3 className="mb-4 text-sm font-semibold text-gray-100">
           {initial ? "Edit cloud account" : "Add cloud account"}
         </h3>

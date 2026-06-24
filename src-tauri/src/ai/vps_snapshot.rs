@@ -636,7 +636,7 @@ pub fn truncate_for_context(snapshot: &str, num_ctx: u32) -> String {
     let Some(first_section) = snapshot.find(SECTION_MARKER) else {
         return format!(
             "{}\n\n[... snapshot truncated for context window ({num_ctx} tokens) ...]",
-            &snapshot[..max_chars]
+            crate::ai::text::truncate_bytes(snapshot, max_chars)
         );
     };
 
@@ -650,7 +650,7 @@ pub fn truncate_for_context(snapshot: &str, num_ctx: u32) -> String {
     if sections.is_empty() {
         return format!(
             "{}\n\n[... snapshot truncated for context window ({num_ctx} tokens) ...]",
-            &snapshot[..max_chars]
+            crate::ai::text::truncate_bytes(snapshot, max_chars)
         );
     }
 
@@ -662,7 +662,7 @@ pub fn truncate_for_context(snapshot: &str, num_ctx: u32) -> String {
         if section.len() > per_section {
             *section = format!(
                 "{}\n[... section truncated; use run_command_all for full output ...]",
-                &section[..per_section]
+                crate::ai::text::truncate_bytes(section, per_section)
             );
         }
     }

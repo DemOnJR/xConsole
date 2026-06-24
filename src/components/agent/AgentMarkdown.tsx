@@ -46,7 +46,7 @@ const assistantComponents: Components = {
       {children}
     </blockquote>
   ),
-  hr: () => <hr className="my-3 border-[#1f2737]" />,
+  hr: () => <hr className="my-3 border-[var(--border)]" />,
   code: ({ className, children }) => {
     const text = String(children).replace(/\n$/, "");
     const isBlock = className?.includes("language-") || text.includes("\n");
@@ -60,17 +60,17 @@ const assistantComponents: Components = {
     );
   },
   table: ({ children }) => (
-    <div className="my-3 overflow-x-auto rounded-md border border-[#1f2737]">
+    <div className="my-3 overflow-x-auto rounded-md border border-[var(--border)]">
       <table className="w-full min-w-[280px] border-collapse text-left text-[12px]">
         {children}
       </table>
     </div>
   ),
   thead: ({ children }) => <thead className="bg-[#151b26] text-gray-300">{children}</thead>,
-  tbody: ({ children }) => <tbody className="divide-y divide-[#1f2737]">{children}</tbody>,
-  tr: ({ children }) => <tr className="hover:bg-[#11161f]/80">{children}</tr>,
+  tbody: ({ children }) => <tbody className="divide-y divide-[var(--border)]">{children}</tbody>,
+  tr: ({ children }) => <tr className="hover:bg-[var(--surface)]/80">{children}</tr>,
   th: ({ children }) => (
-    <th className="border-b border-[#1f2737] px-2.5 py-1.5 font-medium">{children}</th>
+    <th className="border-b border-[var(--border)] px-2.5 py-1.5 font-medium">{children}</th>
   ),
   td: ({ children }) => <td className="px-2.5 py-1.5 text-gray-300">{children}</td>,
 };

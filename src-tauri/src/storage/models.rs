@@ -93,6 +93,10 @@ pub struct Workspace {
     /// Where the accent color is applied: "side" | "border" | "bg".
     #[serde(default)]
     pub color_mode: Option<String>,
+    /// JSON describing the workspace's project location for agent context:
+    /// `{ "kind": "local"|"vps", "path": "...", "vps_id": "..."? }`.
+    #[serde(default)]
+    pub project_json: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
 }
@@ -114,6 +118,8 @@ pub struct WorkspaceInput {
     pub icon: Option<String>,
     #[serde(default)]
     pub color_mode: Option<String>,
+    #[serde(default)]
+    pub project_json: Option<String>,
 }
 
 /// A configured AI provider. Secrets (API keys / tokens) are never stored here;

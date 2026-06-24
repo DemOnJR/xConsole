@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type KnownHost } from "../../../lib/tauri";
+import { dialog } from "../../../stores/dialogStore";
 import { Button, Card, SectionHeader } from "../ui";
 import { TrashIcon } from "../../icons";
 
@@ -12,7 +13,15 @@ export function SecuritySection() {
   }, []);
 
   const forget = async (h: KnownHost) => {
-    if (!confirm(`Forget pinned key for ${h.host}:${h.port}?`)) return;
+    if (
+      !(await dialog.confirm({
+        title: "Forget host key",
+        message: `Forget pinned key for ${h.host}:${h.port}?`,
+        danger: true,
+        confirmText: "Forget",
+      }))
+    )
+      return;
     await api.forgetHostKey(h.host, h.port);
     load();
   };

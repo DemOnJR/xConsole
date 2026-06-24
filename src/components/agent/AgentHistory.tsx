@@ -35,13 +35,13 @@ export function AgentHistory({
   if (!open) return null;
 
   return (
-    <div className="border-b border-[#1f2737] bg-[#0b0f17] px-2 py-2">
+    <div className="border-b border-[var(--border)] bg-[var(--bg)] px-2 py-2">
       <div className="mb-2 flex items-center gap-2 px-1">
         <span className="text-[11px] font-medium text-gray-400">History</span>
         <button
           type="button"
           onClick={onNew}
-          className="ml-auto rounded border border-[#1f2737] px-2 py-0.5 text-[10px] text-gray-300 hover:bg-[#1f2737]"
+          className="ml-auto rounded border border-[var(--border)] px-2 py-0.5 text-[10px] text-gray-300 hover:bg-[var(--border)]"
         >
           + New
         </button>
@@ -63,7 +63,7 @@ export function AgentHistory({
             <div
               key={c.id}
               className={`group flex items-start gap-1 rounded px-1.5 py-1 ${
-                active ? "bg-blue-600/20" : "hover:bg-[#1f2737]/60"
+                active ? "bg-blue-600/20" : "hover:bg-[var(--border)]/60"
               }`}
             >
               <button
@@ -81,7 +81,7 @@ export function AgentHistory({
               </button>
               <button
                 type="button"
-                title="Delete"
+                data-tooltip="Delete"
                 onClick={() => onDelete(c.id)}
                 className="shrink-0 px-1 text-[10px] text-gray-600 opacity-0 hover:text-red-400 group-hover:opacity-100"
               >

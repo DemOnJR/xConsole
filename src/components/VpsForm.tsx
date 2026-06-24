@@ -3,7 +3,7 @@ import { useVpsStore } from "../stores/vpsStore";
 import type { AuthType, Vps, VpsInput } from "../lib/tauri";
 
 const FIELD =
-  "w-full rounded-md border border-[#1f2737] bg-[#0b0f17] px-2.5 py-1.5 text-sm text-gray-200 outline-none focus:border-blue-500";
+  "w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-2.5 py-1.5 text-sm text-gray-200 outline-none focus:border-blue-500";
 const LABEL = "mb-1 block text-xs font-medium text-gray-400";
 
 export function VpsForm({
@@ -66,7 +66,7 @@ export function VpsForm({
       onMouseDown={onClose}
     >
       <div
-        className="w-[420px] rounded-xl border border-[#1f2737] bg-[#11161f] p-5 shadow-2xl"
+        className="w-[420px] rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-2xl"
         onMouseDown={(e) => e.stopPropagation()}
       >
         <h2 className="mb-4 text-base font-semibold text-gray-100">
@@ -185,7 +185,7 @@ export function VpsForm({
 
         <div className="mt-5 flex justify-end gap-2">
           <button
-            className="rounded-md px-3 py-1.5 text-sm text-gray-300 hover:bg-[#1f2737]"
+            className="rounded-md px-3 py-1.5 text-sm text-gray-300 hover:bg-[var(--border)]"
             onClick={onClose}
           >
             Cancel

@@ -39,6 +39,8 @@ export interface Workspace {
   color?: string | null;
   icon?: string | null;
   color_mode?: string | null;
+  /** JSON: { kind: "local"|"vps", path, vps_id? } — the workspace's project location. */
+  project_json?: string | null;
   updated_at?: string | null;
 }
 
@@ -51,6 +53,71 @@ export interface WorkspaceInput {
   color?: string | null;
   icon?: string | null;
   color_mode?: string | null;
+  project_json?: string | null;
+}
+
+/** A workspace's project location, used for agent context. */
+export interface WorkspaceProject {
+  kind: "local" | "vps";
+  path: string;
+  vps_id?: string;
+}
+
+/** RAM/GPU snapshot for model-fit filtering. */
+export interface SystemCaps {
+  ram_mb: number;
+  vram_mb: number | null;
+  gpu_name: string | null;
+}
+
+export interface ModelEntry {
+  id: string;
+  name: string;
+  source: "ollama" | "huggingface";
+  size_bytes: number | null;
+  detail: string;
+  installed: boolean;
+}
+
+export interface HfFile {
+  file: string;
+  size_bytes: number;
+  url: string;
+}
+
+export interface LocalFile {
+  file: string;
+  size_bytes: number;
+}
+
+export interface LlamaStatus {
+  running: boolean;
+  port: number | null;
+  model: string | null;
+  bin: string | null;
+}
+
+export interface OllamaStatus {
+  installed: boolean;
+  running: boolean;
+  bin: string | null;
+}
+
+export interface DownloadProgress {
+  id: string;
+  received: number;
+  total: number | null;
+  status: "downloading" | "done" | "error";
+  message: string | null;
+}
+
+/** Result of a skill security scan (NVIDIA SkillSpector or built-in heuristic). */
+export interface SkillScanReport {
+  risk_score: number;
+  severity: string;
+  recommendation: string;
+  findings: string[];
+  scanner: string;
 }
 
 export interface ConnectOutcome {
@@ -97,6 +164,7 @@ export type ProviderKind =
   | "anthropic"
   | "openai"
   | "ollama"
+  | "llamacpp"
   | "cursor"
   | "codex_cli"
   | "opencode_cli";
@@ -139,6 +207,28 @@ export interface AgentApproval {
   command: string;
   status: string;
   created_at?: string | null;
+}
+
+/** A clarifying question the agent asks via the ask_user tool. */
+export interface AgentQuestionItem {
+  question: string;
+  header?: string;
+  options?: string[];
+  multi?: boolean;
+}
+
+export interface AgentQuestion {
+  id: string;
+  session_id: string;
+  questions: AgentQuestionItem[];
+}
+
+/** A plan the agent presents via present_plan, awaiting approve/reject. */
+export interface AgentPlan {
+  id: string;
+  session_id: string;
+  title?: string;
+  plan: string;
 }
 
 export interface AgentConversationMeta {
@@ -317,7 +407,7 @@ export type StreamEvent =
         percent: number;
       };
     }
-  | { kind: "ConversationCompacted"; data: ChatMessage[] }
+  | { kind: "ConversationCompacted"; data: { messages: ChatMessage[] } }
   | { kind: "Done" }
   | { kind: "Error"; data: string };
 
@@ -350,6 +440,8 @@ export const api = {
     invoke<SftpListOutcome>("sftp_list", { sessionId, path }),
   sftpDownload: (sessionId: string, path: string) =>
     invoke<string>("sftp_download", { sessionId, path }),
+  sftpWrite: (sessionId: string, path: string, contentB64: string) =>
+    invoke<void>("sftp_write", { sessionId, path, contentB64 }),
   sftpDisconnect: (sessionId: string) =>
     invoke<void>("sftp_disconnect", { sessionId }),
 
@@ -377,6 +469,72 @@ export const api = {
   saveWorkspace: (input: WorkspaceInput) =>
     invoke<Workspace>("save_workspace", { input }),
   deleteWorkspace: (id: string) => invoke<void>("delete_workspace", { id }),
+  reorderVps: (ids: string[]) => invoke<void>("reorder_vps", { ids }),
+  getWorkspaceBrief: (id: string) =>
+    invoke<string>("get_workspace_brief", { id }),
+  saveWorkspaceBrief: (id: string, content: string) =>
+    invoke<void>("save_workspace_brief", { id, content }),
+  scanSkillPath: (path: string) =>
+    invoke<SkillScanReport>("scan_skill_path", { path }),
+
+  getSystemCapabilities: () =>
+    invoke<SystemCaps>("get_system_capabilities"),
+  searchModels: (source: "ollama" | "huggingface", query: string, baseUrl?: string) =>
+    invoke<ModelEntry[]>("search_models", { source, query, baseUrl: baseUrl ?? null }),
+  hfModelFiles: (repoId: string) =>
+    invoke<HfFile[]>("hf_model_files", { repoId }),
+  downloadModel: (args: {
+    source: "ollama" | "huggingface";
+    id: string;
+    url?: string;
+    filename?: string;
+    baseUrl?: string;
+  }) =>
+    invoke<void>("download_model", {
+      source: args.source,
+      id: args.id,
+      url: args.url ?? null,
+      filename: args.filename ?? null,
+      baseUrl: args.baseUrl ?? null,
+    }),
+  listLocalFiles: () => invoke<LocalFile[]>("list_local_files"),
+  deleteModel: (source: "ollama" | "gguf", id: string, baseUrl?: string) =>
+    invoke<void>("delete_model", { source, id, baseUrl: baseUrl ?? null }),
+  llamaServerStatus: () => invoke<LlamaStatus>("llama_server_status"),
+  llamaServerStart: (modelFile: string, port: number, gpuLayers: number) =>
+    invoke<void>("llama_server_start", { modelFile, port, gpuLayers }),
+  llamaServerStop: () => invoke<void>("llama_server_stop"),
+  ollamaStatus: (baseUrl?: string) =>
+    invoke<OllamaStatus>("ollama_status", { baseUrl: baseUrl ?? null }),
+  ollamaEnsure: (baseUrl?: string) =>
+    invoke<boolean>("ollama_ensure", { baseUrl: baseUrl ?? null }),
+  transcribe: (
+    audioB64: string,
+    engine: "local" | "cloud" | "groq" | "parakeet",
+    modelFile?: string,
+    lang?: string,
+  ) =>
+    invoke<string>("transcribe", {
+      audioB64,
+      engine,
+      modelFile: modelFile ?? null,
+      lang: lang ?? "auto",
+    }),
+  setupWhisper: () => invoke<string>("setup_whisper"),
+  downloadWhisperModel: (modelFile: string) =>
+    invoke<string>("download_whisper_model", { modelFile }),
+  synthesize: (text: string, voice?: string, engine: string = "piper", instructions?: string) =>
+    invoke<string>("synthesize", {
+      text,
+      voice: voice ?? null,
+      engine,
+      instructions: instructions ?? null,
+    }),
+  setupPiper: () => invoke<string>("setup_piper"),
+  downloadPiperVoice: (voice: string) => invoke<string>("download_piper_voice", { voice }),
+  setupEdgeTts: () => invoke<void>("setup_edge_tts"),
+  setupParakeet: () => invoke<void>("setup_parakeet"),
+  setupLlama: () => invoke<string>("setup_llama"),
 
   listKnownHosts: () => invoke<KnownHost[]>("list_known_hosts"),
   forgetHostKey: (host: string, port: number) =>
@@ -401,16 +559,43 @@ export const api = {
     messages: ChatMessage[];
     providerId?: string | null;
     targets: string[];
+    planMode?: boolean;
+    workspaceId?: string | null;
+    canvas?: CanvasSnapshotNode[];
   }) =>
     invoke<ChatMessage>("ai_chat", {
       sessionId: args.sessionId,
       messages: args.messages,
       providerId: args.providerId ?? null,
       targets: args.targets,
+      planMode: args.planMode ?? false,
+      workspaceId: args.workspaceId ?? null,
+      canvas: args.canvas ?? [],
     }),
 
-  agentResolveApproval: (id: string, approved: boolean) =>
-    invoke<void>("agent_resolve_approval", { id, approved }),
+  agentCancel: (sessionId: string) => invoke<void>("agent_cancel", { sessionId }),
+
+  listFileChanges: (sessionId: string) =>
+    invoke<FileChange[]>("list_file_changes", { sessionId }),
+  clearFileChanges: (sessionId: string) =>
+    invoke<void>("clear_file_changes", { sessionId }),
+  revertFileChange: (id: string) => invoke<void>("revert_file_change", { id }),
+
+  agentResolveApproval: (
+    id: string,
+    approved: boolean,
+    remember?: boolean,
+    sessionId?: string,
+  ) =>
+    invoke<void>("agent_resolve_approval", {
+      id,
+      approved,
+      remember: remember ?? false,
+      sessionId: sessionId ?? null,
+    }),
+  /** Answer a pending ask_user question or a present_plan decision. */
+  agentAnswerPrompt: (id: string, answer: string) =>
+    invoke<void>("agent_answer_prompt", { id, answer }),
   listPendingApprovals: () =>
     invoke<AgentApproval[]>("list_pending_approvals"),
 
@@ -495,6 +680,98 @@ export function onAgentApproval(
   cb: (approval: AgentApproval) => void,
 ): Promise<UnlistenFn> {
   return listen<AgentApproval>("ai://approval", (e) => cb(e.payload));
+}
+
+/** Subscribe to clarifying questions the agent asks (ask_user tool). */
+export function onAgentQuestion(
+  cb: (question: AgentQuestion) => void,
+): Promise<UnlistenFn> {
+  return listen<AgentQuestion>("ai://question", (e) => cb(e.payload));
+}
+
+/** Subscribe to plans the agent presents for approval (present_plan tool). */
+export function onAgentPlan(cb: (plan: AgentPlan) => void): Promise<UnlistenFn> {
+  return listen<AgentPlan>("ai://plan", (e) => cb(e.payload));
+}
+
+/** A canvas action requested by the agent (open/close a node, tile). */
+export interface CanvasCommand {
+  action: "open_terminal" | "open_sftp" | "tile" | "close" | "reconnect";
+  vps_id?: string;
+  /** Target one specific canvas panel (close/reconnect). */
+  node_id?: string;
+}
+
+/** A snapshot of one open canvas node, sent to the agent each turn so it can see
+ * the user's live terminals / SFTP panels. Field names are snake_case to match
+ * the Rust `CanvasNode` deserializer. */
+export interface CanvasSnapshotNode {
+  kind: "terminal" | "sftp";
+  /** Canvas node id, so the agent can target one specific panel. */
+  node_id: string;
+  vps_id: string;
+  name: string;
+  host: string;
+  /** Backend SSH session id (terminals) — lets the agent read live scrollback. */
+  session_id?: string;
+  status?: string;
+  /** Terminal working directory. */
+  cwd?: string;
+  /** SFTP panel's current remote path. */
+  path?: string;
+}
+
+/** Subscribe to canvas actions the agent requests (drive the live canvas). */
+export function onCanvasCommand(
+  cb: (cmd: CanvasCommand) => void,
+): Promise<UnlistenFn> {
+  return listen<CanvasCommand>("canvas://command", (e) => cb(e.payload));
+}
+
+/** One file the agent edited this session (before/after captured for the diff panel). */
+export interface FileChange {
+  id: string;
+  session_id: string;
+  scope: "local" | "vps";
+  vps_id?: string | null;
+  label: string;
+  path: string;
+  before: string;
+  after: string;
+  is_new: boolean;
+  reverted: boolean;
+  ts: number;
+}
+
+/** Fired when the agent edits a file. */
+export function onFileChange(cb: (c: FileChange) => void): Promise<UnlistenFn> {
+  return listen<FileChange>("agent://file-change", (e) => cb(e.payload));
+}
+
+/** Fired when an edit is reverted (payload is the change id). */
+export function onFileChangeReverted(cb: (id: string) => void): Promise<UnlistenFn> {
+  return listen<string>("agent://file-change-reverted", (e) => cb(e.payload));
+}
+
+/** Per-workspace agent status (working / planning / testing / idle). */
+export interface AgentWorkspaceStatus {
+  workspace_id: string;
+  status: string;
+}
+
+export function onAgentWorkspaceStatus(
+  cb: (s: AgentWorkspaceStatus) => void,
+): Promise<UnlistenFn> {
+  return listen<AgentWorkspaceStatus>("agent://workspace-status", (e) =>
+    cb(e.payload),
+  );
+}
+
+/** Subscribe to model-download progress. */
+export function onModelDownload(
+  cb: (p: DownloadProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<DownloadProgress>("models://download", (e) => cb(e.payload));
 }
 
 /** Subscribe to a session's terminal output (base64-encoded chunks). */

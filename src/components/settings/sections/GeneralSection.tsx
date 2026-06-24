@@ -1,4 +1,7 @@
+import { useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { useSettingsStore } from "../../../stores/settingsStore";
+import { useUpdateStore } from "../../../stores/updateStore";
 import { Card, Field, SectionHeader, Select, Toggle } from "../ui";
 
 export const SK = {
@@ -15,6 +18,17 @@ export function GeneralSection() {
 
   const agentEnabled = settings[SK.agentEnabled] !== "false";
   const activeProvider = settings[SK.activeProvider] ?? "";
+
+  const updateStatus = useUpdateStore((s) => s.status);
+  const checkUpdate = useUpdateStore((s) => s.check);
+  const [appVersion, setAppVersion] = useState("");
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => {});
+  }, []);
+  const checking =
+    updateStatus === "checking" ||
+    updateStatus === "downloading" ||
+    updateStatus === "installing";
 
   return (
     <div>
@@ -54,6 +68,24 @@ export function GeneralSection() {
               </option>
             ))}
           </Select>
+        </Field>
+      </Card>
+
+      <Card className="mt-3">
+        <Field
+          label="App version & updates"
+          hint="xConsole checks GitHub for a newer signed release on launch and prompts you to install it. Updates only replace the app — your chats, workspaces, memory, settings, and keys are never touched."
+        >
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm text-gray-300">v{appVersion || "…"}</span>
+            <button
+              onClick={() => void checkUpdate(true)}
+              disabled={checking}
+              className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs text-gray-200 transition hover:bg-[var(--border)] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {updateStatus === "checking" ? "Checking…" : "Check for updates"}
+            </button>
+          </div>
         </Field>
       </Card>
     </div>

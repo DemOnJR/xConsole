@@ -56,3 +56,11 @@ pub fn provider_key(provider_id: &str) -> String {
 pub fn cloud_account_key(account_id: &str) -> String {
     format!("cloud:{account_id}:secret")
 }
+
+/// Keychain key namespace for a VPS's app-managed SSH private key (PEM). Distinct
+/// from the raw `vps_id` namespace (which holds a password / key-file passphrase),
+/// so a managed key and a passphrase never collide. The private key lives only
+/// here — never in SQLite or on disk.
+pub fn ssh_key_key(vps_id: &str) -> String {
+    format!("sshkey:{vps_id}")
+}
