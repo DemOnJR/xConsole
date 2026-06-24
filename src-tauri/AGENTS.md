@@ -49,7 +49,8 @@ refuse to auto-update. For real releases, prefer the CI path below (it signs fro
    **Publish** — only a published (non-draft, non-prerelease) release reaches users via
    auto-update (`endpoints` → `…/releases/latest/download/latest.json`).
 
-Full release runbook + the GitHub secrets to configure: see [`../RELEASING.md`](../RELEASING.md).
+The detailed release runbook + the exact GitHub secrets to configure are kept in a
+private local note (not committed to this repo).
 
 ## Data safety — never break this
 

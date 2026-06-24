@@ -18,6 +18,9 @@ dist-ssr
 # Per-user Claude Code settings (local, not for the public repo).
 .claude/settings.local.json
 
+# Internal release runbook — keep the signing/release process private.
+RELEASING.md
+
 # App data / secrets must NEVER be committed. The app keeps all user data in the OS
 # app-data dir + keychain (never the repo); these are a defensive backstop in case a
 # DB / env / key file is ever dropped into the working tree during development.
