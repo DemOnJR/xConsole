@@ -16,6 +16,8 @@ pure-Rust SSH stack (**russh**).
 - **Layout modes** - Freeform, Snap-to-grid, and one-click Tile auto-arrange.
 - **Workspaces** - save/restore named layouts (which servers, positions, viewport).
 - **Broadcast** - type one command and send it to all selected terminals.
+- **Remote code editing** - right-click a file in the SFTP browser and pick *Edit* to
+  open it in an in-app editor; save writes it straight back over SFTP (`Ctrl/⌘+S`).
 - **Focus mode** - double-click a terminal header to zoom into it; `Ctrl+Tab` cycles.
 - **Tiered rendering** - WebGL is reserved for focused terminals (LRU-capped) so the
   app stays under the webview's ~16 WebGL-context limit when many VPS are open.

@@ -2,12 +2,67 @@ import { create } from "zustand";
 import {
   api,
   onAgentApproval,
+  onAgentPlan,
+  onAgentQuestion,
   onAiChatOutput,
   type AgentApproval,
   type AgentConversationMeta,
+  type AgentPlan,
+  type AgentQuestion,
+  type CanvasSnapshotNode,
   type ChatMessage,
   type StreamEvent,
 } from "../lib/tauri";
+import { notify } from "../lib/notify";
+import { useWorkspaceStore } from "./workspaceStore";
+import { useCanvasStore } from "./canvasStore";
+import { useSessionStore } from "./sessionStore";
+import { useVoiceStore } from "./voiceStore";
+import { cancelSpeech, speak, speakBytes, speakableText } from "../lib/voice";
+
+/** Speak text via TTS if the user enabled spoken replies. Uses the natural cloud
+ *  voice when selected, falling back to the OS voice if it fails or has no key. */
+async function maybeSpeak(raw: string) {
+  const v = useVoiceStore.getState();
+  const text = speakableText(raw);
+  if (!v.ttsEnabled || !text.trim()) return;
+  // Track speaking so the Stop button can hush the agent mid-sentence; the lib
+  // calls `done` on natural end AND on cancel/stop, so the flag never sticks.
+  // Set the flag AFTER playback starts (speakBytes first stops any prior clip,
+  // which fires the previous `done`) so overlapping replies don't clear it.
+  const setSpeaking = useAgentStore.getState().setSpeaking;
+  const done = () => setSpeaking(false);
+  if (v.ttsEngine === "piper") {
+    try {
+      const b64 = await api.synthesize(text, v.ttsPiperVoice || "en_US-amy-medium", "piper");
+      speakBytes(b64, done);
+      setSpeaking(true);
+      return;
+    } catch {
+      /* fall through to the OS voice */
+    }
+  } else if (v.ttsEngine === "edge") {
+    try {
+      const b64 = await api.synthesize(text, v.ttsEdgeVoice || "en-US-AriaNeural", "edge");
+      speakBytes(b64, done, "audio/mpeg");
+      setSpeaking(true);
+      return;
+    } catch {
+      /* fall through to the OS voice */
+    }
+  } else if (v.ttsEngine === "cloud") {
+    try {
+      const b64 = await api.synthesize(text, v.ttsCloudVoice || "sage", "cloud", v.ttsInstructions);
+      speakBytes(b64, done);
+      setSpeaking(true);
+      return;
+    } catch {
+      /* fall through to the OS voice */
+    }
+  }
+  speak(text, { voice: v.ttsVoice || undefined, rate: v.ttsRate, onEnd: done });
+  setSpeaking(true);
+}
 import {
   liveTokenStats,
   type ContextUsage,
@@ -46,6 +101,8 @@ interface AgentState {
   streamingText: string;
   activity: AgentActivityItem[];
   streaming: boolean;
+  /** TTS is currently reading a reply aloud (so the user can press Stop to hush it). */
+  speaking: boolean;
   streamStats: TokenStats | null;
   contextUsage: ContextUsage | null;
   /** Increments when conversation is auto-compacted — drives hourglass flip. */
@@ -53,21 +110,49 @@ interface AgentState {
   error: string | null;
   targets: string[];
   pendingApprovals: AgentApproval[];
+  pendingQuestions: AgentQuestion[];
+  pendingPlan: AgentPlan | null;
+  planMode: boolean;
   hydrated: boolean;
 
   init: () => Promise<void>;
   setTargets: (ids: string[]) => void;
-  send: (text: string) => Promise<void>;
+  setSpeaking: (v: boolean) => void;
+  togglePlanMode: () => void;
+  send: (text: string, opts?: { providerId?: string }) => Promise<void>;
+  stop: () => Promise<void>;
   newConversation: () => Promise<void>;
   openConversation: (id: string) => Promise<void>;
   removeConversation: (id: string) => Promise<void>;
   subscribeApprovals: () => Promise<UnlistenFn>;
-  resolveApproval: (id: string, approved: boolean) => Promise<void>;
+  resolveApproval: (id: string, approved: boolean, remember?: boolean) => Promise<void>;
+  answerQuestion: (id: string, answer: string) => Promise<void>;
+  resolvePlan: (id: string, approve: boolean, feedback?: string) => Promise<void>;
 }
 
 const newSessionId = () =>
   (crypto.randomUUID && crypto.randomUUID()) ||
   Math.random().toString(36).slice(2);
+
+/** Snapshot the user's open canvas (terminals + SFTP panels) so the agent can see
+ * and act on them. Terminal scrollback is fetched backend-side from session_id. */
+function canvasSnapshot(): CanvasSnapshotNode[] {
+  const nodes = useCanvasStore.getState().nodes;
+  const sessions = useSessionStore.getState().sessions;
+  return nodes.map((n) => {
+    const info = sessions[n.id];
+    const base = {
+      node_id: n.id,
+      vps_id: String(n.data.vpsId ?? ""),
+      name: String(n.data.name ?? ""),
+      host: String(n.data.host ?? ""),
+      status: info?.status,
+    };
+    return n.type === "sftp"
+      ? { kind: "sftp" as const, ...base, path: info?.sftpPath }
+      : { kind: "terminal" as const, ...base, session_id: info?.sessionId, cwd: info?.cwd };
+  });
+}
 
 function applyStreamEvent(
   activity: AgentActivityItem[],
@@ -242,12 +327,16 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   streamingText: "",
   activity: [],
   streaming: false,
+  speaking: false,
   streamStats: null,
   contextUsage: null,
   compactFlipCount: 0,
   error: null,
   targets: [],
   pendingApprovals: [],
+  pendingQuestions: [],
+  pendingPlan: null,
+  planMode: false,
   hydrated: false,
 
   init: async () => {
@@ -269,20 +358,63 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   setTargets: (ids) => set({ targets: ids }),
 
-  subscribeApprovals: () =>
-    onAgentApproval((approval) =>
+  togglePlanMode: () => set((s) => ({ planMode: !s.planMode })),
+
+  // Subscribes to all three interactive agent events (approval / question /
+  // plan), each of which fires an OS notification and shows an in-chat popup.
+  // Returns one combined unlisten. (Name kept for the existing App.tsx wiring.)
+  subscribeApprovals: async () => {
+    const unApproval = await onAgentApproval((approval) => {
       set((s) =>
         s.pendingApprovals.some((a) => a.id === approval.id)
           ? s
           : { pendingApprovals: [...s.pendingApprovals, approval] },
-      ),
-    ),
+      );
+      void notify("xConsole agent — approval needed", approval.command);
+    });
+    const unQuestion = await onAgentQuestion((question) => {
+      set((s) =>
+        s.pendingQuestions.some((q) => q.id === question.id)
+          ? s
+          : { pendingQuestions: [...s.pendingQuestions, question] },
+      );
+      const first = question.questions[0]?.question ?? "The agent has a question.";
+      void notify("xConsole agent — needs your input", first);
+      maybeSpeak(first);
+    });
+    const unPlan = await onAgentPlan((plan) => {
+      set({ pendingPlan: plan });
+      void notify(
+        "xConsole agent — plan ready for review",
+        plan.title || "Review the proposed plan.",
+      );
+    });
+    return () => {
+      unApproval();
+      unQuestion();
+      unPlan();
+    };
+  },
 
-  resolveApproval: async (id, approved) => {
+  resolveApproval: async (id, approved, remember) => {
+    const sessionId = get().sessionId;
     set((s) => ({
       pendingApprovals: s.pendingApprovals.filter((a) => a.id !== id),
     }));
-    await api.agentResolveApproval(id, approved);
+    await api.agentResolveApproval(id, approved, remember, sessionId);
+  },
+
+  answerQuestion: async (id, answer) => {
+    set((s) => ({
+      pendingQuestions: s.pendingQuestions.filter((q) => q.id !== id),
+    }));
+    await api.agentAnswerPrompt(id, answer);
+  },
+
+  resolvePlan: async (id, approve, feedback) => {
+    set({ pendingPlan: null });
+    const answer = approve ? "APPROVE" : `REJECT: ${feedback ?? ""}`.trim();
+    await api.agentAnswerPrompt(id, answer);
   },
 
   newConversation: async () => {
@@ -348,7 +480,21 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
-  send: async (text) => {
+  setSpeaking: (speaking) => set({ speaking }),
+
+  stop: async () => {
+    // Hush any spoken reply immediately…
+    if (get().speaking) {
+      cancelSpeech();
+      set({ speaking: false });
+    }
+    // …and ask the running turn to stop.
+    if (get().streaming) {
+      await api.agentCancel(get().sessionId).catch(() => {});
+    }
+  },
+
+  send: async (text, opts) => {
     const trimmed = text.trim();
     if (!trimmed || get().streaming) return;
 
@@ -365,18 +511,25 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
     let streamStartedAt: number | null = null;
     let latestStats: TokenStats | null = null;
+    // Session-scoped turn state. If the user switches conversations mid-stream we
+    // must not read or clobber the now-visible thread, so the turn tracks its own
+    // text, activity, and (post-compaction) messages locally instead of via shared
+    // store state, and every shared set() is gated on still being the live session.
+    let turnText = "";
+    let turnActivity: AgentActivityItem[] = [];
+    let turnMessages: AgentChatMessage[] = history;
 
-    const { sessionId, targets } = get();
-    const unlisten = await onAiChatOutput(sessionId, (ev) => {
+    const { sessionId, targets, planMode } = get();
+    const mySession = sessionId;
+    const isCurrent = () => get().sessionId === mySession;
+
+    const unlisten = await onAiChatOutput(mySession, (ev) => {
       if (ev.kind === "Text") {
-        set((s) => {
-          const streamingText = s.streamingText + ev.data;
-          if (streamStartedAt === null) {
-            streamStartedAt = Date.now();
-          }
-          const streamStats = liveTokenStats(streamingText, streamStartedAt);
-          return { streamingText, streamStats };
-        });
+        if (streamStartedAt === null) streamStartedAt = Date.now();
+        turnText += ev.data;
+        if (isCurrent()) {
+          set({ streamingText: turnText, streamStats: liveTokenStats(turnText, streamStartedAt) });
+        }
         return;
       }
       if (ev.kind === "Stats") {
@@ -386,82 +539,86 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           tokensPerSec: ev.data.tokens_per_sec,
           source: "provider",
         };
-        set({ streamStats: latestStats });
+        if (isCurrent()) set({ streamStats: latestStats });
         return;
       }
       if (ev.kind === "ContextUsage") {
-        set({ contextUsage: ev.data });
+        if (isCurrent()) set({ contextUsage: ev.data });
         return;
       }
       if (ev.kind === "ConversationCompacted") {
-        set((s) => ({
-          messages: ev.data.map((m) => ({
-            role: m.role as "user" | "assistant" | "system" | "tool",
-            content: m.content,
-          })),
-          compactFlipCount: s.compactFlipCount + 1,
+        // Preserve tool_calls / tool_call_id so the next request's history keeps
+        // valid tool_use ids (dropping them 400s the Anthropic Messages API).
+        turnMessages = ev.data.messages.map((m) => ({
+          role: m.role as "user" | "assistant" | "system" | "tool",
+          content: m.content,
+          tool_calls: m.tool_calls,
+          tool_call_id: m.tool_call_id,
         }));
+        if (isCurrent()) {
+          set((s) => ({ messages: turnMessages, compactFlipCount: s.compactFlipCount + 1 }));
+        }
         return;
       }
       if (ev.kind === "Error") {
-        set({ error: ev.data });
+        if (isCurrent()) set({ error: ev.data });
         return;
       }
-      set((s) => ({ activity: applyStreamEvent(s.activity, ev) }));
+      turnActivity = applyStreamEvent(turnActivity, ev);
+      if (isCurrent()) set({ activity: turnActivity });
     });
 
     try {
       const assistant = await api.aiChat({
-        sessionId,
+        sessionId: mySession,
         messages: history,
+        providerId: opts?.providerId || null,
         targets,
+        planMode,
+        workspaceId: useWorkspaceStore.getState().activeId,
+        canvas: canvasSnapshot(),
       });
-      const activity = get().activity;
       const tokenStats =
         latestStats ??
-        (get().streamingText && streamStartedAt
-          ? liveTokenStats(get().streamingText, streamStartedAt)
-          : undefined);
+        (turnText && streamStartedAt ? liveTokenStats(turnText, streamStartedAt) : undefined);
       const messages = [
-        ...get().messages,
+        ...turnMessages,
         {
           ...assistant,
-          activity: activity.length > 0 ? [...activity] : undefined,
+          activity: turnActivity.length > 0 ? [...turnActivity] : undefined,
           tokenStats,
         },
       ];
-      set({
-        messages,
-        streamingText: "",
-        activity: [],
-        streaming: false,
-        streamStats: null,
-      });
-      await persistConversation({ sessionId, messages, targets });
+      if (isCurrent()) {
+        set({ messages, streamingText: "", activity: [], streaming: false, streamStats: null });
+        maybeSpeak(assistant.content);
+      }
+      await persistConversation({ sessionId: mySession, messages, targets });
       const list = await api.listAgentConversations().catch(() => get().conversations);
       set({ conversations: list });
     } catch (e) {
-      const activity = get().activity;
-      const messages = get().streamingText
+      const messages = turnText
         ? [
-            ...get().messages,
+            ...turnMessages,
             {
               role: "assistant" as const,
-              content: get().streamingText,
-              activity: activity.length > 0 ? [...activity] : undefined,
+              content: turnText,
+              activity: turnActivity.length > 0 ? [...turnActivity] : undefined,
             },
           ]
-        : get().messages;
-      set({
-        streaming: false,
-        error: String(e),
-        messages,
-        streamingText: "",
-        activity: [],
-        streamStats: null,
-      });
+        : turnMessages;
+      if (isCurrent()) {
+        set({
+          streaming: false,
+          error: String(e),
+          messages,
+          streamingText: "",
+          activity: [],
+          streamStats: null,
+        });
+      }
       if (messages.length > 0) {
-        await persistConversation({ sessionId, messages, targets }).catch(() => {});
+        await persistConversation({ sessionId: mySession, messages, targets }).catch(() => {});
       }
     } finally {
       unlisten();

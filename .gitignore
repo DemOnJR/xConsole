@@ -12,6 +12,25 @@ dist
 dist-ssr
 *.local
 
+# Tauri updater signing keys — NEVER commit the private key.
+.tauri-signing/
+
+# Per-user Claude Code settings (local, not for the public repo).
+.claude/settings.local.json
+
+# App data / secrets must NEVER be committed. The app keeps all user data in the OS
+# app-data dir + keychain (never the repo); these are a defensive backstop in case a
+# DB / env / key file is ever dropped into the working tree during development.
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+.env
+.env.*
+*.pem
+*.p12
+*.key
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

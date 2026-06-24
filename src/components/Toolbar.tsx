@@ -1,7 +1,8 @@
-import { Panel, useReactFlow } from "@xyflow/react";
+import { useReactFlow, useStore } from "@xyflow/react";
 import { useCanvasStore, type LayoutMode } from "../stores/canvasStore";
 import { useSessionStore } from "../stores/sessionStore";
 import { useWorkspaceStore } from "../stores/workspaceStore";
+import { dialog } from "../stores/dialogStore";
 import { api } from "../lib/tauri";
 import {
   EraserIcon,
@@ -18,7 +19,7 @@ const MODES: { id: LayoutMode; label: string; title: string }[] = [
 ];
 
 const ICON_BTN =
-  "flex items-center justify-center rounded-md border border-[#1f2737] p-1.5 text-gray-300 hover:bg-[#1f2737] hover:text-white";
+  "flex items-center justify-center rounded-md border border-[var(--border)] p-1.5 text-gray-300 hover:bg-[var(--border)] hover:text-white";
 
 export function Toolbar() {
   const layoutMode = useCanvasStore((s) => s.layoutMode);
@@ -27,7 +28,16 @@ export function Toolbar() {
   const clear = useCanvasStore((s) => s.clear);
   const nodes = useCanvasStore((s) => s.nodes);
   const sessions = useSessionStore((s) => s.sessions);
-  const { fitView, getViewport } = useReactFlow();
+  const { fitView, getViewport, setViewport } = useReactFlow();
+  const paneW = useStore((s) => s.width);
+  const paneH = useStore((s) => s.height);
+
+  // Tile to fill the visible window (equal cells), then reset zoom to 1 so the
+  // terminals render at their normal font size.
+  const tileToFit = () => {
+    arrangeTiles({ width: paneW, height: paneH });
+    setViewport({ x: 0, y: 0, zoom: 1 }, { duration: 300 });
+  };
 
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const activeId = useWorkspaceStore((s) => s.activeId);
@@ -47,9 +57,14 @@ export function Toolbar() {
   };
 
   const saveAsNew = async () => {
-    const name = window.prompt("Workspace name");
-    if (!name) return;
-    await saveWorkspace(name, getViewport());
+    const name = await dialog.prompt({
+      title: "Save workspace",
+      label: "Name",
+      placeholder: "My workspace",
+      confirmText: "Save",
+    });
+    if (!name || !name.trim()) return;
+    await saveWorkspace(name.trim(), getViewport());
   };
 
   const clearCanvas = () => {
@@ -65,19 +80,21 @@ export function Toolbar() {
   };
 
   return (
-    <Panel position="top-left" className="!m-2">
-      <div className="flex items-center gap-2 rounded-lg border border-[#1f2737] bg-[#11161f]/95 px-2 py-1.5 shadow-lg backdrop-blur">
+    <div className="flex items-center gap-2">
         {/* Layout modes */}
-        <div className="flex overflow-hidden rounded-md border border-[#1f2737]">
+        <div className="flex overflow-hidden rounded-md border border-[var(--border)]">
           {MODES.map((m) => (
             <button
               key={m.id}
-              title={m.title}
-              onClick={() => setLayout(m.id)}
+              data-tooltip={m.title}
+              onClick={() => {
+                setLayout(m.id);
+                if (m.id === "tile") tileToFit();
+              }}
               className={`px-2.5 py-1 text-xs ${
                 layoutMode === m.id
                   ? "bg-blue-600 text-white"
-                  : "bg-transparent text-gray-300 hover:bg-[#1f2737]"
+                  : "bg-transparent text-gray-300 hover:bg-[var(--border)]"
               }`}
             >
               {m.label}
@@ -85,22 +102,22 @@ export function Toolbar() {
           ))}
         </div>
 
-        <button title="Re-tile now" onClick={() => arrangeTiles()} className={ICON_BTN}>
+        <button data-tooltip="Re-tile now (fill the window)" onClick={tileToFit} className={ICON_BTN}>
           <GridIcon size={15} />
         </button>
         <button
-          title="Fit all terminals in view"
+          data-tooltip="Fit all terminals in view"
           onClick={() => fitView({ duration: 300, padding: 0.15 })}
           className={ICON_BTN}
         >
           <MaximizeIcon size={15} />
         </button>
 
-        <div className="mx-0.5 h-5 w-px bg-[#1f2737]" />
+        <div className="mx-0.5 h-5 w-px bg-[var(--border)]" />
 
         {/* Workspace actions */}
         <button
-          title={
+          data-tooltip={
             activeWorkspace
               ? `Update workspace "${activeWorkspace.name}"`
               : "Save canvas as a workspace"
@@ -111,13 +128,12 @@ export function Toolbar() {
           <SaveIcon size={15} />
           {activeWorkspace ? "Update" : "Save"}
         </button>
-        <button title="Save as a new workspace" onClick={saveAsNew} className={ICON_BTN}>
+        <button data-tooltip="Save as a new workspace" onClick={saveAsNew} className={ICON_BTN}>
           <SaveAsIcon size={15} />
         </button>
-        <button title="Clear canvas" onClick={() => clearCanvas()} className={ICON_BTN}>
+        <button data-tooltip="Clear canvas" onClick={() => clearCanvas()} className={ICON_BTN}>
           <EraserIcon size={15} />
         </button>
-      </div>
-    </Panel>
+    </div>
   );
 }

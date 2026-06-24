@@ -10,9 +10,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use super::client::{self, Auth, ConnectError};
-use crate::secrets;
-use crate::storage::models::{AuthType, Vps};
+use super::client;
 use crate::storage::Db;
 
 const MAX_DOWNLOAD: u64 = 10 * 1024 * 1024;
@@ -39,7 +37,6 @@ pub struct SftpListOutcome {
 }
 
 struct SftpHandle {
-    vps_id: String,
     sftp: Arc<Mutex<SftpSession>>,
     pump: JoinHandle<()>,
 }
@@ -65,7 +62,7 @@ impl SftpManager {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "VPS not found".to_string())?;
 
-        let auth = resolve_auth(&vps).map_err(|e| e.to_string())?;
+        let auth = client::resolve_auth(&vps).map_err(|e| e.to_string())?;
         let connected = client::connect(&vps.host, vps.port, &vps.username, auth, self.db.clone())
             .await
             .map_err(|e| e.to_string())?;
@@ -98,7 +95,6 @@ impl SftpManager {
         self.map.insert(
             session_id.clone(),
             SftpHandle {
-                vps_id: vps.id.clone(),
                 sftp: Arc::new(Mutex::new(sftp)),
                 pump,
             },
@@ -170,16 +166,60 @@ impl SftpManager {
             return Err(format!("file too large ({size} bytes, max {MAX_DOWNLOAD})"));
         }
 
-        let mut file = sftp
+        let file = sftp
             .open(&path)
             .await
             .map_err(|e| format!("open failed: {e}"))?;
         let mut buf = Vec::new();
         use tokio::io::AsyncReadExt;
-        file.read_to_end(&mut buf)
+        // Cap the actual read, not just the reported size: some servers report
+        // size 0 for special files, which would otherwise read unbounded.
+        file.take(MAX_DOWNLOAD + 1)
+            .read_to_end(&mut buf)
             .await
             .map_err(|e| format!("read failed: {e}"))?;
+        if buf.len() as u64 > MAX_DOWNLOAD {
+            return Err(format!("file too large (max {MAX_DOWNLOAD} bytes)"));
+        }
         Ok(base64::engine::general_purpose::STANDARD.encode(buf))
+    }
+
+    /// Overwrite (or create) a remote file with `content_b64` (base64). Opens with
+    /// CREATE|TRUNCATE so a shorter new body fully replaces the old one.
+    pub async fn write(&self, session_id: &str, path: &str, content_b64: &str) -> Result<(), String> {
+        use russh_sftp::protocol::OpenFlags;
+        use tokio::io::AsyncWriteExt;
+
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(content_b64.as_bytes())
+            .map_err(|e| format!("invalid base64: {e}"))?;
+        if bytes.len() as u64 > MAX_DOWNLOAD {
+            return Err(format!("file too large ({} bytes, max {MAX_DOWNLOAD})", bytes.len()));
+        }
+
+        let path = normalize_path(path);
+        let entry = self
+            .map
+            .get(session_id)
+            .ok_or_else(|| "SFTP session not found".to_string())?;
+        let sftp = entry.sftp.clone();
+        drop(entry);
+
+        let sftp = sftp.lock().await;
+        if sftp.metadata(&path).await.map(|m| m.is_dir()).unwrap_or(false) {
+            return Err("cannot write to a directory".into());
+        }
+        let mut file = sftp
+            .open_with_flags(&path, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE)
+            .await
+            .map_err(|e| format!("open for write failed: {e}"))?;
+        file.write_all(&bytes)
+            .await
+            .map_err(|e| format!("write failed: {e}"))?;
+        file.shutdown()
+            .await
+            .map_err(|e| format!("flush failed: {e}"))?;
+        Ok(())
     }
 
     pub fn disconnect(&self, session_id: &str) -> Result<(), String> {
@@ -211,27 +251,3 @@ fn join_path(base: &str, name: &str) -> String {
     }
 }
 
-fn resolve_auth(vps: &Vps) -> Result<Auth, ConnectError> {
-    match vps.auth_type {
-        AuthType::Agent => Ok(Auth::Agent),
-        AuthType::Password => {
-            let secret = secrets::get_secret(&vps.id)
-                .map_err(|e| ConnectError::Other(e.to_string()))?
-                .ok_or_else(|| ConnectError::MissingCredential("password".into()))?;
-            Ok(Auth::Password(secret.to_string()))
-        }
-        AuthType::Key => {
-            let key_path = vps
-                .key_path
-                .clone()
-                .ok_or_else(|| ConnectError::MissingCredential("key_path".into()))?;
-            let passphrase = secrets::get_secret(&vps.id)
-                .map_err(|e| ConnectError::Other(e.to_string()))?
-                .map(|z| z.to_string());
-            Ok(Auth::Key {
-                key_path,
-                passphrase,
-            })
-        }
-    }
-}

@@ -35,7 +35,7 @@ function RwxRow({
             type="checkbox"
             checked={value[bit]}
             onChange={(e) => onChange({ ...value, [bit]: e.target.checked })}
-            className="rounded border-[#1f2737]"
+            className="rounded border-[var(--border)]"
           />
           {bit.toUpperCase()}
         </label>
@@ -51,6 +51,7 @@ export function SftpPermissionsDialog({ entry, vpsId, onClose, onApplied }: Prop
   const [owner, setOwner] = useState("");
   const [group, setGroup] = useState("");
   const [recursive, setRecursive] = useState(entry.is_dir);
+  const [special, setSpecial] = useState(0); // setuid(4) / setgid(2) / sticky(1)
   const [userRwx, setUserRwx] = useState<RwxTriplet>({ r: true, w: true, x: true });
   const [groupRwx, setGroupRwx] = useState<RwxTriplet>({ r: true, w: false, x: true });
   const [otherRwx, setOtherRwx] = useState<RwxTriplet>({ r: true, w: false, x: true });
@@ -65,11 +66,12 @@ export function SftpPermissionsDialog({ entry, vpsId, onClose, onApplied }: Prop
         setOwner(stat.owner);
         setGroup(stat.group);
         setRecursive(stat.is_dir);
-        const [u, g, o] = octalToTriplets(stat.mode);
+        const [sp, u, g, o] = octalToTriplets(stat.mode);
+        setSpecial(sp);
         setUserRwx(bitsToRwx(u));
         setGroupRwx(bitsToRwx(g));
         setOtherRwx(bitsToRwx(o));
-        setModeInput(tripletsToOctal(u, g, o));
+        setModeInput(tripletsToOctal(sp, u, g, o));
       } catch (e) {
         if (mounted) setError(String(e));
       } finally {
@@ -82,17 +84,27 @@ export function SftpPermissionsDialog({ entry, vpsId, onClose, onApplied }: Prop
   }, [entry.path, vpsId]);
 
   const syncFromRwx = (u: RwxTriplet, g: RwxTriplet, o: RwxTriplet) => {
-    setModeInput(tripletsToOctal(rwxToBits(u), rwxToBits(g), rwxToBits(o)));
+    // Preserve the special (setuid/setgid/sticky) digit when toggling rwx.
+    setModeInput(tripletsToOctal(special, rwxToBits(u), rwxToBits(g), rwxToBits(o)));
   };
 
   const applyModeInput = (raw: string) => {
     const parsed = parseModeInput(raw);
     if (!parsed) return;
-    const [u, g, o] = octalToTriplets(parsed);
+    const [sp, u, g, o] = octalToTriplets(parsed);
+    setSpecial(sp);
     setUserRwx(bitsToRwx(u));
     setGroupRwx(bitsToRwx(g));
     setOtherRwx(bitsToRwx(o));
     setModeInput(parsed);
+  };
+
+  const toggleSpecial = (bit: number, on: boolean) => {
+    const next = on ? special | bit : special & ~bit;
+    setSpecial(next);
+    setModeInput(
+      tripletsToOctal(next, rwxToBits(userRwx), rwxToBits(groupRwx), rwxToBits(otherRwx)),
+    );
   };
 
   const apply = async () => {
@@ -126,10 +138,10 @@ export function SftpPermissionsDialog({ entry, vpsId, onClose, onApplied }: Prop
       }}
     >
       <div
-        className="w-full max-w-md rounded-lg border border-[#1f2737] bg-[#0b0f17] shadow-xl"
+        className="w-full max-w-md rounded-lg border border-[var(--border)] bg-[var(--bg)] shadow-xl"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="border-b border-[#1f2737] px-4 py-2.5">
+        <div className="border-b border-[var(--border)] px-4 py-2.5">
           <h3 className="text-sm font-medium text-gray-200">Properties</h3>
           <p className="mt-0.5 truncate font-mono text-[10px] text-gray-500">{entry.path}</p>
         </div>
@@ -145,7 +157,7 @@ export function SftpPermissionsDialog({ entry, vpsId, onClose, onApplied }: Prop
                   <input
                     value={owner}
                     onChange={(e) => setOwner(e.target.value)}
-                    className="mt-0.5 w-full rounded border border-[#1f2737] bg-[#11161f] px-2 py-1 text-xs text-gray-200"
+                    className="mt-0.5 w-full rounded border border-[var(--border)] bg-[var(--surface)] px-2 py-1 text-xs text-gray-200"
                   />
                 </label>
                 <label className="text-[10px] text-gray-500">
@@ -153,12 +165,12 @@ export function SftpPermissionsDialog({ entry, vpsId, onClose, onApplied }: Prop
                   <input
                     value={group}
                     onChange={(e) => setGroup(e.target.value)}
-                    className="mt-0.5 w-full rounded border border-[#1f2737] bg-[#11161f] px-2 py-1 text-xs text-gray-200"
+                    className="mt-0.5 w-full rounded border border-[var(--border)] bg-[var(--surface)] px-2 py-1 text-xs text-gray-200"
                   />
                 </label>
               </div>
 
-              <div className="space-y-1.5 rounded border border-[#1f2737]/80 bg-[#11161f]/50 p-2">
+              <div className="space-y-1.5 rounded border border-[var(--border)]/80 bg-[var(--surface)]/50 p-2">
                 <RwxRow
                   label="Owner"
                   value={userRwx}
@@ -183,6 +195,20 @@ export function SftpPermissionsDialog({ entry, vpsId, onClose, onApplied }: Prop
                     syncFromRwx(userRwx, groupRwx, v);
                   }}
                 />
+                <div className="flex items-center gap-2 border-t border-[var(--border)]/60 pt-1.5 text-xs">
+                  <span className="w-14 text-gray-500">Special</span>
+                  {([["setuid", 4], ["setgid", 2], ["sticky", 1]] as const).map(([label, bit]) => (
+                    <label key={label} className="flex items-center gap-1 text-gray-300">
+                      <input
+                        type="checkbox"
+                        checked={(special & bit) !== 0}
+                        onChange={(e) => toggleSpecial(bit, e.target.checked)}
+                        className="rounded border-[var(--border)]"
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
               </div>
 
               <label className="flex items-center gap-2 text-xs text-gray-400">
@@ -194,7 +220,7 @@ export function SftpPermissionsDialog({ entry, vpsId, onClose, onApplied }: Prop
                   onKeyDown={(e) => {
                     if (e.key === "Enter") applyModeInput(modeInput);
                   }}
-                  className="w-16 rounded border border-[#1f2737] bg-[#0b0f17] px-2 py-0.5 font-mono text-xs text-gray-200"
+                  className="w-16 rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-0.5 font-mono text-xs text-gray-200"
                 />
               </label>
 
@@ -218,10 +244,10 @@ export function SftpPermissionsDialog({ entry, vpsId, onClose, onApplied }: Prop
           {error && <p className="text-xs text-red-300">{error}</p>}
         </div>
 
-        <div className="flex justify-end gap-2 border-t border-[#1f2737] px-4 py-2.5">
+        <div className="flex justify-end gap-2 border-t border-[var(--border)] px-4 py-2.5">
           <button
             type="button"
-            className="rounded px-3 py-1 text-xs text-gray-400 hover:bg-[#1f2737]"
+            className="rounded px-3 py-1 text-xs text-gray-400 hover:bg-[var(--border)]"
             onClick={onClose}
             disabled={saving}
           >

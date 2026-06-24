@@ -4,7 +4,7 @@ use base64::Engine;
 
 use crate::ai::AgentHome;
 use crate::infra::projects::{list_project_files, read_project_file, slugify};
-use crate::ssh::SessionManager;
+use crate::ssh::{shell_quote, SessionManager};
 use crate::storage::Db;
 
 const REMOTE_ROOT: &str = "$HOME/xconsole-projects";
@@ -44,26 +44,24 @@ pub fn build_sync_command(home: &AgentHome, slug: &str) -> Result<String, String
     Ok(tar_parts.join(" && "))
 }
 
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 /// Full remote command: sync, credentials, ensure terraform, run subcommand.
+/// `args` are raw, unquoted terraform tokens; each is shell-quoted here for the
+/// remote shell.
 pub fn build_remote_terraform_command(
     home: &AgentHome,
     slug: &str,
     subcommand: &str,
-    extra_args: &str,
+    args: &[String],
     credential_prefix: Option<&str>,
 ) -> Result<String, String> {
     let sync = build_sync_command(home, slug)?;
     let remote = remote_project_dir(slug);
     let tf = ensure_terraform_cmd();
-    let args = extra_args.trim();
     let run = if args.is_empty() {
         format!("cd {remote} && terraform {subcommand}")
     } else {
-        format!("cd {remote} && terraform {subcommand} {args}")
+        let quoted = args.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
+        format!("cd {remote} && terraform {subcommand} {quoted}")
     };
     let mut parts = vec![sync];
     if let Some(creds) = credential_prefix.filter(|s| !s.is_empty()) {
@@ -82,18 +80,18 @@ pub fn is_readonly_subcommand(sub: &str) -> bool {
     )
 }
 
-/// Inject `-var=vps_*` from the linked VPS record when present.
-pub async fn vps_var_args(db: &Db, vps_id: &str) -> Result<String, String> {
+/// Raw `-var=vps_*` terraform tokens from the linked VPS record (unquoted; the
+/// runner quotes per-token — argv for local, shell_quote for remote).
+pub async fn vps_var_args(db: &Db, vps_id: &str) -> Result<Vec<String>, String> {
     let vps = db
         .get_vps(vps_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("VPS '{vps_id}' not found"))?;
-    Ok(format!(
-        "-var='vps_host={}' -var='vps_user={}' -var='vps_port={}'",
-        vps.host.replace('\'', "\\'"),
-        vps.username.replace('\'', "\\'"),
-        vps.port
-    ))
+    Ok(vec![
+        format!("-var=vps_host={}", vps.host),
+        format!("-var=vps_user={}", vps.username),
+        format!("-var=vps_port={}", vps.port),
+    ])
 }
 
 pub async fn run_on_vps(

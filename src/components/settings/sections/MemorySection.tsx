@@ -20,7 +20,7 @@ export function MemorySection() {
     <div>
       <SectionHeader
         title="Memory"
-        description="Compact, persistent memory injected into every session. The agent also writes here via its memory tool. Keep entries terse; do not store secrets."
+        description="Compact, persistent memory injected into every session. Starts empty — that's normal; it fills as the agent saves facts (its memory_save tool) or as you add your own notes below. Keep entries terse; never store secrets."
       />
 
       <Card className="mb-3">

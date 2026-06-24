@@ -5,11 +5,20 @@ import { ServerPanel } from "./components/ServerPanel";
 import { CanvasFlow } from "./components/CanvasFlow";
 import { BottomBar } from "./components/BottomBar";
 import { SettingsModal } from "./components/settings/SettingsModal";
+import { DialogHost } from "./components/Dialog";
+import { TooltipHost } from "./components/Tooltip";
 import { AgentPanel } from "./components/agent/AgentPanel";
 import { AppToolbar } from "./components/AppToolbar";
+import { ChangesPanel } from "./components/agent/ChangesPanel";
+import { UpdateNotice } from "./components/UpdateNotice";
+import { useUpdateStore } from "./stores/updateStore";
 import { useCanvasStore } from "./stores/canvasStore";
 import { useAgentStore } from "./stores/agentStore";
+import { useEditsStore } from "./stores/editsStore";
 import { useUiStore } from "./stores/uiStore";
+import { useThemeStore } from "./stores/themeStore";
+import { useAgentStatusStore } from "./stores/agentStatusStore";
+import { onAgentWorkspaceStatus, onFileChange, onFileChangeReverted } from "./lib/tauri";
 
 export default function App() {
   const nodes = useCanvasStore((s) => s.nodes);
@@ -22,8 +31,32 @@ export default function App() {
   const agentExpanded = useUiStore((s) => s.agentExpanded);
   const setAgentOpen = useUiStore((s) => s.setAgentOpen);
 
+  const loadTheme = useThemeStore((s) => s.load);
+  const agentSessionId = useAgentStore((s) => s.sessionId);
   const subscribeApprovals = useAgentStore((s) => s.subscribeApprovals);
   const pendingApprovalsCount = useAgentStore((s) => s.pendingApprovals.length);
+  const pendingQuestionsCount = useAgentStore((s) => s.pendingQuestions.length);
+  const hasPendingPlan = useAgentStore((s) => s.pendingPlan !== null);
+
+  useEffect(() => {
+    void loadTheme();
+  }, [loadTheme]);
+
+  // Check GitHub for a newer signed release shortly after launch (silent — only
+  // shows a card if one is available). Manual checks live in Settings → General.
+  useEffect(() => {
+    const t = setTimeout(() => void useUpdateStore.getState().check(false), 4000);
+    return () => clearTimeout(t);
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    const setStatus = useAgentStatusStore.getState().set;
+    onAgentWorkspaceStatus((s) => setStatus(s.workspace_id, s.status)).then(
+      (u) => (unlisten = u),
+    );
+    return () => unlisten?.();
+  }, []);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -31,9 +64,27 @@ export default function App() {
     return () => unlisten?.();
   }, [subscribeApprovals]);
 
+  // Load the agent's recorded file edits for the active chat session, and keep the
+  // changes panel updated live as the agent writes/reverts files.
   useEffect(() => {
-    if (pendingApprovalsCount > 0) setAgentOpen(true);
-  }, [pendingApprovalsCount, setAgentOpen]);
+    void useEditsStore.getState().sync(agentSessionId ?? null);
+  }, [agentSessionId]);
+
+  useEffect(() => {
+    const unlisteners: Array<() => void> = [];
+    onFileChange((c) => useEditsStore.getState().ingest(c)).then((u) => unlisteners.push(u));
+    onFileChangeReverted((id) => useEditsStore.getState().markReverted(id)).then((u) =>
+      unlisteners.push(u),
+    );
+    return () => unlisteners.forEach((u) => u());
+  }, []);
+
+  useEffect(() => {
+    // Surface the agent panel whenever it needs the user (approval/question/plan).
+    if (pendingApprovalsCount > 0 || pendingQuestionsCount > 0 || hasPendingPlan) {
+      setAgentOpen(true);
+    }
+  }, [pendingApprovalsCount, pendingQuestionsCount, hasPendingPlan, setAgentOpen]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -55,7 +106,7 @@ export default function App() {
 
   return (
     <ReactFlowProvider>
-      <div className="flex h-screen w-screen flex-col overflow-hidden bg-[#0b0f17]">
+      <div className="flex h-screen w-screen flex-col overflow-hidden bg-[var(--bg)]">
         <AppToolbar />
 
         <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -90,6 +141,10 @@ export default function App() {
         {bottomOpen && !agentOnly ? <BottomBar /> : null}
       </div>
       <SettingsModal />
+      <ChangesPanel />
+      <UpdateNotice />
+      <DialogHost />
+      <TooltipHost />
     </ReactFlowProvider>
   );
 }

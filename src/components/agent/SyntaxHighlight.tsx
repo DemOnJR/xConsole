@@ -289,8 +289,8 @@ export function MarkdownCodeBlock({
   const label = lang ?? "code";
 
   return (
-    <div className="group relative my-2 overflow-hidden rounded-md border border-[#1f2737] bg-[#070a10]">
-      <div className="flex items-center border-b border-[#1f2737]/80 px-3 py-1">
+    <div className="group relative my-2 overflow-hidden rounded-md border border-[var(--border)] bg-[#070a10]">
+      <div className="flex items-center border-b border-[var(--border)]/80 px-3 py-1">
         <span className="font-mono text-[10px] uppercase tracking-wide text-gray-500">
           {label}
         </span>
@@ -376,7 +376,7 @@ function parseAnsiSegments(text: string): { className: string; text: string }[] 
 }
 
 function logLineClass(line: string): string {
-  if (/KCPU|error|failed|fatal|denied|cannot|panic|exception|traceback/i.test(line)) {
+  if (/error|failed|fatal|denied|cannot|panic|exception|traceback/i.test(line)) {
     return "log-error";
   }
   if (/warn|warning|deprecated/i.test(line)) {

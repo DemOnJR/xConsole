@@ -1,7 +1,13 @@
 import { create } from "zustand";
 import type { Viewport } from "@xyflow/react";
-import { api, type Workspace } from "../lib/tauri";
-import { useCanvasStore, type CanvasEdge, type CanvasNode, type LayoutMode } from "./canvasStore";
+import { api, type Workspace, type WorkspaceProject } from "../lib/tauri";
+import {
+  defaultViewport,
+  useCanvasStore,
+  type CanvasEdge,
+  type CanvasNode,
+  type LayoutMode,
+} from "./canvasStore";
 import { useSessionStore } from "./sessionStore";
 
 /** Deterministic node id for a workspace slot (stable across reopen). */
@@ -27,6 +33,25 @@ interface SavedNode {
 interface SavedEdge {
   sourceIndex: number;
   targetIndex: number;
+}
+
+/**
+ * Parse a workspace's persisted `nodes_json`. It is stored as an object
+ * `{ nodes, edges }`, but a legacy format stored a bare array — and a corrupt
+ * blob must degrade gracefully rather than throw. Single source for every reader
+ * so the two shapes can't be mis-handled again.
+ */
+export function parseSavedNodes(
+  nodesJson: string | null | undefined,
+): { nodes: SavedNode[]; edges: SavedEdge[] } {
+  if (!nodesJson) return { nodes: [], edges: [] };
+  try {
+    const raw = JSON.parse(nodesJson);
+    if (Array.isArray(raw)) return { nodes: raw, edges: [] };
+    return { nodes: raw.nodes ?? [], edges: raw.edges ?? [] };
+  } catch {
+    return { nodes: [], edges: [] };
+  }
 }
 
 export const WORKSPACE_COLORS = [
@@ -57,6 +82,12 @@ interface WorkspaceState {
     id: string,
     patch: { name?: string; color?: string; icon?: string; colorMode?: string },
   ) => Promise<void>;
+  /** Set (or clear) the workspace's project location for agent context. */
+  setProject: (id: string, project: WorkspaceProject | null) => Promise<void>;
+  /** Create a new empty workspace, make it active, and clear the canvas. */
+  createNew: (name: string) => Promise<void>;
+  /** Clear the active selection (no workspace open). */
+  deselect: () => void;
   remove: (id: string) => Promise<void>;
   /** Returns the layout + viewport to apply; node reconstruction is done by the canvas. */
   restore: (
@@ -118,6 +149,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       color: color ?? existing?.color ?? null,
       icon: icon ?? existing?.icon ?? null,
       color_mode: colorMode ?? existing?.color_mode ?? null,
+      project_json: existing?.project_json ?? null,
     });
 
     // Rebind the live canvas nodes to the deterministic ids this workspace will
@@ -167,9 +199,43 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       color: patch.color ?? w.color ?? null,
       icon: patch.icon ?? w.icon ?? null,
       color_mode: patch.colorMode ?? w.color_mode ?? null,
+      project_json: w.project_json ?? null,
     });
     await get().load();
   },
+
+  setProject: async (id, project) => {
+    const w = get().workspaces.find((x) => x.id === id);
+    if (!w) return;
+    await api.saveWorkspace({
+      id: w.id,
+      name: w.name,
+      viewport_json: w.viewport_json ?? null,
+      layout_mode: w.layout_mode ?? null,
+      nodes_json: w.nodes_json ?? null,
+      color: w.color ?? null,
+      icon: w.icon ?? null,
+      color_mode: w.color_mode ?? null,
+      project_json: project ? JSON.stringify(project) : null,
+    });
+    await get().load();
+  },
+
+  createNew: async (name) => {
+    const ws = await api.saveWorkspace({
+      name,
+      viewport_json: JSON.stringify(defaultViewport),
+      layout_mode: "freeform",
+      nodes_json: JSON.stringify({ nodes: [], edges: [] }),
+    });
+    // Start from an empty canvas (background sessions are untouched).
+    useCanvasStore.getState().setNodes([]);
+    useCanvasStore.getState().setEdges([]);
+    await get().load();
+    set({ activeId: ws.id });
+  },
+
+  deselect: () => set({ activeId: null }),
 
   remove: async (id) => {
     await api.deleteWorkspace(id);
@@ -180,12 +246,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   restore: async (id) => {
     const ws = get().workspaces.find((w) => w.id === id);
     if (!ws) return null;
-    const raw = ws.nodes_json ? JSON.parse(ws.nodes_json) : [];
-    const saved: SavedNode[] = Array.isArray(raw) ? raw : raw.nodes ?? [];
-    const savedEdges: SavedEdge[] = Array.isArray(raw) ? [] : raw.edges ?? [];
-    const viewport: Viewport = ws.viewport_json
-      ? JSON.parse(ws.viewport_json)
-      : { x: 0, y: 0, zoom: 1 };
+    const { nodes: saved, edges: savedEdges } = parseSavedNodes(ws.nodes_json);
+    let viewport: Viewport = { x: 0, y: 0, zoom: 1 };
+    if (ws.viewport_json) {
+      try {
+        viewport = JSON.parse(ws.viewport_json);
+      } catch {
+        // corrupt viewport blob → keep the default
+      }
+    }
     const layout = (ws.layout_mode as LayoutMode) || "freeform";
     const nodes: CanvasNode[] = saved.map((s, i) => {
       const nodeId = workspaceNodeId(id, i);
@@ -216,7 +285,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         id: `link-${srcId}-${tgtId}`,
         source: srcId,
         target: tgtId,
-        type: "smoothstep",
+        type: "floating",
         animated: true,
         style: { stroke: "#22d3ee", strokeWidth: 2 },
         data: { kind: "sftp-terminal" },

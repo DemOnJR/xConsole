@@ -129,7 +129,7 @@ impl CliProvider {
     fn resolve_cursor_runtime() -> Option<(PathBuf, PathBuf)> {
         let local = std::env::var("LOCALAPPDATA").ok()?;
         let versions = PathBuf::from(local).join("cursor-agent").join("versions");
-        let mut best: Option<(i32, PathBuf)> = None;
+        let mut best: Option<((i32, i32, i32), PathBuf)> = None;
         if let Ok(entries) = std::fs::read_dir(&versions) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -145,14 +145,13 @@ impl CliProvider {
                 if parts.len() != 3 {
                     continue;
                 }
-                let key: i32 = format!(
-                    "{}{}{}",
-                    parts[0],
+                // Compare as a numeric (year, minor, patch) tuple so 2024.10.2
+                // correctly outranks 2024.1.15 (string-concat would not).
+                let key = (
+                    parts[0].parse::<i32>().unwrap_or(0),
                     parts[1].parse::<i32>().unwrap_or(0),
-                    parts[2].parse::<i32>().unwrap_or(0)
-                )
-                .parse()
-                .unwrap_or(0);
+                    parts[2].parse::<i32>().unwrap_or(0),
+                );
                 let node = path.join("node.exe");
                 let index = path.join("index.js");
                 if node.exists() && index.exists() {
@@ -166,6 +165,46 @@ impl CliProvider {
     }
 }
 
+/// Build the base command to run the Cursor agent. Prefers the bundled
+/// `node.exe index.js` (a real executable that accepts stdin); falls back to the
+/// `agent.cmd` launcher via `cmd /C` (Windows can't CreateProcess a `.cmd`
+/// directly, which is the "program not found" people hit when launching `agent`).
+fn cursor_base_command(bin: &str) -> Command {
+    if let Some((node, index)) = CliProvider::resolve_cursor_runtime() {
+        let mut c = Command::new(node);
+        c.arg(index);
+        return c;
+    }
+    #[cfg(windows)]
+    {
+        // A configured/installed .cmd or .ps1 launcher → run it through its host.
+        let path = std::path::Path::new(bin);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        if bin.contains('\\') || bin.contains('/') {
+            if ext == "cmd" || ext == "bat" {
+                let mut c = Command::new("cmd");
+                c.arg("/C").arg(bin);
+                return c;
+            }
+            if ext == "ps1" {
+                let mut c = Command::new("powershell");
+                c.arg("-NoProfile").arg("-ExecutionPolicy").arg("Bypass").arg("-File").arg(bin);
+                return c;
+            }
+        }
+        // Bare name like "agent": resolve the known install location's .cmd.
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let cmd_path = format!(r"{local}\cursor-agent\agent.cmd");
+            if std::path::Path::new(&cmd_path).exists() {
+                let mut c = Command::new("cmd");
+                c.arg("/C").arg(cmd_path);
+                return c;
+            }
+        }
+    }
+    Command::new(bin)
+}
+
 /// Spawn a CLI process. Prompt is written to stdin when `prompt` is Some.
 async fn spawn_with_stdin(
     kind: &str,
@@ -175,13 +214,7 @@ async fn spawn_with_stdin(
     api_key: Option<&str>,
 ) -> Result<tokio::process::Child, String> {
     let mut cmd = if kind == "cursor" {
-        if let Some((node, index)) = CliProvider::resolve_cursor_runtime() {
-            let mut c = Command::new(node);
-            c.arg(index);
-            c
-        } else {
-            spawn_cli_program(bin)?
-        }
+        cursor_base_command(bin)
     } else {
         spawn_cli_program(bin)?
     };
@@ -243,35 +276,80 @@ async fn read_child_output(
     kind: &str,
     sink: Option<&EventSink>,
     stream_json: bool,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<ChatResponse, String> {
-    let mut out = ChatResponse::default();
+    use std::sync::atomic::Ordering;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
 
-    if stream_json {
-        if let Some(stdout) = child.stdout.take() {
+    // Drain stdout and stderr concurrently *before* waiting: if the child writes
+    // more than a pipe buffer (~64KB) to stderr while we're blocked on stdout
+    // (or vice versa) a sequential reader deadlocks.
+    let cancel_out = cancel.clone();
+    let stdout_fut = async move {
+        let mut out = ChatResponse::default();
+        if let Some(stdout) = stdout {
             let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                parse_cursor_stream_line(&line, &mut out, sink);
+            loop {
+                tokio::select! {
+                    next = lines.next_line() => match next {
+                        Ok(Some(line)) => {
+                            if stream_json {
+                                parse_cursor_stream_line(&line, &mut out, sink);
+                            } else {
+                                out.content.push_str(&line);
+                                out.content.push('\n');
+                                emit(sink, StreamEvent::Text(format!("{line}\n")));
+                            }
+                        }
+                        _ => break,
+                    },
+                    // Wake periodically so Stop is honored even while the child is quiet.
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(120)) => {}
+                }
+                if cancel_out.as_ref().map(|c| c.load(Ordering::SeqCst)).unwrap_or(false) {
+                    emit(sink, StreamEvent::Status("Stopped.".into()));
+                    break;
+                }
             }
         }
-    } else if let Some(stdout) = child.stdout.take() {
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            out.content.push_str(&line);
-            out.content.push('\n');
-            emit(sink, StreamEvent::Text(format!("{line}\n")));
+        out
+    };
+    let cancel_err = cancel.clone();
+    let stderr_fut = async move {
+        let mut err = String::new();
+        if let Some(stderr) = stderr {
+            let mut lines = BufReader::new(stderr).lines();
+            loop {
+                tokio::select! {
+                    next = lines.next_line() => match next {
+                        Ok(Some(line)) => {
+                            err.push_str(&line);
+                            err.push('\n');
+                        }
+                        _ => break,
+                    },
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(120)) => {}
+                }
+                if cancel_err.as_ref().map(|c| c.load(Ordering::SeqCst)).unwrap_or(false) {
+                    break;
+                }
+            }
         }
+        err
+    };
+    let (mut out, err) = tokio::join!(stdout_fut, stderr_fut);
+
+    // Stop pressed mid-run: kill the agent process and return what we have.
+    if cancel.as_ref().map(|c| c.load(Ordering::SeqCst)).unwrap_or(false) {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        out.stop_reason = "stop".into();
+        return Ok(out);
     }
 
     let status = child.wait().await.map_err(|e| e.to_string())?;
     if !status.success() {
-        let mut err = String::new();
-        if let Some(stderr) = child.stderr.take() {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                err.push_str(&line);
-                err.push('\n');
-            }
-        }
         let hint = if kind == "cursor"
             && (err.contains("invalid") || err.contains("Not logged in") || err.contains("API key"))
         {
@@ -286,10 +364,6 @@ async fn read_child_output(
             err.trim(),
             hint
         ));
-    }
-
-    if out.content.is_empty() && stream_json {
-        // Final result may only be in accumulated stream; content filled by parser.
     }
 
     out.stop_reason = "stop".into();
@@ -402,10 +476,12 @@ fn cursor_tool_is_noise(name: &str, label: &str) -> bool {
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    // Operate on chars, never byte offsets, so multibyte tool args (accented
+    // paths, box-drawing output) can't panic mid-codepoint.
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
+        format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
     }
 }
 
@@ -834,6 +910,8 @@ impl Provider for CliProvider {
         sink: Option<&EventSink>,
     ) -> Result<ChatResponse, String> {
         let prompt = Self::build_prompt(req);
+        // Count prompt tokens now (the prompt is moved into the child args below).
+        let prompt_tokens = crate::ai::text::count_tokens(&prompt) as u32;
         let stream_json = self.kind == "cursor" && req.xconsole.is_some();
 
         let workspace = if let Some(xc) = &req.xconsole {
@@ -849,6 +927,7 @@ impl Provider for CliProvider {
                     &xc.session_id,
                     &xc.targets,
                     &xc.safety,
+                    &xc.workspace_id,
                 )
                 .map_err(|e| format!("failed to prepare Cursor MCP workspace: {e}"))?,
             )
@@ -871,7 +950,26 @@ impl Provider for CliProvider {
                 .map_err(|e| format!("failed to launch '{}': {e}", self.bin))?
         };
 
-        read_child_output(child, &self.bin, &self.kind, sink, stream_json).await
+        let started = std::time::Instant::now();
+        let resp =
+            read_child_output(child, &self.bin, &self.kind, sink, stream_json, req.cancel.clone())
+                .await?;
+
+        // CLI tools don't report token usage — tokenize locally so the calculator
+        // still works (labeled as an estimate in the UI).
+        let completion_tokens = crate::ai::text::count_tokens(&resp.content) as u32;
+        let ms = started.elapsed().as_millis() as u64;
+        let secs = (ms as f64 / 1000.0).max(0.05);
+        emit(
+            sink,
+            StreamEvent::Stats(crate::ai::provider::StreamStats {
+                completion_tokens,
+                prompt_tokens: Some(prompt_tokens),
+                duration_ms: ms,
+                tokens_per_sec: (completion_tokens as f64 / secs) as f32,
+            }),
+        );
+        Ok(resp)
     }
 
     fn is_autonomous_cli(&self) -> bool {
@@ -897,30 +995,52 @@ pub async fn login(kind: &str, bin: &str, sink: Option<&EventSink>) -> Result<St
         StreamEvent::Status(format!("Launching `{} {}`...", bin, args.join(" "))),
     );
 
-    let mut child = spawn_cli(bin, &args)?
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to launch '{bin}': {e}"))?;
+    let mut child = if kind == "cursor" {
+        let mut c = cursor_base_command(bin);
+        c.args(&args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        c.spawn().map_err(|e| {
+            format!("failed to launch Cursor agent: {e}. Install/repair the CLI from https://cursor.com/docs/cli")
+        })?
+    } else {
+        spawn_cli(bin, &args)?
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("failed to launch '{bin}': {e}"))?
+    };
 
-    let mut combined = String::new();
-    if let Some(stdout) = child.stdout.take() {
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            combined.push_str(&line);
-            combined.push('\n');
-            emit(sink, StreamEvent::Text(format!("{line}\n")));
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let drain = |reader: Option<tokio::process::ChildStdout>| async move {
+        let mut buf = String::new();
+        if let Some(r) = reader {
+            let mut lines = BufReader::new(r).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                buf.push_str(&line);
+                buf.push('\n');
+                emit(sink, StreamEvent::Text(format!("{line}\n")));
+            }
         }
-    }
+        buf
+    };
+    let drain_err = |reader: Option<tokio::process::ChildStderr>| async move {
+        let mut buf = String::new();
+        if let Some(r) = reader {
+            let mut lines = BufReader::new(r).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                buf.push_str(&line);
+                buf.push('\n');
+                emit(sink, StreamEvent::Text(format!("{line}\n")));
+            }
+        }
+        buf
+    };
+    // Drain both pipes concurrently to avoid a stderr-before-stdout-EOF deadlock.
+    let (out_s, err_s) = tokio::join!(drain(stdout), drain_err(stderr));
+    let combined = format!("{out_s}{err_s}");
     let status = child.wait().await.map_err(|e| e.to_string())?;
-    if let Some(stderr) = child.stderr.take() {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            combined.push_str(&line);
-            combined.push('\n');
-            emit(sink, StreamEvent::Text(format!("{line}\n")));
-        }
-    }
     if !status.success() {
         return Err(format!(
             "login exited with {}",

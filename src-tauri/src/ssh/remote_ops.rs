@@ -33,17 +33,6 @@ pub fn validate_octal_mode(mode: &str) -> Result<String, String> {
     Ok(m.to_string())
 }
 
-pub fn validate_name(name: &str) -> Result<String, String> {
-    let n = name.trim();
-    if n.is_empty() || n == "." || n == ".." {
-        return Err("invalid name".into());
-    }
-    if n.contains('/') || n.contains('\0') || n.contains('\n') {
-        return Err("invalid name".into());
-    }
-    Ok(n.to_string())
-}
-
 fn validate_owner_part(s: &str, label: &str) -> Result<String, String> {
     let s = s.trim();
     if s.is_empty() {

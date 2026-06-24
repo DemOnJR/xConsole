@@ -280,20 +280,8 @@ impl OllamaProvider {
         if !out.content.is_empty() {
             emit(sink, StreamEvent::Text(out.content.clone()));
         }
-        if let (Some(count), Some(dur_ns)) = (parsed.eval_count, parsed.eval_duration) {
-            if count > 0 && dur_ns > 0 {
-                let duration_ms = dur_ns / 1_000_000;
-                let tps = count as f32 / (dur_ns as f32 / 1_000_000_000.0);
-                emit(
-                    sink,
-                    StreamEvent::Stats(StreamStats {
-                        completion_tokens: count as u32,
-                        prompt_tokens: parsed.prompt_eval_count.map(|n| n as u32),
-                        duration_ms: duration_ms.max(1),
-                        tokens_per_sec: tps,
-                    }),
-                );
-            }
+        if let Some(ev) = stats_event(parsed.eval_count, parsed.eval_duration, parsed.prompt_eval_count) {
+            emit(sink, ev);
         }
         for call in Self::parse_tool_calls(&parsed.message) {
             emit(sink, StreamEvent::ToolCall(call.clone()));
@@ -318,6 +306,26 @@ struct OllamaStreamChunk {
     eval_duration: Option<u64>,
     #[serde(default)]
     prompt_eval_count: Option<u64>,
+}
+
+/// Build a Stats event from Ollama's eval counters, when both are present and
+/// non-zero. Single source for the non-stream and stream-done emit sites.
+fn stats_event(
+    eval_count: Option<u64>,
+    eval_duration: Option<u64>,
+    prompt_eval_count: Option<u64>,
+) -> Option<StreamEvent> {
+    let (count, dur_ns) = (eval_count?, eval_duration?);
+    if count == 0 || dur_ns == 0 {
+        return None;
+    }
+    let tps = count as f32 / (dur_ns as f32 / 1_000_000_000.0);
+    Some(StreamEvent::Stats(StreamStats {
+        completion_tokens: count as u32,
+        prompt_tokens: prompt_eval_count.map(|n| n as u32),
+        duration_ms: (dur_ns / 1_000_000).max(1),
+        tokens_per_sec: tps,
+    }))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -376,6 +384,11 @@ impl Provider for OllamaProvider {
         let mut stream = resp.bytes_stream();
 
         while let Some(chunk) = stream.next().await {
+            // User pressed Stop — abort the in-flight response immediately.
+            if req.is_cancelled() {
+                emit(sink, StreamEvent::Status("Stopped.".into()));
+                break;
+            }
             let chunk = chunk.map_err(|e| format!("ollama stream error: {e}"))?;
             line_buf.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -402,20 +415,10 @@ impl Provider for OllamaProvider {
                 }
 
                 if chunk.done {
-                    if let (Some(count), Some(dur_ns)) = (chunk.eval_count, chunk.eval_duration) {
-                        if count > 0 && dur_ns > 0 {
-                            let duration_ms = dur_ns / 1_000_000;
-                            let tps = count as f32 / (dur_ns as f32 / 1_000_000_000.0);
-                            emit(
-                                sink,
-                                StreamEvent::Stats(StreamStats {
-                                    completion_tokens: count as u32,
-                                    prompt_tokens: chunk.prompt_eval_count.map(|n| n as u32),
-                                    duration_ms: duration_ms.max(1),
-                                    tokens_per_sec: tps,
-                                }),
-                            );
-                        }
+                    if let Some(ev) =
+                        stats_event(chunk.eval_count, chunk.eval_duration, chunk.prompt_eval_count)
+                    {
+                        emit(sink, ev);
                     }
                     if let Some(reason) = chunk.done_reason {
                         out.stop_reason = reason.clone();

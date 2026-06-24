@@ -14,6 +14,8 @@ export interface SessionInfo {
   error?: string;
   /** Remote working directory when known (OSC 7 / cd tracking). */
   cwd?: string;
+  /** SFTP panels: the remote path currently being browsed. */
+  sftpPath?: string;
 }
 
 interface SessionState {

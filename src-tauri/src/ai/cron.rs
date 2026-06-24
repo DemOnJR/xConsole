@@ -91,6 +91,11 @@ fn parse_schedule(spec: &str) -> Option<Schedule> {
             "d" => Duration::days(n),
             _ => return None,
         };
+        // Reject zero/negative/sub-tick intervals: they would fire on every
+        // scheduler tick forever.
+        if dur < Duration::seconds(TICK.as_secs() as i64) {
+            return None;
+        }
         return Some(Schedule::Every(dur));
     }
     if spec == "@hourly" {
@@ -107,6 +112,11 @@ fn parse_schedule(spec: &str) -> Option<Schedule> {
         return Some(Schedule::Weekly { wd, h, m });
     }
     None
+}
+
+/// Whether a schedule spec is well-formed (used to validate before saving a job).
+pub fn schedule_is_valid(spec: &str) -> bool {
+    parse_schedule(spec).is_some()
 }
 
 /// Parse SQLite's `datetime('now')` output (UTC, "%Y-%m-%d %H:%M:%S").
@@ -239,16 +249,23 @@ async fn run_command_job(
     if targets.is_empty() {
         return Err("no targets configured".into());
     }
-    let global = ctx
-        .db
-        .get_setting("agent.safety_mode")
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "approve".to_string());
+    let global = safety::global_safety_mode(&ctx.db);
 
+    // Per-target resilience: one denied/unreachable host must not abort the rest.
+    // Each target reports its own result; the job only errors if *every* target failed.
+    let mut failures = 0usize;
+    let emit_result = |id: &str, output: String| {
+        let _ = ctx.app.emit(
+            event,
+            StreamEvent::ToolResult {
+                id: id.to_string(),
+                output,
+            },
+        );
+    };
     for vps_id in targets {
         let mode = safety::effective_mode(&ctx.db, &global, vps_id);
-        safety::authorize(
+        if let Err(e) = safety::authorize(
             &ctx.app,
             &ctx.db,
             &ctx.approvals,
@@ -257,21 +274,31 @@ async fn run_command_job(
             Some(vps_id),
             &job.payload,
         )
-        .await?;
+        .await
+        {
+            failures += 1;
+            emit_result(vps_id, format!("[{vps_id}] {e}"));
+            continue;
+        }
 
-        let out = ctx.sessions.run_command(vps_id, &job.payload).await?;
-        let _ = ctx.app.emit(
-            event,
-            StreamEvent::ToolResult {
-                id: vps_id.clone(),
-                output: format!(
+        match ctx.sessions.run_command(vps_id, &job.payload).await {
+            Ok(out) => emit_result(
+                vps_id,
+                format!(
                     "[{vps_id}] exit {}\n{}\n{}",
                     out.exit_code,
                     out.stdout.trim_end(),
                     out.stderr.trim_end()
                 ),
-            },
-        );
+            ),
+            Err(e) => {
+                failures += 1;
+                emit_result(vps_id, format!("[{vps_id}] error: {e}"));
+            }
+        }
+    }
+    if failures == targets.len() {
+        return Err(format!("all {} target(s) failed", targets.len()));
     }
     Ok(())
 }
@@ -291,27 +318,30 @@ async fn run_prompt_job(
         }
     });
 
-    let global = ctx
-        .db
-        .get_setting("agent.safety_mode")
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "approve".to_string());
-
     let tc = ToolContext {
         app: ctx.app.clone(),
         db: ctx.db.clone(),
         sessions: ctx.sessions.clone(),
         home: ctx.home.clone(),
         approvals: ctx.approvals.clone(),
+        // Cron runs unattended: no interactive prompts, no plan mode. Fresh
+        // per-run state means a cron job never inherits a chat's overrides.
+        prompts: crate::ai::interaction::PromptRegistry::new(),
+        session_state: crate::ai::interaction::SessionState::new(),
         session_id: format!("cron:{}", job.id),
         targets,
-        safety: global,
+        safety: safety::global_safety_mode(&ctx.db),
+        plan_mode: false,
+        workspace_id: None,
+        canvas: Vec::new(),
+        edits: crate::ai::edits::EditJournal::new(),
     };
 
     let messages = vec![ChatMessage::user(job.payload.clone())];
     let result = agent::run_turn(&tc, None, messages, &tx).await.map(|_| ());
-    drop(tc);
+    // Drop the SENDER (not tc, which doesn't own it) to close the channel so the
+    // forwarder drains and returns instead of hanging.
+    drop(tx);
     let _ = forward.await;
     result
 }
@@ -348,5 +378,10 @@ mod tests {
     fn parse_invalid_schedule() {
         assert!(parse_schedule("not a schedule").is_none());
         assert!(parse_schedule("@every").is_none());
+        // Zero/negative/sub-tick intervals are rejected (would fire every tick).
+        assert!(parse_schedule("@every 0m").is_none());
+        assert!(parse_schedule("@every -5m").is_none());
+        assert!(parse_schedule("@every 5s").is_none());
+        assert!(parse_schedule("@every 30s").is_some());
     }
 }

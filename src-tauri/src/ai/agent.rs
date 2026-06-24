@@ -4,12 +4,12 @@
 use crate::ai::context::{self, PromptContext};
 use crate::ai::context_compact;
 use crate::ai::context_usage;
-use crate::ai::provider::{emit, ChatMessage, ChatRequest, EventSink, StreamEvent, ToolCall};
+use crate::ai::provider::{emit, ChatMessage, ChatRequest, EventSink, StreamEvent};
 use crate::ai::tools::{self, ToolContext};
 use crate::ai::vps_snapshot;
 use crate::ai::registry;
-use crate::ai::providers::ollama::parse_ollama_extra;
-use tauri::Manager;
+use serde_json::json;
+use tauri::{Emitter, Manager};
 
 /// Maximum tool-execution iterations before we stop.
 const MAX_ITERS: usize = 12;
@@ -24,6 +24,18 @@ pub async fn run_turn(
 ) -> Result<ChatMessage, String> {
     let mut messages = context::compress_window(messages);
 
+    // Per-workspace agent status (working / planning / testing / idle) shown on the
+    // workspace row. No-op when the turn isn't tied to a workspace.
+    let emit_ws = |status: &str| {
+        if let Some(ws) = tc.workspace_id.as_deref().filter(|s| !s.is_empty()) {
+            let _ = tc.app.emit(
+                "agent://workspace-status",
+                json!({ "workspace_id": ws, "status": status }),
+            );
+        }
+    };
+    emit_ws(if tc.plan_mode { "planning" } else { "working" });
+
     let preferred_id = registry::active_provider_id(&tc.db, provider_id.as_deref())?;
     let (resolved, fallback_note) = registry::resolve_for_turn(&tc.db, &preferred_id)?;
     if let Some(note) = &fallback_note {
@@ -32,15 +44,9 @@ pub async fn run_turn(
     let tool_defs = tools::definitions(&tc.home);
     let cli_mode = resolved.provider.is_autonomous_cli();
     let ollama_mode = resolved.kind == "ollama";
-    let ollama_num_ctx = if ollama_mode {
-        tc.db
-            .get_provider(&preferred_id)
-            .ok()
-            .flatten()
-            .map(|p| parse_ollama_extra(p.extra_json.as_deref()).num_ctx)
-    } else {
-        None
-    };
+    // Read num_ctx from the resolved provider (not preferred_id) so a CLI→Ollama
+    // fallback budgets context against the Ollama provider that actually runs.
+    let ollama_num_ctx = resolved.ollama_num_ctx;
     let last_user_msg = messages
         .iter()
         .rev()
@@ -98,6 +104,7 @@ pub async fn run_turn(
         let hint = "Add an OpenAI or Anthropic provider in Settings → Providers to execute \
              commands on your VPS. OpenCode/Codex CLI cannot SSH directly.";
         emit(Some(sink), StreamEvent::Error(hint.to_string()));
+        emit_ws("idle");
         return Err(hint.to_string());
     }
 
@@ -113,6 +120,7 @@ pub async fn run_turn(
             session_id: tc.session_id.clone(),
             targets: tc.targets.clone(),
             safety: tc.safety.clone(),
+            workspace_id: tc.workspace_id.clone().unwrap_or_default(),
         })
     } else {
         None
@@ -144,6 +152,33 @@ pub async fn run_turn(
 
     let mut thread_summary = conversation_summary.clone();
 
+    // Per-workspace project context (brief + scoped memory + the project's own
+    // CLAUDE.md/AGENTS.md), loaded once for this turn when a workspace is active.
+    let workspace_block = match &tc.workspace_id {
+        Some(id) if !id.is_empty() && !casual_turn => {
+            crate::ai::workspace_context::build_workspace_block(&tc.home, &tc.db, &tc.sessions, id)
+                .await
+        }
+        _ => None,
+    };
+
+    // Live canvas: the terminals / SFTP panels the user has open right now, with a
+    // tail of each terminal's scrollback so the agent can see what's on screen.
+    // Always include it when panels are open (even on casual turns) — the user
+    // expects the agent to be aware of what's on their canvas.
+    let canvas_block = crate::ai::canvas_context::build_canvas_block(&tc.canvas, &tc.sessions);
+    if canvas_block.is_some() {
+        let n = tc
+            .canvas
+            .iter()
+            .filter(|c| c.kind == "terminal" || c.kind == "sftp")
+            .count();
+        emit(
+            Some(sink),
+            StreamEvent::Status(format!("Looking at your open canvas ({n} panel(s))…")),
+        );
+    }
+
     let build_system = |force_minimal: bool, summary: &Option<String>| -> (String, String) {
         let ctx = PromptContext {
             home: &tc.home,
@@ -160,6 +195,9 @@ pub async fn run_turn(
             casual_turn,
             target_selection_note: target_selection_note.clone(),
             force_minimal_prompt: force_minimal,
+            plan_mode: tc.plan_mode,
+            workspace_context: workspace_block.clone(),
+            canvas_context: canvas_block.clone(),
         };
 
         if cli_mode {
@@ -173,11 +211,27 @@ pub async fn run_turn(
             if xconsole_exec.is_some() {
                 base.push_str(
                     "\n\nYou have xConsole MCP tools for the user's VPS: run_command, read_file, \
-                     write_file, list_vps_targets, skills_list, skill_view, skill_save, memory_save. \
+                     write_file, list_vps_targets, skills_list, skill_view, skill_save, memory_save, \
+                     set_project_brief. \
+                     You ALSO control the user's canvas: canvas_open_terminal and canvas_open_sftp open \
+                     a live panel for a server, canvas_close removes a panel (node_id or vps_id), \
+                     canvas_refresh reconnects a terminal, and canvas_tile arranges them. So when the \
+                     user asks to open/duplicate/close a terminal or panel on the canvas, CALL the \
+                     matching canvas_* tool — never reply that you can't open canvas panels. \
                      Use them to inspect and change servers — do not tell the user to run commands \
                      manually. Call list_vps_targets first if you need host ids. Load relevant skills \
                      (skill_view) before complex infra work.",
                 );
+            }
+            // The CLI system prompt is built from scratch, so the shared context
+            // tiers (workspace + live canvas) are appended explicitly here.
+            if let Some(ws) = &workspace_block {
+                base.push_str("\n\n");
+                base.push_str(ws);
+            }
+            if let Some(cv) = &canvas_block {
+                base.push_str("\n\n");
+                base.push_str(cv);
             }
             return (base, String::new());
         }
@@ -233,6 +287,13 @@ pub async fn run_turn(
         )
         .await
         {
+            emit(
+                Some(sink),
+                StreamEvent::Status(format!(
+                    "Compacted context: ~{} → ~{} tokens ({} tool result(s) pruned)",
+                    compact.tokens_before, compact.tokens_after, compact.pruned_tools
+                )),
+            );
             thread_summary = Some(compact.summary);
             emit(
                 Some(sink),
@@ -259,6 +320,9 @@ pub async fn run_turn(
             casual_turn,
             target_selection_note: target_selection_note.clone(),
             force_minimal_prompt: false,
+            plan_mode: tc.plan_mode,
+            workspace_context: workspace_block.clone(),
+            canvas_context: canvas_block.clone(),
         },
         &tool_defs_for_turn,
         &messages,
@@ -293,6 +357,9 @@ pub async fn run_turn(
                 casual_turn,
                 target_selection_note: target_selection_note.clone(),
                 force_minimal_prompt: true,
+                plan_mode: tc.plan_mode,
+                workspace_context: workspace_block.clone(),
+                canvas_context: canvas_block.clone(),
             },
             &tool_defs_for_turn,
             &messages,
@@ -322,16 +389,24 @@ pub async fn run_turn(
     let mut last = ChatMessage::assistant("");
 
     for iter in 0..MAX_ITERS {
+        // User pressed Stop — halt before the next model call.
+        if tc.session_state.is_cancelled(&tc.session_id) {
+            emit(Some(sink), StreamEvent::Status("Stopped.".into()));
+            break;
+        }
         let mut req = ChatRequest::new(&resolved.model);
         req.system = system.clone();
         req.messages = messages.clone();
         req.tools = tool_defs_for_turn.clone();
         req.xconsole = xconsole_exec.clone();
+        // Let the provider's stream loop abort the moment the user presses Stop.
+        req.cancel = Some(tc.session_state.cancel_flag(&tc.session_id));
 
         let resp = match resolved.provider.chat(&req, Some(sink)).await {
             Ok(r) => r,
             Err(e) => {
                 emit(Some(sink), StreamEvent::Error(e.clone()));
+                emit_ws("idle");
                 return Err(e);
             }
         };
@@ -349,15 +424,26 @@ pub async fn run_turn(
         if resp.tool_calls.is_empty() || cli_mode {
             break;
         }
+        // Surface a "testing" status when the agent runs a test/verify command.
+        let testing = resp.tool_calls.iter().any(|c| {
+            c.arguments
+                .get("command")
+                .and_then(|v| v.as_str())
+                .map(|cmd| {
+                    let l = cmd.to_lowercase();
+                    l.contains("test") || l.contains("pytest") || l.contains("verify")
+                })
+                .unwrap_or(false)
+        });
+        // Don't start running tools if the user pressed Stop during generation.
+        if tc.session_state.is_cancelled(&tc.session_id) {
+            emit(Some(sink), StreamEvent::Status("Stopped.".into()));
+            break;
+        }
+        emit_ws(if testing { "testing" } else { "working" });
         for call in &resp.tool_calls {
-            emit(
-                Some(sink),
-                StreamEvent::ToolCall(ToolCall {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    arguments: call.arguments.clone(),
-                }),
-            );
+            // The provider already streamed StreamEvent::ToolCall for each call;
+            // the single ToolResult is emitted by this loop below. No re-emit here.
             let output = tools::dispatch(tc, call, sink).await;
             emit(
                 Some(sink),
@@ -380,6 +466,7 @@ pub async fn run_turn(
     }
 
     emit(Some(sink), StreamEvent::Done);
+    emit_ws("idle");
 
     if last.content.trim().is_empty() && !last.tool_calls.is_empty() {
         // Tool loop will continue on the next iteration; no placeholder needed.

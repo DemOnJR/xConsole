@@ -25,14 +25,27 @@ pub fn save_user(home: &AgentHome, content: &str) -> Result<(), String> {
     std::fs::write(home.user(), content).map_err(|e| e.to_string())
 }
 
-/// Append a memory entry as a bullet line, then return the new contents.
+/// Append a memory entry as a single bullet line, then return the new contents.
 pub fn append_memory(home: &AgentHome, entry: &str) -> Result<String, String> {
+    // Normalize to one bullet: collapse multi-line input and strip any leading
+    // marker so we never write "- - x" or unbulleted continuation lines.
+    let normalized = entry
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let normalized = normalized.trim_start_matches(['-', '*', '•']).trim();
+    if normalized.is_empty() {
+        return Err("memory entry is empty".into());
+    }
+
     let mut content = load_memory(home);
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
     content.push_str("- ");
-    content.push_str(entry.trim());
+    content.push_str(normalized);
     content.push('\n');
     save_memory(home, &content)?;
     Ok(content)

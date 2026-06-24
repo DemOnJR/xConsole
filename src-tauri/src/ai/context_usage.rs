@@ -23,22 +23,18 @@ pub struct ContextUsage {
 }
 
 pub fn estimate_tokens(text: &str) -> u32 {
-    if text.is_empty() {
-        return 0;
-    }
-    ((text.len() as f64) / 4.0).ceil() as u32
+    crate::ai::text::count_tokens(text) as u32
 }
 
 pub fn estimate_tools_tokens(tools: &[ToolDef]) -> u32 {
-    if tools.is_empty() {
-        return 0;
-    }
-    let mut chars = 0usize;
-    for t in tools {
-        chars += t.name.len() + t.description.len();
-        chars += t.parameters.to_string().len();
-    }
-    estimate_tokens(&"x".repeat(chars))
+    tools
+        .iter()
+        .map(|t| {
+            estimate_tokens(&t.name)
+                + estimate_tokens(&t.description)
+                + estimate_tokens(&t.parameters.to_string())
+        })
+        .sum()
 }
 
 pub fn estimate_messages_tokens(messages: &[ChatMessage]) -> u32 {
@@ -84,7 +80,7 @@ pub fn compute_usage(
     let runtime_tokens = estimate_runtime(ctx);
 
     let mut segments = vec![
-        segment("system_prompt", "System prompt", runtime_tokens),
+        segment("system_prompt", "Runtime", runtime_tokens),
         segment("rules", "Rules", parts.rules_tokens),
         segment("tool_definitions", "Tool definitions", tool_tokens),
         segment("skills", "Skills", parts.skills_tokens),

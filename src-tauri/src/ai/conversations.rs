@@ -45,11 +45,6 @@ pub fn compact_summary(messages: &[ChatMessage]) -> String {
     truncate_block(&body, SUMMARY_PROMPT_MAX)
 }
 
-/// Parse stored JSON messages for summary/title helpers.
-pub fn messages_from_json(json: &str) -> Vec<ChatMessage> {
-    serde_json::from_str(json).unwrap_or_default()
-}
-
 fn one_line(s: &str, max: usize) -> String {
     let flat: String = s
         .lines()

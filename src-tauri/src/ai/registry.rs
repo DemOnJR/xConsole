@@ -11,7 +11,7 @@ use crate::storage::Db;
 
 /// Provider kinds that support xConsole's tool loop (SSH, files, infra tools).
 pub fn is_tool_capable_kind(kind: &str) -> bool {
-    matches!(kind, "openai" | "anthropic" | "ollama")
+    matches!(kind, "openai" | "anthropic" | "ollama" | "llamacpp")
 }
 
 /// A constructed provider plus the model it should use.
@@ -20,6 +20,9 @@ pub struct ResolvedProvider {
     pub model: String,
     pub name: String,
     pub kind: String,
+    /// Ollama `num_ctx` for this provider (None for non-ollama). Read from the
+    /// *resolved* provider so context budgeting stays correct on CLI→Ollama fallback.
+    pub ollama_num_ctx: Option<u32>,
 }
 
 /// Resolve the provider id the agent should use: explicit override, else the
@@ -56,6 +59,8 @@ pub fn build(db: &Db, provider_id: &str) -> Result<ResolvedProvider, String> {
         .map(|z| z.to_string());
 
     let model = p.model.clone().unwrap_or_default();
+    let ollama_num_ctx =
+        (p.kind == "ollama").then(|| parse_ollama_extra(p.extra_json.as_deref()).num_ctx);
 
     let provider: Box<dyn Provider> = match p.kind.as_str() {
         "anthropic" => Box::new(AnthropicProvider::new(
@@ -65,6 +70,14 @@ pub fn build(db: &Db, provider_id: &str) -> Result<ResolvedProvider, String> {
         "openai" => Box::new(OpenAiProvider::new(
             secret.ok_or_else(|| "missing API key for provider".to_string())?,
             p.base_url.clone(),
+        )),
+        // llama.cpp's server speaks the OpenAI wire format and needs no key.
+        "llamacpp" => Box::new(OpenAiProvider::new(
+            secret.unwrap_or_default(),
+            p.base_url
+                .clone()
+                .filter(|s| !s.is_empty())
+                .or_else(|| Some("http://127.0.0.1:8080/v1".to_string())),
         )),
         "ollama" => Box::new(OllamaProvider::new(
             p.base_url.clone(),
@@ -96,6 +109,7 @@ pub fn build(db: &Db, provider_id: &str) -> Result<ResolvedProvider, String> {
         model,
         name: p.name,
         kind: p.kind,
+        ollama_num_ctx,
     })
 }
 

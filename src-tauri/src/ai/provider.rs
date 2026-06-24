@@ -62,6 +62,9 @@ pub struct XConsoleExec {
     pub session_id: String,
     pub targets: Vec<String>,
     pub safety: String,
+    /// Active workspace id (empty if none) — lets the MCP write the project brief
+    /// and workspace-scoped memory for the right workspace.
+    pub workspace_id: String,
 }
 
 /// A single chat request to a provider.
@@ -75,6 +78,9 @@ pub struct ChatRequest {
     pub temperature: f32,
     /// When set, Cursor CLI uses xConsole MCP for SSH on selected VPS targets.
     pub xconsole: Option<XConsoleExec>,
+    /// User-pressed-Stop flag. Providers poll this in their streaming loop to abort
+    /// an in-flight response immediately. `None` means no cancellation wired.
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl ChatRequest {
@@ -87,7 +93,16 @@ impl ChatRequest {
             max_tokens: 4096,
             temperature: 0.7,
             xconsole: None,
+            cancel: None,
         }
+    }
+
+    /// True when the user has pressed Stop mid-stream.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .map(|c| c.load(std::sync::atomic::Ordering::SeqCst))
+            .unwrap_or(false)
     }
 }
 

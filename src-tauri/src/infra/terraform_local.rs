@@ -14,12 +14,11 @@ pub struct LocalOutput {
 }
 
 /// Human-readable command line for the safety gate (never includes secrets).
-pub fn describe_command(slug: &str, subcommand: &str, extra_args: &str) -> String {
-    let args = extra_args.trim();
+pub fn describe_command(slug: &str, subcommand: &str, args: &[String]) -> String {
     if args.is_empty() {
         format!("local terraform {subcommand} (project: {slug})")
     } else {
-        format!("local terraform {subcommand} {args} (project: {slug})")
+        format!("local terraform {subcommand} {} (project: {slug})", args.join(" "))
     }
 }
 
@@ -27,7 +26,7 @@ pub async fn run_local(
     home: &AgentHome,
     slug: &str,
     subcommand: &str,
-    extra_args: &str,
+    args: &[String],
     env: &HashMap<String, String>,
 ) -> Result<LocalOutput, String> {
     let dir = project_dir(home, slug);
@@ -38,7 +37,9 @@ pub async fn run_local(
     let mut cmd = Command::new("terraform");
     cmd.current_dir(&dir);
     cmd.arg(subcommand);
-    for token in extra_args.split_whitespace().filter(|t| !t.is_empty()) {
+    // Pass each token as a distinct argv entry (no shell), so values with
+    // spaces/quotes are preserved verbatim.
+    for token in args {
         cmd.arg(token);
     }
     cmd.envs(env);
@@ -82,8 +83,9 @@ mod tests {
 
     #[test]
     fn describe_command_includes_slug() {
-        let s = describe_command("my-app", "plan", "-out=tfplan");
+        let s = describe_command("my-app", "plan", &["-out=tfplan".to_string()]);
         assert!(s.contains("my-app"));
         assert!(s.contains("plan"));
+        assert!(s.contains("-out=tfplan"));
     }
 }

@@ -12,6 +12,7 @@ interface Props {
   menu: SftpMenuState;
   onClose: () => void;
   onOpen: (entry: SftpEntry) => void;
+  onEdit: (entry: SftpEntry) => void;
   onDownload: (entry: SftpEntry) => void;
   onProperties: (entry: SftpEntry) => void;
   onRename: (entry: SftpEntry) => void;
@@ -26,6 +27,7 @@ export function SftpContextMenu({
   menu,
   onClose,
   onOpen,
+  onEdit,
   onDownload,
   onProperties,
   onRename,
@@ -62,7 +64,7 @@ export function SftpContextMenu({
       className={`block w-full px-3 py-1.5 text-left text-xs disabled:opacity-40 ${
         opts?.danger
           ? "text-red-300 hover:bg-red-950/40"
-          : "text-gray-200 hover:bg-[#1f2737]"
+          : "text-gray-200 hover:bg-[var(--border)]"
       }`}
       onClick={() => {
         action();
@@ -80,7 +82,7 @@ export function SftpContextMenu({
   return createPortal(
     <div
       ref={ref}
-      className="fixed z-[9998] min-w-[180px] overflow-hidden rounded-md border border-[#1f2737] bg-[#11161f] py-1 shadow-xl"
+      className="fixed z-[9998] min-w-[180px] overflow-hidden rounded-md border border-[var(--border)] bg-[var(--surface)] py-1 shadow-xl"
       style={{
         left: Math.min(menu.x, maxX),
         top: Math.min(menu.y, maxY),
@@ -89,21 +91,26 @@ export function SftpContextMenu({
     >
       {entry ? (
         <>
-          {entry.is_dir
-            ? item("Open", () => onOpen(entry))
-            : item("Download", () => onDownload(entry))}
-          <div className="my-1 border-t border-[#1f2737]" />
+          {entry.is_dir ? (
+            item("Open", () => onOpen(entry))
+          ) : (
+            <>
+              {item("Edit…", () => onEdit(entry))}
+              {item("Download", () => onDownload(entry))}
+            </>
+          )}
+          <div className="my-1 border-t border-[var(--border)]" />
           {item("Properties…", () => onProperties(entry))}
           {item("Rename…", () => onRename(entry))}
           {item("Copy path", () => onCopyPath(entry.path))}
-          <div className="my-1 border-t border-[#1f2737]" />
+          <div className="my-1 border-t border-[var(--border)]" />
           {item("Delete", () => onDelete(entry), { danger: true })}
         </>
       ) : (
         <>
           {item("New directory…", onNewFolder)}
           {item("New file…", onNewFile)}
-          <div className="my-1 border-t border-[#1f2737]" />
+          <div className="my-1 border-t border-[var(--border)]" />
           {item("Refresh", onRefresh)}
         </>
       )}

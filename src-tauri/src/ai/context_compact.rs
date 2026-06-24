@@ -21,9 +21,7 @@ const THRESHOLD_PERCENT: f32 = 0.50;
 const MIN_CTX_TRIGGER_RATIO: f32 = 0.85;
 const MINIMUM_CONTEXT_TOKENS: u32 = 32_768;
 const PROTECT_FIRST_N: usize = 3;
-const MAX_TAIL_FLOOR: usize = 8;
 const SUMMARY_TARGET_RATIO: f32 = 0.20;
-const SUMMARY_CHARS_PER_TOKEN: usize = 4;
 
 pub struct CompactResult {
     pub messages: Vec<ChatMessage>,
@@ -202,7 +200,7 @@ async fn summarize_middle(
     }
 
     let today = Local::now().format("%Y-%m-%d").to_string();
-    let budget = (serialized.len() / SUMMARY_CHARS_PER_TOKEN).max(400) / 5;
+    let budget = (crate::ai::text::estimate_tokens_from_len(serialized.len()) as usize).max(400) / 5;
 
     let template = format!(
         "## Historical Task Snapshot\n[User's most recent unfulfilled input — verbatim if possible]\n\n\
@@ -296,7 +294,7 @@ fn find_tail_cut(messages: &[ChatMessage], head_end: usize, token_budget: u32) -
         return n;
     }
     let available = n.saturating_sub(head_end);
-    let min_tail = 3.min(available).max(1).min(MAX_TAIL_FLOOR);
+    let min_tail = 3.min(available).max(1);
     let soft_ceiling = (token_budget as f32 * 1.5) as u32;
     let mut accumulated = 0u32;
     let mut cut_idx = n;

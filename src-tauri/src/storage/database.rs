@@ -168,6 +168,8 @@ impl Db {
         let _ = conn.execute("ALTER TABLE workspace ADD COLUMN color TEXT", []);
         let _ = conn.execute("ALTER TABLE workspace ADD COLUMN icon TEXT", []);
         let _ = conn.execute("ALTER TABLE workspace ADD COLUMN color_mode TEXT", []);
+        let _ = conn.execute("ALTER TABLE workspace ADD COLUMN project_json TEXT", []);
+        let _ = conn.execute("ALTER TABLE vps ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0", []);
         let _ = conn.execute("ALTER TABLE infra_project ADD COLUMN backend TEXT DEFAULT 'vps'", []);
         let _ = conn.execute("ALTER TABLE infra_project ADD COLUMN cloud_account_id TEXT", []);
         let _ = conn.execute("ALTER TABLE infra_project ADD COLUMN config_json TEXT", []);
@@ -180,7 +182,7 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, name, host, port, username, auth_type, key_path, tags, created_at
-             FROM vps ORDER BY name COLLATE NOCASE",
+             FROM vps ORDER BY sort_order, name COLLATE NOCASE",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(Vps {
@@ -228,8 +230,8 @@ impl Db {
         {
             let conn = self.conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO vps (id, name, host, port, username, auth_type, key_path, tags)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "INSERT INTO vps (id, name, host, port, username, auth_type, key_path, tags, sort_order)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE((SELECT MAX(sort_order) + 1 FROM vps), 0))
                  ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     host = excluded.host,
@@ -259,12 +261,27 @@ impl Db {
         Ok(())
     }
 
+    /// Persist a manual ordering of the server list: each id's `sort_order`
+    /// becomes its index in `ids`.
+    pub fn reorder_vps(&self, ids: &[String]) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for (i, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE vps SET sort_order = ?1 WHERE id = ?2",
+                params![i as i64, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     // ----- Workspace CRUD -----
 
     pub fn list_workspaces(&self) -> Result<Vec<Workspace>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, viewport_json, layout_mode, nodes_json, color, icon, color_mode, updated_at
+            "SELECT id, name, viewport_json, layout_mode, nodes_json, color, icon, color_mode, project_json, updated_at
              FROM workspace ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -277,10 +294,16 @@ impl Db {
                 color: r.get(5)?,
                 icon: r.get(6)?,
                 color_mode: r.get(7)?,
-                updated_at: r.get(8)?,
+                project_json: r.get(8)?,
+                updated_at: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Fetch a single workspace by id.
+    pub fn get_workspace(&self, id: &str) -> Result<Option<Workspace>> {
+        Ok(self.list_workspaces()?.into_iter().find(|w| w.id == id))
     }
 
     pub fn upsert_workspace(&self, input: &WorkspaceInput) -> Result<Workspace> {
@@ -288,8 +311,8 @@ impl Db {
         {
             let conn = self.conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO workspace (id, name, viewport_json, layout_mode, nodes_json, color, icon, color_mode, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'))
+                "INSERT INTO workspace (id, name, viewport_json, layout_mode, nodes_json, color, icon, color_mode, project_json, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'))
                  ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     viewport_json = excluded.viewport_json,
@@ -298,6 +321,7 @@ impl Db {
                     color = excluded.color,
                     icon = excluded.icon,
                     color_mode = excluded.color_mode,
+                    project_json = excluded.project_json,
                     updated_at = datetime('now')",
                 params![
                     id,
@@ -308,6 +332,7 @@ impl Db {
                     input.color,
                     input.icon,
                     input.color_mode,
+                    input.project_json,
                 ],
             )?;
         }
@@ -328,10 +353,15 @@ impl Db {
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
-        let val: Option<String> = conn
-            .query_row("SELECT value FROM setting WHERE key = ?1", [key], |r| r.get(0))
-            .ok();
-        Ok(val)
+        // Only "no row" maps to None; real DB errors propagate instead of being
+        // silently swallowed (which previously masked e.g. a locked database).
+        match conn.query_row("SELECT value FROM setting WHERE key = ?1", [key], |r| {
+            r.get::<_, String>(0)
+        }) {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
@@ -470,6 +500,19 @@ impl Db {
         )?;
         let rows = stmt.query_map([], Self::row_to_cron)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_cron_job(&self, id: &str) -> Result<Option<CronJob>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, schedule, kind, payload, targets_json, enabled, last_run, last_status, created_at
+             FROM cron_job WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query([id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::row_to_cron(row)?)),
+            None => Ok(None),
+        }
     }
 
     pub fn upsert_cron_job(&self, input: &CronJobInput) -> Result<CronJob> {
@@ -690,11 +733,16 @@ impl Db {
     }
 
     pub fn upsert_infra_project(&self, input: &InfraProjectInput, slug: &str) -> Result<InfraProject> {
-        let id = input
-            .id
-            .clone()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        // Resolve the id before insert: an explicit id wins; otherwise reuse the
+        // row that already owns this slug so a re-save updates it (via
+        // ON CONFLICT(id)) instead of tripping the slug UNIQUE constraint.
+        let id = match input.id.clone().filter(|s| !s.is_empty()) {
+            Some(id) => id,
+            None => self
+                .get_infra_project(slug)?
+                .map(|p| p.id)
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        };
         let template = input
             .template
             .clone()

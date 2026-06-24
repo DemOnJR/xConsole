@@ -1,5 +1,6 @@
 use tauri::State;
 
+use crate::ai::{workspace_context, AgentHome};
 use crate::storage::models::{KnownHost, Workspace, WorkspaceInput};
 use crate::storage::Db;
 
@@ -16,6 +17,22 @@ pub fn save_workspace(db: State<'_, Db>, input: WorkspaceInput) -> Result<Worksp
 #[tauri::command]
 pub fn delete_workspace(db: State<'_, Db>, id: String) -> Result<(), String> {
     db.delete_workspace(&id).map_err(|e| e.to_string())
+}
+
+/// Read the per-workspace project brief (CONTEXT.md) for the editor.
+#[tauri::command]
+pub fn get_workspace_brief(home: State<'_, AgentHome>, id: String) -> Result<String, String> {
+    Ok(workspace_context::load_brief(&home, &id))
+}
+
+/// Save the per-workspace project brief (CONTEXT.md) from the editor.
+#[tauri::command]
+pub fn save_workspace_brief(
+    home: State<'_, AgentHome>,
+    id: String,
+    content: String,
+) -> Result<(), String> {
+    workspace_context::save_brief(&home, &id, &content)
 }
 
 #[tauri::command]

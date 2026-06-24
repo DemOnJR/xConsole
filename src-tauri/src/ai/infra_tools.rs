@@ -205,6 +205,22 @@ async fn project_create(ctx: &ToolContext, args: &Value) -> String {
             .and_then(|v| v.as_str())
             .map(String::from),
     };
+    // Resolve the slug and refuse before touching disk if it already exists, so a
+    // name collision can't clobber another project's .tf files.
+    let slug = match crate::infra::projects::project_slug(&input) {
+        Ok(s) => s,
+        Err(e) => return format!("error: {e}"),
+    };
+    match ctx.db.get_infra_project(&slug) {
+        Ok(Some(p)) => {
+            return format!(
+                "error: a project with slug '{}' already exists (id {}); use project_write or terraform_* to work with it, or choose a different name",
+                p.slug, p.id
+            )
+        }
+        Ok(None) => {}
+        Err(e) => return format!("error: {e}"),
+    }
     let slug = match scaffold(&ctx.home, &input) {
         Ok(s) => s,
         Err(e) => return format!("error: {e}"),
@@ -314,7 +330,7 @@ async fn tfc_list_workspaces(ctx: &ToolContext, args: &Value) -> String {
     }
 }
 
-async fn tfc_run_status(_ctx: &ToolContext, args: &Value) -> String {
+async fn tfc_run_status(ctx: &ToolContext, args: &Value) -> String {
     let account_id = match args.get("cloud_account_id").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => s,
         _ => return "error: missing 'cloud_account_id'".into(),
@@ -323,6 +339,14 @@ async fn tfc_run_status(_ctx: &ToolContext, args: &Value) -> String {
         Some(s) if !s.is_empty() => s,
         _ => return "error: missing 'run_id'".into(),
     };
+    // Verify the account exists and is a TFC account before loading its secret,
+    // so a non-tfc account id can't trigger a cross-service keychain read.
+    match ctx.db.get_cloud_account(account_id) {
+        Ok(Some(acct)) if acct.kind == "tfc" => {}
+        Ok(Some(_)) => return "error: cloud account is not a Terraform Cloud (tfc) account".into(),
+        Ok(None) => return format!("error: cloud account '{account_id}' not found"),
+        Err(e) => return format!("error: {e}"),
+    }
     let token = match tfc::load_tfc_token(account_id) {
         Ok(t) => t,
         Err(e) => return format!("error: {e}"),
@@ -437,13 +461,13 @@ async fn terraform_run_local(
     subcommand: &str,
     extra_args: &str,
 ) -> String {
-    let mut args_line = extra_args.to_string();
+    let mut tokens: Vec<String> = extra_args.split_whitespace().map(String::from).collect();
     if let Ok(Some(project)) = ctx.db.get_infra_project(slug) {
         if project.template == "vps-web" {
             if let Some(vps_id) = project.default_vps_id.as_deref().filter(|s| !s.is_empty()) {
                 if let Ok(vars) = vps_var_args(&ctx.db, vps_id).await {
-                    if !args_line.contains("vps_host") {
-                        args_line = format!("{args_line} {vars}").trim().to_string();
+                    if !tokens.iter().any(|t| t.contains("vps_host")) {
+                        tokens.extend(vars);
                     }
                 }
             }
@@ -455,7 +479,7 @@ async fn terraform_run_local(
         Err(e) => return format!("error: {e}"),
     };
 
-    let command = describe_command(slug, subcommand, &args_line);
+    let command = describe_command(slug, subcommand, &tokens);
     if let Err(e) = authorize_infra(ctx, None, &command).await {
         return format!("error: {e}");
     }
@@ -465,7 +489,7 @@ async fn terraform_run_local(
         crate::ai::provider::StreamEvent::Status(format!("$ {command}")),
     );
 
-    match run_local(&ctx.home, slug, subcommand, &args_line, &env).await {
+    match run_local(&ctx.home, slug, subcommand, &tokens, &env).await {
         Ok(out) => format_output(out.exit_code, &out.stdout, &out.stderr, subcommand),
         Err(e) => format!("error running terraform: {e}"),
     }
@@ -479,10 +503,10 @@ async fn terraform_run_vps(
     subcommand: &str,
     extra_args: &str,
 ) -> String {
-    let mut args_line = extra_args.to_string();
+    let mut tokens: Vec<String> = extra_args.split_whitespace().map(String::from).collect();
     if let Ok(vars) = vps_var_args(&ctx.db, vps_id).await {
-        if !args_line.contains("vps_host") {
-            args_line = format!("{args_line} {vars}").trim().to_string();
+        if !tokens.iter().any(|t| t.contains("vps_host")) {
+            tokens.extend(vars);
         }
     }
 
@@ -495,7 +519,7 @@ async fn terraform_run_vps(
         &ctx.home,
         slug,
         subcommand,
-        &args_line,
+        &tokens,
         creds.as_deref(),
     ) {
         Ok(c) => c,

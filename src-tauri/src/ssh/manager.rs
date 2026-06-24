@@ -9,15 +9,11 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
-use super::client::{self, Auth, ConnectError};
-use crate::secrets;
-use crate::storage::models::{AuthType, Vps};
+use super::client;
+use crate::storage::models::Vps;
 use crate::storage::{Db, HostKeyVerdict};
 
 const RING_CAPACITY: usize = 256 * 1024; // bytes of scrollback replay buffer per session
-
-/// Maximum wall-clock time for a non-interactive SSH command (agent/cron).
-const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Commands sent to a running session's I/O task.
 enum SessionCmd {
@@ -77,7 +73,8 @@ struct SessionHandle {
 pub struct ConnectOutcome {
     pub session_id: String,
     pub vps_id: String,
-    /// "match" | "pinned_on_first_use" | "mismatch"
+    /// "match" | "pinned_on_first_use" (a host-key mismatch fails the connect,
+    /// so this outcome is never produced with "mismatch").
     pub host_key: String,
 }
 
@@ -112,37 +109,11 @@ impl SessionManager {
         let _ = self.app.emit(&Self::event_status(session_id), status);
     }
 
-    /// Build authentication material from the stored VPS + OS keychain.
-    fn resolve_auth(&self, vps: &Vps) -> Result<Auth, ConnectError> {
-        match vps.auth_type {
-            AuthType::Agent => Ok(Auth::Agent),
-            AuthType::Password => {
-                let secret = secrets::get_secret(&vps.id)
-                    .map_err(|e| ConnectError::Other(e.to_string()))?
-                    .ok_or_else(|| ConnectError::MissingCredential("password".into()))?;
-                Ok(Auth::Password(secret.to_string()))
-            }
-            AuthType::Key => {
-                let key_path = vps
-                    .key_path
-                    .clone()
-                    .ok_or_else(|| ConnectError::MissingCredential("key_path".into()))?;
-                let passphrase = secrets::get_secret(&vps.id)
-                    .map_err(|e| ConnectError::Other(e.to_string()))?
-                    .map(|z| z.to_string());
-                Ok(Auth::Key {
-                    key_path,
-                    passphrase,
-                })
-            }
-        }
-    }
-
     /// Establish a new interactive shell session for the given VPS.
     pub async fn connect(&self, vps: Vps, cols: u32, rows: u32) -> Result<ConnectOutcome, String> {
         let session_id = Uuid::new_v4().to_string();
 
-        let auth = self.resolve_auth(&vps).map_err(|e| e.to_string())?;
+        let auth = client::resolve_auth(&vps).map_err(|e| e.to_string())?;
 
         let connected = client::connect(&vps.host, vps.port, &vps.username, auth, self.db.clone())
             .await
@@ -243,92 +214,94 @@ impl SessionManager {
         self.map.get(session_id).map(|h| h.vps_id.clone())
     }
 
-    /// Run a single command on a VPS non-interactively and capture its output.
-    ///
-    /// This is the one command-execution path used by the agent, cron, and any
-    /// future UI. It opens a dedicated connection (reusing the same auth + host
-    /// key verification as interactive shells), runs the command, and returns
-    /// stdout/stderr/exit code.
-    pub async fn run_command(
-        &self,
-        vps_id: &str,
-        command: &str,
-    ) -> Result<CommandOutput, String> {
-        match tokio::time::timeout(
-            COMMAND_TIMEOUT,
-            self.run_command_inner(vps_id, command),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(_) => Err(format!(
-                "command timed out after {}s",
-                COMMAND_TIMEOUT.as_secs()
-            )),
-        }
+    /// Live interactive session ids for a VPS (the terminals open on the canvas).
+    /// Lets the agent drive the terminals the user is actually watching.
+    pub fn live_sessions_for_vps(&self, vps_id: &str) -> Vec<String> {
+        self.map
+            .iter()
+            .filter(|e| e.value().vps_id == vps_id)
+            .map(|e| e.key().clone())
+            .collect()
     }
 
-    async fn run_command_inner(
-        &self,
-        vps_id: &str,
-        command: &str,
-    ) -> Result<CommandOutput, String> {
-        let vps = self
-            .db
-            .get_vps(vps_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "VPS not found".to_string())?;
-
-        let auth = self.resolve_auth(&vps).map_err(|e| e.to_string())?;
-        let connected =
-            client::connect(&vps.host, vps.port, &vps.username, auth, self.db.clone())
-                .await
-                .map_err(|e| e.to_string())?;
-        let handle = connected.handle;
-
-        let mut channel = handle
-            .channel_open_session()
-            .await
-            .map_err(|e| e.to_string())?;
-        channel.exec(true, command).await.map_err(|e| e.to_string())?;
-
-        let mut stdout: Vec<u8> = Vec::new();
-        let mut stderr: Vec<u8> = Vec::new();
-        let mut exit_code: Option<i32> = None;
-
-        loop {
-            match channel.wait().await {
-                Some(ChannelMsg::Data { ref data }) => stdout.extend_from_slice(data),
-                Some(ChannelMsg::ExtendedData { ref data, ext }) => {
-                    if ext == 1 {
-                        stderr.extend_from_slice(data);
-                    } else {
-                        stdout.extend_from_slice(data);
-                    }
-                }
-                Some(ChannelMsg::ExitStatus { exit_status }) => {
-                    exit_code = Some(exit_status as i32);
-                }
-                Some(ChannelMsg::Eof) => {
-                    if exit_code.is_some() {
-                        break;
-                    }
-                }
-                Some(ChannelMsg::Close) | None => break,
-                _ => {}
-            }
-        }
-
-        let _ = handle
-            .disconnect(Disconnect::ByApplication, "", "en")
-            .await;
-
-        Ok(CommandOutput {
-            stdout: String::from_utf8_lossy(&stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&stderr).into_owned(),
-            exit_code: exit_code.unwrap_or(-1),
+    /// Snapshot of a session's recent scrollback as plain text (ANSI stripped),
+    /// so the agent can "read the screen" of a live terminal.
+    pub fn capture_text(&self, session_id: &str) -> Option<String> {
+        self.map.get(session_id).map(|h| {
+            let bytes = h.ring.lock().unwrap().snapshot();
+            strip_ansi(&String::from_utf8_lossy(&bytes))
         })
     }
+
+    /// Run a single command on a VPS non-interactively and capture its output.
+    ///
+    /// Delegates to the shared headless path ([`super::command::run_vps_command`]) —
+    /// the one command-execution implementation used by the agent, cron, MCP, and
+    /// remote file ops — which already applies [`super::command::COMMAND_TIMEOUT`].
+    pub async fn run_command(&self, vps_id: &str, command: &str) -> Result<CommandOutput, String> {
+        super::command::run_vps_command(&self.db, vps_id, command).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_ansi;
+
+    #[test]
+    fn strips_csi_and_keeps_text() {
+        assert_eq!(strip_ansi("\u{1b}[31mhi\u{1b}[0m there"), "hi there");
+        assert_eq!(strip_ansi("plain\nline"), "plain\nline");
+    }
+
+    #[test]
+    fn strips_osc_title() {
+        assert_eq!(strip_ansi("\u{1b}]0;my title\u{7}prompt$ "), "prompt$ ");
+    }
+}
+
+/// Strip ANSI/VT escape sequences (CSI and OSC) from terminal output, keeping
+/// printable text and newlines — used by `capture_text` so the agent reads clean text.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    // CSI: parameter/intermediate bytes then a final letter.
+                    while let Some(&n) = chars.peek() {
+                        chars.next();
+                        if n.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    // OSC: terminated by BEL or ST (ESC \).
+                    while let Some(&n) = chars.peek() {
+                        chars.next();
+                        if n == '\u{7}' {
+                            break;
+                        }
+                        if n == '\u{1b}' {
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    chars.next();
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Result of a non-interactive command execution.

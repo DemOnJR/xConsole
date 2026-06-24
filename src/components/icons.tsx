@@ -252,6 +252,99 @@ export function SparkIcon(props: IconProps) {
   );
 }
 
+export function MicIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="9" y="2" width="6" height="12" rx="3" />
+      <path d="M5 10v1a7 7 0 0 0 14 0v-1" />
+      <line x1="12" y1="18" x2="12" y2="22" />
+      <line x1="8" y1="22" x2="16" y2="22" />
+    </svg>
+  );
+}
+
+export function StopIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export function VolumeIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+      <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+      <path d="M18.5 5.5a9 9 0 0 1 0 13" />
+    </svg>
+  );
+}
+
+export function VolumeOffIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+      <line x1="22" y1="9" x2="16" y2="15" />
+      <line x1="16" y1="9" x2="22" y2="15" />
+    </svg>
+  );
+}
+
+export function PlanIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="8" y="2" width="8" height="4" rx="1" />
+      <path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2" />
+      <path d="m9 14 2 2 4-4" />
+    </svg>
+  );
+}
+
+export function LockIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="4" y="11" width="16" height="10" rx="2" />
+      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+    </svg>
+  );
+}
+
+export function LockOpenIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="4" y="11" width="16" height="10" rx="2" />
+      <path d="M8 11V7a4 4 0 0 1 7.5-2" />
+    </svg>
+  );
+}
+
+export function RadarIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <rect x="13" y="13" width="5" height="5" rx="1" fill="currentColor" stroke="none" opacity="0.5" />
+    </svg>
+  );
+}
+
+export function ConversationIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M8 9h8M8 13h5" />
+      <path d="M4 4h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H8l-4 4V5a1 1 0 0 1 1-1z" />
+    </svg>
+  );
+}
+
+export function LoaderIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+    </svg>
+  );
+}
+
 export function BookIcon(props: IconProps) {
   return (
     <svg {...base(props)}>
