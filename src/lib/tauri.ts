@@ -562,6 +562,7 @@ export const api = {
     planMode?: boolean;
     workspaceId?: string | null;
     canvas?: CanvasSnapshotNode[];
+    conversation?: boolean;
   }) =>
     invoke<ChatMessage>("ai_chat", {
       sessionId: args.sessionId,
@@ -571,9 +572,27 @@ export const api = {
       planMode: args.planMode ?? false,
       workspaceId: args.workspaceId ?? null,
       canvas: args.canvas ?? [],
+      conversation: args.conversation ?? false,
     }),
 
   agentCancel: (sessionId: string) => invoke<void>("agent_cancel", { sessionId }),
+
+  // In-app updater (clone+compile): check GitHub for a newer commit, and (on accept)
+  // back up data + re-run the installer's rebuild.
+  checkForUpdate: () => invoke<UpdateInfo>("check_for_update"),
+  startAppUpdate: () => invoke<string>("start_app_update"),
+
+  // App lock / at-rest DB encryption.
+  lockStatus: () => invoke<LockStatus>("lock_status"),
+  setupLock: (password: string, remember: boolean) =>
+    invoke<void>("setup_lock", { password, remember }),
+  unlockWithPassword: (password: string, remember: boolean) =>
+    invoke<void>("unlock_with_password", { password, remember }),
+  changePassword: (oldPassword: string, newPassword: string) =>
+    invoke<void>("change_password", { oldPassword, newPassword }),
+  forgetDevice: () => invoke<void>("forget_device"),
+  disableLock: (password: string) => invoke<void>("disable_lock", { password }),
+  exportUnencryptedBackup: () => invoke<string>("export_unencrypted_backup"),
 
   listFileChanges: (sessionId: string) =>
     invoke<FileChange[]>("list_file_changes", { sessionId }),
@@ -729,6 +748,24 @@ export function onCanvasCommand(
 }
 
 /** One file the agent edited this session (before/after captured for the diff panel). */
+/** App-lock status (matches the Rust `LockStatus`). */
+export interface LockStatus {
+  enabled: boolean;
+  unlocked: boolean;
+  remembered: boolean;
+}
+
+/** Result of the in-app update check (matches the Rust `UpdateInfo`). */
+export interface UpdateInfo {
+  available: boolean;
+  current: string | null;
+  latest: string | null;
+  message: string;
+  date: string;
+  can_self_update: boolean;
+  note: string | null;
+}
+
 export interface FileChange {
   id: string;
   session_id: string;

@@ -29,6 +29,10 @@ pub enum HostKeyVerdict {
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
+    /// Present when the DB is encrypted at rest (Approach B); drives the persister.
+    /// Interior-mutable so a locked placeholder can be unlocked in place (the connection
+    /// is swapped and this is set) without re-creating the managed Db — see `unlock_into`.
+    persist: Arc<Mutex<Option<Arc<super::encrypt::PersistCtx>>>>,
 }
 
 impl Db {
@@ -41,9 +45,248 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", "ON").ok();
         let db = Db {
             conn: Arc::new(Mutex::new(conn)),
+            persist: Arc::new(Mutex::new(None)),
         };
         db.migrate()?;
         Ok(db)
+    }
+
+    /// A locked placeholder: an empty in-memory DB so managed state can be built at startup
+    /// before the user has unlocked. The frontend shows only the unlock screen; `unlock_into`
+    /// swaps the real decrypted connection in once the password/key is available.
+    pub fn open_locked() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        let db = Db {
+            conn: Arc::new(Mutex::new(conn)),
+            persist: Arc::new(Mutex::new(None)),
+        };
+        db.migrate()?; // harmless empty schema; replaced on unlock
+        Ok(db)
+    }
+
+    /// Open the DB with at-rest encryption. `enc` is the encrypted blob, `work` the plaintext
+    /// working file the app operates on, `key` the 32-byte data key (from unlock). Decrypts
+    /// `enc` → `work` (unless a valid plaintext `work` already exists from an unclean shutdown —
+    /// that is always at least as new as `enc`, so it's preferred for crash recovery), then
+    /// opens `work` exactly like [`open`]. A wrong/corrupt key returns Err (caller shows a
+    /// locked/restore screen) rather than panicking.
+    pub fn open_encrypted(
+        enc: &std::path::Path,
+        work: &std::path::Path,
+        data_dir: &std::path::Path,
+        key: &[u8; crate::crypto::KEY_LEN],
+    ) -> Result<Self> {
+        use super::encrypt;
+        if let Some(parent) = work.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        // A half-written blob from a kill mid-persist — discard it.
+        let _ = std::fs::remove_file(enc.with_extension("enc.tmp"));
+
+        // Lazy plaintext cleanup: a clean exit leaves a `.clean` marker but can't delete the
+        // still-open working file on Windows. So at the NEXT launch (file now closeable) we
+        // delete that stale plaintext and decrypt fresh from `.enc`. No marker => the previous
+        // run crashed, so a valid working file is the most-recent truth and is kept.
+        let clean_marker = enc.with_extension("clean");
+        let had_clean_exit = clean_marker.exists();
+        let _ = std::fs::remove_file(&clean_marker);
+        if had_clean_exit && work.exists() {
+            encrypt::cleanup_work_files(work);
+        }
+
+        let have_valid_work = work.exists() && encrypt::integrity_ok(work);
+        if !have_valid_work {
+            if work.exists() {
+                encrypt::cleanup_work_files(work); // corrupt leftover
+            }
+            if enc.exists() {
+                encrypt::decrypt_to_work(enc, work, key)?; // wrong key => Err here
+            }
+            // else: first run — Connection::open will create an empty `work`.
+        }
+
+        let conn = Connection::open(work)?;
+        conn.pragma_update(None, "journal_mode", "WAL").ok();
+        conn.pragma_update(None, "foreign_keys", "ON").ok();
+
+        let dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Flag dirty on every committed write (autocommit => once per execute).
+        conn.commit_hook(Some({
+            let d = dirty.clone();
+            move || {
+                d.store(true, std::sync::atomic::Ordering::Release);
+                false // allow the commit
+            }
+        }));
+
+        let conn = Arc::new(Mutex::new(conn));
+        let ctx = Arc::new(encrypt::PersistCtx {
+            enc: enc.to_path_buf(),
+            work: work.to_path_buf(),
+            data_dir: data_dir.to_path_buf(),
+            key: *key,
+            dirty,
+            stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        let db = Db {
+            conn: conn.clone(),
+            persist: Arc::new(Mutex::new(Some(ctx.clone()))),
+        };
+        db.migrate()?;
+        // First run with no blob yet: write the initial encrypted artifact now.
+        if !enc.exists() {
+            encrypt::persist_now(&conn, &ctx)?;
+        }
+        encrypt::spawn_persister(conn, ctx);
+        Ok(db)
+    }
+
+    /// Unlock a locked placeholder IN PLACE: decrypt `enc`→`work`, swap the real connection
+    /// into this Db (every clone shares the same Arc, so they all pick it up), wire the
+    /// commit-hook + persister, and migrate. Used by the unlock command at runtime.
+    pub fn unlock_into(
+        &self,
+        enc: &std::path::Path,
+        work: &std::path::Path,
+        data_dir: &std::path::Path,
+        key: &[u8; crate::crypto::KEY_LEN],
+    ) -> Result<()> {
+        use super::encrypt;
+        if let Some(parent) = work.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let _ = std::fs::remove_file(enc.with_extension("enc.tmp"));
+        let clean_marker = enc.with_extension("clean");
+        let had_clean_exit = clean_marker.exists();
+        let _ = std::fs::remove_file(&clean_marker);
+        if had_clean_exit && work.exists() {
+            encrypt::cleanup_work_files(work);
+        }
+        let have_valid_work = work.exists() && encrypt::integrity_ok(work);
+        if !have_valid_work {
+            if work.exists() {
+                encrypt::cleanup_work_files(work);
+            }
+            if enc.exists() {
+                encrypt::decrypt_to_work(enc, work, key)?; // wrong key => Err
+            }
+        }
+
+        let new_conn = Connection::open(work)?;
+        new_conn.pragma_update(None, "journal_mode", "WAL").ok();
+        new_conn.pragma_update(None, "foreign_keys", "ON").ok();
+        let dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        new_conn.commit_hook(Some({
+            let d = dirty.clone();
+            move || {
+                d.store(true, std::sync::atomic::Ordering::Release);
+                false
+            }
+        }));
+
+        // Swap the real connection in (replaces the in-memory placeholder).
+        *self.conn.lock().unwrap() = new_conn;
+
+        let ctx = Arc::new(encrypt::PersistCtx {
+            enc: enc.to_path_buf(),
+            work: work.to_path_buf(),
+            data_dir: data_dir.to_path_buf(),
+            key: *key,
+            dirty,
+            stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        self.migrate()?; // run on the now-real connection
+        if !enc.exists() {
+            encrypt::persist_now(&self.conn, &ctx)?;
+        }
+        *self.persist.lock().unwrap() = Some(ctx.clone());
+        encrypt::spawn_persister(self.conn.clone(), ctx);
+        Ok(())
+    }
+
+    /// Synchronously snapshot + encrypt the DB now (no-op for an unencrypted DB). Call after a
+    /// security-critical write (host-key pin) and on clean app exit so a crash can't drop it.
+    /// Consistent Online-Backup snapshot of the live DB to `dst` (a fresh SQLite file). Safe
+    /// against concurrent writers; used for the pre-migration backup + the encrypt snapshot.
+    pub fn backup_to(&self, dst: &std::path::Path) -> Result<()> {
+        let _ = std::fs::remove_file(dst);
+        let src = self.conn.lock().unwrap();
+        let _ = src.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        let mut out = Connection::open(dst)?;
+        {
+            let backup = rusqlite::backup::Backup::new(&src, &mut out)?;
+            backup.run_to_completion(200, std::time::Duration::from_millis(0), None)?;
+        }
+        Ok(())
+    }
+
+    /// Convert the currently-open (plaintext) DB into an encrypted one IN PLACE: attach the
+    /// commit-hook + persister so future writes persist to `enc`. The caller has already
+    /// written + verified the initial `enc`, and the current working file IS `work`.
+    pub fn enable_encryption_in_place(
+        &self,
+        enc: &std::path::Path,
+        work: &std::path::Path,
+        data_dir: &std::path::Path,
+        key: &[u8; crate::crypto::KEY_LEN],
+    ) -> Result<()> {
+        use super::encrypt;
+        let dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.commit_hook(Some({
+                let d = dirty.clone();
+                move || {
+                    d.store(true, std::sync::atomic::Ordering::Release);
+                    false
+                }
+            }));
+        }
+        let ctx = Arc::new(encrypt::PersistCtx {
+            enc: enc.to_path_buf(),
+            work: work.to_path_buf(),
+            data_dir: data_dir.to_path_buf(),
+            key: *key,
+            dirty,
+            stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        *self.persist.lock().unwrap() = Some(ctx.clone());
+        encrypt::spawn_persister(self.conn.clone(), ctx);
+        Ok(())
+    }
+
+    /// Disable encryption: decrypt to plaintext working file (already there), drop the persister
+    /// ctx + commit-hook, and the caller removes `enc`. Used by "turn off app lock".
+    pub fn disable_encryption(&self) {
+        if let Some(ctx) = self.persist.lock().unwrap().take() {
+            ctx.stopped.store(true, std::sync::atomic::Ordering::Release);
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.commit_hook::<fn() -> bool>(None);
+    }
+
+    pub fn persist_now_blocking(&self) -> Result<()> {
+        let ctx = self.persist.lock().unwrap().clone();
+        if let Some(ctx) = ctx {
+            super::encrypt::persist_now(&self.conn, &ctx)?;
+        }
+        Ok(())
+    }
+
+    /// Whether this DB is encrypted at rest (i.e. unlocked with a key, not a plain/placeholder DB).
+    pub fn is_encrypted(&self) -> bool {
+        self.persist.lock().unwrap().is_some()
+    }
+
+    /// On clean exit: final persist + drop a `.clean` marker. We can't delete the still-open
+    /// plaintext working file on Windows, so the next launch removes it (see `open_encrypted`).
+    /// No-op for an unencrypted DB.
+    pub fn finalize_on_exit(&self) {
+        let ctx = self.persist.lock().unwrap().clone();
+        if let Some(ctx) = ctx {
+            let _ = super::encrypt::persist_now(&self.conn, &ctx);
+            let _ = std::fs::write(ctx.enc.with_extension("clean"), b"1");
+        }
     }
 
     fn migrate(&self) -> Result<()> {

@@ -39,14 +39,20 @@ base64 = "0.22"
 # Concurrent session registry
 dashmap = "6"
 
-# Local persistence (bundled SQLite, no system dependency)
-rusqlite = { version = "0.32", features = ["bundled"] }
+# Local persistence (bundled SQLite, no system dependency). `backup` = Online Backup API
+# for consistent encrypted snapshots; `hooks` = commit_hook to auto-flag the DB dirty for
+# the at-rest encryption persister. Both are rusqlite feature flags only (no new crates).
+rusqlite = { version = "0.32", features = ["bundled", "backup", "hooks"] }
 
 # Secrets in the OS keychain (Windows Credential Manager / macOS Keychain / libsecret)
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
 
 # Wipe key material from memory after use
 zeroize = "1"
+
+# At-rest DB encryption (AES-256-GCM + PBKDF2). Already in the tree via russh/rustls —
+# the `ring` backend builds cleanly on MinGW (no OpenSSL).
+ring = "0.17"
 
 # OS CSPRNG for generating SSH keypairs in-process (OsRng implements CryptoRngCore,
 # which ssh-key's PrivateKey::random requires). Matches ssh-key's rand_core 0.6.

@@ -19,8 +19,12 @@ import { useUiStore } from "./stores/uiStore";
 import { useThemeStore } from "./stores/themeStore";
 import { useAgentStatusStore } from "./stores/agentStatusStore";
 import { onAgentWorkspaceStatus, onFileChange, onFileChangeReverted } from "./lib/tauri";
+import { useLockStore } from "./stores/lockStore";
+import { SplashScreen, UnlockScreen } from "./components/lock/UnlockScreen";
 
-export default function App() {
+// The real app body. Only mounts once unlocked, so none of its DB-touching effects
+// (theme load, agent/edits subscriptions) run while the database is still encrypted/locked.
+function UnlockedApp() {
   const nodes = useCanvasStore((s) => s.nodes);
   const focus = useCanvasStore((s) => s.focus);
 
@@ -147,4 +151,15 @@ export default function App() {
       <TooltipHost />
     </ReactFlowProvider>
   );
+}
+
+// Gate: hold the whole app behind the unlock screen while the DB is locked.
+export default function App() {
+  const status = useLockStore((s) => s.status);
+  useEffect(() => {
+    void useLockStore.getState().check();
+  }, []);
+  if (status === "loading") return <SplashScreen />;
+  if (status === "locked") return <UnlockScreen />;
+  return <UnlockedApp />;
 }

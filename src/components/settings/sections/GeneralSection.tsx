@@ -25,10 +25,7 @@ export function GeneralSection() {
   useEffect(() => {
     getVersion().then(setAppVersion).catch(() => {});
   }, []);
-  const checking =
-    updateStatus === "checking" ||
-    updateStatus === "downloading" ||
-    updateStatus === "installing";
+  const checking = updateStatus === "checking" || updateStatus === "updating";
 
   return (
     <div>
@@ -74,7 +71,7 @@ export function GeneralSection() {
       <Card className="mt-3">
         <Field
           label="App version & updates"
-          hint="xConsole checks GitHub for a newer signed release on launch and prompts you to install it. Updates only replace the app — your chats, workspaces, memory, settings, and keys are never touched."
+          hint="xConsole checks GitHub for newer code on launch and prompts you to update. An update re-clones + rebuilds from source — your chats, workspaces, memory, settings, and keys are backed up first and never touched."
         >
           <div className="flex items-center justify-between gap-3">
             <span className="text-sm text-gray-300">v{appVersion || "…"}</span>

@@ -1,8 +1,15 @@
 mod ai;
+/// Headless benchmark / eval harness (driven by the `xconsole-bench` bin).
+pub mod bench;
 mod commands;
+/// At-rest encryption primitives (AES-256-GCM + PBKDF2) for DB encryption.
+pub mod crypto;
+/// The `db.lock.json` manifest (salt + wrapped data key) for the app lock.
+pub mod lock;
 mod infra;
 mod local;
 pub mod mcp;
+mod proc;
 mod secrets;
 mod ssh;
 mod storage;
@@ -48,11 +55,17 @@ pub fn run() {
             // settings. Kept as a single rolling backup next to the DB.
             let version_marker = dir.join("app_version.txt");
             let current_version = app.package_info().version.to_string();
-            if db_path.exists() {
+            let enc_for_bak = dir.join("xconsole.db.enc");
+            if db_path.exists() || enc_for_bak.exists() {
                 let last = std::fs::read_to_string(&version_marker).unwrap_or_default();
                 if !last.trim().is_empty() && last.trim() != current_version {
-                    let backup = dir.join("xconsole.db.bak");
-                    if let Err(e) = std::fs::copy(&db_path, &backup) {
+                    // Back up the encrypted blob if the lock is on, else the plaintext DB.
+                    let (src, backup) = if enc_for_bak.exists() {
+                        (enc_for_bak.clone(), dir.join("xconsole.db.enc.bak"))
+                    } else {
+                        (db_path.clone(), dir.join("xconsole.db.bak"))
+                    };
+                    if let Err(e) = std::fs::copy(&src, &backup) {
                         eprintln!("xconsole: pre-update DB backup failed: {e}");
                     } else {
                         eprintln!(
@@ -64,7 +77,29 @@ pub fn run() {
                 }
             }
 
-            let db = Db::open(&db_path).expect("failed to open database");
+            // At-rest encryption (Approach B): if the app lock is configured, open the
+            // encrypted DB using the remembered device key; if there's no remembered key, start
+            // a LOCKED PLACEHOLDER so the frontend can show the unlock screen (the unlock
+            // command swaps the real connection in). With no lock, open the plaintext DB as before.
+            let enc_path = dir.join("xconsole.db.enc");
+            let mut initial_data_key: Option<[u8; crate::crypto::KEY_LEN]> = None;
+            let db = if crate::lock::is_lock_enabled(&dir) {
+                match crate::secrets::get_data_key().ok().flatten() {
+                    Some(key) => match Db::open_encrypted(&enc_path, &db_path, &dir, &key) {
+                        Ok(db) => {
+                            initial_data_key = Some(key);
+                            db
+                        }
+                        Err(e) => {
+                            eprintln!("xconsole: silent unlock failed ({e}); showing unlock screen");
+                            Db::open_locked().expect("failed to open placeholder db")
+                        }
+                    },
+                    None => Db::open_locked().expect("failed to open placeholder db"),
+                }
+            } else {
+                Db::open(&db_path).expect("failed to open database")
+            };
             // Record the version we successfully opened at, for the next launch's check.
             let _ = std::fs::write(&version_marker, &current_version);
 
@@ -92,6 +127,7 @@ pub fn run() {
                 running: cron_running.clone(),
             });
 
+            app.manage(commands::lock::DataKey(std::sync::Mutex::new(initial_data_key)));
             app.manage(db);
             app.manage(sessions);
             app.manage(sftp);
@@ -202,6 +238,8 @@ pub fn run() {
             commands::settings::list_providers,
             commands::settings::save_provider,
             commands::settings::delete_provider,
+            commands::update::check_for_update,
+            commands::update::start_app_update,
             commands::ai::ai_cli_login,
             commands::ai::ai_chat,
             commands::ai::list_agent_conversations,
@@ -258,7 +296,23 @@ pub fn run() {
             commands::cloud::delete_cloud_account,
             commands::cloud::list_tfc_workspaces,
             commands::cloud::list_cloud_resources,
+            commands::lock::lock_status,
+            commands::lock::setup_lock,
+            commands::lock::unlock_with_password,
+            commands::lock::change_password,
+            commands::lock::forget_device,
+            commands::lock::disable_lock,
+            commands::lock::export_unencrypted_backup,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // On exit: final encrypted persist so a crash/last-second write can't be lost, then
+            // the next launch removes the plaintext working file (see Db::open_encrypted).
+            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+                if let Some(db) = app.try_state::<Db>() {
+                    db.finalize_on_exit();
+                }
+            }
+        });
 }
