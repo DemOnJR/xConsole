@@ -45,8 +45,30 @@ impl McpSession {
         let safety = std::env::var("XCONSOLE_SAFETY").unwrap_or_else(|_| "approve".into());
         let workspace_id = std::env::var("XCONSOLE_WORKSPACE_ID").unwrap_or_default();
 
-        let db_path = PathBuf::from(&data_dir).join("xconsole.db");
-        let db = Db::open(&db_path).map_err(|e| format!("failed to open db: {e}"))?;
+        // DB open, app-lock aware. If the plaintext working file exists, the app is running /
+        // unlocked (or the DB is unencrypted) — share it via WAL. Otherwise, if the lock is on,
+        // use the remembered device key to decrypt; if there's no key, FAIL LOUD rather than
+        // creating an empty DB that could later overwrite the user's encrypted data.
+        let data_dir_path = PathBuf::from(&data_dir);
+        let db_path = data_dir_path.join("xconsole.db");
+        let db = if db_path.exists() {
+            Db::open(&db_path).map_err(|e| format!("failed to open db: {e}"))?
+        } else if crate::lock::is_lock_enabled(&data_dir_path) {
+            match crate::secrets::get_data_key().ok().flatten() {
+                Some(key) => Db::open_encrypted(
+                    &data_dir_path.join("xconsole.db.enc"),
+                    &db_path,
+                    &data_dir_path,
+                    &key,
+                )
+                .map_err(|e| format!("failed to open encrypted db: {e}"))?,
+                None => {
+                    return Err("xConsole is locked — open and unlock the app first, then retry.".into())
+                }
+            }
+        } else {
+            Db::open(&db_path).map_err(|e| format!("failed to open db: {e}"))?
+        };
 
         Ok(Self {
             db,

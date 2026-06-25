@@ -1,0 +1,121 @@
+{
+  "avg_turn_ms": 1799,
+  "mode": "agent",
+  "model": "qwen3.5:9b",
+  "num_ctx": 65536,
+  "pass": 10,
+  "samples": 3,
+  "scenarios": [
+    {
+      "gen_tps": 47.96881866455078,
+      "last_selected": "(text)",
+      "pass": true,
+      "passed_samples": 3,
+      "prompt_tokens": 1403,
+      "samples": 3,
+      "scenario": "casual-greeting",
+      "total_ms_avg": 700,
+      "ttft_ms_avg": 320
+    },
+    {
+      "gen_tps": 56.97193908691406,
+      "last_selected": "(text)",
+      "pass": true,
+      "passed_samples": 2,
+      "prompt_tokens": 2930,
+      "samples": 3,
+      "scenario": "math-no-tools",
+      "total_ms_avg": 841,
+      "ttft_ms_avg": 770
+    },
+    {
+      "gen_tps": 46.938297271728516,
+      "last_selected": "(text)",
+      "pass": true,
+      "passed_samples": 3,
+      "prompt_tokens": 2925,
+      "samples": 3,
+      "scenario": "voice-terse-explain",
+      "total_ms_avg": 1474,
+      "ttft_ms_avg": 749
+    },
+    {
+      "gen_tps": 46.21164321899414,
+      "last_selected": "run_command_all",
+      "pass": true,
+      "passed_samples": 3,
+      "prompt_tokens": 4470,
+      "samples": 3,
+      "scenario": "single-server-command",
+      "total_ms_avg": 2547,
+      "ttft_ms_avg": 2547
+    },
+    {
+      "gen_tps": 46.12211608886719,
+      "last_selected": "run_command_all",
+      "pass": true,
+      "passed_samples": 3,
+      "prompt_tokens": 4505,
+      "samples": 3,
+      "scenario": "all-servers-command",
+      "total_ms_avg": 2376,
+      "ttft_ms_avg": 2376
+    },
+    {
+      "gen_tps": 45.79325485229492,
+      "last_selected": "write_file",
+      "pass": true,
+      "passed_samples": 2,
+      "prompt_tokens": 4477,
+      "samples": 3,
+      "scenario": "write-remote-file",
+      "total_ms_avg": 3527,
+      "ttft_ms_avg": 3527
+    },
+    {
+      "gen_tps": 48.489356994628906,
+      "last_selected": "(text)",
+      "pass": true,
+      "passed_samples": 3,
+      "prompt_tokens": 4485,
+      "samples": 3,
+      "scenario": "in-chat-code-only",
+      "total_ms_avg": 1546,
+      "ttft_ms_avg": 772
+    },
+    {
+      "gen_tps": 47.419944763183594,
+      "last_selected": "(text)",
+      "pass": true,
+      "passed_samples": 3,
+      "prompt_tokens": 155,
+      "samples": 3,
+      "scenario": "voice:greeting",
+      "total_ms_avg": 898,
+      "ttft_ms_avg": 352
+    },
+    {
+      "gen_tps": 46.846221923828125,
+      "last_selected": "(text)",
+      "pass": true,
+      "passed_samples": 3,
+      "prompt_tokens": 155,
+      "samples": 3,
+      "scenario": "voice:explain",
+      "total_ms_avg": 1636,
+      "ttft_ms_avg": 323
+    },
+    {
+      "gen_tps": 46.54460525512695,
+      "last_selected": "run_command",
+      "pass": true,
+      "passed_samples": 3,
+      "prompt_tokens": 3842,
+      "samples": 3,
+      "scenario": "voice:server-action",
+      "total_ms_avg": 2446,
+      "ttft_ms_avg": 2446
+    }
+  ],
+  "total": 10
+}

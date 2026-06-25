@@ -158,7 +158,7 @@ pub fn find_binary(override_path: Option<&str>) -> Option<String> {
     };
     let finder = if cfg!(windows) { "where" } else { "which" };
     for n in names {
-        if let Ok(out) = std::process::Command::new(finder).arg(n).output() {
+        if let Ok(out) = crate::proc::quiet_command(finder).arg(n).output() {
             if out.status.success() {
                 if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
                     let p = line.trim();

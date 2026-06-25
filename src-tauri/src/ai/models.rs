@@ -80,7 +80,7 @@ pub fn system_capabilities() -> SystemCaps {
 
 fn probe_gpu() -> (Option<u64>, Option<String>) {
     // NVIDIA: nvidia-smi gives exact total VRAM + name (fast path).
-    if let Ok(out) = std::process::Command::new("nvidia-smi")
+    if let Ok(out) = crate::proc::quiet_command("nvidia-smi")
         .args([
             "--query-gpu=memory.total,name",
             "--format=csv,noheader,nounits",
@@ -114,7 +114,7 @@ fn probe_gpu() -> (Option<u64>, Option<String>) {
 fn probe_gpu_windows_registry() -> Option<(Option<u64>, Option<String>)> {
     // Pick the adapter with the largest dedicated VRAM (the discrete GPU).
     let cmd = r#"$d='HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\*'; $a = Get-ItemProperty $d -ErrorAction SilentlyContinue | Where-Object { $_.'HardwareInformation.qwMemorySize' -gt 0 } | Sort-Object { [int64]$_.'HardwareInformation.qwMemorySize' } -Descending | Select-Object -First 1; if ($a) { Write-Output ("{0}|{1}" -f [int64]$a.'HardwareInformation.qwMemorySize', $a.DriverDesc) }"#;
-    let out = std::process::Command::new("powershell")
+    let out = crate::proc::quiet_command("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", cmd])
         .output()
         .ok()?;
@@ -180,7 +180,7 @@ pub fn find_ollama_binary() -> Option<String> {
     };
     let finder = if cfg!(windows) { "where" } else { "which" };
     for n in names {
-        if let Ok(out) = std::process::Command::new(finder).arg(n).output() {
+        if let Ok(out) = crate::proc::quiet_command(finder).arg(n).output() {
             if out.status.success() {
                 if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
                     let p = line.trim();
@@ -218,7 +218,7 @@ pub async fn ollama_ensure(base_url: &str) -> Result<bool, String> {
         "Ollama is not installed. Install it from https://ollama.com/download, then try again.",
     )?;
     // The daemon persists in the background; we don't track the child.
-    std::process::Command::new(&bin)
+    crate::proc::quiet_command(&bin)
         .arg("serve")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

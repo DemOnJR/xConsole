@@ -577,7 +577,11 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
     try {
       const text = await transcribeAuto(wav);
       if (text.trim()) {
-        await send(text.trim(), { providerId: vs.conversationProvider || undefined });
+        // Hands-free voice: use the lightweight, low-latency conversation prompt.
+        await send(text.trim(), {
+          providerId: vs.conversationProvider || undefined,
+          conversation: true,
+        });
       }
     } catch (e) {
       setVoiceError(String(e));

@@ -35,54 +35,96 @@ export function speak(
   window.speechSynthesis.speak(u);
 }
 
-// Playback for synthesized audio bytes (cloud/local neural TTS). One reused element
-// so a new reply / barge-in / mute can cut the current one within a frame.
+// Playback for synthesized audio bytes (cloud/local neural TTS). A sequential queue
+// so streamed, sentence-by-sentence TTS plays in order without clips cutting each
+// other off. `speechEpoch` bumps on every stop/cancel/barge-in so a synth request
+// that resolves AFTER the interruption is discarded instead of speaking stale audio.
 let activeAudio: HTMLAudioElement | null = null;
-let activeOnEnd: (() => void) | null = null;
+let speechQueue: { b64: string; mime: string }[] = [];
+let queueDraining = false;
 let cloudSpeaking = false;
+let onQueueDrain: (() => void) | null = null;
+let speechEpoch = 0;
 
+/** A token captured before an async synth; if it no longer matches after the synth
+ *  resolves, a stop/barge-in happened and the audio should be discarded. */
+export function currentSpeechEpoch(): number {
+  return speechEpoch;
+}
+
+/** Queue one synthesized clip for sequential playback. `onDrain` fires once the whole
+ *  queue has finished (or was cleared) — used to clear the UI "speaking" flag. */
+export function enqueueSpeechBytes(
+  b64Audio: string,
+  mime: string = "audio/wav",
+  onDrain?: () => void,
+): void {
+  speechQueue.push({ b64: b64Audio, mime });
+  if (onDrain) onQueueDrain = onDrain;
+  if (!queueDraining) {
+    queueDraining = true;
+    cloudSpeaking = true;
+    playNextClip();
+  }
+}
+
+function playNextClip(): void {
+  const item = speechQueue.shift();
+  if (!item) {
+    queueDraining = false;
+    cloudSpeaking = false;
+    activeAudio = null;
+    const cb = onQueueDrain;
+    onQueueDrain = null;
+    cb?.();
+    return;
+  }
+  const bytes = Uint8Array.from(atob(item.b64), (c) => c.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes], { type: item.mime }));
+  const a = new Audio(url);
+  activeAudio = a;
+  const next = () => {
+    URL.revokeObjectURL(url);
+    if (activeAudio === a) {
+      activeAudio = null;
+      playNextClip();
+    }
+  };
+  a.onended = next;
+  a.onerror = next;
+  void a.play().catch(next);
+}
+
+/** Play a single clip now, replacing anything queued/playing (one-shot use: Settings
+ *  voice previews, non-streaming replies). */
 export function speakBytes(
   b64Audio: string,
   onEnd?: () => void,
   mime: string = "audio/wav",
 ): { stop: () => void } {
-  stopBytes();
-  const bytes = Uint8Array.from(atob(b64Audio), (c) => c.charCodeAt(0));
-  const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
-  const a = new Audio(url);
-  activeAudio = a;
-  activeOnEnd = onEnd ?? null;
-  cloudSpeaking = true;
-  const done = () => {
-    cloudSpeaking = false;
-    URL.revokeObjectURL(url);
-    if (activeAudio === a) activeAudio = null;
-    // Fire the end callback once (covers natural end, error, and stop/cancel).
-    const cb = activeOnEnd;
-    activeOnEnd = null;
-    cb?.();
-  };
-  a.onended = done;
-  a.onerror = done;
-  void a.play().catch(done);
-  return { stop: () => { try { a.pause(); } catch { /* ignore */ } done(); } };
+  clearSpeechQueue();
+  enqueueSpeechBytes(b64Audio, mime, onEnd);
+  return { stop: () => clearSpeechQueue() };
 }
 
-function stopBytes(): void {
+/** Stop playback and empty the queue; bumps the epoch so in-flight synths are dropped. */
+export function clearSpeechQueue(): void {
+  speechEpoch++;
+  speechQueue = [];
   if (activeAudio) {
     try { activeAudio.pause(); } catch { /* ignore */ }
     activeAudio = null;
   }
+  queueDraining = false;
   cloudSpeaking = false;
-  // Notify a waiting onEnd (e.g. so the UI's "speaking" flag clears on cancel).
-  const cb = activeOnEnd;
-  activeOnEnd = null;
+  const cb = onQueueDrain;
+  onQueueDrain = null;
   cb?.();
 }
 
 export function cancelSpeech(): void {
   if (ttsAvailable()) window.speechSynthesis.cancel();
-  stopBytes();
+  clearSpeechQueue();
 }
 
 /** Strip markdown so TTS speaks prose, not backticks/asterisks/code blocks/emoji. */

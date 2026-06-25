@@ -47,6 +47,7 @@ async fn run_local_command_inner(command: &str) -> Result<CommandOutput, String>
         c
     };
 
+    crate::proc::hide_console(&mut cmd);
     let output = cmd
         .output()
         .await

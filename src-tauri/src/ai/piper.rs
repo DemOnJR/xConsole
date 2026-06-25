@@ -14,7 +14,7 @@ const PIPER_ZIP_URL: &str =
     "https://github.com/rhasspy/piper/releases/latest/download/piper_windows_amd64.zip";
 
 /// Default voice installed by setup.
-pub const DEFAULT_VOICE: &str = "en_US-amy-medium";
+pub const DEFAULT_VOICE: &str = "en_US-hfc_female-medium";
 
 /// Curated voices → their subpath in the rhasspy/piper-voices HF repo.
 pub fn voice_subpath(key: &str) -> Option<&'static str> {
@@ -92,7 +92,7 @@ pub fn find_piper(app: &AppHandle, override_path: Option<&str>) -> Option<String
         return Some(found.to_string_lossy().into_owned());
     }
     let finder = if cfg!(windows) { "where" } else { "which" };
-    if let Ok(out) = std::process::Command::new(finder).arg(exe).output() {
+    if let Ok(out) = crate::proc::quiet_command(finder).arg(exe).output() {
         if out.status.success() {
             if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
                 let p = line.trim();

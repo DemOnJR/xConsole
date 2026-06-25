@@ -19,6 +19,7 @@ pub mod models;
 pub mod provider;
 pub mod providers;
 pub mod vps_snapshot;
+pub mod reflection;
 pub mod registry;
 pub mod safety;
 pub mod skill_install;

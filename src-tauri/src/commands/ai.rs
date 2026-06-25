@@ -48,6 +48,8 @@ pub async fn ai_chat(
     #[allow(non_snake_case)] plan_mode: Option<bool>,
     #[allow(non_snake_case)] workspace_id: Option<String>,
     canvas: Option<Vec<crate::ai::canvas_context::CanvasNode>>,
+    // Spoken voice conversation turn — use the lightweight, low-latency prompt.
+    conversation: Option<bool>,
 ) -> Result<ChatMessage, String> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
     let event = chat_event(&session_id);
@@ -168,7 +170,14 @@ pub async fn ai_chat(
 
     // Fresh turn — clear any leftover Stop request from a previous turn.
     tc.session_state.clear_cancel(&tc.session_id);
-    let result = agent::run_turn(&tc, provider_id.filter(|s| !s.is_empty()), messages, &tx).await;
+    let result = agent::run_turn(
+        &tc,
+        provider_id.filter(|s| !s.is_empty()),
+        messages,
+        conversation.unwrap_or(false),
+        &tx,
+    )
+    .await;
     // Close the sender and wait for the forwarder to drain, so trailing
     // Activity/ConversationCompacted/Error events are emitted before we return.
     drop(tx);

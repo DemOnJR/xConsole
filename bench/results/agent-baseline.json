@@ -1,0 +1,100 @@
+{
+  "avg_total_ms": 2584,
+  "mode": "agent",
+  "model": "qwen3.5:9b",
+  "num_ctx": 65536,
+  "pass": 6,
+  "scenarios": [
+    {
+      "completion_tokens": 19,
+      "error": null,
+      "gen_tps": 47.63086700439453,
+      "pass": true,
+      "prompt_tokens": 1403,
+      "scenario": "casual-greeting",
+      "selected_tools": [],
+      "sys_prompt_tokens_est": 892,
+      "total_ms": 757,
+      "ttft_ms": 358
+    },
+    {
+      "completion_tokens": 4,
+      "error": null,
+      "gen_tps": 57.06215286254883,
+      "pass": true,
+      "prompt_tokens": 2930,
+      "scenario": "math-no-tools",
+      "selected_tools": [],
+      "sys_prompt_tokens_est": 1032,
+      "total_ms": 1840,
+      "ttft_ms": 1770
+    },
+    {
+      "completion_tokens": 42,
+      "error": null,
+      "gen_tps": 46.926795959472656,
+      "pass": true,
+      "prompt_tokens": 2925,
+      "scenario": "voice-terse-explain",
+      "selected_tools": [],
+      "sys_prompt_tokens_est": 1032,
+      "total_ms": 2513,
+      "ttft_ms": 1617
+    },
+    {
+      "completion_tokens": 16,
+      "error": null,
+      "gen_tps": 48.171730041503906,
+      "pass": false,
+      "prompt_tokens": 4470,
+      "scenario": "single-server-command",
+      "selected_tools": [
+        "list_vps_targets"
+      ],
+      "sys_prompt_tokens_est": 1037,
+      "total_ms": 2769,
+      "ttft_ms": 2769
+    },
+    {
+      "completion_tokens": 30,
+      "error": null,
+      "gen_tps": 47.19445037841797,
+      "pass": true,
+      "prompt_tokens": 4505,
+      "scenario": "all-servers-command",
+      "selected_tools": [
+        "run_command_all"
+      ],
+      "sys_prompt_tokens_est": 1069,
+      "total_ms": 3239,
+      "ttft_ms": 3239
+    },
+    {
+      "completion_tokens": 46,
+      "error": null,
+      "gen_tps": 46.86675262451172,
+      "pass": true,
+      "prompt_tokens": 4477,
+      "scenario": "write-remote-file",
+      "selected_tools": [
+        "write_file"
+      ],
+      "sys_prompt_tokens_est": 1037,
+      "total_ms": 3975,
+      "ttft_ms": 3975
+    },
+    {
+      "completion_tokens": 59,
+      "error": null,
+      "gen_tps": 46.058128356933594,
+      "pass": true,
+      "prompt_tokens": 4485,
+      "scenario": "in-chat-code-only",
+      "selected_tools": [],
+      "sys_prompt_tokens_est": 1037,
+      "total_ms": 2997,
+      "ttft_ms": 1716
+    }
+  ],
+  "total": 7
+}

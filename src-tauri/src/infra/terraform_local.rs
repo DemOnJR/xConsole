@@ -46,6 +46,7 @@ pub async fn run_local(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
+    crate::proc::hide_console(&mut cmd);
     let output = cmd.output().await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             "terraform not found in PATH; install Terraform on this machine or use runner=vps".to_string()

@@ -20,6 +20,7 @@ pub async fn run_turn(
     tc: &ToolContext,
     provider_id: Option<String>,
     messages: Vec<ChatMessage>,
+    conversation: bool,
     sink: &EventSink,
 ) -> Result<ChatMessage, String> {
     let mut messages = context::compress_window(messages);
@@ -95,6 +96,10 @@ pub async fn run_turn(
             }
         }
     }
+    // Voice turns keep the same curated tool set as any local turn — web_search /
+    // web_fetch / geo_locate are ALWAYS included (so "what's the weather?" works), plus
+    // local_* tools, plus VPS tools when targets are selected. The voice prompt stays
+    // fast by trimming PROSE (see voice_tiers), not by removing the agent's hands.
     let tool_defs_for_turn = if ollama_mode {
         tools::definitions_for_ollama(&tc.home, tc.targets.len(), casual_turn)
     } else {
@@ -198,6 +203,7 @@ pub async fn run_turn(
             plan_mode: tc.plan_mode,
             workspace_context: workspace_block.clone(),
             canvas_context: canvas_block.clone(),
+            conversation,
         };
 
         if cli_mode {
@@ -323,6 +329,7 @@ pub async fn run_turn(
             plan_mode: tc.plan_mode,
             workspace_context: workspace_block.clone(),
             canvas_context: canvas_block.clone(),
+            conversation,
         },
         &tool_defs_for_turn,
         &messages,
@@ -360,6 +367,7 @@ pub async fn run_turn(
                 plan_mode: tc.plan_mode,
                 workspace_context: workspace_block.clone(),
                 canvas_context: canvas_block.clone(),
+                conversation,
             },
             &tool_defs_for_turn,
             &messages,
@@ -387,6 +395,7 @@ pub async fn run_turn(
     );
 
     let mut last = ChatMessage::assistant("");
+    let mut iters_used = 0usize;
 
     for iter in 0..MAX_ITERS {
         // User pressed Stop — halt before the next model call.
@@ -394,6 +403,7 @@ pub async fn run_turn(
             emit(Some(sink), StreamEvent::Status("Stopped.".into()));
             break;
         }
+        iters_used = iter + 1;
         let mut req = ChatRequest::new(&resolved.model);
         req.system = system.clone();
         req.messages = messages.clone();
@@ -460,6 +470,33 @@ pub async fn run_turn(
                 Some(sink),
                 StreamEvent::Error(format!(
                     "Agent stopped after {MAX_ITERS} tool iterations; task may be incomplete."
+                )),
+            );
+        }
+    }
+
+    // Self-improvement loop (ETAPA 29): before finishing, look at what went wrong this
+    // turn (failed/retried tool calls, hitting the iteration cap), distill a short
+    // lesson, and save it to memory — where it's injected into every future turn's
+    // prompt. Pure analysis runs every turn but only WRITES when there was trouble, so
+    // it adds no latency to clean turns (including voice). On by default; disable with
+    // the `agent.self_improve` setting = "false".
+    let self_improve = tc
+        .db
+        .get_setting("agent.self_improve")
+        .ok()
+        .flatten()
+        .map(|v| v != "false")
+        .unwrap_or(true);
+    if self_improve && registry::is_tool_capable_kind(&resolved.kind) && !cli_mode {
+        let lessons =
+            crate::ai::reflection::reflect_and_save(&tc.home, &messages, iters_used, MAX_ITERS);
+        if !lessons.is_empty() {
+            emit(
+                Some(sink),
+                StreamEvent::Status(format!(
+                    "Self-improvement: learned {} lesson(s) from this turn and saved them to memory.",
+                    lessons.len()
                 )),
             );
         }

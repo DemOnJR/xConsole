@@ -1,0 +1,134 @@
+{
+  "avg_total_ms": 2453,
+  "mode": "agent",
+  "model": "qwen3.5:9b",
+  "num_ctx": 65536,
+  "pass": 8,
+  "scenarios": [
+    {
+      "completion_tokens": 20,
+      "error": null,
+      "gen_tps": 46.56295394897461,
+      "pass": true,
+      "prompt_tokens": 1403,
+      "scenario": "casual-greeting",
+      "selected_tools": [],
+      "sys_prompt_tokens_est": 892,
+      "total_ms": 792,
+      "ttft_ms": 362
+    },
+    {
+      "completion_tokens": 4,
+      "error": null,
+      "gen_tps": 55.67308807373047,
+      "pass": true,
+      "prompt_tokens": 2930,
+      "scenario": "math-no-tools",
+      "selected_tools": [],
+      "sys_prompt_tokens_est": 1032,
+      "total_ms": 1865,
+      "ttft_ms": 1793
+    },
+    {
+      "completion_tokens": 25,
+      "error": null,
+      "gen_tps": 46.6219596862793,
+      "pass": true,
+      "prompt_tokens": 2925,
+      "scenario": "voice-terse-explain",
+      "selected_tools": [],
+      "sys_prompt_tokens_est": 1032,
+      "total_ms": 2221,
+      "ttft_ms": 1685
+    },
+    {
+      "completion_tokens": 32,
+      "error": null,
+      "gen_tps": 45.64015197753906,
+      "pass": false,
+      "prompt_tokens": 4470,
+      "scenario": "single-server-command",
+      "selected_tools": [],
+      "sys_prompt_tokens_est": 1037,
+      "total_ms": 2574,
+      "ttft_ms": 1873
+    },
+    {
+      "completion_tokens": 28,
+      "error": null,
+      "gen_tps": 45.75178146362305,
+      "pass": true,
+      "prompt_tokens": 4505,
+      "scenario": "all-servers-command",
+      "selected_tools": [
+        "run_command_all"
+      ],
+      "sys_prompt_tokens_est": 1069,
+      "total_ms": 3525,
+      "ttft_ms": 3525
+    },
+    {
+      "completion_tokens": 45,
+      "error": null,
+      "gen_tps": 44.798091888427734,
+      "pass": true,
+      "prompt_tokens": 4477,
+      "scenario": "write-remote-file",
+      "selected_tools": [
+        "write_file"
+      ],
+      "sys_prompt_tokens_est": 1037,
+      "total_ms": 4518,
+      "ttft_ms": 4518
+    },
+    {
+      "completion_tokens": 92,
+      "error": null,
+      "gen_tps": 45.0220947265625,
+      "pass": true,
+      "prompt_tokens": 4485,
+      "scenario": "in-chat-code-only",
+      "selected_tools": [],
+      "sys_prompt_tokens_est": 1037,
+      "total_ms": 3832,
+      "ttft_ms": 1788
+    },
+    {
+      "completion_tokens": 39,
+      "error": null,
+      "gen_tps": 45.46455764770508,
+      "pass": true,
+      "prompt_tokens": 155,
+      "scenario": "voice:greeting",
+      "selected_tools": [],
+      "sys_prompt_tokens_est": 135,
+      "total_ms": 1332,
+      "ttft_ms": 474
+    },
+    {
+      "completion_tokens": 58,
+      "error": null,
+      "gen_tps": 44.8455810546875,
+      "pass": true,
+      "prompt_tokens": 155,
+      "scenario": "voice:explain",
+      "selected_tools": [],
+      "sys_prompt_tokens_est": 135,
+      "total_ms": 1705,
+      "ttft_ms": 412
+    },
+    {
+      "completion_tokens": 43,
+      "error": null,
+      "gen_tps": 44.99649429321289,
+      "pass": false,
+      "prompt_tokens": 3704,
+      "scenario": "voice:server-action",
+      "selected_tools": [],
+      "sys_prompt_tokens_est": 195,
+      "total_ms": 2174,
+      "ttft_ms": 1218
+    }
+  ],
+  "total": 10
+}

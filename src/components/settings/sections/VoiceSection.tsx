@@ -171,7 +171,7 @@ export function VoiceSection() {
   };
 
   const downloadSttModel = async () => {
-    const file = v.sttModel || "ggml-small.bin";
+    const file = v.sttModel || "ggml-medium.bin";
     setSttBusy(true);
     setSttMsg(`Downloading ${file}…`);
     try {
@@ -292,7 +292,7 @@ export function VoiceSection() {
           <>
             <Field label="Model" hint="Bigger = more accurate but slower. Medium is best for non-English.">
               <Select
-                value={v.sttModel || "ggml-small.bin"}
+                value={v.sttModel || "ggml-medium.bin"}
                 onChange={(e) => v.update({ sttModel: e.target.value })}
               >
                 {STT_MODELS.map((m) => (

@@ -74,7 +74,7 @@ pub fn find_parakeet(app: &AppHandle, override_path: Option<&str>) -> Option<Str
         return Some(found.to_string_lossy().into_owned());
     }
     let finder = if cfg!(windows) { "where" } else { "which" };
-    if let Ok(out) = std::process::Command::new(finder).arg(exe).output() {
+    if let Ok(out) = crate::proc::quiet_command(finder).arg(exe).output() {
         if out.status.success() {
             if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
                 let p = line.trim();

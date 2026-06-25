@@ -66,15 +66,13 @@ pub async fn scan_skill(path: &Path) -> ScanReport {
 
 /// Run the SkillSpector CLI if available: `skillspector scan <path> -f json --no-llm`.
 async fn scan_with_skillspector(path: &Path) -> Option<ScanReport> {
-    use tokio::process::Command;
-
     // Probe availability cheaply first; if absent, fall back silently.
-    let probe = Command::new("skillspector").arg("--version").output().await;
+    let probe = crate::proc::quiet_tokio("skillspector").arg("--version").output().await;
     if probe.map(|o| !o.status.success()).unwrap_or(true) {
         return None;
     }
 
-    let out = Command::new("skillspector")
+    let out = crate::proc::quiet_tokio("skillspector")
         .arg("scan")
         .arg(path)
         .args(["-f", "json", "--no-llm"])

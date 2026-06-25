@@ -18,7 +18,14 @@ import { useWorkspaceStore } from "./workspaceStore";
 import { useCanvasStore } from "./canvasStore";
 import { useSessionStore } from "./sessionStore";
 import { useVoiceStore } from "./voiceStore";
-import { cancelSpeech, speak, speakBytes, speakableText } from "../lib/voice";
+import {
+  cancelSpeech,
+  currentSpeechEpoch,
+  enqueueSpeechBytes,
+  speak,
+  speakBytes,
+  speakableText,
+} from "../lib/voice";
 
 /** Speak text via TTS if the user enabled spoken replies. Uses the natural cloud
  *  voice when selected, falling back to the OS voice if it fails or has no key. */
@@ -34,7 +41,7 @@ async function maybeSpeak(raw: string) {
   const done = () => setSpeaking(false);
   if (v.ttsEngine === "piper") {
     try {
-      const b64 = await api.synthesize(text, v.ttsPiperVoice || "en_US-amy-medium", "piper");
+      const b64 = await api.synthesize(text, v.ttsPiperVoice || "en_US-hfc_female-medium", "piper");
       speakBytes(b64, done);
       setSpeaking(true);
       return;
@@ -62,6 +69,59 @@ async function maybeSpeak(raw: string) {
   }
   speak(text, { voice: v.ttsVoice || undefined, rate: v.ttsRate, onEnd: done });
   setSpeaking(true);
+}
+
+/** Pull complete sentences off a growing buffer for streaming TTS. Splits on . ! ?
+ *  or newline, but only when the segment is long enough, so abbreviations ("e.g.",
+ *  "v1.") don't trigger a split. Returns finished sentences + the unfinished tail. */
+function extractSentences(buf: string): { sentences: string[]; rest: string } {
+  const sentences: string[] = [];
+  let start = 0;
+  for (let i = 0; i < buf.length; i++) {
+    const c = buf[i];
+    if (c === "\n" || c === "." || c === "!" || c === "?") {
+      const seg = buf.slice(start, i + 1).trim();
+      if (c === "\n" || seg.length >= 12) {
+        if (seg) sentences.push(seg);
+        start = i + 1;
+      }
+    }
+  }
+  return { sentences, rest: buf.slice(start) };
+}
+
+/** Synthesize ONE sentence and queue it for in-order playback (streaming voice).
+ *  Mirrors maybeSpeak's engine selection but ENQUEUES instead of replacing, and drops
+ *  the audio if a stop/barge-in happened while it was still synthesizing. */
+async function speakSentenceQueued(raw: string) {
+  const v = useVoiceStore.getState();
+  const text = speakableText(raw);
+  if (!v.ttsEnabled || !text.trim()) return;
+  const setSpeaking = useAgentStore.getState().setSpeaking;
+  setSpeaking(true);
+  const onDrain = () => setSpeaking(false);
+  const epoch = currentSpeechEpoch();
+  const enqueue = (b64: string, mime: string) => {
+    if (currentSpeechEpoch() !== epoch) return; // stopped / barged-in mid-synth → discard
+    enqueueSpeechBytes(b64, mime, onDrain);
+  };
+  try {
+    if (v.ttsEngine === "piper") {
+      return enqueue(await api.synthesize(text, v.ttsPiperVoice || "en_US-hfc_female-medium", "piper"), "audio/wav");
+    }
+    if (v.ttsEngine === "edge") {
+      return enqueue(await api.synthesize(text, v.ttsEdgeVoice || "en-US-AriaNeural", "edge"), "audio/mpeg");
+    }
+    if (v.ttsEngine === "cloud") {
+      return enqueue(await api.synthesize(text, v.ttsCloudVoice || "sage", "cloud", v.ttsInstructions), "audio/wav");
+    }
+  } catch {
+    /* fall through to the OS voice */
+  }
+  // OS Web Speech queues utterances natively, so per-sentence speak() plays in order.
+  if (currentSpeechEpoch() === epoch) {
+    speak(text, { voice: v.ttsVoice || undefined, rate: v.ttsRate, onEnd: onDrain });
+  }
 }
 import {
   liveTokenStats,
@@ -119,7 +179,7 @@ interface AgentState {
   setTargets: (ids: string[]) => void;
   setSpeaking: (v: boolean) => void;
   togglePlanMode: () => void;
-  send: (text: string, opts?: { providerId?: string }) => Promise<void>;
+  send: (text: string, opts?: { providerId?: string; conversation?: boolean }) => Promise<void>;
   stop: () => Promise<void>;
   newConversation: () => Promise<void>;
   openConversation: (id: string) => Promise<void>;
@@ -523,10 +583,30 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     const mySession = sessionId;
     const isCurrent = () => get().sessionId === mySession;
 
+    // Streaming TTS: in hands-free voice (conversation mode) speak each sentence as
+    // soon as it's generated instead of waiting for the whole reply, so the user hears
+    // a response almost immediately. Gated to conversation turns (replies are markdown-
+    // free there), so typed-with-TTS turns keep the safe whole-reply path below.
+    const streamVoice = (opts?.conversation ?? false) && useVoiceStore.getState().ttsEnabled;
+    let speechBuf = "";
+    let streamingSpoke = false;
+    let speechChain: Promise<void> = Promise.resolve();
+    const feedSpeech = (delta: string) => {
+      if (!streamVoice) return;
+      speechBuf += delta;
+      const ex = extractSentences(speechBuf);
+      speechBuf = ex.rest;
+      for (const s of ex.sentences) {
+        streamingSpoke = true;
+        speechChain = speechChain.then(() => speakSentenceQueued(s));
+      }
+    };
+
     const unlisten = await onAiChatOutput(mySession, (ev) => {
       if (ev.kind === "Text") {
         if (streamStartedAt === null) streamStartedAt = Date.now();
         turnText += ev.data;
+        feedSpeech(ev.data);
         if (isCurrent()) {
           set({ streamingText: turnText, streamStats: liveTokenStats(turnText, streamStartedAt) });
         }
@@ -577,6 +657,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         planMode,
         workspaceId: useWorkspaceStore.getState().activeId,
         canvas: canvasSnapshot(),
+        conversation: opts?.conversation ?? false,
       });
       const tokenStats =
         latestStats ??
@@ -591,7 +672,13 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       ];
       if (isCurrent()) {
         set({ messages, streamingText: "", activity: [], streaming: false, streamStats: null });
-        maybeSpeak(assistant.content);
+        if (streamVoice && streamingSpoke) {
+          // Speak whatever's left after the last sentence boundary.
+          const tail = speechBuf.trim();
+          if (tail) speechChain = speechChain.then(() => speakSentenceQueued(tail));
+        } else {
+          maybeSpeak(assistant.content);
+        }
       }
       await persistConversation({ sessionId: mySession, messages, targets });
       const list = await api.listAgentConversations().catch(() => get().conversations);

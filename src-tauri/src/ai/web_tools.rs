@@ -205,59 +205,127 @@ async fn web_search(args: &Value) -> String {
         Err(e) => return e,
     };
 
-    let resp = match client
+    // Primary: real web results (titles + snippets). DuckDuckGo's instant-answer API
+    // returns nothing for most queries (place names, "X weather", etc.), so scrape the
+    // HTML results endpoint, which returns actual search hits.
+    if let Ok(results) = ddg_html_results(&client, query).await {
+        if !results.is_empty() {
+            let mut block = format!("Top web results for \"{query}\":");
+            for (i, r) in results.iter().take(6).enumerate() {
+                block.push_str(&format!("\n{}. {r}", i + 1));
+            }
+            return truncate_text(&block, MAX_BODY);
+        }
+    }
+
+    // Fallback: instant answer (definitions, calculations, direct facts).
+    if let Some(ia) = ddg_instant_answer(&client, query).await {
+        return truncate_text(&ia, MAX_BODY);
+    }
+
+    format!(
+        "No results for \"{query}\". For weather, web_fetch https://wttr.in/CITY?format=3 \
+(URL-encode spaces as +). For a specific site, call web_fetch with its URL directly."
+    )
+}
+
+/// Real search results (title — snippet) scraped from DuckDuckGo's HTML endpoint.
+async fn ddg_html_results(client: &reqwest::Client, query: &str) -> Result<Vec<String>, String> {
+    let resp = client
+        .get("https://html.duckduckgo.com/html/")
+        .query(&[("q", query)])
+        // DuckDuckGo serves the HTML results only to browser-like user agents.
+        .header(
+            reqwest::header::USER_AGENT,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        )
+        .send()
+        .await
+        .map_err(|e| format!("error: search request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("error: search HTTP {}", resp.status()));
+    }
+    let html = resp
+        .text()
+        .await
+        .map_err(|e| format!("error: read search body: {e}"))?;
+
+    let titles = anchor_inner_texts(&html, "result__a");
+    let snippets = anchor_inner_texts(&html, "result__snippet");
+    let mut out = Vec::new();
+    for i in 0..titles.len() {
+        let title = titles.get(i).cloned().unwrap_or_default();
+        let snip = snippets.get(i).cloned().unwrap_or_default();
+        let line = match (title.is_empty(), snip.is_empty()) {
+            (false, false) => format!("{title} — {snip}"),
+            (false, true) => title,
+            (true, false) => snip,
+            (true, true) => continue,
+        };
+        out.push(line);
+        if out.len() >= 6 {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// DuckDuckGo Instant Answer (definitions, calculations, direct facts). Often empty.
+async fn ddg_instant_answer(client: &reqwest::Client, query: &str) -> Option<String> {
+    let body: Value = client
         .get("https://api.duckduckgo.com/")
         .query(&[("q", query), ("format", "json"), ("no_redirect", "1"), ("no_html", "1")])
         .send()
         .await
-    {
-        Ok(r) => r,
-        Err(e) => return format!("error: search request failed: {e}"),
-    };
-
-    if !resp.status().is_success() {
-        return format!("error: search HTTP {}", resp.status());
-    }
-
-    let body: Value = match resp.json().await {
-        Ok(v) => v,
-        Err(e) => return format!("error: invalid search response: {e}"),
-    };
-
+        .ok()?
+        .json()
+        .await
+        .ok()?;
     let mut parts = Vec::new();
-    if let Some(abs) = body.get("AbstractText").and_then(|v| v.as_str()) {
-        if !abs.is_empty() {
-            parts.push(abs.to_string());
-        }
-    }
-    if let Some(ans) = body.get("Answer").and_then(|v| v.as_str()) {
-        if !ans.is_empty() {
-            parts.push(format!("Answer: {ans}"));
-        }
-    }
-    if let Some(topic) = body.get("Heading").and_then(|v| v.as_str()) {
-        if !topic.is_empty() && parts.is_empty() {
-            parts.push(topic.to_string());
-        }
-    }
-    if let Some(related) = body.get("RelatedTopics").and_then(|v| v.as_array()) {
-        for item in related.iter().take(5) {
-            if let Some(text) = item.get("Text").and_then(|v| v.as_str()) {
-                if !text.is_empty() {
-                    parts.push(text.to_string());
-                }
+    for key in ["AbstractText", "Answer", "Definition"] {
+        if let Some(s) = body.get(key).and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                parts.push(s.to_string());
             }
         }
     }
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
 
-    if parts.is_empty() {
-        return format!(
-            "No instant answer for \"{query}\". Try web_fetch with a specific URL \
-(e.g. https://wttr.in/?format=3 for local weather)."
-        );
+/// Inner text of every `<a class="<class>" …>…</a>` anchor (tags stripped, entities decoded).
+fn anchor_inner_texts(html: &str, class: &str) -> Vec<String> {
+    let needle = format!("class=\"{class}\"");
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = html[from..].find(&needle) {
+        let cls = from + rel;
+        let Some(gt) = html[cls..].find('>') else { break };
+        let inner_start = cls + gt + 1;
+        let Some(close) = html[inner_start..].find("</a>") else {
+            from = inner_start;
+            continue;
+        };
+        let inner = &html[inner_start..inner_start + close];
+        let text = decode_entities(html_to_text(inner).trim());
+        if !text.trim().is_empty() {
+            out.push(text.trim().to_string());
+        }
+        from = inner_start + close + 4;
     }
+    out
+}
 
-    truncate_text(&parts.join("\n"), MAX_BODY)
+/// Decode the handful of HTML entities that show up in search snippets.
+fn decode_entities(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&#x2F;", "/")
+        .replace("&nbsp;", " ")
 }
 
 async fn web_fetch(args: &Value) -> String {
@@ -318,9 +386,43 @@ pub fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
         .user_agent("xConsole-agent/1.0 (+https://github.com/xconsole)")
-        .redirect(reqwest::redirect::Policy::limited(3))
+        // Re-validate EVERY redirect hop. reqwest follows 3xx responses without re-checking,
+        // so without this a public URL could 30x-redirect to 127.0.0.1 / a metadata IP and
+        // slip past validate_public_url (which only ever sees the first URL). We keep the same
+        // 3-hop budget the old Policy::limited(3) enforced.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 3 {
+                return attempt.error("too many redirects".to_string());
+            }
+            if let Some(reason) = blocked_target(attempt.url()) {
+                return attempt.error(format!("blocked redirect target: {reason}"));
+            }
+            attempt.follow()
+        }))
         .build()
         .map_err(|e| format!("error: http client: {e}"))
+}
+
+/// Why a URL points at a local/private/metadata target, or `None` if it looks public.
+/// Used for BOTH the initial URL (via [`validate_public_url`]) and every redirect hop, so the
+/// SSRF guard can't be sidestepped with a 30x redirect.
+fn blocked_target(url: &reqwest::Url) -> Option<&'static str> {
+    let host = match url.host_str() {
+        Some(h) => h.to_lowercase(),
+        None => return Some("URL must have a host"),
+    };
+    if host == "localhost" || host.ends_with(".local") || host.ends_with(".internal") {
+        return Some("local/private hosts are not allowed");
+    }
+    if host == "metadata.google.internal" || host == "169.254.169.254" {
+        return Some("metadata endpoints are not allowed");
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_private_ip(ip) {
+            return Some("private IP addresses are not allowed");
+        }
+    }
+    None
 }
 
 pub fn validate_public_url(raw: &str) -> Result<reqwest::Url, String> {
@@ -331,20 +433,8 @@ pub fn validate_public_url(raw: &str) -> Result<reqwest::Url, String> {
     if url.username() != "" || url.password().is_some() {
         return Err("error: URL credentials are not allowed".into());
     }
-    let host = url
-        .host_str()
-        .ok_or_else(|| "error: URL must have a host".to_string())?
-        .to_lowercase();
-    if host == "localhost" || host.ends_with(".local") || host.ends_with(".internal") {
-        return Err("error: local/private hosts are not allowed".into());
-    }
-    if host == "metadata.google.internal" || host == "169.254.169.254" {
-        return Err("error: metadata endpoints are not allowed".into());
-    }
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_private_ip(ip) {
-            return Err("error: private IP addresses are not allowed".into());
-        }
+    if let Some(reason) = blocked_target(&url) {
+        return Err(format!("error: {reason}"));
     }
     Ok(url)
 }
@@ -356,7 +446,12 @@ fn is_private_ip(ip: IpAddr) -> bool {
                 || v4.is_loopback()
                 || v4.is_link_local()
                 || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
                 || v4 == Ipv4Addr::new(169, 254, 169, 254)
+                || matches!(v4.octets(), [100, 64..=127, _, _]) // 100.64.0.0/10 CGNAT / Tailscale
+                || matches!(v4.octets(), [192, 0, 0, _]) // 192.0.0.0/24 IETF protocol assignments
+                || matches!(v4.octets(), [198, 18..=19, _, _]) // 198.18.0.0/15 benchmarking
         }
         IpAddr::V6(v6) => {
             // An IPv4-mapped address like ::ffff:169.254.169.254 must be judged
@@ -364,13 +459,18 @@ fn is_private_ip(ip: IpAddr) -> bool {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_private_ip(IpAddr::V4(v4));
             }
-            v6.is_loopback() || v6.is_unspecified() || is_unique_local(v6)
+            v6.is_loopback() || v6.is_unspecified() || is_unique_local(v6) || is_v6_link_local(v6)
         }
     }
 }
 
 fn is_unique_local(ip: Ipv6Addr) -> bool {
     (ip.segments()[0] & 0xfe00) == 0xfc00
+}
+
+/// IPv6 link-local: fe80::/10.
+fn is_v6_link_local(ip: Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xffc0) == 0xfe80
 }
 
 fn html_to_text(html: &str) -> String {
@@ -435,6 +535,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_ddg_html_anchors() {
+        let html = r#"<a rel="nofollow" class="result__a" href="//x">Marina di Tor San Lorenzo &amp; beach</a>
+            <a class="result__snippet" href="//y">A <b>coastal</b> town in Lazio near Rome.</a>"#;
+        assert_eq!(
+            anchor_inner_texts(html, "result__a"),
+            vec!["Marina di Tor San Lorenzo & beach"]
+        );
+        assert_eq!(
+            anchor_inner_texts(html, "result__snippet"),
+            vec!["A coastal town in Lazio near Rome."]
+        );
+    }
+
+    #[test]
     fn allows_public_https() {
         assert!(validate_public_url("https://wttr.in/Berlin?format=3").is_ok());
     }
@@ -444,6 +558,24 @@ mod tests {
         // IPv4-mapped IPv6 must not bypass the metadata/loopback guard.
         assert!(validate_public_url("http://[::ffff:169.254.169.254]/latest/meta-data").is_err());
         assert!(validate_public_url("http://[::ffff:127.0.0.1]/").is_err());
+    }
+
+    #[test]
+    fn blocks_extra_private_ranges() {
+        assert!(validate_public_url("http://100.64.0.1/").is_err()); // CGNAT / Tailscale
+        assert!(validate_public_url("http://198.18.0.1/").is_err()); // benchmarking
+        assert!(validate_public_url("http://192.0.0.1/").is_err()); // IETF protocol
+        assert!(validate_public_url("http://[fe80::1]/").is_err()); // v6 link-local
+    }
+
+    #[test]
+    fn redirect_predicate_blocks_private_targets() {
+        // blocked_target backs the per-hop redirect guard; private/metadata => blocked, public => ok.
+        let blocked = |u: &str| blocked_target(&reqwest::Url::parse(u).unwrap()).is_some();
+        assert!(blocked("http://127.0.0.1:11434/"));
+        assert!(blocked("http://169.254.169.254/latest/meta-data"));
+        assert!(blocked("http://10.0.0.5/"));
+        assert!(!blocked("https://example.com/"));
     }
 
     #[test]

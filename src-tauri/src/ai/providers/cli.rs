@@ -171,7 +171,7 @@ impl CliProvider {
 /// directly, which is the "program not found" people hit when launching `agent`).
 fn cursor_base_command(bin: &str) -> Command {
     if let Some((node, index)) = CliProvider::resolve_cursor_runtime() {
-        let mut c = Command::new(node);
+        let mut c = crate::proc::quiet_tokio(node);
         c.arg(index);
         return c;
     }
@@ -182,12 +182,12 @@ fn cursor_base_command(bin: &str) -> Command {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
         if bin.contains('\\') || bin.contains('/') {
             if ext == "cmd" || ext == "bat" {
-                let mut c = Command::new("cmd");
+                let mut c = crate::proc::quiet_tokio("cmd");
                 c.arg("/C").arg(bin);
                 return c;
             }
             if ext == "ps1" {
-                let mut c = Command::new("powershell");
+                let mut c = crate::proc::quiet_tokio("powershell");
                 c.arg("-NoProfile").arg("-ExecutionPolicy").arg("Bypass").arg("-File").arg(bin);
                 return c;
             }
@@ -196,13 +196,13 @@ fn cursor_base_command(bin: &str) -> Command {
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
             let cmd_path = format!(r"{local}\cursor-agent\agent.cmd");
             if std::path::Path::new(&cmd_path).exists() {
-                let mut c = Command::new("cmd");
+                let mut c = crate::proc::quiet_tokio("cmd");
                 c.arg("/C").arg(cmd_path);
                 return c;
             }
         }
     }
-    Command::new(bin)
+    crate::proc::quiet_tokio(bin)
 }
 
 /// Spawn a CLI process. Prompt is written to stdin when `prompt` is Some.
@@ -230,6 +230,7 @@ async fn spawn_with_stdin(
         }
     }
 
+    crate::proc::hide_console(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| {
         if kind == "cursor" {
             format!(
@@ -256,12 +257,12 @@ fn spawn_cli_program(bin: &str) -> Result<Command, String> {
     {
         let lower = bin.to_ascii_lowercase();
         if lower.ends_with(".cmd") || lower.ends_with(".bat") {
-            let mut cmd = Command::new("cmd");
+            let mut cmd = crate::proc::quiet_tokio("cmd");
             cmd.arg("/C").arg(bin);
             return Ok(cmd);
         }
     }
-    Ok(Command::new(bin))
+    Ok(crate::proc::quiet_tokio(bin))
 }
 
 fn spawn_cli(bin: &str, args: &[String]) -> Result<Command, String> {

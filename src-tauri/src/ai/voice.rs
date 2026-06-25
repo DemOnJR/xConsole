@@ -17,10 +17,11 @@ use crate::storage::Db;
 
 const WHISPER_ZIP_URL: &str =
     "https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip";
-// Multilingual model (supports Romanian etc.) with better accuracy than base.en.
-const WHISPER_MODEL_FILE: &str = "ggml-small.bin";
+// Medium multilingual model (~1.5 GB) — best accuracy for non-English (e.g. Romanian).
+// Slower than small/base on CPU; the user opted for accuracy over STT speed.
+const WHISPER_MODEL_FILE: &str = "ggml-medium.bin";
 const WHISPER_MODEL_URL: &str =
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin";
 
 /// Download a whisper GGML model by filename from the official whisper.cpp repo.
 pub async fn download_whisper_model(app: &AppHandle, model_file: &str) -> Result<String, String> {
@@ -147,7 +148,7 @@ pub fn find_whisper_server(cli_path: Option<&str>) -> Option<String> {
         }
     }
     let finder = if cfg!(windows) { "where" } else { "which" };
-    if let Ok(out) = std::process::Command::new(finder).arg(exe).output() {
+    if let Ok(out) = crate::proc::quiet_command(finder).arg(exe).output() {
         if out.status.success() {
             if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
                 let p = line.trim();

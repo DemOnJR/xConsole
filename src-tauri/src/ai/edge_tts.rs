@@ -29,7 +29,7 @@ fn venv_python(app: &AppHandle) -> PathBuf {
 fn find_python() -> Option<String> {
     let finder = if cfg!(windows) { "where" } else { "which" };
     for name in ["python", "py", "python3"] {
-        if let Ok(out) = std::process::Command::new(finder).arg(name).output() {
+        if let Ok(out) = crate::proc::quiet_command(finder).arg(name).output() {
             if out.status.success() {
                 if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
                     let p = line.trim();
