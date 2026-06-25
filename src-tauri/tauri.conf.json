@@ -24,32 +24,13 @@
     }
   },
   "bundle": {
-    "active": true,
-    "targets": ["nsis"],
-    "createUpdaterArtifacts": true,
+    "active": false,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ],
-    "windows": {
-      "nsis": {
-        "installMode": "both",
-        "installerIcon": "icons/icon.ico",
-        "headerImage": "installer/header.bmp",
-        "sidebarImage": "installer/sidebar.bmp",
-        "template": "installer/installer.nsi"
-      }
-    }
-  },
-  "plugins": {
-    "updater": {
-      "endpoints": [
-        "https://github.com/DemOnJR/xConsole/releases/latest/download/latest.json"
-      ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY1QjEyMjFGRDk4RUE3NEMKUldSTXA0N1pIeUt4WlVwNmxOemtMaUF2TENsdnU4N0RLRDNhT0RzaHFMT094VlpKMUQzMCt2SmkK"
-    }
+    ]
   }
 }

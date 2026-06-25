@@ -8,8 +8,10 @@ If the user asks you to **compile / build / make an installer / cut a release**,
 Run these from the **project root** (`..`), not from `src-tauri/`:
 
 - **Dev (hot reload):** `pnpm tauri dev`
-- **Production build** (Windows NSIS installer + signed update artifacts): `pnpm tauri build`
-  - Output: `src-tauri/target/release/bundle/nsis/xConsole_<version>_x64-setup.exe` (and its `.sig`)
+- **Production build** (compiles the app binary — xConsole is distributed via the
+  clone+compile installer, **not** a Tauri bundle): on this toolchain,
+  `cargo +stable-x86_64-pc-windows-gnu build --release` from `src-tauri/`.
+  - Output: `src-tauri/target/release/xconsole.exe` (+ `WebView2Loader.dll`)
 - **Frontend typecheck:** `npx tsc --noEmit`
 
 Run this from **`src-tauri/`**:
@@ -21,36 +23,22 @@ Run this from **`src-tauri/`**:
     (`STATUS_ENTRYPOINT_NOT_FOUND`, a native-DLL link quirk) — that's environmental, not a
     code failure. Treat `cargo build` success as the gate.
 
-## Signing is REQUIRED for release builds (auto-update will reject unsigned bundles)
+## Cutting a release (clone + compile distribution)
 
-`pnpm tauri build` only signs the updater artifacts when these env vars are set:
+xConsole is **not** shipped as a signed Tauri bundle. It's distributed via the
+clone+compile installer in `../installer/`, and the in-app updater
+(`src/commands/update.rs`) rebuilds from `origin/main`. So there's no version tag/bump and
+no signing step — releases are commit-based off `main`:
 
-- `TAURI_SIGNING_PRIVATE_KEY` — the updater private key (string contents OR a path).
-  The key file is `../.tauri-signing/xconsole.key` (**gitignored — never commit or print it**).
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — **empty** (the key has no password).
+1. Merge your changes to `main`.
+2. The **Build installer** workflow (`../.github/workflows/installer-release.yml`) builds
+   `xConsole-Setup.exe` on `windows-latest` and publishes it to the rolling
+   `installer-latest` GitHub Release (marked `--latest`), so `…/releases/latest` always
+   serves the newest installer. No secrets needed (preinstalled `rustup` + `gh` +
+   automatic `GITHUB_TOKEN`).
 
-PowerShell example for a local signed build:
-
-```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw ..\.tauri-signing\xconsole.key
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
-pnpm tauri build
-```
-
-Without these, you still get an installer but **no valid `.sig`**, so existing installs will
-refuse to auto-update. For real releases, prefer the CI path below (it signs from repo secrets).
-
-## Cutting a release (the normal path — CI builds & signs)
-
-1. Bump `"version"` in **both** `../package.json` and `tauri.conf.json` to the new number.
-2. `git commit -am "Release vX.Y.Z" && git tag vX.Y.Z && git push origin main --tags`
-3. The GitHub Actions **Release** workflow (`../.github/workflows/release.yml`) builds + signs +
-   creates a **draft** GitHub release with the installer + `latest.json`. Review it, then
-   **Publish** — only a published (non-draft, non-prerelease) release reaches users via
-   auto-update (`endpoints` → `…/releases/latest/download/latest.json`).
-
-The detailed release runbook + the exact GitHub secrets to configure are kept in a
-private local note (not committed to this repo).
+Existing users get an "Update available" prompt (their checkout is behind `origin/main`)
+and rebuild in one click. See `../RELEASING.md` for the full picture.
 
 ## Data safety — never break this
 
@@ -66,9 +54,9 @@ SSH keys) — **never** in the repo or the install directory. An update only rep
 
 ## Key files in this directory
 
-- `Cargo.toml` — Rust dependencies (incl. `tauri-plugin-updater`, `tauri-plugin-process`).
-- `tauri.conf.json` — bundle + updater config (`endpoints`, `pubkey`, NSIS `installMode`).
-  The `pubkey` here is the **public** half of the signing key; it is safe to commit.
-- `capabilities/default.json` — frontend permissions (incl. `updater:default`, `process:default`).
+- `Cargo.toml` — Rust dependencies.
+- `tauri.conf.json` — app/window config. `bundle.active` is `false` (xConsole ships via the
+  clone+compile installer, not a Tauri bundle).
+- `capabilities/default.json` — frontend permissions for the main window.
 - `src/lib.rs` — app setup: DB open, plugin registration, pre-update DB backup, command registry.
 - `src/mcp/server.rs` — the stdio MCP server Cursor uses (run/read/write/canvas/brief tools).

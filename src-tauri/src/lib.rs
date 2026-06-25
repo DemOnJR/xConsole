@@ -26,9 +26,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
-        // Signed auto-update from GitHub releases + relaunch after install.
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         // Restore the window to where it was last left (position/size/maximized),
         // on whichever monitor it was on. Minimized isn't restored — see the guard
         // in setup() that centers an off-screen window instead.
