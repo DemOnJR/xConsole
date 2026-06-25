@@ -1,0 +1,788 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Install xConsole</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --border: #e5e7eb;
+    --ink: #111827;
+    --muted: #6b7280;
+    --muted-soft: #9ca3af;
+    --blue: #3b82f6;
+    --blue-dark: #2563eb;
+    --blue-darker: #1d4ed8;
+    --green: #16a34a;
+    --green-soft: #22c55e;
+    --red: #dc2626;
+    --orange: #f59e0b;
+    --shadow: 0 1px 2px rgba(16,24,40,.04), 0 8px 24px rgba(16,24,40,.06);
+    --shadow-sm: 0 1px 2px rgba(16,24,40,.05), 0 2px 8px rgba(16,24,40,.04);
+    --term-bg: #0f172a;
+    --term-ink: #cbd5e1;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+    user-select: none;
+    cursor: default;
+  }
+
+  /* ---------- View system ---------- */
+  .view {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity .28s ease;
+    pointer-events: none;
+  }
+  .view.active {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+  }
+
+  /* ---------- Buttons ---------- */
+  button {
+    font-family: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    border: none;
+    background: none;
+    color: inherit;
+  }
+  .btn-primary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background: var(--blue);
+    color: #fff;
+    font-weight: 600;
+    padding: 11px 22px;
+    border-radius: 10px;
+    box-shadow: 0 1px 2px rgba(37,99,235,.25);
+    transition: background .15s ease, transform .05s ease, box-shadow .15s ease;
+  }
+  .btn-primary:hover { background: var(--blue-dark); }
+  .btn-primary:active { background: var(--blue-darker); transform: translateY(1px); }
+  .btn-primary:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(59,130,246,.4);
+  }
+
+  .btn-ghost {
+    color: var(--muted);
+    font-weight: 500;
+    padding: 9px 16px;
+    border-radius: 8px;
+    transition: background .15s ease, color .15s ease;
+  }
+  .btn-ghost:hover { background: #f3f4f6; color: var(--ink); }
+  .btn-ghost:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(59,130,246,.3);
+  }
+
+  .btn-arrow { font-size: 16px; line-height: 1; margin-top: -1px; }
+
+  /* ---------- Welcome view ---------- */
+  #welcome {
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 40px;
+  }
+  .logo-wrap { margin-bottom: 22px; }
+  .wordmark {
+    font-size: 38px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: 0 0 12px;
+    color: var(--ink);
+  }
+  .subtitle {
+    font-size: 15px;
+    color: var(--muted);
+    max-width: 430px;
+    margin: 0 auto 18px;
+    line-height: 1.55;
+  }
+  .fineprint {
+    font-size: 12.5px;
+    color: var(--muted-soft);
+    margin: 0 auto 32px;
+  }
+  .welcome-actions {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+  .welcome-actions .btn-primary {
+    padding: 13px 28px;
+    font-size: 15px;
+    border-radius: 11px;
+  }
+
+  /* ---------- Installing view ---------- */
+  #installing { padding: 26px 30px 18px; }
+
+  .install-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 14px;
+  }
+  .install-title {
+    font-size: 19px;
+    font-weight: 600;
+    color: var(--ink);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .install-count {
+    font-size: 13px;
+    color: var(--muted);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .progress-track {
+    height: 6px;
+    background: #eef0f3;
+    border-radius: 99px;
+    overflow: hidden;
+    margin-bottom: 22px;
+  }
+  .progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--blue), var(--blue-dark));
+    border-radius: 99px;
+    transition: width .45s cubic-bezier(.4,0,.2,1);
+  }
+
+  .install-body {
+    flex: 1;
+    display: flex;
+    gap: 18px;
+    min-height: 0;
+  }
+
+  .steps-col {
+    flex: 0 0 44%;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+  .steps-col::-webkit-scrollbar { width: 8px; }
+  .steps-col::-webkit-scrollbar-thumb { background: #e5e7eb; border-radius: 8px; }
+
+  .step-row {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 9px 4px;
+    border-radius: 8px;
+  }
+  .step-glyph {
+    flex: 0 0 18px;
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .step-label {
+    flex: 1;
+    font-size: 13.5px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: color .2s ease;
+  }
+  .step-row.running .step-label { color: var(--ink); font-weight: 600; }
+  .step-row.done .step-label { color: #374151; }
+  .step-row.error .step-label { color: var(--red); font-weight: 600; }
+  .step-dur {
+    font-size: 11.5px;
+    color: var(--muted-soft);
+    font-variant-numeric: tabular-nums;
+    flex: 0 0 auto;
+  }
+
+  /* glyph: pending hollow dot */
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    border: 1.5px solid #cbd5e1;
+    box-sizing: border-box;
+  }
+  /* glyph: spinner */
+  .spinner {
+    width: 15px;
+    height: 15px;
+    border: 2px solid rgba(59,130,246,.25);
+    border-top-color: var(--blue);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  /* glyph: check */
+  .check {
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--green-soft);
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700;
+    line-height: 1;
+  }
+  /* glyph: cross */
+  .cross {
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--red);
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700;
+    line-height: 1;
+  }
+
+  /* Live output panel */
+  .output-col {
+    flex: 1 1 56%;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .output-card {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+    min-height: 0;
+  }
+  .output-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 9px 13px;
+    border-bottom: 1px solid var(--border);
+    background: #fbfbfc;
+    flex: 0 0 auto;
+  }
+  .output-head-title {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: #374151;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .output-head-title::before {
+    content: "";
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--green-soft);
+    box-shadow: 0 0 0 3px rgba(34,197,94,.18);
+  }
+  .output-lines {
+    font-size: 11.5px;
+    color: var(--muted-soft);
+    font-variant-numeric: tabular-nums;
+  }
+  .output-body {
+    flex: 1;
+    overflow-y: auto;
+    background: var(--term-bg);
+    color: var(--term-ink);
+    font-family: "SF Mono", "Cascadia Code", "Consolas", ui-monospace, Menlo, Monaco, monospace;
+    font-size: 11.5px;
+    line-height: 1.65;
+    padding: 10px 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .output-body::-webkit-scrollbar { width: 9px; }
+  .output-body::-webkit-scrollbar-thumb { background: #334155; border-radius: 8px; }
+  .output-body::-webkit-scrollbar-track { background: transparent; }
+  .log-line { display: block; }
+  .log-line .ts { color: #64748b; margin-right: 8px; }
+
+  .install-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 14px;
+    margin-top: 4px;
+    flex: 0 0 auto;
+  }
+  .details-toggle {
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 500;
+    padding: 7px 10px;
+    border-radius: 7px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    transition: background .15s ease, color .15s ease;
+  }
+  .details-toggle:hover { background: #f3f4f6; color: var(--ink); }
+  .details-toggle:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(59,130,246,.3); }
+
+  /* collapsed details */
+  #installing.details-hidden .output-col { display: none; }
+  #installing.details-hidden .steps-col { flex-basis: 100%; }
+
+  /* ---------- Done / Error view ---------- */
+  #done {
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 40px;
+  }
+  .result-badge {
+    width: 76px; height: 76px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 24px;
+    animation: pop .35s cubic-bezier(.2,.9,.3,1.4);
+  }
+  @keyframes pop {
+    0% { transform: scale(.5); opacity: 0; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  .result-badge.ok { background: rgba(34,197,94,.13); }
+  .result-badge.fail { background: rgba(220,38,38,.12); }
+  .result-badge svg { width: 40px; height: 40px; }
+  .result-title {
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    margin: 0 0 10px;
+  }
+  .result-sub {
+    font-size: 14px;
+    color: var(--muted);
+    margin: 0 auto 28px;
+    max-width: 400px;
+  }
+  .error-box {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #b91c1c;
+    font-family: "SF Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+    font-size: 12px;
+    line-height: 1.55;
+    text-align: left;
+    padding: 12px 14px;
+    border-radius: 10px;
+    max-width: 460px;
+    margin: 0 auto 26px;
+    max-height: 140px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    user-select: text;
+  }
+  .done-actions {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+  .done-actions .btn-primary { padding: 12px 26px; font-size: 15px; }
+</style>
+</head>
+<body>
+
+  <!-- ============ WELCOME ============ -->
+  <section id="welcome" class="view active">
+    <div class="logo-wrap" aria-hidden="true">
+      <svg width="76" height="76" viewBox="0 0 76 76" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="xConsole logo">
+        <defs>
+          <linearGradient id="ringBlue" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#60a5fa"/>
+            <stop offset="1" stop-color="#3b82f6"/>
+          </linearGradient>
+          <linearGradient id="ringOrange" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#fbbf24"/>
+            <stop offset="1" stop-color="#f59e0b"/>
+          </linearGradient>
+        </defs>
+        <!-- blue ring (behind, lower-right) -->
+        <circle cx="46" cy="44" r="20" stroke="url(#ringBlue)" stroke-width="6" fill="none"/>
+        <!-- orange ring (front, upper-left) -->
+        <circle cx="30" cy="32" r="20" stroke="url(#ringOrange)" stroke-width="6" fill="none"/>
+        <!-- prompt caret core -->
+        <path d="M25 27.5 L33 33.5 L25 39.5" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      </svg>
+    </div>
+    <h1 class="wordmark">xConsole</h1>
+    <p class="subtitle">AI VPS cockpit — your terminals, SFTP, and an AI agent on one canvas.</p>
+    <p class="fineprint">Installs just for you — no admin required. Takes a few seconds.</p>
+    <div class="welcome-actions">
+      <button id="installBtn" class="btn-primary" autofocus>
+        Install xConsole <span class="btn-arrow">&rarr;</span>
+      </button>
+      <button id="cancelWelcome" class="btn-ghost">Cancel</button>
+    </div>
+  </section>
+
+  <!-- ============ INSTALLING ============ -->
+  <section id="installing" class="view">
+    <div class="install-header">
+      <div class="install-title" id="currentStep">Preparing…</div>
+      <div class="install-count" id="stepCount">0 of 0 steps</div>
+    </div>
+    <div class="progress-track">
+      <div class="progress-fill" id="progressFill"></div>
+    </div>
+    <div class="install-body">
+      <div class="steps-col" id="stepsList"></div>
+      <div class="output-col">
+        <div class="output-card">
+          <div class="output-head">
+            <div class="output-head-title">Live output</div>
+            <div class="output-lines" id="lineCount">0 lines</div>
+          </div>
+          <div class="output-body" id="logBody"></div>
+        </div>
+      </div>
+    </div>
+    <div class="install-footer">
+      <button class="details-toggle" id="detailsToggle">
+        <span id="detailsIcon">&#9662;</span> <span id="detailsText">Hide details</span>
+      </button>
+      <button class="btn-ghost" id="cancelInstall">Cancel</button>
+    </div>
+  </section>
+
+  <!-- ============ DONE / ERROR ============ -->
+  <section id="done" class="view">
+    <div class="result-badge ok" id="resultBadge"></div>
+    <h2 class="result-title" id="resultTitle">xConsole is installed</h2>
+    <p class="result-sub" id="resultSub">It's been added to your Start Menu and Desktop.</p>
+    <div class="error-box" id="errorBox" style="display:none"></div>
+    <div class="done-actions" id="doneActions"></div>
+  </section>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---- Tauri bridge (safe in a plain browser) ----
+  var TAURI = (typeof window !== "undefined" && window.__TAURI__) ? window.__TAURI__ : null;
+
+  function invoke(cmd) {
+    if (TAURI && TAURI.core && typeof TAURI.core.invoke === "function") {
+      try { return TAURI.core.invoke(cmd); }
+      catch (e) { return Promise.reject(e); }
+    }
+    // Browser fallback: no-op so the UI still renders/works for previewing.
+    console.log("[invoke fallback]", cmd);
+    return Promise.resolve();
+  }
+
+  function listen(eventName, handler) {
+    if (TAURI && TAURI.event && typeof TAURI.event.listen === "function") {
+      return TAURI.event.listen(eventName, handler);
+    }
+    return Promise.resolve(function () {}); // unlisten no-op
+  }
+
+  // ---- Elements ----
+  var views = {
+    welcome: document.getElementById("welcome"),
+    installing: document.getElementById("installing"),
+    done: document.getElementById("done")
+  };
+  var installingEl = views.installing;
+
+  var elCurrentStep = document.getElementById("currentStep");
+  var elStepCount   = document.getElementById("stepCount");
+  var elProgress    = document.getElementById("progressFill");
+  var elStepsList   = document.getElementById("stepsList");
+  var elLogBody     = document.getElementById("logBody");
+  var elLineCount   = document.getElementById("lineCount");
+
+  var SVG_CHECK = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5 13l4 4L19 7" stroke="#16a34a" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var SVG_CROSS = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M7 7l10 10M17 7L7 17" stroke="#dc2626" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+  // ---- State ----
+  var steps = [];        // [{ label, status, ms, rowEl, glyphEl, durEl }]
+  var total = 0;
+  var lineCount = 0;
+  var finished = false;  // guards against post-completion step updates
+
+  // ---- View switching ----
+  function showView(name) {
+    Object.keys(views).forEach(function (k) {
+      views[k].classList.toggle("active", k === name);
+    });
+  }
+
+  // ---- Steps rendering ----
+  function glyphFor(status) {
+    if (status === "running") return '<div class="spinner"></div>';
+    if (status === "done")    return '<div class="check">&#10003;</div>';
+    if (status === "error")   return '<div class="cross">&#10005;</div>';
+    return '<div class="dot"></div>';
+  }
+
+  function renderPlan(labels) {
+    steps = [];
+    total = labels.length;
+    elStepsList.innerHTML = "";
+
+    labels.forEach(function (label) {
+      var row = document.createElement("div");
+      row.className = "step-row pending";
+
+      var glyph = document.createElement("div");
+      glyph.className = "step-glyph";
+      glyph.innerHTML = glyphFor("pending");
+
+      var lbl = document.createElement("div");
+      lbl.className = "step-label";
+      lbl.textContent = label;
+
+      var dur = document.createElement("div");
+      dur.className = "step-dur";
+      dur.textContent = "";
+
+      row.appendChild(glyph);
+      row.appendChild(lbl);
+      row.appendChild(dur);
+      elStepsList.appendChild(row);
+
+      steps.push({ label: label, status: "pending", ms: null, rowEl: row, glyphEl: glyph, durEl: dur });
+    });
+
+    updateHeader();
+  }
+
+  function updateStep(index, status, ms) {
+    if (index < 0 || index >= steps.length) return;
+    var s = steps[index];
+    s.status = status;
+    if (ms !== null && ms !== undefined) s.ms = ms;
+
+    s.rowEl.className = "step-row " + status;
+    s.glyphEl.innerHTML = glyphFor(status);
+
+    if (status === "done" && s.ms !== null && s.ms !== undefined) {
+      s.durEl.textContent = Math.round(s.ms) + "ms";
+    } else if (status === "error") {
+      s.durEl.textContent = "";
+    }
+
+    updateHeader();
+
+    // keep the active step in view if the list scrolls
+    if (status === "running" && s.rowEl.scrollIntoView) {
+      try { s.rowEl.scrollIntoView({ block: "nearest" }); } catch (e) {}
+    }
+  }
+
+  function doneCount() {
+    var c = 0;
+    for (var i = 0; i < steps.length; i++) {
+      if (steps[i].status === "done") c++;
+    }
+    return c;
+  }
+
+  function updateHeader() {
+    var dc = doneCount();
+    var t = total || steps.length;
+
+    var running = null, lastErr = null;
+    for (var i = 0; i < steps.length; i++) {
+      if (steps[i].status === "running") running = steps[i];
+      if (steps[i].status === "error") lastErr = steps[i];
+    }
+    if (running) elCurrentStep.textContent = running.label;
+    else if (lastErr) elCurrentStep.textContent = lastErr.label;
+    else if (dc >= t && t > 0) elCurrentStep.textContent = "Finishing up…";
+
+    elStepCount.textContent = dc + " of " + t + " steps";
+
+    var pct = t > 0 ? (dc / t) * 100 : 0;
+    elProgress.style.width = pct + "%";
+  }
+
+  // ---- Log panel ----
+  function pad2(n) { return n < 10 ? "0" + n : "" + n; }
+  function appendLog(text) {
+    var atBottom = (elLogBody.scrollHeight - elLogBody.scrollTop - elLogBody.clientHeight) < 24;
+
+    var d = new Date();
+    var ts = pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
+
+    var line = document.createElement("span");
+    line.className = "log-line";
+    var t = document.createElement("span");
+    t.className = "ts";
+    t.textContent = ts;
+    line.appendChild(t);
+    line.appendChild(document.createTextNode(String(text)));
+    elLogBody.appendChild(line);
+
+    lineCount++;
+    elLineCount.textContent = lineCount + (lineCount === 1 ? " line" : " lines");
+
+    if (atBottom) elLogBody.scrollTop = elLogBody.scrollHeight;
+  }
+
+  // ---- Done / error screens ----
+  function showDone() {
+    finished = true;
+    var badge = document.getElementById("resultBadge");
+    badge.className = "result-badge ok";
+    badge.innerHTML = SVG_CHECK;
+    document.getElementById("resultTitle").textContent = "xConsole is installed";
+    var sub = document.getElementById("resultSub");
+    sub.textContent = "It's been added to your Start Menu and Desktop.";
+    sub.style.display = "";
+    document.getElementById("errorBox").style.display = "none";
+
+    var actions = document.getElementById("doneActions");
+    actions.innerHTML = "";
+    var launch = document.createElement("button");
+    launch.className = "btn-primary";
+    launch.textContent = "Launch xConsole";
+    launch.addEventListener("click", function () { invoke("launch_app"); });
+    var close = document.createElement("button");
+    close.className = "btn-ghost";
+    close.textContent = "Close";
+    close.addEventListener("click", function () { invoke("close_installer"); });
+    actions.appendChild(launch);
+    actions.appendChild(close);
+
+    showView("done");
+    setTimeout(function () { launch.focus(); }, 60);
+  }
+
+  function showError(message) {
+    finished = true;
+    var badge = document.getElementById("resultBadge");
+    badge.className = "result-badge fail";
+    badge.innerHTML = SVG_CROSS;
+    document.getElementById("resultTitle").textContent = "Installation failed";
+    document.getElementById("resultSub").style.display = "none";
+
+    var box = document.getElementById("errorBox");
+    box.style.display = "";
+    box.textContent = (message && String(message).trim())
+      ? String(message)
+      : "An unexpected error occurred during installation.";
+
+    var actions = document.getElementById("doneActions");
+    actions.innerHTML = "";
+    var close = document.createElement("button");
+    close.className = "btn-primary";
+    close.textContent = "Close";
+    close.addEventListener("click", function () { invoke("close_installer"); });
+    actions.appendChild(close);
+
+    showView("done");
+    setTimeout(function () { close.focus(); }, 60);
+  }
+
+  // ---- Event listeners (registered BEFORE start_install) ----
+  var listenersReady = false;
+  function setupListeners() {
+    if (listenersReady) return Promise.resolve();
+    listenersReady = true;
+
+    return Promise.all([
+      listen("install://plan", function (e) {
+        var plan = e && e.payload;
+        if (Array.isArray(plan)) renderPlan(plan);
+      }),
+      listen("install://step", function (e) {
+        if (finished) return;
+        var p = e && e.payload;
+        if (p && typeof p.index === "number") {
+          updateStep(p.index, p.status, (typeof p.ms === "number") ? p.ms : null);
+        }
+      }),
+      listen("install://log", function (e) {
+        if (e && e.payload !== undefined && e.payload !== null) appendLog(e.payload);
+      }),
+      listen("install://done", function (e) {
+        var p = (e && e.payload) || {};
+        if (p.ok) showDone();
+        else showError(p.error);
+      })
+    ]);
+  }
+
+  // ---- Wire up controls ----
+  document.getElementById("installBtn").addEventListener("click", function () {
+    showView("installing");
+    // Register listeners first, THEN start the install so we never miss install://plan.
+    setupListeners().then(function () {
+      return invoke("start_install");
+    }).catch(function (err) {
+      appendLog("Failed to start installer: " + err);
+      showError(String(err));
+    });
+  });
+
+  document.getElementById("cancelWelcome").addEventListener("click", function () {
+    invoke("close_installer");
+  });
+  document.getElementById("cancelInstall").addEventListener("click", function () {
+    invoke("close_installer");
+  });
+
+  // details toggle
+  document.getElementById("detailsToggle").addEventListener("click", function () {
+    var hidden = installingEl.classList.toggle("details-hidden");
+    document.getElementById("detailsIcon").innerHTML = hidden ? "&#9656;" : "&#9662;"; // ▸ / ▾
+    document.getElementById("detailsText").textContent = hidden ? "Show details" : "Hide details";
+  });
+
+  // ---- Initial state ----
+  showView("welcome");
+  window.addEventListener("DOMContentLoaded", function () {
+    var b = document.getElementById("installBtn");
+    if (b) b.focus();
+  });
+})();
+</script>
+</body>
+</html>

@@ -473,10 +473,6 @@ Function .onInit
   ${IfNot} ${Errors}
     StrCpy $PassiveMode 1
   ${EndIf}
-  ; xConsole: always run one-click (electron-builder style) — passive mode skips the
-  ; wizard pages and shows only the progress window, then auto-closes. The updater
-  ; already passes /P, so update installs are unaffected.
-  StrCpy $PassiveMode 1
 
   ${GetOptions} $CMDLINE "/NS" $NoShortcutMode
   ${IfNot} ${Errors}
@@ -645,10 +641,9 @@ Section Install
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"
 
-  ; xConsole: WebView2Loader.dll is built next to the main binary and the exe links
-  ; it dynamically, but Tauri's template doesn't copy it into the installer — so the
-  ; installed app fails to start (STATUS_DLL_NOT_FOUND). Include it explicitly. The
-  ; path is derived from the binary's own path, so it stays correct in CI too.
+  ; xConsole: bundle WebView2Loader.dll (built next to the main binary; our exe links
+  ; it dynamically). Tauri's stock template doesn't copy it, so the installed app
+  ; fails to start (STATUS_DLL_NOT_FOUND) without this. Path derives from the binary.
   File "/oname=WebView2Loader.dll" "${MAINBINARYSRCPATH}\..\WebView2Loader.dll"
 
   ; Copy resources
@@ -745,20 +740,14 @@ Section Install
 SectionEnd
 
 Function .onInstSuccess
-  ; In silent/passive installers the finish page (with its "run app" toggle) is
-  ; skipped, so launching is handled here.
+  ; Check for `/R` flag only in silent and passive installers because
+  ; GUI installer has a toggle for the user to (re)start the app
   ${If} $PassiveMode = 1
   ${OrIf} ${Silent}
-    ${If} $UpdateMode <> 1
-      ; xConsole: fresh one-click install -> auto-launch the app (electron-builder style).
-      nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" ""
-    ${Else}
-      ; Update install -> only relaunch when the updater asks via /R (original behavior).
-      ${GetOptions} $CMDLINE "/R" $R0
-      ${IfNot} ${Errors}
-        ${GetOptions} $CMDLINE "/ARGS" $R0
-        nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" "$R0"
-      ${EndIf}
+    ${GetOptions} $CMDLINE "/R" $R0
+    ${IfNot} ${Errors}
+      ${GetOptions} $CMDLINE "/ARGS" $R0
+      nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" "$R0"
     ${EndIf}
   ${EndIf}
 FunctionEnd

@@ -1,0 +1,31 @@
+# Standalone workspace so this never gets pulled into a parent Cargo workspace.
+[workspace]
+
+[package]
+name = "xconsole-installer"
+version = "0.1.0"
+edition = "2021"
+description = "xConsole Setup"
+license = "MIT"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+mslnk = "0.1"
+winreg = "0.52"
+
+# The setup .exe — embeds the compiled app (~48 MB) via include_bytes!, so a
+# release build with thin LTO keeps it reasonable and fast to start.
+[profile.release]
+opt-level = "s"
+lto = "thin"
+strip = true
+
+[[bin]]
+name = "xConsole-Setup"
+path = "src/main.rs"

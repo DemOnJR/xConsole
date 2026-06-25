@@ -3,6 +3,7 @@ name = "xconsole"
 version = "0.1.0"
 description = "xConsole - Multi-VPS Canvas Terminal"
 authors = ["xConsole"]
+license = "MIT"
 edition = "2021"
 
 [lib]

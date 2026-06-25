@@ -8,9 +8,20 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
-dist
-dist-ssr
+# Root frontend build output only — the installer's hand-written UI (installer/dist)
+# is source and IS tracked.
+/dist
+/dist-ssr
 *.local
+
+# Rust build output — NEVER committed. The whole point is that users clone clean
+# source and compile it on their own machine, so no build data ships in the repo.
+**/target/
+
+# Installer build artifacts + any bundled/prebuilt binaries. The installer is
+# compiled from installer/src; it never embeds a prebuilt app exe.
+installer/resources/
+*-setup.exe
 
 # Tauri updater signing keys — NEVER commit the private key.
 .tauri-signing/
