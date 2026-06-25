@@ -778,6 +778,32 @@ fn selftest() -> i32 {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    println!("\n=== SELFTEST: SSH key generation (Ed25519, post russh-0.61 upgrade) ===");
+    {
+        use russh::keys::{decode_secret_key, Algorithm};
+        match crate::ssh::keygen::generate_ed25519() {
+            Ok(k) => {
+                check(
+                    "keygen: public key is ssh-ed25519",
+                    k.public_openssh.starts_with("ssh-ed25519 "),
+                );
+                check("keygen: fingerprint is SHA256", k.fingerprint.starts_with("SHA256:"));
+                check(
+                    "keygen: private PEM decodes back to an Ed25519 key",
+                    decode_secret_key(&k.private_pem, None)
+                        .map(|d| d.algorithm() == Algorithm::Ed25519)
+                        .unwrap_or(false),
+                );
+                // Seeded from the OS CSPRNG, so two fresh keys must differ.
+                let other = crate::ssh::keygen::generate_ed25519()
+                    .map(|x| x.public_openssh)
+                    .unwrap_or_default();
+                check("keygen: two fresh keys differ (randomized)", k.public_openssh != other);
+            }
+            Err(e) => check(&format!("keygen ({e})"), false),
+        }
+    }
+
     println!("\nSELFTEST: {pass} passed, {fail} failed");
     if fail > 0 {
         1
