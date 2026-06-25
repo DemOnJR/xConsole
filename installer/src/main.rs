@@ -22,7 +22,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             install::start_install,
             install::launch_app,
-            install::close_installer
+            install::close_installer,
+            install::is_update_mode
         ])
         .run(tauri::generate_context!())
         .expect("error while running the xConsole installer");

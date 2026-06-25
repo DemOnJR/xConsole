@@ -778,9 +778,28 @@
 
   // ---- Initial state ----
   showView("welcome");
+  function autoStartInstall() {
+    showView("installing");
+    setupListeners().then(function () {
+      return invoke("start_install");
+    }).catch(function (err) {
+      appendLog("Failed to start: " + err);
+      showError(String(err));
+    });
+  }
   window.addEventListener("DOMContentLoaded", function () {
-    var b = document.getElementById("installBtn");
-    if (b) b.focus();
+    // Launched by the app's "Update now" → skip the welcome and rebuild immediately.
+    Promise.resolve(invoke("is_update_mode")).then(function (isUpdate) {
+      if (isUpdate) {
+        autoStartInstall();
+      } else {
+        var b = document.getElementById("installBtn");
+        if (b) b.focus();
+      }
+    }).catch(function () {
+      var b = document.getElementById("installBtn");
+      if (b) b.focus();
+    });
   });
 })();
 </script>

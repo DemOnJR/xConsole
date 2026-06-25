@@ -143,9 +143,31 @@ pub fn is_terraform_readonly(command: &str) -> bool {
         || lc.contains("local terraform init")
 }
 
-/// Whether a command may auto-run under allowlist safety mode.
+/// Substrings that name credential/secret stores. A command that references one of these must
+/// NOT auto-run under allowlist mode even when it is otherwise "read-only" (`cat`, `grep`, …):
+/// otherwise prompt-injected web/MCP content could make the agent read and exfiltrate keys
+/// without the user ever seeing an approval. Matching one of these forces the approval prompt.
+const SENSITIVE_PATH_MARKERS: &[&str] = &[
+    "/.ssh", "\\.ssh", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "authorized_keys",
+    "/.aws", "\\.aws", "/.gnupg", "\\.gnupg", "gcloud", "/.kube", "\\.kube", "/.docker/config",
+    ".env", "credential", "secret", "private_key", "privatekey", "passwd", "shadow",
+    ".pem", ".pfx", ".p12", ".key", ".keystore", ".netrc", ".pgpass", "wallet",
+    "xconsole.db", "db.lock.json", "id_rsa.pub",
+];
+
+/// Whether a command line references a likely credential/secret path (see
+/// [`SENSITIVE_PATH_MARKERS`]). Conservative on purpose — a false positive just means one extra
+/// approval prompt, while a miss could leak a key.
+pub fn touches_sensitive_path(command: &str) -> bool {
+    let lc = command.to_lowercase();
+    SENSITIVE_PATH_MARKERS.iter().any(|m| lc.contains(m))
+}
+
+/// Whether a command may auto-run under allowlist safety mode. Read-only/terraform-plan
+/// commands qualify — UNLESS they touch a sensitive credential path, which always needs
+/// explicit approval so injected content can't silently read secrets.
 pub fn is_allowlisted(command: &str) -> bool {
-    is_read_only(command) || is_terraform_readonly(command)
+    (is_read_only(command) || is_terraform_readonly(command)) && !touches_sensitive_path(command)
 }
 
 /// The global default safety mode (the `agent.safety_mode` setting), falling
@@ -317,6 +339,20 @@ mod tests {
         assert_eq!(resolve_session_mode(&s, "sess", "approve"), "full");
         // A different session is unaffected.
         assert_eq!(resolve_session_mode(&s, "other", "allowlist"), "allowlist");
+    }
+
+    #[test]
+    fn sensitive_path_reads_need_approval() {
+        // Read-only on its own…
+        assert!(is_read_only("cat -- /home/u/notes.txt"));
+        assert!(is_allowlisted("cat -- /home/u/notes.txt"));
+        // …but reading a credential path must NOT auto-run, even though `cat` is read-only.
+        assert!(is_read_only("cat -- /home/u/.ssh/id_rsa"));
+        assert!(!is_allowlisted("cat -- /home/u/.ssh/id_rsa"));
+        assert!(!is_allowlisted("cat ~/.aws/credentials"));
+        assert!(!is_allowlisted("grep -r secret /home/u/.env"));
+        assert!(touches_sensitive_path("cat /etc/shadow"));
+        assert!(!touches_sensitive_path("ls /var/www"));
     }
 
     #[test]

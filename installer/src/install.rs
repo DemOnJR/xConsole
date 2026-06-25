@@ -59,7 +59,12 @@ fn base_dir() -> PathBuf {
     // Optional explicit install root (lets a user/CI choose where xConsole lives;
     // also used for testing outside the default per-user location).
     if let Ok(b) = std::env::var("XCONSOLE_INSTALL_BASE") {
-        if !b.trim().is_empty() {
+        let b = b.trim();
+        // The path is later interpolated into PowerShell download/extract commands, so reject
+        // any value carrying shell metacharacters — otherwise a quote could break out of the
+        // PS string literal and inject commands. A normal Windows path has none of these.
+        let unsafe_char = b.chars().any(|c| "'\"`;&|$<>\r\n".contains(c));
+        if !b.is_empty() && !unsafe_char {
             return PathBuf::from(b);
         }
     }
@@ -372,6 +377,13 @@ pub fn run_install_headless() -> i32 {
             1
         }
     }
+}
+
+/// True when launched as `--update` (by the app's in-app updater) — the frontend uses
+/// this to skip the welcome screen and auto-start the rebuild.
+#[tauri::command]
+pub fn is_update_mode() -> bool {
+    std::env::args().any(|a| a == "--update")
 }
 
 #[tauri::command]

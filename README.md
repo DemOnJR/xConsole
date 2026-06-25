@@ -1,75 +1,136 @@
+<div align="center">
+
 # xConsole
 
-A multi-VPS canvas terminal. Drop live SSH terminals for all your servers onto a
-single zoomable, pannable canvas, switch between them instantly, and broadcast
-commands to many at once.
+**All your servers, on one canvas.**
 
-Built with **Tauri 2** (Rust) + **React 19** + **xterm.js** + **React Flow**, with a
+xConsole is a desktop app that puts a live SSH terminal for every one of your
+servers onto a single zoomable, pannable canvas — switch between them instantly,
+broadcast a command to many at once, and let a built-in AI assistant help you run
+and manage them.
+
+Built with **Tauri 2** (Rust) · **React 19** · **xterm.js** · **React Flow**, on a
 pure-Rust SSH stack (**russh**).
 
-## Features
+</div>
 
-- **Canvas of terminals** - each VPS is a draggable, resizable xterm.js node on an
+---
+
+> ## 🔒 Important: xConsole is a *local* app — don't run it on a public server
+>
+> xConsole is meant to run **on your own computer**, in **local mode only**. **Do not
+> deploy it on a public / internet-facing server or expose it on a public IP address.**
+>
+> Why: xConsole holds the keys to your infrastructure — your **SSH credentials** and
+> **cloud/API keys** (kept in your operating system's keychain) — and its built-in AI
+> assistant can **run shell commands on your machine and on your servers**. It is
+> designed for a single, trusted machine that only you control.
+>
+> It never opens a port to the outside world: its only background services (the local
+> AI helpers) listen on `127.0.0.1` (localhost) and are unreachable from the network.
+> So running it on a public box gains you nothing and risks exposing your credentials.
+> **Keep it on your desktop. 👍**
+
+---
+
+## ✨ What it does
+
+- **A canvas of terminals** — each server is a draggable, resizable terminal on an
   infinite canvas with zoom, pan, and a minimap.
-- **VPS picker** - add servers from a searchable sidebar; click to drop a connected
-  terminal on the canvas.
-- **Layout modes** - Freeform, Snap-to-grid, and one-click Tile auto-arrange.
-- **Workspaces** - save/restore named layouts (which servers, positions, viewport).
-- **Broadcast** - type one command and send it to all selected terminals.
-- **Remote code editing** - right-click a file in the SFTP browser and pick *Edit* to
-  open it in an in-app editor; save writes it straight back over SFTP (`Ctrl/⌘+S`).
-- **Focus mode** - double-click a terminal header to zoom into it; `Ctrl+Tab` cycles.
-- **Tiered rendering** - WebGL is reserved for focused terminals (LRU-capped) so the
-  app stays under the webview's ~16 WebGL-context limit when many VPS are open.
+- **Quick connect** — add servers from a searchable sidebar; click one to drop a
+  connected terminal onto the canvas.
+- **Broadcast** — type one command and send it to every selected terminal at once.
+- **Workspaces** — save and restore named layouts (which servers, where, and the view).
+- **Layout modes** — Freeform, Snap-to-grid, and one-click Tile auto-arrange.
+- **Remote file editing** — right-click a file in the SFTP browser → *Edit* to open it
+  in an in-app editor; `Ctrl/⌘+S` saves it straight back over SFTP.
+- **Built-in AI assistant** — ask it to check, fix, or set things up across your
+  servers. Works with local models (Ollama / llama.cpp) or cloud providers.
+- **Focus mode** — double-click a terminal header to zoom in; `Ctrl+Tab` cycles.
 
-## Security
+## 🚀 Install (the easy way)
 
-See [SECURITY.md](SECURITY.md). Highlights:
+xConsole compiles itself from source on your PC, so you always run a build you can
+inspect — and there's a one-click installer that handles everything for you.
 
-- SSH keys are referenced by **path** only; passwords/passphrases live in the **OS
-  keychain** (never in the local database) and key material is **zeroized** after use.
-- **Host key verification** (trust-on-first-use) protects against MITM.
-- **7-day dependency cooldown** on both npm (pnpm) and Cargo dependencies to defend
-  against supply-chain attacks.
+1. **[➡️ Download the installer](https://github.com/DemOnJR/xConsole/releases/latest)**
+   — grab `xConsole-Setup-windows-x64.zip` from the latest release.
+2. **Right-click the zip → Extract All.**
+3. **Double-click `xConsole-Setup.exe`** and press **Install**.
 
-## Prerequisites (Windows)
+That's it. The installer downloads the build tools it needs and compiles xConsole on
+your machine (about **10–20 minutes** the first time). It needs an **internet
+connection**, but **no administrator rights** — everything installs neatly under your
+own user folder.
 
-- Node.js 22+ and **pnpm** (`corepack enable pnpm`)
-- Rust via rustup. This project links with the **GNU** toolchain plus MinGW gcc
-  (no Visual Studio required):
+> **Updating later** is just as easy: xConsole tells you when there's a new version and
+> updates itself in one click. Your chats, workspaces, settings, and saved keys are
+> always kept safe across updates.
+
+*(Windows is supported today. macOS/Linux builds are on the roadmap.)*
+
+## 🛠️ Build from source (for developers)
+
+Prefer to build it yourself? You'll need:
+
+- **Node.js 22+** and **pnpm** (`corepack enable pnpm`)
+- **Rust** via rustup. xConsole links with the **GNU** toolchain + MinGW gcc, so you
+  *don't* need Visual Studio:
 
 ```powershell
 rustup toolchain install stable-x86_64-pc-windows-gnu
 winget install -e --id BrechtSanders.WinLibs.POSIX.UCRT --scope user
-# In src-tauri:
+# In the src-tauri folder:
 rustup override set stable-x86_64-pc-windows-gnu
 ```
 
-Ensure the MinGW `bin` directory and `~/.cargo/bin` are on your PATH.
-
-## Develop
+Make sure the MinGW `bin` directory and `~/.cargo/bin` are on your `PATH`. Then:
 
 ```powershell
-pnpm install           # respects the 7-day dependency cooldown
-pnpm tauri dev         # launches the desktop app with hot reload
+pnpm install      # respects a 7-day dependency cooldown (see Security)
+pnpm tauri dev    # run with hot reload
+pnpm tauri build  # produce a release build
 ```
 
-## Build
+## 🛡️ Is it safe?
 
-```powershell
-pnpm tauri build
+Yes — and because xConsole is **open source**, you don't have to take our word for it:
+the security doesn't rely on hiding the code. Highlights:
+
+- **Your secrets stay in the OS keychain.** SSH passwords/passphrases and API keys live
+  in Windows Credential Manager (or the macOS/Linux equivalent) — **never** in the app's
+  database — and key material is wiped from memory right after it's used.
+- **Optional app lock (encryption at rest).** Turn on a master password and your local
+  database is encrypted with **AES-256-GCM**; the key is derived with **PBKDF2** and can
+  be remembered on your trusted device via the OS keychain. There's no backdoor and no
+  recovery — a stolen database file is just noise without your password.
+- **Host-key verification (TOFU)** protects your SSH sessions against man-in-the-middle.
+- **Supply-chain hardening** — a **7-day cooldown** on every dependency (npm *and* Cargo)
+  plus advisory/license audits in CI, so a freshly-published malicious package can't
+  sneak in.
+- **Local-only by design** (see the note at the top).
+
+Full details are in **[SECURITY.md](SECURITY.md)**. Found a vulnerability? Please report
+it privately to the maintainers before disclosing it publicly.
+
+## 🧱 Project layout
+
 ```
-
-## Project layout
-
-```
-src/                     React UI
-  components/            Sidebar, CanvasFlow, TerminalNode, Toolbar, VpsForm
-  stores/                Zustand: vps, canvas, session, workspace
-  lib/tauri.ts           Typed IPC + event bridge
+src/                       React UI
+  components/              Sidebar, CanvasFlow, TerminalNode, Toolbar, AgentPanel…
+  stores/                 Zustand state: vps, canvas, session, workspace, agent, lock
+  lib/tauri.ts            Typed IPC + event bridge
 src-tauri/src/
-  ssh/                   russh client, session manager, host-key TOFU
-  storage/               SQLite (VPS, workspaces, known_hosts)
-  secrets.rs             OS keychain (keyring) + zeroize
-  commands/              Tauri command handlers
+  ssh/                    russh client, session manager, host-key TOFU
+  ai/                     the built-in agent (context, tools, providers, voice)
+  storage/                SQLite + at-rest encryption
+  crypto.rs / lock.rs     master-password key wrapping + the lock manifest
+  secrets.rs              OS keychain (keyring) + zeroize
+  mcp/                    local MCP server (stdio)
+  commands/               Tauri command handlers
+installer/                the one-click "clone + compile on your PC" setup app
 ```
+
+## 📄 License
+
+xConsole is released under the **[MIT License](LICENSE)**.

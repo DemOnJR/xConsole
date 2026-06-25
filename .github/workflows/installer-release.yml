@@ -1,0 +1,122 @@
+name: Installer Release
+
+# Builds the one-click xConsole installer — the "clone + compile on your PC" setup.exe
+# that lives in installer/ — and publishes it to a rolling GitHub Release. Anyone can then
+# grab the newest installer from:
+#   https://github.com/DemOnJR/xConsole/releases/latest
+#
+# It re-runs automatically whenever the installer source changes on main, so editing the
+# installer ships a fresh download with no manual steps. You can also trigger it by hand
+# from the Actions tab (Run workflow).
+#
+# No repo secrets are required: it publishes with the automatic GITHUB_TOKEN and uses only
+# tools preinstalled on the runner (rustup + the GitHub CLI), so there is no third-party
+# action in the release path to trust.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "installer/**"
+      - ".github/workflows/installer-release.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # required to create/update the GitHub Release
+
+# Never let two installer releases race each other.
+concurrency:
+  group: installer-release
+  cancel-in-progress: true
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # windows-latest ships rustup + the MSVC toolchain + the Windows SDK preinstalled,
+      # so the installer .exe builds with the default stable-msvc target right away.
+      # (The *GNU* toolchain is only needed on the END USER's machine, where the installer
+      # itself compiles the main app at install time — that is not built here.)
+      - name: Show Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            installer/target
+          key: installer-${{ runner.os }}-${{ hashFiles('installer/Cargo.lock') }}
+          restore-keys: |
+            installer-${{ runner.os }}-
+
+      - name: Build the installer
+        working-directory: installer
+        run: cargo build --release --locked
+
+      - name: Package the download
+        id: package
+        shell: pwsh
+        working-directory: installer
+        run: |
+          $rel = "target/release"
+          $exe = Join-Path $rel "xConsole-Setup.exe"
+          if (-not (Test-Path $exe)) { throw "build did not produce $exe" }
+
+          $stage = "release-staging"
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item $exe (Join-Path $stage "xConsole-Setup.exe")
+
+          # WebView2Loader.dll is only emitted when it is not statically linked into the
+          # exe; bundle it next to the installer when present so the setup window always opens.
+          $dll = Join-Path $rel "WebView2Loader.dll"
+          if (Test-Path $dll) {
+            Copy-Item $dll (Join-Path $stage "WebView2Loader.dll")
+            Write-Host "Bundled WebView2Loader.dll alongside the installer."
+          } else {
+            Write-Host "WebView2Loader is statically linked — shipping a single exe."
+          }
+
+          $zip = "xConsole-Setup-windows-x64.zip"
+          Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -Force
+
+          "zip=installer/$zip" >> $env:GITHUB_OUTPUT
+          "exe=installer/$rel/xConsole-Setup.exe" >> $env:GITHUB_OUTPUT
+
+      - name: Publish the rolling "installer-latest" release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag  = "installer-latest"
+          $sha  = "${{ github.sha }}".Substring(0, 7)
+          $date = Get-Date -Format "yyyy-MM-dd"
+
+          # Built as a string array (not a here-string) so YAML indentation can't break it.
+          $notes = @(
+            "**One-click xConsole installer** - always the latest build from the main branch.",
+            "",
+            "### Install",
+            "1. Download **xConsole-Setup-windows-x64.zip** below.",
+            "2. Right-click the zip and choose **Extract All**.",
+            "3. Double-click **xConsole-Setup.exe** and press **Install**.",
+            "",
+            "The installer fetches the build tools and compiles xConsole from source on your own PC (about 10-20 minutes the first time). No admin rights are needed - everything installs under your user profile. Running it again later updates xConsole in place.",
+            "",
+            "Built from commit ``$sha`` on $date."
+          ) -join "`n"
+
+          # Rolling release: drop the previous tag/release so this one tracks the latest
+          # commit, then recreate it with fresh assets. The first run has nothing to delete.
+          gh release delete $tag --yes --cleanup-tag 2>$null
+          gh release create $tag `
+            "${{ steps.package.outputs.zip }}" `
+            "${{ steps.package.outputs.exe }}" `
+            --target "${{ github.sha }}" `
+            --title "xConsole Installer (latest)" `
+            --notes "$notes" `
+            --latest

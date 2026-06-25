@@ -45,6 +45,13 @@ RELEASING.md
 *.p12
 *.key
 
+# At-rest-encryption working/backup artifacts — these can hold PLAINTEXT user data and must
+# never be committed if one ever lands in the working tree during development.
+*.bak
+*.migsnap
+db.lock.json
+xconsole-unencrypted-backup-*.db
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
