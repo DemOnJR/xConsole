@@ -778,6 +778,54 @@ fn selftest() -> i32 {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    println!("\n=== SELFTEST: SSH key generation (Ed25519, post russh-0.61 upgrade) ===");
+    {
+        use russh::keys::{decode_secret_key, Algorithm};
+        match crate::ssh::keygen::generate_ed25519() {
+            Ok(k) => {
+                check(
+                    "keygen: public key is ssh-ed25519",
+                    k.public_openssh.starts_with("ssh-ed25519 "),
+                );
+                check("keygen: fingerprint is SHA256", k.fingerprint.starts_with("SHA256:"));
+                check(
+                    "keygen: private PEM decodes back to an Ed25519 key",
+                    decode_secret_key(&k.private_pem, None)
+                        .map(|d| d.algorithm() == Algorithm::Ed25519)
+                        .unwrap_or(false),
+                );
+                // Seeded from the OS CSPRNG, so two fresh keys must differ.
+                let other = crate::ssh::keygen::generate_ed25519()
+                    .map(|x| x.public_openssh)
+                    .unwrap_or_default();
+                check("keygen: two fresh keys differ (randomized)", k.public_openssh != other);
+            }
+            Err(e) => check(&format!("keygen ({e})"), false),
+        }
+    }
+
+    println!("\n=== SELFTEST: input guards (SSRF URL filter + multi-target parsing) ===");
+    {
+        use crate::ai::vps_snapshot::user_asks_multiple_targets;
+        use crate::ai::web_tools::validate_public_url;
+        // The SSRF guard must classify IPv6 literals — including the IPv4-mapped form
+        // that points at the cloud-metadata endpoint — not just bare IPv4.
+        check("ssrf: blocks IPv6 link-local", validate_public_url("http://[fe80::1]/").is_err());
+        check(
+            "ssrf: blocks IPv4-mapped IPv6 metadata",
+            validate_public_url("http://[::ffff:169.254.169.254]/latest/meta-data").is_err(),
+        );
+        check(
+            "ssrf: still allows a public https URL",
+            validate_public_url("https://wttr.in/Berlin?format=3").is_ok(),
+        );
+        check(
+            "targets: 'when did both reboot' is multi-target",
+            user_asks_multiple_targets("when did both reboot"),
+        );
+        check("targets: bare 'both' is not multi-target", !user_asks_multiple_targets("both"));
+    }
+
     println!("\nSELFTEST: {pass} passed, {fail} failed");
     if fail > 0 {
         1

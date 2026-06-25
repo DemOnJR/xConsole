@@ -3,8 +3,9 @@
 //! which isn't guaranteed on Windows) and the private key never touches disk or
 //! SQLite — it lives only in the OS keychain (see [`crate::secrets`]).
 
+use russh::keys::ssh_key::private::Ed25519Keypair;
 use russh::keys::ssh_key::LineEnding;
-use russh::keys::{Algorithm, HashAlg, PrivateKey};
+use russh::keys::{HashAlg, PrivateKey};
 use zeroize::Zeroizing;
 
 use crate::secrets;
@@ -24,9 +25,15 @@ pub struct GeneratedKey {
 
 /// Generate a new Ed25519 SSH keypair using the OS CSPRNG.
 pub fn generate_ed25519() -> Result<GeneratedKey, String> {
-    let mut rng = rand_core::OsRng;
-    let key = PrivateKey::random(&mut rng, Algorithm::Ed25519)
-        .map_err(|e| format!("key generation failed: {e}"))?;
+    // Seed Ed25519 from the same vetted OS CSPRNG (ring) used for at-rest encryption.
+    // A 32-byte uniform seed is exactly the Ed25519 private-scalar input, so this avoids
+    // threading ssh-key's rand_core `OsRng` — whose trait/feature surface shifted in the
+    // russh 0.61 upgrade (fallible `TryRngCore` vs. the infallible `CryptoRng` that
+    // `PrivateKey::random` now requires).
+    let seed: [u8; 32] = crate::crypto::random_bytes(32)
+        .try_into()
+        .map_err(|_| "rng returned wrong length".to_string())?;
+    let key = PrivateKey::from(Ed25519Keypair::from_seed(&seed));
     let private_pem = key
         .to_openssh(LineEnding::LF)
         .map_err(|e| format!("encoding private key failed: {e}"))?;
@@ -148,7 +155,7 @@ fn vps_input_from(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use russh::keys::decode_secret_key;
+    use russh::keys::{decode_secret_key, Algorithm};
 
     #[test]
     fn generated_key_round_trips_and_is_ed25519() {

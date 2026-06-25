@@ -417,7 +417,15 @@ fn blocked_target(url: &reqwest::Url) -> Option<&'static str> {
     if host == "metadata.google.internal" || host == "169.254.169.254" {
         return Some("metadata endpoints are not allowed");
     }
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    // `host_str()` serializes IPv6 hosts WITH brackets (e.g. "[fe80::1]"), which
+    // `IpAddr::parse` rejects — strip them so IPv6 literals get classified too.
+    // Without this, the private/metadata guard is trivially bypassed via IPv6
+    // (including IPv4-mapped forms like [::ffff:169.254.169.254]).
+    let ip_str = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host.as_str());
+    if let Ok(ip) = ip_str.parse::<IpAddr>() {
         if is_private_ip(ip) {
             return Some("private IP addresses are not allowed");
         }

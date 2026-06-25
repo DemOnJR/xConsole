@@ -36,7 +36,9 @@ jobs:
         run: cargo cooldown check --locked
       - name: Security audit (RustSec)
         working-directory: src-tauri
-        run: cargo audit
+        # RUSTSEC-2023-0071 (rsa "Marvin Attack") has no fixed upstream release and
+        # reaches us only via russh's `rsa` feature. See deny.toml for the rationale.
+        run: cargo audit --ignore RUSTSEC-2023-0071
       - name: Policy check (advisories, licenses, sources)
         working-directory: src-tauri
         run: cargo deny check

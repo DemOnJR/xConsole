@@ -232,9 +232,12 @@ pub fn user_asks_multiple_targets(message: &str) -> bool {
     if matches!(lower.as_str(), "both" | "both." | "both!" | "both please") {
         return false;
     }
+    // A standalone "both" inside a real sentence ("when did both reboot",
+    // "check both vps") refers to both servers.
+    if lower.split(|c: char| !c.is_alphanumeric()).any(|w| w == "both") {
+        return true;
+    }
     const PHRASES: &[&str] = &[
-        "both vps",
-        "both server",
         "all vps",
         "all server",
         "all host",
@@ -244,8 +247,6 @@ pub fn user_asks_multiple_targets(message: &str) -> bool {
         "every server",
         "two vps",
         "2 vps",
-        "on both",
-        "check both",
     ];
     PHRASES.iter().any(|p| lower.contains(p))
 }
