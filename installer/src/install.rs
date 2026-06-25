@@ -15,7 +15,8 @@
 // `xConsole-Setup.exe --install` runs the whole thing headlessly (for debugging),
 // writing only to install.log.
 
-use std::io::{BufRead, BufReader, Write};
+use sha2::{Digest, Sha256};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -27,11 +28,45 @@ const REPO_URL: &str = "https://github.com/DemOnJR/xConsole";
 const GNU_TOOLCHAIN: &str = "stable-x86_64-pc-windows-gnu";
 
 // Portable toolchain downloads (only used when the tool isn't already on PATH).
-const RUSTUP_URL: &str = "https://win.rustup.rs/x86_64";
+//
+// SUPPLY-CHAIN INTEGRITY: every artifact below is verified BEFORE it is unzipped or
+// executed. TLS only protects transport; it does not stop a maliciously-replaced
+// GitHub/CDN release asset, and whatever we download gets compiled straight into the
+// user's xconsole.exe (which holds their SSH credentials). Defenses:
+//   * Version-pinned ZIPs   -> SHA-256 pinned here, checked with verify_sha256().
+//   * rustup-init.exe       -> rolling AND not Authenticode-signed, so we pin a
+//                              specific versioned archive build + its SHA-256.
+//   * WebView2 bootstrapper -> rolling but Microsoft-signed, so we verify its
+//                              Authenticode signature with verify_authenticode().
+// To bump any pinned hash: change the URL, download the asset, recompute with
+// PowerShell `Get-FileHash -Algorithm SHA256 <file>`, and paste the digest below.
+
+// rustup-init.exe is NOT Authenticode-signed and https://win.rustup.rs is a rolling
+// redirector, so we pin a specific build from the immutable archive instead. This
+// only bootstraps rustup itself; `rustup toolchain install` below still fetches the
+// latest stable toolchain. To bump: read the current version from
+// https://static.rust-lang.org/rustup/release-stable.toml and the matching
+// .../x86_64-pc-windows-msvc/rustup-init.exe.sha256.
+const RUSTUP_URL: &str =
+    "https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-pc-windows-msvc/rustup-init.exe";
+const RUSTUP_SHA256: &str = "86478e53f769379d7f0ebfa7c9aa97cb76ca92233f79aa2cc0dbee2efaac73c7";
+
 const MINGIT_URL: &str =
     "https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/MinGit-2.47.1-64-bit.zip";
-const MINGW_URL: &str = "https://github.com/brechtsanders/winlibs_mingw/releases/download/14.2.0posix-19.1.1-12.0.0-ucrt-r3/winlibs-x86_64-posix-seh-gcc-14.2.0-llvm-19.1.1-mingw-w64ucrt-12.0.0-r3.zip";
+const MINGIT_SHA256: &str = "50b04b55425b5c465d076cdb184f63a0cd0f86f6ec8bb4d5860114a713d2c29a";
+
+// winlibs deletes superseded packaging revisions, and the old `-ucrt-r3` asset is now
+// a 404. `-ucrt-r2` is the same compiler (GCC 14.2.0 / LLVM 19.1.1 / mingw-w64 ucrt
+// 12.0.0); only the packaging revision differs.
+const MINGW_URL: &str = "https://github.com/brechtsanders/winlibs_mingw/releases/download/14.2.0posix-19.1.1-12.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-14.2.0-llvm-19.1.1-mingw-w64ucrt-12.0.0-r2.zip";
+const MINGW_SHA256: &str = "12fa72d2566e641c3bf0213a946d33d8bef2e0757af2fb3ed60a995e05d74606";
+
 const NODE_VER: &str = "v20.18.1";
+const NODE_SHA256: &str = "56e5aacdeee7168871721b75819ccacf2367de8761b78eaceacdecd41e04ca03";
+
+// WebView2 evergreen bootstrapper: rolling URL, but Authenticode-signed by Microsoft.
+const WEBVIEW2_URL: &str = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
+const WEBVIEW2_SIGNER: &str = "Microsoft Corporation";
 
 const APP_NAME: &str = "xConsole";
 const EXE_NAME: &str = "xconsole.exe";
@@ -314,6 +349,81 @@ fn unzip(rep: &Reporter, zip: &Path, dest: &Path) -> Result<(), String> {
     run_streamed(rep, c, "extract")
 }
 
+/// Stream a file through SHA-256 and return the lowercase hex digest.
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut f = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Verify a downloaded artifact against its pinned SHA-256 BEFORE it is unzipped or
+/// run. On mismatch the file is deleted (so a re-run re-downloads it) and the step
+/// fails hard — we never extract or execute an artifact that failed its check.
+fn verify_sha256(rep: &Reporter, path: &Path, expected: &str, what: &str) -> Result<(), String> {
+    let actual = sha256_file(path)?;
+    if actual.eq_ignore_ascii_case(expected) {
+        rep.log(format!("Verified {what} (SHA-256 {actual})."));
+        Ok(())
+    } else {
+        let _ = std::fs::remove_file(path);
+        Err(format!(
+            "{what} failed its integrity check (expected SHA-256 {expected}, got {actual}). \
+             The download was corrupt or tampered with — aborting before it could be used."
+        ))
+    }
+}
+
+/// Verify an Authenticode signature for artifacts that roll (no stable hash) but are
+/// code-signed: require Status=Valid AND a signer subject naming the expected org.
+/// The file path and expected signer are passed via env vars (never interpolated into
+/// the script) so an unusual path can't break out of the PowerShell string literal.
+fn verify_authenticode(
+    rep: &Reporter,
+    path: &Path,
+    expected_signer: &str,
+    what: &str,
+) -> Result<(), String> {
+    // `Stop` makes a failing Get-AuthenticodeSignature throw (-> non-zero exit). The
+    // validation failures use [Console]::Error.WriteLine (not Write-Error) so the exit
+    // codes actually fire and stderr carries a clean one-line reason, not PS's error blob.
+    const SCRIPT: &str = "\
+$ErrorActionPreference = 'Stop'; \
+$sig = Get-AuthenticodeSignature -LiteralPath $env:XCV_FILE; \
+if ($sig.Status -ne 'Valid') { [Console]::Error.WriteLine('status=' + $sig.Status); exit 2 }; \
+$subject = $sig.SignerCertificate.Subject; \
+if ($subject -notlike ('*' + $env:XCV_SIGNER + '*')) { [Console]::Error.WriteLine('signer=' + $subject); exit 3 }; \
+Write-Output $subject";
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+        .env("XCV_FILE", path)
+        .env("XCV_SIGNER", expected_signer)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("{what}: could not run the signature check ({e})"))?;
+    if out.status.success() {
+        let subject = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        rep.log(format!("Verified {what} Authenticode signature ({subject})."));
+        Ok(())
+    } else {
+        let _ = std::fs::remove_file(path);
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(format!(
+            "{what} failed Authenticode verification ({err}). \
+             Refusing to run an unsigned or untrusted binary."
+        ))
+    }
+}
+
 /// Remove a directory tree, falling back to `rmdir /s /q` for git's read-only files.
 fn remove_dir_robust(p: &Path) {
     if !p.exists() {
@@ -443,6 +553,7 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
             rep.log("Installing a portable Git...");
             let zip = base.join("tools").join("mingit.zip");
             download(rep, MINGIT_URL, &zip)?;
+            verify_sha256(rep, &zip, MINGIT_SHA256, "MinGit")?;
             unzip(rep, &zip, &base.join(r"tools\git"))?;
             let _ = std::fs::remove_file(&zip);
             if !current_env(&base).check("git --version") {
@@ -459,6 +570,7 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
             rep.log("Installing the Rust toolchain (rustup)...");
             let init = base.join("tools").join("rustup-init.exe");
             download(rep, RUSTUP_URL, &init)?;
+            verify_sha256(rep, &init, RUSTUP_SHA256, "rustup-init")?;
             let portable = BuildEnv {
                 path: env.path.clone(),
                 rustup_home: Some(base.join(".rustup")),
@@ -502,6 +614,7 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
             rep.log("Installing the MinGW compiler...");
             let zip = base.join("tools").join("mingw.zip");
             download(rep, MINGW_URL, &zip)?;
+            verify_sha256(rep, &zip, MINGW_SHA256, "MinGW")?;
             unzip(rep, &zip, &base.join(r"tools\mingw"))?;
             let _ = std::fs::remove_file(&zip);
             if !current_env(&base).check("gcc --version") {
@@ -519,6 +632,7 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
             let zip = base.join("tools").join("node.zip");
             let url = format!("https://nodejs.org/dist/{NODE_VER}/node-{NODE_VER}-win-x64.zip");
             download(rep, &url, &zip)?;
+            verify_sha256(rep, &zip, NODE_SHA256, "Node.js")?;
             unzip(rep, &zip, &base.join("tools"))?;
             let _ = std::fs::remove_file(&zip);
             let extracted = base.join(format!("tools\\node-{NODE_VER}-win-x64"));
@@ -546,7 +660,7 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
             rep.log("WebView2 runtime is already installed.");
         } else {
             rep.log("Installing the Microsoft WebView2 runtime...");
-            match install_webview2() {
+            match install_webview2(rep) {
                 Ok(()) => rep.log("WebView2 runtime installed."),
                 Err(e) => rep.log(format!("WebView2 warning (non-fatal): {e}")),
             }
@@ -682,24 +796,12 @@ fn webview2_installed() -> bool {
     false
 }
 
-fn install_webview2() -> Result<(), String> {
+fn install_webview2(rep: &Reporter) -> Result<(), String> {
     let tmp = std::env::temp_dir().join("MicrosoftEdgeWebview2Setup.exe");
-    let dl = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!(
-                "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile '{}'",
-                tmp.display()
-            ),
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .status()
-        .map_err(|e| format!("download failed: {e}"))?;
-    if !dl.success() {
-        return Err("could not download the WebView2 bootstrapper".into());
-    }
+    download(rep, WEBVIEW2_URL, &tmp)?;
+    // Rolling URL (no stable hash), but Microsoft Authenticode-signs it — verify the
+    // signature before we execute the bootstrapper.
+    verify_authenticode(rep, &tmp, WEBVIEW2_SIGNER, "WebView2 bootstrapper")?;
     let st = Command::new(&tmp)
         .args(["/silent", "/install"])
         .creation_flags(CREATE_NO_WINDOW)
