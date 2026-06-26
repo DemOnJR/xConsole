@@ -16,12 +16,12 @@
 // writing only to install.log.
 
 use sha2::{Digest, Sha256};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 const REPO_URL: &str = "https://github.com/DemOnJR/xConsole";
@@ -75,6 +75,23 @@ const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstal
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+// Robustness knobs for the long, network-heavy steps. Every external command the
+// installer runs is idempotent (downloads truncate+rewrite, extraction overwrites,
+// the build resumes incrementally, git re-clones), so a hung or transiently-failing
+// attempt is always safe to kill and retry from scratch.
+const MAX_ATTEMPTS: u32 = 3;
+// Abort a child that produces NO output for this long. Downloads stream a progress
+// line every second, extraction prints every few hundred files, and the compiler
+// prints continuously — so real work never goes silent this long. Only a child
+// blocked on an interactive prompt (the corepack "continue? [Y/n]" hang) does.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+// The final GNU-ld link of the release binary can be silent for a minute or two on a
+// slow disk, so the build step gets a more generous silence budget than everything
+// else. (A false-kill here would self-heal anyway — the incremental rebuild on retry
+// resumes straight to the link — but better not to throw away progress in the first
+// place.)
+const BUILD_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
 
 const STEPS: [&str; 11] = [
     "Preparing",
@@ -202,12 +219,25 @@ impl BuildEnv {
         if let Some(c) = &self.cargo_home {
             cmd.env("CARGO_HOME", c);
         }
+        // The installer runs headless (no console), so a child that waits for keyboard
+        // input would hang forever. corepack is the culprit behind the "stuck on
+        // Installing dependencies" bug: the first time it fetches the pinned pnpm it
+        // prints "Corepack is about to download ... continue? [Y/n]" and blocks on
+        // stdin. Disabling its prompt makes it download unattended; the others pre-empt
+        // git-credential / npm-confirmation prompts the same way. (We also feed every
+        // child a null stdin as a belt-and-suspenders guard — see stream_once / check.)
+        cmd.env("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0");
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+        // Make cargo's network fetches resilient during the long build on flaky links.
+        cmd.env("CARGO_NET_RETRY", "5");
+        cmd.env("CARGO_NET_GIT_FETCH_WITH_CLI", "true");
     }
     fn check(&self, command_line: &str) -> bool {
         let mut c = Command::new("cmd");
         c.args(["/C", command_line]);
         self.apply(&mut c);
         c.creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -218,7 +248,7 @@ impl BuildEnv {
         let mut c = Command::new("cmd");
         c.args(["/C", command_line]);
         self.apply(&mut c);
-        c.creation_flags(CREATE_NO_WINDOW);
+        c.creation_flags(CREATE_NO_WINDOW).stdin(Stdio::null());
         match c.output() {
             Ok(o) => String::from_utf8_lossy(&o.stdout)
                 .lines()
@@ -231,39 +261,186 @@ impl BuildEnv {
     }
 }
 
-fn run_streamed(rep: &Reporter, mut cmd: Command, what: &str) -> Result<(), String> {
-    cmd.stdout(Stdio::piped())
+/// Kill a process AND its whole child tree. The installer launches most tools through
+/// `cmd /C`, which then spawns node/git/pnpm/etc. `Child::kill()` only reaps the `cmd`
+/// wrapper and leaves the grandchild alive holding our stdout/stderr pipes open — so
+/// the reader threads (and the whole install) would block forever. `taskkill /T` takes
+/// down the entire tree, which closes the pipes and lets the readers finish.
+fn kill_tree(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+}
+
+/// Drain one output stream to the reporter, stamping `last` on EVERY chunk of bytes
+/// read (not only on newline-terminated lines) so the idle-timeout watchdog never
+/// false-kills a phase that reports progress with carriage returns (`git clone
+/// --progress`, rustup component download) instead of newlines. Lines are flushed to
+/// the log on `\n` OR `\r`, so those CR-updated progress bars also surface to the UI.
+fn spawn_reader<R: Read + Send + 'static>(
+    stream: Option<R>,
+    rep: Reporter,
+    last: Arc<Mutex<Instant>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        if let Some(s) = stream {
+            let mut reader = BufReader::new(s);
+            let mut buf = [0u8; 4096];
+            let mut line: Vec<u8> = Vec::new();
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break; // EOF: all writers (incl. inherited grandchild handles) closed
+                }
+                if let Ok(mut t) = last.lock() {
+                    *t = Instant::now();
+                }
+                for &b in &buf[..n] {
+                    if b == b'\n' || b == b'\r' {
+                        if !line.is_empty() {
+                            rep.log(String::from_utf8_lossy(&line).into_owned());
+                            line.clear();
+                        }
+                    } else {
+                        line.push(b);
+                    }
+                }
+            }
+            if !line.is_empty() {
+                rep.log(String::from_utf8_lossy(&line).into_owned());
+            }
+        }
+    })
+}
+
+/// Wait for the reader threads to drain, but NEVER block the installer forever doing
+/// so. The piped stdout/stderr handles are inherited by the whole descendant tree, so a
+/// grandchild that outlives `cmd` (e.g. the esbuild/vite service spawned during the
+/// build, or a stray node daemon) keeps the pipe open and the readers never reach EOF.
+/// We give them a short grace period; if they're still stuck we kill the tree to force
+/// the handles closed; and if a re-parented orphan that `taskkill /T` can't reach STILL
+/// wedges a reader, we detach (drop the handle) rather than join — a leaked reader
+/// thread is harmless and dies with the installer. This is what stops the join itself
+/// from becoming the new hang.
+fn finish_readers(pid: u32, t1: std::thread::JoinHandle<()>, t2: std::thread::JoinHandle<()>) {
+    let done = |a: &std::thread::JoinHandle<()>, b: &std::thread::JoinHandle<()>| {
+        a.is_finished() && b.is_finished()
+    };
+    let wait_until = |deadline: Instant, a: &std::thread::JoinHandle<()>, b: &std::thread::JoinHandle<()>| {
+        while Instant::now() < deadline && !done(a, b) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    // 1) Normal case: the child and its tree have exited, EOF arrives within moments.
+    wait_until(Instant::now() + Duration::from_secs(5), &t1, &t2);
+    // 2) Still draining → a descendant is holding the inherited pipe open. Kill the tree.
+    if !done(&t1, &t2) {
+        kill_tree(pid);
+        wait_until(Instant::now() + Duration::from_secs(5), &t1, &t2);
+    }
+    // 3) Join if they finished; otherwise leave them detached so we can't hang here.
+    if t1.is_finished() {
+        let _ = t1.join();
+    }
+    if t2.is_finished() {
+        let _ = t2.join();
+    }
+}
+
+/// How a single attempt ended — kept distinct so retries can treat a hang (worth
+/// retrying) differently from a clean non-zero exit (often a deterministic error).
+enum StepErr {
+    Timeout(String),
+    Failed(String),
+}
+
+/// Run a command ONCE, streaming its output, and abort it if it produces no output for
+/// `idle`. A stuck child (e.g. one blocked on a prompt) goes silent; a healthy
+/// download/extract/build keeps printing — so this catches hangs without ever killing
+/// genuine work.
+fn stream_once(rep: &Reporter, mut cmd: Command, what: &str, idle: Duration) -> Result<(), StepErr> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW);
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("{what}: failed to start ({e})"))?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let r1 = rep.clone();
-    let t1 = std::thread::spawn(move || {
-        if let Some(o) = stdout {
-            for line in BufReader::new(o).lines().map_while(Result::ok) {
-                r1.log(line);
-            }
+        .map_err(|e| StepErr::Failed(format!("{what}: failed to start ({e})")))?;
+    let pid = child.id();
+    let last = Arc::new(Mutex::new(Instant::now()));
+    let t1 = spawn_reader(child.stdout.take(), rep.clone(), last.clone());
+    let t2 = spawn_reader(child.stderr.take(), rep.clone(), last.clone());
+
+    let outcome = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Ok(s),
+            Ok(None) => {}
+            Err(e) => break Err(StepErr::Failed(format!("{what}: {e}"))),
         }
-    });
-    let r2 = rep.clone();
-    let t2 = std::thread::spawn(move || {
-        if let Some(e) = stderr {
-            for line in BufReader::new(e).lines().map_while(Result::ok) {
-                r2.log(line);
-            }
+        let idle_for = last.lock().map(|t| t.elapsed()).unwrap_or_default();
+        if idle_for >= idle {
+            rep.log(format!(
+                "{what}: no output for {}s — assuming it is stuck, terminating.",
+                idle.as_secs()
+            ));
+            kill_tree(pid);
+            let _ = child.wait();
+            break Err(StepErr::Timeout(format!(
+                "{what} timed out (no output for {}s)",
+                idle.as_secs()
+            )));
         }
-    });
-    let status = child.wait().map_err(|e| format!("{what}: {e}"))?;
-    let _ = t1.join();
-    let _ = t2.join();
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{what} failed (exit {})", status.code().unwrap_or(-1)))
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    // Always reap the reader threads through the bounded drainer so a lingering
+    // grandchild pipe can never hang the installer (success OR failure path).
+    finish_readers(pid, t1, t2);
+    match outcome {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(StepErr::Failed(format!(
+            "{what} failed (exit {})",
+            s.code().unwrap_or(-1)
+        ))),
+        Err(e) => Err(e),
     }
+}
+
+/// Run a command with retries and a per-attempt idle timeout. `make` rebuilds a fresh
+/// `Command` each attempt (a spawned `Command` can't be reused). A hang (idle-timeout)
+/// is ALWAYS retried; a clean non-zero exit is retried only when `retry_on_exit` is set
+/// — callers whose failure is usually deterministic (the compile/link in `tauri build`,
+/// a `--frozen-lockfile` mismatch) pass `false` so a real error fails fast instead of
+/// re-running a 15-minute build three times.
+fn run_with_retry(
+    rep: &Reporter,
+    what: &str,
+    attempts: u32,
+    idle: Duration,
+    retry_on_exit: bool,
+    make: impl Fn() -> Command,
+) -> Result<(), String> {
+    let mut last = String::new();
+    for attempt in 1..=attempts {
+        match stream_once(rep, make(), what, idle) {
+            Ok(()) => return Ok(()),
+            Err(StepErr::Timeout(e)) => last = e, // a hang — always worth a retry
+            Err(StepErr::Failed(e)) => {
+                last = e;
+                if !retry_on_exit {
+                    return Err(format!("{what} failed — {last}"));
+                }
+            }
+        }
+        if attempt < attempts {
+            rep.log(format!(
+                "{what}: attempt {attempt} of {attempts} failed — {last}. Retrying..."
+            ));
+            std::thread::sleep(Duration::from_secs(3 * attempt as u64));
+        }
+    }
+    Err(format!("{what} failed after {attempts} attempts — {last}"))
 }
 
 /// Find an executable/script on the given PATH (tries .exe/.cmd/.bat).
@@ -296,6 +473,27 @@ fn run_tool(
     args: &[&str],
     what: &str,
 ) -> Result<(), String> {
+    // Default policy: 3 attempts, default idle budget, and retry transient non-zero
+    // exits (a flaky download/clone is worth re-running).
+    run_tool_full(rep, env, cwd, program, args, what, MAX_ATTEMPTS, IDLE_TIMEOUT, true)
+}
+
+/// `run_tool` with an explicit retry policy. The build step uses this with a longer idle
+/// budget (silent final link) and `retry_on_exit=false` (a compile error is
+/// deterministic — fail fast instead of rebuilding 3×); the frozen-lockfile probe uses
+/// `attempts=1` so it falls straight through to the normal install.
+#[allow(clippy::too_many_arguments)]
+fn run_tool_full(
+    rep: &Reporter,
+    env: &BuildEnv,
+    cwd: Option<&Path>,
+    program: &str,
+    args: &[&str],
+    what: &str,
+    attempts: u32,
+    idle: Duration,
+    retry_on_exit: bool,
+) -> Result<(), String> {
     let full =
         resolve(program, &env.path).ok_or_else(|| format!("{program}: not found on PATH"))?;
     let is_script = full
@@ -305,48 +503,97 @@ fn run_tool(
             e == "cmd" || e == "bat"
         })
         .unwrap_or(false);
-    let mut c = if is_script {
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(&full).args(args);
+    run_with_retry(rep, what, attempts, idle, retry_on_exit, || {
+        let mut c = if is_script {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(&full).args(args);
+            c
+        } else {
+            let mut c = Command::new(&full);
+            c.args(args);
+            c
+        };
+        env.apply(&mut c);
+        if let Some(d) = cwd {
+            c.current_dir(d);
+        }
         c
-    } else {
-        let mut c = Command::new(&full);
-        c.args(args);
-        c
-    };
-    env.apply(&mut c);
-    if let Some(d) = cwd {
-        c.current_dir(d);
-    }
-    run_streamed(rep, c, what)
+    })
 }
 
 fn download(rep: &Reporter, url: &str, dest: &Path) -> Result<(), String> {
-    let mut c = Command::new("powershell");
-    c.args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        &format!(
-            "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest -Uri '{url}' -OutFile '{}'",
-            dest.display()
-        ),
-    ]);
-    run_streamed(rep, c, "download")
+    // Stream the body in 1 MB chunks and print a progress line every second. This
+    // replaces `Invoke-WebRequest -OutFile`, which was silent until completion — so a
+    // stalled connection looked identical to a healthy slow download and there was no
+    // signal for the idle-timeout watchdog. The explicit connect/read timeouts also
+    // make a dead socket fail fast (instead of hanging) so a retry can kick in.
+    //
+    // URL and destination are passed via env vars, never interpolated into the script,
+    // so an unusual path can't break out of the PowerShell string literal. Each attempt
+    // re-creates (truncates) the file, so a retry after a partial download starts clean.
+    const SCRIPT: &str = "\
+$ErrorActionPreference='Stop'; \
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; \
+$req=[Net.HttpWebRequest]::Create($env:XCV_URL); \
+$req.Timeout=30000; $req.ReadWriteTimeout=60000; \
+$req.UserAgent='xConsole-Installer'; $req.Accept='*/*'; \
+if($req.Proxy){ $req.Proxy.Credentials=[Net.CredentialCache]::DefaultCredentials }; \
+$resp=$req.GetResponse(); $total=$resp.ContentLength; \
+$in=$resp.GetResponseStream(); $out=[IO.File]::Create($env:XCV_DEST); \
+try { \
+  $buf=New-Object byte[] 1048576; $read=0; $sw=[Diagnostics.Stopwatch]::StartNew(); \
+  while(($n=$in.Read($buf,0,$buf.Length)) -gt 0){ \
+    $out.Write($buf,0,$n); $read+=$n; \
+    if($sw.Elapsed.TotalSeconds -ge 1){ \
+      $t=if($total -gt 0){[string][math]::Round($total/1MB,1)}else{'?'}; \
+      Write-Output ('  ' + [math]::Round($read/1MB,1) + ' / ' + $t + ' MB'); \
+      $sw.Restart() } } \
+  Write-Output ('  done (' + [math]::Round($read/1MB,1) + ' MB)') \
+} finally { $out.Close(); $in.Close() }";
+    run_with_retry(rep, "download", MAX_ATTEMPTS, IDLE_TIMEOUT, true, || {
+        let mut c = Command::new("powershell");
+        c.args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+            .env("XCV_URL", url)
+            .env("XCV_DEST", dest);
+        c
+    })
 }
 
 fn unzip(rep: &Reporter, zip: &Path, dest: &Path) -> Result<(), String> {
-    let mut c = Command::new("powershell");
-    c.args([
-        "-NoProfile",
-        "-Command",
-        &format!(
-            "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
-            zip.display(),
-            dest.display()
-        ),
-    ]);
-    run_streamed(rep, c, "extract")
+    // Extract entry-by-entry, printing progress every 200 files. `Expand-Archive` was
+    // silent for the whole extraction — and the MinGW archive alone is ~1.5 GB
+    // unpacked, several silent minutes that would trip the idle-timeout watchdog. This
+    // also overwrites in place (so a retry can resume) and rejects any entry whose path
+    // escapes the destination (zip-slip), even though every archive here is SHA-pinned.
+    //
+    // Runs after verify_sha256, so the archive is already trusted; paths come via env
+    // vars so they're never interpolated into the script.
+    const SCRIPT: &str = "\
+$ErrorActionPreference='Stop'; \
+Add-Type -AssemblyName System.IO.Compression.FileSystem; \
+$zip=[IO.Compression.ZipFile]::OpenRead($env:XCV_ZIP); \
+try { \
+  $root=[IO.Path]::GetFullPath($env:XCV_DEST); \
+  if(-not $root.EndsWith([IO.Path]::DirectorySeparatorChar)){ $root=$root + [IO.Path]::DirectorySeparatorChar } \
+  $i=0; $tot=$zip.Entries.Count; \
+  foreach($e in $zip.Entries){ \
+    $i++; \
+    $target=[IO.Path]::GetFullPath([IO.Path]::Combine($root, $e.FullName)); \
+    if(-not $target.StartsWith($root)){ throw ('unsafe zip entry: ' + $e.FullName) }; \
+    if($e.FullName.EndsWith('/')){ continue }; \
+    $dir=[IO.Path]::GetDirectoryName($target); \
+    if($dir -and -not (Test-Path -LiteralPath $dir)){ New-Item -ItemType Directory -LiteralPath $dir -Force | Out-Null }; \
+    [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $target, $true); \
+    if($i % 200 -eq 0){ Write-Output ('  extracted ' + $i + ' / ' + $tot + ' files') } } \
+  Write-Output ('  done (' + $tot + ' files)') \
+} finally { $zip.Dispose() }";
+    run_with_retry(rep, "extract", MAX_ATTEMPTS, IDLE_TIMEOUT, true, || {
+        let mut c = Command::new("powershell");
+        c.args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+            .env("XCV_ZIP", zip)
+            .env("XCV_DEST", dest);
+        c
+    })
 }
 
 /// Stream a file through SHA-256 and return the lowercase hex digest.
@@ -576,18 +823,20 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
                 rustup_home: Some(base.join(".rustup")),
                 cargo_home: Some(base.join(".cargo")),
             };
-            let mut c = Command::new(&init);
-            c.args([
-                "--default-host",
-                "x86_64-pc-windows-gnu",
-                "--default-toolchain",
-                "stable",
-                "--profile",
-                "minimal",
-                "-y",
-            ]);
-            portable.apply(&mut c);
-            run_streamed(rep, c, "rustup install")?;
+            run_with_retry(rep, "rustup install", MAX_ATTEMPTS, IDLE_TIMEOUT, true, || {
+                let mut c = Command::new(&init);
+                c.args([
+                    "--default-host",
+                    "x86_64-pc-windows-gnu",
+                    "--default-toolchain",
+                    "stable",
+                    "--profile",
+                    "minimal",
+                    "-y",
+                ]);
+                portable.apply(&mut c);
+                c
+            })?;
             let _ = std::fs::remove_file(&init);
         } else {
             rep.log("Rust is already available.");
@@ -690,8 +939,30 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
     // 7. Frontend dependencies
     step!(7, {
         let env = current_env(&base);
+        let src = src_dir();
         rep.log("Installing frontend dependencies (pnpm install)...");
-        run_tool(rep, &env, Some(&src_dir()), "pnpm", &["install"], "pnpm install")?;
+        // --frozen-lockfile installs exactly what pnpm-lock.yaml pins, skipping the
+        // resolution pass — faster and bit-for-bit identical to what CI ships.
+        // --prefer-offline reuses the global pnpm store so re-installs/updates barely
+        // touch the network. The frozen attempt is single-shot (attempts=1): a lockfile
+        // mismatch is deterministic, so don't burn the 3× retry+backoff on it — fall
+        // straight through to a normal resolving install so the build still succeeds.
+        if run_tool_full(
+            rep,
+            &env,
+            Some(&src),
+            "pnpm",
+            &["install", "--frozen-lockfile", "--prefer-offline"],
+            "pnpm install (frozen)",
+            1,
+            IDLE_TIMEOUT,
+            false,
+        )
+        .is_err()
+        {
+            rep.log("Frozen install failed (lockfile out of sync?) — falling back to a normal install...");
+            run_tool(rep, &env, Some(&src), "pnpm", &["install"], "pnpm install")?;
+        }
         Ok(())
     });
 
@@ -718,13 +989,19 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
         std::fs::write(&cfg, r#"{"build":{"beforeBuildCommand":"pnpm exec vite build"}}"#)
             .map_err(|e| format!("write build config: {e}"))?;
         rep.log("Building xConsole (production, release). This is the long part (~10-20 min)...");
-        run_tool(
+        // retry_on_exit=false: a compile/link failure is deterministic, so fail fast
+        // rather than re-run a 15-minute build 3×. A genuine HANG (idle-timeout) is still
+        // retried, and cargo's own CARGO_NET_RETRY handles transient crate-fetch flakiness.
+        run_tool_full(
             rep,
             &env,
             Some(&src),
             "pnpm",
             &["exec", "tauri", "build", "--no-bundle", "-c", ".xconsole-build.json"],
             "tauri build",
+            MAX_ATTEMPTS,
+            BUILD_IDLE_TIMEOUT,
+            false,
         )?;
         Ok(())
     });
@@ -761,8 +1038,33 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
 
     // 10. Finishing up
     step!(10, {
-        if let Ok(me) = std::env::current_exe() {
-            let _ = std::fs::copy(&me, base.join("uninstall.exe"));
+        // Install `uninstall.exe` — re-used for both "Apps & Features" removal AND the
+        // in-app `uninstall.exe --update`. It MUST be runnable on its own. When we were
+        // launched from the single-exe self-extracting stub (GNU build), our own
+        // current_exe() is the DLL-needing inner exe in %TEMP%; the stub passes its own
+        // self-contained path in XC_OUTER_EXE, so register THAT instead. Under MSVC
+        // (statically linked, no stub) XC_OUTER_EXE is unset and current_exe() is itself
+        // already self-contained.
+        let uninstaller_src = std::env::var_os("XC_OUTER_EXE")
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
+            .or_else(|| std::env::current_exe().ok());
+        if let Some(me) = uninstaller_src {
+            let dest = base.join("uninstall.exe");
+            // On the in-app `--update` flow we're launched as base\uninstall.exe (the
+            // stub), so XC_OUTER_EXE == dest: copying it onto the live, running file would
+            // just fail with a sharing violation. Skip the no-op self-copy; otherwise
+            // refresh the registered uninstaller and surface (don't swallow) a real error.
+            let same = std::fs::canonicalize(&me)
+                .ok()
+                .zip(std::fs::canonicalize(&dest).ok())
+                .map(|(a, b)| a == b)
+                .unwrap_or(false);
+            if !same {
+                if let Err(e) = std::fs::copy(&me, &dest) {
+                    rep.log(format!("note: could not refresh uninstall.exe ({e})"));
+                }
+            }
         }
         register_uninstall(&base).map_err(|e| format!("registry: {e}"))?;
         rep.log("Registered in Apps & Features.");
@@ -802,11 +1104,29 @@ fn install_webview2(rep: &Reporter) -> Result<(), String> {
     // Rolling URL (no stable hash), but Microsoft Authenticode-signs it — verify the
     // signature before we execute the bootstrapper.
     verify_authenticode(rep, &tmp, WEBVIEW2_SIGNER, "WebView2 bootstrapper")?;
-    let st = Command::new(&tmp)
+    // This silent GUI installer produces no stdout to monitor, so it gets a bounded
+    // WALL-CLOCK timeout (not the idle watchdog): null stdin so it can't block on a
+    // prompt, and kill the tree if it stalls (e.g. a proxied evergreen fetch) so a hung
+    // bootstrapper can't freeze the whole install. The step is non-fatal either way.
+    let mut child = Command::new(&tmp)
         .args(["/silent", "/install"])
         .creation_flags(CREATE_NO_WINDOW)
-        .status()
+        .stdin(Stdio::null())
+        .spawn()
         .map_err(|e| format!("run bootstrapper: {e}"))?;
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let st = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => {}
+            Err(e) => return Err(format!("run bootstrapper: {e}")),
+        }
+        if Instant::now() >= deadline {
+            kill_tree(child.id());
+            return Err("WebView2 bootstrapper timed out".into());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
     if !st.success() {
         return Err("WebView2 bootstrapper returned an error".into());
     }
@@ -894,12 +1214,20 @@ pub fn run_uninstall() {
         );
     }
     let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(UNINSTALL_KEY);
+    // `base\uninstall.exe` is THIS still-running process's image, so it can't be deleted
+    // until we exit and Windows releases the handle. A single fixed wait can lose that
+    // race on a loaded machine (leaving an orphaned dir), so try a few times with
+    // escalating waits — a plain `&` chain (like the original, just repeated) so the
+    // cmd string stays trivially parseable. rmdir on an already-gone dir is a harmless
+    // no-op. Detached so it outlives us.
+    let b = base.display().to_string();
     let _ = Command::new("cmd")
         .args([
             "/C",
             &format!(
-                "timeout /t 2 /nobreak >nul & rmdir /s /q \"{}\"",
-                base.display()
+                "timeout /t 2 /nobreak >nul & rmdir /s /q \"{b}\" 2>nul & \
+                 timeout /t 2 /nobreak >nul & rmdir /s /q \"{b}\" 2>nul & \
+                 timeout /t 3 /nobreak >nul & rmdir /s /q \"{b}\" 2>nul"
             ),
         ])
         .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
