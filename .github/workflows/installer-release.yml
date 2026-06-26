@@ -57,6 +57,33 @@ jobs:
         working-directory: installer
         run: cargo build --release --locked
 
+      # Optional Authenticode signing — the durable fix for AV false positives. No-ops
+      # unless the repo has a WINDOWS_SIGN_PFX_BASE64 secret (a base64-encoded .pfx) and,
+      # if the key is password-protected, WINDOWS_SIGN_PASSWORD. See installer/ANTIVIRUS.md.
+      - name: Sign the installer (optional)
+        shell: pwsh
+        working-directory: installer
+        env:
+          PFX_B64: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
+        run: |
+          if (-not $env:PFX_B64) {
+            Write-Host "No signing certificate configured (secret WINDOWS_SIGN_PFX_BASE64 is empty) — shipping unsigned."
+            exit 0
+          }
+          $exe = "target/release/xConsole-Setup.exe"
+          if (-not (Test-Path $exe)) { throw "build did not produce $exe" }
+          $pfx = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+                      Where-Object { $_.FullName -match '\\x64\\' } |
+                      Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signtool) { throw "signtool.exe not found on the runner" }
+          & $signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f $pfx /p $env:PFX_PASSWORD $exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed" }
+          Remove-Item $pfx -Force
+          Write-Host "Signed $exe"
+
       - name: Package the download
         id: package
         shell: pwsh
@@ -106,6 +133,9 @@ jobs:
             "3. Double-click **xConsole-Setup.exe** and press **Install**.",
             "",
             "The installer fetches the build tools and compiles xConsole from source on your own PC (about 10-20 minutes the first time). No admin rights are needed - everything installs under your user profile. Running it again later updates xConsole in place.",
+            "",
+            "### If your antivirus warns about it",
+            "Because xConsole is compiled fresh on your PC, the resulting exe is unsigned and unique to your machine, so it has no reputation yet - some antivirus (e.g. Kaspersky) or SmartScreen may warn or quarantine it. This is a false positive: xConsole is open source and scans statically clean on VirusTotal. To allow it - SmartScreen: More info -> Run anyway; Kaspersky: add the folder %LOCALAPPDATA%\xConsole to Exclusions / trusted apps, and optionally report it at https://opentip.kaspersky.com/. Full details: https://github.com/DemOnJR/xConsole/blob/main/installer/ANTIVIRUS.md",
             "",
             "Built from commit ``$sha`` on $date."
           ) -join "`n"
