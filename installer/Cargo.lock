@@ -4387,9 +4387,11 @@ dependencies = [
 name = "xconsole-installer"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "mslnk",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "winreg 0.52.0",

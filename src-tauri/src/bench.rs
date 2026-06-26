@@ -11,9 +11,11 @@
 //! numbers reflect production behavior, not a stub.
 //!
 //! Usage:
-//!   xconsole-bench agent  [--model qwen3.5:9b] [--base http://localhost:11434] [--ctx 65536] [--out results.json]
-//!   xconsole-bench llm    [--model ...] [--ctx ...]
+//!   xconsole-bench agent    [--model qwen3.5:9b] [--base http://localhost:11434] [--ctx 65536] [--out results.json]
+//!   xconsole-bench llm      [--model ...] [--ctx ...]
 //!   xconsole-bench all
+//!   xconsole-bench hooks    [--out results.json]   # hooks dispatch overhead (no model)
+//!   xconsole-bench selftest                        # pure-logic + live-hook checks (no model)
 //!
 //! These are REGRESSION benchmarks: run them, change a feature, run them again,
 //! and compare the JSON to see whether latency / pass-rate improved.
@@ -74,9 +76,18 @@ async fn run_async(args: &[String]) -> i32 {
 
     println!("xConsole bench — mode={mode} model={model} base={base} num_ctx={num_ctx}");
 
-    // Pure-logic self-tests (reflection, voice prompt) — no Ollama needed.
+    // Pure-logic self-tests (reflection, voice prompt, hooks) — no Ollama needed.
     if mode == "selftest" {
-        return selftest();
+        let mut code = selftest();
+        if selftest_hooks_live().await != 0 {
+            code = 1;
+        }
+        return code;
+    }
+
+    // Hooks overhead benchmark — needs no model, so run before the Ollama preflight.
+    if mode == "hooks" {
+        return bench_hooks(out).await;
     }
 
     // Preflight: Ollama up and the model present?
@@ -107,7 +118,7 @@ async fn run_async(args: &[String]) -> i32 {
             a
         }
         other => {
-            eprintln!("bench: unknown mode '{other}' (use: agent | llm | all)");
+            eprintln!("bench: unknown mode '{other}' (use: agent | llm | all | hooks | selftest)");
             return 1;
         }
     };
@@ -583,7 +594,149 @@ fn merge_reports(into: &mut Value, other: Value) {
     }
 }
 
+// ---- Hooks overhead benchmark (no model needed) --------------------------
+
+/// Measure what a Claude Code–style hook costs the agent loop: the pure config/select
+/// path (nanoseconds) and a real no-op hook subprocess (the per-tool-call latency a
+/// configured PreToolUse hook adds). No Ollama, fully headless.
+async fn bench_hooks(out: Option<String>) -> i32 {
+    use crate::ai::hooks::{self, HookEvent, HookEventInput, HooksConfig};
+
+    println!("\n=== HOOKS OVERHEAD ===");
+
+    // 1) Pure path: config.select() — what runs on EVERY tool call to decide whether a
+    //    hook even fires. Should be negligible.
+    let cfg = HooksConfig::parse(
+        r#"{"PreToolUse":[{"matcher":"run_command|write_file","hooks":[{"command":"exit 0"}]}]}"#,
+    )
+    .expect("valid config");
+    let iters = 200_000u32;
+    let t0 = Instant::now();
+    let mut acc = 0usize;
+    for _ in 0..iters {
+        acc += cfg.select(HookEvent::PreToolUse, Some("run_command")).len();
+    }
+    std::hint::black_box(acc);
+    let pure_ns = t0.elapsed().as_nanos() / iters as u128;
+    println!("pure select() per call : {pure_ns} ns   ({iters} iters)");
+
+    // 2) Live path: spawn a no-op hook (exit 0) through the real runner, JSON piped to
+    //    stdin. This is the latency a configured PreToolUse hook adds to one tool call.
+    let targets: Vec<String> = vec![];
+    let args = json!({ "command": "ls -la" });
+    let input = HookEventInput {
+        event: HookEvent::PreToolUse,
+        session_id: "bench",
+        cwd: ".",
+        workspace_id: None,
+        vps_targets: &targets,
+        tool_name: Some("run_command"),
+        tool_input: Some(&args),
+        tool_response: None,
+        prompt: None,
+    };
+    // Warm the shell once (the very first spawn pays a one-off OS cost).
+    let _ = hooks::run_event(&cfg, &input).await;
+    let runs = 30u32;
+    let t1 = Instant::now();
+    for _ in 0..runs {
+        let _ = hooks::run_event(&cfg, &input).await;
+    }
+    let live_ms = t1.elapsed().as_millis() as f64 / runs as f64;
+    println!("live no-op hook spawn  : {live_ms:.2} ms   ({runs} runs)");
+
+    // 3) Blocking hook (exit 2): confirm the block path works and costs the same order.
+    let block_cfg =
+        HooksConfig::parse(r#"{"PreToolUse":[{"matcher":"*","hooks":[{"command":"exit 2"}]}]}"#)
+            .unwrap();
+    let blocked = hooks::run_event(&block_cfg, &input).await.blocks();
+    println!("blocking hook (exit 2) : blocks = {blocked}");
+
+    println!(
+        "\nA tool call with a PreToolUse hook adds ~{live_ms:.1} ms (one process spawn). \
+         With no hooks configured the loop skips the hook path entirely (0 ms)."
+    );
+
+    let report = json!({
+        "mode": "hooks",
+        "pure_select_ns": pure_ns,
+        "live_hook_ms": live_ms,
+        "live_runs": runs,
+        "block_works": blocked,
+    });
+    if let Some(path) = out {
+        match std::fs::write(&path, serde_json::to_string_pretty(&report).unwrap_or_default()) {
+            Ok(()) => println!("\nWrote results → {path}"),
+            Err(e) => eprintln!("bench: could not write {path}: {e}"),
+        }
+    }
+    if blocked {
+        0
+    } else {
+        1
+    }
+}
+
 // ---- Self-test (pure logic; runs without Ollama) -------------------------
+
+/// Live hooks self-test: spawns real hook subprocesses through the runner (so it can't
+/// live in the sync `selftest()`). Returns 0 on success, 1 on any failure.
+async fn selftest_hooks_live() -> i32 {
+    use crate::ai::hooks::{self, HookEvent, HookEventInput};
+
+    println!("\n=== SELFTEST: hooks live runner (spawns real subprocesses) ===");
+    let mut ok = true;
+    let mut check = |name: &str, cond: bool| {
+        if cond {
+            println!("  PASS {name}");
+        } else {
+            println!("  FAIL {name}");
+            ok = false;
+        }
+    };
+
+    let targets: Vec<String> = vec![];
+    let args = json!({ "command": "ls" });
+    let mk = |event| HookEventInput {
+        event,
+        session_id: "selftest",
+        cwd: ".",
+        workspace_id: None,
+        vps_targets: &targets,
+        tool_name: Some("run_command"),
+        tool_input: Some(&args),
+        tool_response: None,
+        prompt: None,
+    };
+
+    let block =
+        hooks::HooksConfig::parse(r#"{"PreToolUse":[{"matcher":"*","hooks":[{"command":"exit 2"}]}]}"#)
+            .unwrap();
+    check(
+        "PreToolUse exit-2 hook blocks the tool",
+        hooks::run_event(&block, &mk(HookEvent::PreToolUse)).await.blocks(),
+    );
+
+    let allow =
+        hooks::HooksConfig::parse(r#"{"PreToolUse":[{"matcher":"*","hooks":[{"command":"exit 0"}]}]}"#)
+            .unwrap();
+    check(
+        "PreToolUse exit-0 hook allows the tool",
+        !hooks::run_event(&allow, &mk(HookEvent::PreToolUse)).await.blocks(),
+    );
+
+    let empty = hooks::HooksConfig::default();
+    check(
+        "no hooks configured → no-op decision",
+        !hooks::run_event(&empty, &mk(HookEvent::PreToolUse)).await.blocks(),
+    );
+
+    if ok {
+        0
+    } else {
+        1
+    }
+}
 
 fn selftest() -> i32 {
     use crate::ai::provider::ToolCall;
@@ -824,6 +977,56 @@ fn selftest() -> i32 {
             user_asks_multiple_targets("when did both reboot"),
         );
         check("targets: bare 'both' is not multi-target", !user_asks_multiple_targets("both"));
+    }
+
+    println!("\n=== SELFTEST: hooks config + decision parsing (pure) ===");
+    {
+        use crate::ai::hooks::{self, HookEvent};
+        let cfg = hooks::HooksConfig::parse(
+            r#"{"hooks":{"PreToolUse":[{"matcher":"run_command","hooks":[{"command":"exit 2"}]}],"UserPromptSubmit":[{"hooks":[{"command":"echo hi"}]}]}}"#,
+        );
+        check("parses the Claude Code hooks.json shape", cfg.is_ok());
+        if let Ok(cfg) = &cfg {
+            check("counts PreToolUse hooks", cfg.count(HookEvent::PreToolUse) == 1);
+            check(
+                "matcher selects the right tool only",
+                cfg.select(HookEvent::PreToolUse, Some("run_command")).len() == 1
+                    && cfg.select(HookEvent::PreToolUse, Some("write_file")).is_empty(),
+            );
+            check(
+                "non-tool event ignores the matcher",
+                cfg.select(HookEvent::UserPromptSubmit, None).len() == 1,
+            );
+        }
+        check("rejects malformed config", hooks::HooksConfig::parse("not json").is_err());
+        check(
+            "wildcard matcher matches any tool",
+            hooks::matcher_matches(Some("*"), Some("anything")),
+        );
+        let blocked = hooks::parse_output(HookEvent::PreToolUse, 2, "", "denied");
+        check(
+            "exit 2 blocks with the stderr reason",
+            blocked.blocks() && blocked.reason.as_deref() == Some("denied"),
+        );
+        let json_block = hooks::parse_output(
+            HookEvent::PreToolUse,
+            0,
+            r#"{"decision":"block","reason":"nope"}"#,
+            "",
+        );
+        check("decision:block is honored", json_block.blocks());
+        let ctx = hooks::parse_output(HookEvent::UserPromptSubmit, 0, "extra context", "");
+        check(
+            "UserPromptSubmit stdout becomes context",
+            ctx.additional_context.as_deref() == Some("extra context"),
+        );
+        let allow = hooks::parse_output(
+            HookEvent::PreToolUse,
+            0,
+            r#"{"hookSpecificOutput":{"permissionDecision":"allow"}}"#,
+            "",
+        );
+        check("permission allow does not block", !allow.blocks());
     }
 
     println!("\nSELFTEST: {pass} passed, {fail} failed");

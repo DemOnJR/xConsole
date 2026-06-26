@@ -10,7 +10,7 @@ use crate::ai::web_tools;
 use crate::ai::provider::{emit, EventSink, StreamEvent, ToolCall, ToolDef, ActivityEvent};
 use crate::ai::interaction::{PromptRegistry, SessionState};
 use crate::ai::safety::{self, ApprovalRegistry};
-use crate::ai::{memory, skill_install, skill_scan, skills, workspace_context, AgentHome};
+use crate::ai::{hooks, memory, skill_install, skill_scan, skills, workspace_context, AgentHome};
 use crate::secrets;
 use crate::ssh::{keygen, shell_quote, SessionManager};
 use crate::storage::Db;
@@ -45,6 +45,8 @@ pub struct ToolContext {
     pub canvas: Vec<crate::ai::canvas_context::CanvasNode>,
     /// Journal of files the agent edits this session (for the diff/changes panel).
     pub edits: crate::ai::edits::EditJournal,
+    /// Claude Code–style lifecycle hooks (snapshotted at startup). Empty = disabled.
+    pub hooks: crate::ai::hooks::HooksConfig,
 }
 
 /// Tool schemas advertised to the model.
@@ -525,6 +527,47 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
     emit_skill_activity(ctx, call, sink);
 
     let args = &call.arguments;
+
+    // PreToolUse hooks: a user-configured command can block this tool before it runs
+    // (exit 2 / `decision:block` / `permissionDecision:deny`) or inject extra context
+    // for the model. Fires only when something subscribes to PreToolUse (zero cost
+    // otherwise). See `ai::hooks`.
+    let mut hook_notes: Vec<String> = Vec::new();
+    if ctx.hooks.has_event(hooks::HookEvent::PreToolUse) {
+        let cwd = hooks::cwd();
+        let input = hooks::HookEventInput {
+            event: hooks::HookEvent::PreToolUse,
+            session_id: &ctx.session_id,
+            cwd: &cwd,
+            workspace_id: ctx.workspace_id.as_deref(),
+            vps_targets: &ctx.targets,
+            tool_name: Some(&call.name),
+            tool_input: Some(&call.arguments),
+            tool_response: None,
+            prompt: None,
+        };
+        let decision = hooks::run_event(&ctx.hooks, &input).await;
+        if let Some(msg) = &decision.system_message {
+            emit(Some(sink), StreamEvent::Status(msg.clone()));
+        }
+        if decision.blocks() {
+            let reason = decision
+                .reason
+                .unwrap_or_else(|| "blocked by a PreToolUse hook".to_string());
+            emit(
+                Some(sink),
+                StreamEvent::Activity(ActivityEvent::ToolEnd {
+                    id: call.id.clone(),
+                    ok: false,
+                }),
+            );
+            return format!("error: blocked by hook: {reason}");
+        }
+        if let Some(extra) = decision.additional_context {
+            hook_notes.push(format!("[PreToolUse hook] {extra}"));
+        }
+    }
+
     // Plan-mode guard: until the user approves a plan, block anything that would
     // change the PC or a server. Read-only inspection, ask_user, and present_plan
     // still run so the agent can investigate and propose its plan.
@@ -578,6 +621,46 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
         }
         other => format!("error: unknown tool '{other}'"),
         }
+    };
+
+    // PostToolUse hooks: a user-configured command sees the tool result and can feed
+    // a note back to the model (a `decision:block` reason) or inject extra context.
+    if ctx.hooks.has_event(hooks::HookEvent::PostToolUse) {
+        let cwd = hooks::cwd();
+        let input = hooks::HookEventInput {
+            event: hooks::HookEvent::PostToolUse,
+            session_id: &ctx.session_id,
+            cwd: &cwd,
+            workspace_id: ctx.workspace_id.as_deref(),
+            vps_targets: &ctx.targets,
+            tool_name: Some(&call.name),
+            tool_input: Some(&call.arguments),
+            tool_response: Some(&result),
+            prompt: None,
+        };
+        let decision = hooks::run_event(&ctx.hooks, &input).await;
+        if let Some(msg) = &decision.system_message {
+            emit(Some(sink), StreamEvent::Status(msg.clone()));
+        }
+        if decision.blocks() {
+            let reason = decision
+                .reason
+                .clone()
+                .unwrap_or_else(|| "a PostToolUse hook flagged this result".to_string());
+            hook_notes.push(format!("[PostToolUse hook] {reason}"));
+        }
+        if let Some(extra) = decision.additional_context {
+            hook_notes.push(format!("[PostToolUse hook] {extra}"));
+        }
+    }
+
+    // Append any hook-injected context/feedback so the model sees it alongside the
+    // tool result. Kept after the result so it never changes the success/error prefix
+    // the loop keys off — except a PostToolUse block, which we surface as a note.
+    let result = if hook_notes.is_empty() {
+        result
+    } else {
+        format!("{result}\n\n{}", hook_notes.join("\n"))
     };
 
     let ok = !result.starts_with("error:");

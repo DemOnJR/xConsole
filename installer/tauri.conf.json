@@ -26,6 +26,11 @@
   },
   "bundle": {
     "active": false,
+    "publisher": "xConsole",
+    "copyright": "Copyright © 2026 xConsole. Licensed under MIT.",
+    "category": "DeveloperTool",
+    "shortDescription": "xConsole Setup",
+    "longDescription": "Official setup for xConsole — a multi-VPS canvas terminal with a built-in AI agent. Downloads the open-source toolchain and compiles xConsole from source on this PC.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

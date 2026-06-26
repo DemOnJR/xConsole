@@ -12,6 +12,7 @@ import {
   SettingsIcon,
   ShieldIcon,
   SparkIcon,
+  TerminalIcon,
 } from "../icons";
 import { GeneralSection } from "./sections/GeneralSection";
 import { ThemeSection } from "./sections/ThemeSection";
@@ -19,6 +20,7 @@ import { ModelsSection } from "./sections/ModelsSection";
 import { VoiceSection } from "./sections/VoiceSection";
 import { ProvidersSection } from "./sections/ProvidersSection";
 import { AgentSection } from "./sections/AgentSection";
+import { HooksSection } from "./sections/HooksSection";
 import { SoulSection } from "./sections/SoulSection";
 import { MemorySection } from "./sections/MemorySection";
 import { SkillsSection } from "./sections/SkillsSection";
@@ -42,6 +44,7 @@ const CATEGORIES: Category[] = [
   { id: "models", label: "Models", icon: BrainIcon, Component: ModelsSection },
   { id: "voice", label: "Voice", icon: SparkIcon, Component: VoiceSection },
   { id: "agent", label: "Agent & Safety", icon: BotIcon, Component: AgentSection },
+  { id: "hooks", label: "Hooks", icon: TerminalIcon, Component: HooksSection },
   { id: "soul", label: "Soul", icon: SparkIcon, Component: SoulSection },
   { id: "memory", label: "Memory", icon: BrainIcon, Component: MemorySection },
   { id: "skills", label: "Skills", icon: BookIcon, Component: SkillsSection },

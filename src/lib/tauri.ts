@@ -250,6 +250,17 @@ export interface AgentDocs {
   user: string;
 }
 
+/** Per-event hook counts + enable state for the Hooks settings section. */
+export interface HooksStatus {
+  enabled: boolean;
+  total: number;
+  pre_tool_use: number;
+  post_tool_use: number;
+  user_prompt_submit: number;
+  stop: number;
+  error: string | null;
+}
+
 export interface Skill {
   category: string;
   name: string;
@@ -641,6 +652,12 @@ export const api = {
 
   getAgentDocs: () => invoke<AgentDocs>("get_agent_docs"),
   saveSoul: (content: string) => invoke<void>("save_soul", { content }),
+
+  getHooksConfig: () => invoke<string>("get_hooks_config"),
+  saveHooksConfig: (content: string) =>
+    invoke<number>("save_hooks_config", { content }),
+  reloadHooks: () => invoke<number>("reload_hooks"),
+  hooksStatus: () => invoke<HooksStatus>("hooks_status"),
   saveMemoryDoc: (content: string) =>
     invoke<void>("save_memory_doc", { content }),
   saveUserDoc: (content: string) => invoke<void>("save_user_doc", { content }),

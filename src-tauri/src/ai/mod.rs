@@ -11,6 +11,7 @@ pub mod context_usage;
 pub mod conversations;
 pub mod cron;
 pub mod edits;
+pub mod hooks;
 pub mod infra_tools;
 pub mod interaction;
 pub mod llama;
