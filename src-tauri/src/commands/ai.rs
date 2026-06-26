@@ -339,6 +339,19 @@ pub async fn scan_skill_path(path: String) -> Result<crate::ai::skill_scan::Scan
     Ok(crate::ai::skill_scan::scan_skill(&p).await)
 }
 
+/// Whether the strong skill scanner (NVIDIA SkillSpector) is installed, and whether `uv`
+/// is available to install it.
+#[tauri::command]
+pub async fn skill_scanner_status() -> Result<crate::ai::skill_scan::ScannerStatus, String> {
+    Ok(crate::ai::skill_scan::scanner_status().await)
+}
+
+/// Install NVIDIA SkillSpector (the strong static skill scanner) via `uv`.
+#[tauri::command]
+pub async fn install_skill_scanner() -> Result<String, String> {
+    crate::ai::skill_scan::install_scanner().await
+}
+
 // ----- Model discovery / download -----
 
 #[tauri::command]

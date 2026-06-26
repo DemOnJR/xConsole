@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
-import { api, type KnownHost, type LockStatus } from "../../../lib/tauri";
+import {
+  api,
+  type KnownHost,
+  type LockStatus,
+  type ScannerStatus,
+} from "../../../lib/tauri";
 import { dialog } from "../../../stores/dialogStore";
 import { Button, Card, SectionHeader } from "../ui";
 import { TrashIcon } from "../../icons";
@@ -139,6 +144,86 @@ function AppLockCard() {
   );
 }
 
+/** Skill security scanner status + one-click install of NVIDIA SkillSpector. */
+function SkillScannerCard() {
+  const [status, setStatus] = useState<ScannerStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const refresh = () => api.skillScannerStatus().then(setStatus).catch(() => {});
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  const install = async () => {
+    setBusy(true);
+    setMsg("Installing SkillSpector (this can take a minute)…");
+    try {
+      setMsg(await api.installSkillScanner());
+    } catch (e) {
+      setMsg(String(e));
+    } finally {
+      setBusy(false);
+      refresh();
+    }
+  };
+
+  const installed = status?.installed ?? false;
+
+  return (
+    <Card className="mb-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm text-gray-200">Skill security scanner</div>
+          <div className="mt-0.5 text-xs text-gray-500">
+            Skills (including ones the agent researches) are scanned before they're
+            saved or installed. NVIDIA SkillSpector is the strong static analyzer;
+            without it a built-in heuristic is used as a fallback.
+          </div>
+        </div>
+        <div className="shrink-0 text-right">
+          {installed ? (
+            <span className="rounded-full bg-emerald-500/15 px-2 py-1 text-[11px] text-emerald-400">
+              SkillSpector active
+            </span>
+          ) : (
+            <span className="rounded-full bg-amber-500/15 px-2 py-1 text-[11px] text-amber-400">
+              Built-in heuristic
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-2 font-mono text-[11px] text-gray-500">
+        {installed
+          ? status?.version ?? "SkillSpector installed"
+          : status?.uv_available
+            ? "SkillSpector not installed (uv is available)"
+            : "SkillSpector not installed — uv is required to install it"}
+      </div>
+
+      {!installed && (
+        <div className="mt-3 flex items-center gap-2">
+          <Button
+            onClick={() => void install()}
+            disabled={busy || !(status?.uv_available ?? false)}
+            title={status?.uv_available ? "Install SkillSpector via uv" : "Install uv first"}
+          >
+            {busy ? "Installing…" : "Install SkillSpector"}
+          </Button>
+          {!status?.uv_available && (
+            <span className="text-[11px] text-gray-500">
+              Install uv from docs.astral.sh/uv first.
+            </span>
+          )}
+        </div>
+      )}
+
+      {msg && <div className="mt-2 text-[11px] text-gray-400">{msg}</div>}
+    </Card>
+  );
+}
+
 export function SecuritySection() {
   const [hosts, setHosts] = useState<KnownHost[]>([]);
 
@@ -169,6 +254,7 @@ export function SecuritySection() {
       />
 
       <AppLockCard />
+      <SkillScannerCard />
 
       <div className="mb-2 mt-4 text-[11px] uppercase tracking-wide text-gray-500">
         Pinned SSH host keys

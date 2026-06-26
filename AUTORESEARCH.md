@@ -61,10 +61,13 @@ is what makes it dependable.
      match pages actually fetched, no model prompt-leakage);
    - **de-fang** destructive commands (`rm -rf`, `mkfs`, `dd`, `chmod 777 /`, …) by
      rewriting the line to `# REQUIRES APPROVAL:` — kept, never silently deleted;
-   - **security scan** with the same `skill_scan` engine that guards `skill_install`,
-     but a **stricter threshold** (≥40, vs 60 for user-chosen installs) — a researched
-     skill is more untrusted than one the user picked, so pipe-to-shell (`curl … | sh`,
-     ~55) is refused outright;
+   - **security scan** (`commit_candidate`): **NVIDIA SkillSpector** is the primary
+     static analyzer when installed (68 patterns / 17 categories: prompt injection,
+     exfiltration, privilege escalation, supply chain, dangerous-code AST, YARA, …),
+     run static-only (`--no-llm`, no API key); the built-in heuristic is the always-on
+     backstop. Both gate at a **stricter threshold** than user-chosen installs (≥40 /
+     `is_blocking`, vs 60 for `skill_install`) — a researched skill is more untrusted
+     than one the user picked, so pipe-to-shell (`curl … | sh`) is refused outright;
    - **quarantine** under the `unverified/` category with server-authored provenance
      front-matter (`status: draft`, `origin: autoresearch`, `verified: false`,
      `sources: […]`) and an UNVERIFIED banner, **never overwriting** an existing skill.
@@ -79,11 +82,31 @@ than installs; it lands in a distinct `unverified/` namespace with a banner so t
 distrust label is re-attached every time it's re-injected; and the agent is told never
 to run a destructive command from a learned skill without the user's approval.
 
+## The security scanner (NVIDIA SkillSpector)
+
+Every skill — researched, downloaded (`skill_install`), or otherwise — is scanned
+before it's saved or installed, because a `SKILL.md` is followed as trusted
+instructions. The scanner is **NVIDIA SkillSpector** ([github.com/NVIDIA/skillspector](https://github.com/NVIDIA/skillspector))
+when installed, falling back to a built-in pure-Rust heuristic otherwise.
+
+- **Install** (one click in Settings → Security, or):
+  `uv tool install git+https://github.com/NVIDIA/skillspector.git` (uv provisions
+  the required Python 3.12 automatically). The app finds the executable via
+  `uv tool dir --bin` even when it isn't on `PATH`.
+- Runs **static-only** (`scan … -f json --no-llm`) — no API key, no network beyond
+  the optional OSV.dev dependency check.
+- Verdict: `risk_assessment.{score,severity,recommendation}` + an `issues[]` list.
+  Blocking on score ≥ threshold, HIGH/CRITICAL severity, or a `DO_NOT_INSTALL`
+  recommendation. Verify with `xconsole-bench scanner` (a malicious sample scores
+  71/HIGH/DO_NOT_INSTALL → blocked; a clean one 0/LOW → allowed).
+
 ## Settings
 
 - `agent.learn_autopilot` — pre-turn gap detection + auto-research (default **on**).
 - `agent.self_improve` — the reflection pass that writes `[lesson]`/`[gap]` memory
   bullets (default **on**).
+- **Skill scanner** — Settings → Security shows whether SkillSpector is active and
+  installs it in one click (`skill_scanner_status` / `install_skill_scanner` commands).
 
 ## Tested
 

@@ -221,9 +221,17 @@ pub async fn learn(
         Err(_) => return LearnResult::err("synthesis timed out"),
     };
 
-    // 3) Validate → de-fang → scan → save (pure, no model/network).
+    // 3) Validate → de-fang → SCAN (SkillSpector + built-in) → save.
     let fetched_urls: Vec<String> = sources.iter().map(|(u, _)| u.clone()).collect();
-    let mut result = process_synthesized(home, topic, name_hint, &raw, &fetched_urls);
+    let mut result = match build_candidate(topic, name_hint, &raw, &fetched_urls) {
+        Ok(cand) => {
+            // NVIDIA SkillSpector is the primary scanner when installed; the built-in
+            // heuristic is the always-on backstop inside commit_candidate.
+            let external = external_scan(&cand.final_md).await;
+            commit_candidate(home, cand, external.as_ref())
+        }
+        Err(e) => e,
+    };
     // Carry forward any privacy redactions as visible notes.
     for r in redactions {
         result.notes.push(r);
@@ -320,15 +328,22 @@ async fn gather_sources(query: &str) -> Vec<(String, String)> {
 
 // ---- Pure post-synthesis pipeline (unit-testable, no model/network) -------
 
-/// Validate, de-fang, scan, and save a synthesized skill. Pure except for the final
-/// scan+write to disk. This is where every security guarantee lives.
-pub fn process_synthesized(
-    home: &AgentHome,
+/// A prepared (validated + de-fanged + assembled) skill, ready to scan and save.
+struct Candidate {
+    name: String,
+    final_md: String,
+    notes: Vec<String>,
+}
+
+/// Build the canonical skill file from raw model output: unwrap fences, extract the
+/// description, de-fang destructive commands, assemble server-authored provenance
+/// front-matter, and structurally validate. Pure. `Err` only when no name can be derived.
+fn build_candidate(
     topic: &str,
     name_hint: Option<&str>,
     raw_md: &str,
     fetched_urls: &[String],
-) -> LearnResult {
+) -> Result<Candidate, LearnResult> {
     let mut notes: Vec<String> = Vec::new();
 
     // Strip code-fence wrappers the model sometimes adds around the whole file.
@@ -342,12 +357,12 @@ pub fn process_synthesized(
         notes.push(format!("{} destructive command(s) flagged for approval", rewrites.len()));
     }
 
-    // Build the canonical skill file: server-authored provenance front-matter (never
-    // trust the model to set status) + UNVERIFIED banner + the model's body.
+    // Server-authored provenance front-matter (never trust the model to set status)
+    // + UNVERIFIED banner + the model's body.
     let final_md = build_skill_md(&description, &defanged, fetched_urls);
 
     // Structural validation decides "good draft" vs "weak draft" (we still save weak
-    // drafts, loudly labeled — never silently drop, so the agent can see the attempt).
+    // drafts, loudly labeled — never silently drop, so the agent sees the attempt).
     let issues = validate_structure(&defanged, fetched_urls);
     if !issues.is_empty() {
         notes.push(format!("weak draft: {}", issues.join(", ")));
@@ -355,36 +370,39 @@ pub fn process_synthesized(
 
     let name = sanitize_name(name_hint.unwrap_or(topic));
     if name.is_empty() {
-        return LearnResult::err("could not derive a skill name from the topic");
+        return Err(LearnResult::err("could not derive a skill name from the topic"));
+    }
+    Ok(Candidate { name, final_md, notes })
+}
+
+/// Scan a prepared candidate and save it (quarantined, never overwriting). The security
+/// layers, in order: an optional EXTERNAL scan (NVIDIA SkillSpector, the strong scanner,
+/// when installed) then the always-on BUILT-IN heuristic backstop — both at the stricter
+/// autoresearch threshold. Either one blocking refuses the save.
+fn commit_candidate(
+    home: &AgentHome,
+    cand: Candidate,
+    external: Option<&skill_scan::ScanReport>,
+) -> LearnResult {
+    let Candidate { name, final_md, mut notes } = cand;
+
+    // 1) SkillSpector (when present) — the primary layer.
+    if let Some(ext) = external {
+        if ext.is_blocking() || ext.risk_score >= AUTORESEARCH_BLOCK_SCORE {
+            return refused_result(name, ext, notes);
+        }
+        notes.push(format!("SkillSpector: clean ({}/100, {})", ext.risk_score, ext.severity));
     }
 
-    // SECURITY SCAN — the skill_install gate, but with a STRICTER threshold (a
-    // researched skill is more untrusted than a user-chosen install). Write to a temp
-    // file and scan it.
+    // 2) Built-in heuristic — always-on backstop (deterministic, no external deps).
     if let Some(report) = scan_or_none(&final_md) {
         if report.is_blocking() || report.risk_score >= AUTORESEARCH_BLOCK_SCORE {
-            let mut nts = notes;
-            nts.push(format!(
-                "scanner: {} risk {}/100 ({})",
-                report.scanner, report.risk_score, report.severity
-            ));
-            for f in report.findings.iter().take(4) {
-                nts.push(f.clone());
-            }
-            return LearnResult {
-                status: LearnStatus::Refused,
-                category: QUARANTINE_CATEGORY.into(),
-                name,
-                body: String::new(),
-                message: "blocked by skill security scan".into(),
-                notes: nts,
-            };
+            return refused_result(name, &report, notes);
         }
     }
 
     // Never overwrite — pick a free, suffixed name if needed.
     let final_name = unique_name(home, &name);
-
     match skills::save_skill(home, QUARANTINE_CATEGORY, &final_name, &final_md) {
         Ok(()) => LearnResult {
             status: LearnStatus::Saved,
@@ -396,6 +414,58 @@ pub fn process_synthesized(
         },
         Err(e) => LearnResult::err(format!("could not save skill: {e}")),
     }
+}
+
+fn refused_result(name: String, report: &skill_scan::ScanReport, mut notes: Vec<String>) -> LearnResult {
+    notes.push(format!(
+        "scanner: {} risk {}/100 ({}{})",
+        report.scanner,
+        report.risk_score,
+        report.severity,
+        if report.recommendation.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", report.recommendation)
+        }
+    ));
+    for f in report.findings.iter().take(4) {
+        notes.push(f.clone());
+    }
+    LearnResult {
+        status: LearnStatus::Refused,
+        category: QUARANTINE_CATEGORY.into(),
+        name,
+        body: String::new(),
+        message: "blocked by skill security scan".into(),
+        notes,
+    }
+}
+
+/// Validate, de-fang, scan (built-in only), and save a synthesized skill. Pure except
+/// for the final scan+write to disk — the deterministic path used by the selftest. The
+/// live `learn()` path adds the SkillSpector layer via [`commit_candidate`].
+pub fn process_synthesized(
+    home: &AgentHome,
+    topic: &str,
+    name_hint: Option<&str>,
+    raw_md: &str,
+    fetched_urls: &[String],
+) -> LearnResult {
+    match build_candidate(topic, name_hint, raw_md, fetched_urls) {
+        Ok(cand) => commit_candidate(home, cand, None),
+        Err(e) => e,
+    }
+}
+
+/// Run NVIDIA SkillSpector on a candidate skill body, returning its report ONLY when it
+/// actually ran (so the built-in backstop isn't double-counted when it's not installed).
+async fn external_scan(md: &str) -> Option<skill_scan::ScanReport> {
+    let dir = std::env::temp_dir().join(format!("xc-learn-ext-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join("SKILL.md"), md);
+    let report = skill_scan::scan_skill(&dir).await;
+    let _ = std::fs::remove_dir_all(&dir);
+    (report.scanner == "skillspector").then_some(report)
 }
 
 /// Scan a candidate skill body via the built-in heuristic scanner (deterministic, no
