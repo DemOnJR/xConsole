@@ -27,8 +27,11 @@ Run:
 # Raw model latency (TTFT / gen tok/s) with and without the tool payload
 ./src-tauri/target/release/xconsole-bench.exe llm   --model qwen3.5:9b
 
-# Pure-logic self-tests (reflection / self-improvement + voice prompt) — no Ollama needed
+# Pure-logic self-tests (reflection + voice prompt + hooks) + live hook subprocesses — no Ollama
 ./src-tauri/target/release/xconsole-bench.exe selftest
+
+# Hooks dispatch overhead — what a PreToolUse hook adds per tool call (no Ollama)
+./src-tauri/target/release/xconsole-bench.exe hooks --out bench/results/hooks.json
 
 # Both eval + latency
 ./src-tauri/target/release/xconsole-bench.exe all   --model qwen3.5:9b --out bench/results/all.json
@@ -57,6 +60,18 @@ must get right; the pass-rate is the quality signal we track:
 
 Columns: `ttft_ms` (time to first token), `total_ms` (whole turn), `gen_t/s`
 (generation tokens/sec), `ptok` (prompt tokens — how heavy the system prompt is).
+
+**Hooks overhead** (`hooks` mode) — measures the cost of the Claude Code–style hooks
+system (see [`HOOKS.md`](../HOOKS.md)):
+
+| metric | meaning | dev-machine baseline |
+|---|---|---|
+| `pure_select_ns` | per-tool-call cost to decide whether a hook fires | ~135 ns |
+| `live_hook_ms` | one no-op hook subprocess (spawn + JSON on stdin) | ~38 ms (Windows `cmd /C`) |
+
+With **no hooks configured the loop skips the hook path entirely (0 ms)** — hooks are
+opt-in, so they cost nothing until you add one. The `live_hook_ms` figure is dominated
+by process-spawn latency (lower on Unix `sh -c`); a hook that does real work adds its own time.
 
 ## 2. `ollama_latency.ps1` — zero-build latency probe
 

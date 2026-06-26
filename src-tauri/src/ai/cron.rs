@@ -318,6 +318,22 @@ async fn run_prompt_job(
         }
     });
 
+    // Hooks for an unattended run: load the current on-disk config (gated by the global
+    // enable setting). No managed snapshot here — a cron job is the user's own scheduled
+    // work, so it picks up the latest hooks.json.
+    let hooks_cfg = if ctx
+        .db
+        .get_setting("agent.hooks_enabled")
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("false")
+    {
+        crate::ai::hooks::HooksConfig::default()
+    } else {
+        crate::ai::hooks::HooksConfig::load(&ctx.home)
+    };
+
     let tc = ToolContext {
         app: ctx.app.clone(),
         db: ctx.db.clone(),
@@ -335,6 +351,7 @@ async fn run_prompt_job(
         workspace_id: None,
         canvas: Vec::new(),
         edits: crate::ai::edits::EditJournal::new(),
+        hooks: hooks_cfg,
     };
 
     let messages = vec![ChatMessage::user(job.payload.clone())];

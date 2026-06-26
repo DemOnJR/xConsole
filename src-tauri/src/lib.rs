@@ -128,6 +128,12 @@ pub fn run() {
             app.manage(db);
             app.manage(sessions);
             app.manage(sftp);
+            // Claude Code–style lifecycle hooks: snapshot hooks.json at startup so a
+            // mid-session edit (incl. one the agent might write) only takes effect on
+            // an explicit reload. Loaded before agent_home is moved into managed state.
+            app.manage(ai::hooks::HooksState::new(ai::hooks::HooksConfig::load(
+                &agent_home,
+            )));
             app.manage(agent_home);
             app.manage(approvals);
             app.manage(prompts);
@@ -275,6 +281,10 @@ pub fn run() {
             commands::ai::save_soul,
             commands::ai::save_memory_doc,
             commands::ai::save_user_doc,
+            commands::ai::get_hooks_config,
+            commands::ai::save_hooks_config,
+            commands::ai::reload_hooks,
+            commands::ai::hooks_status,
             commands::ai::list_skills,
             commands::ai::get_skill,
             commands::ai::save_skill,

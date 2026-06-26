@@ -4,6 +4,7 @@
 use crate::ai::context::{self, PromptContext};
 use crate::ai::context_compact;
 use crate::ai::context_usage;
+use crate::ai::hooks;
 use crate::ai::provider::{emit, ChatMessage, ChatRequest, EventSink, StreamEvent};
 use crate::ai::tools::{self, ToolContext};
 use crate::ai::vps_snapshot;
@@ -54,6 +55,39 @@ pub async fn run_turn(
         .find(|m| m.role == "user")
         .map(|m| m.content.clone())
         .unwrap_or_default();
+
+    // UserPromptSubmit hooks: fire before the turn runs. A hook can inject extra context
+    // (appended to the system prompt below) or block the turn outright (exit 2 /
+    // `decision:block` / `continue:false`). Only runs when something subscribes.
+    let mut hook_user_context: Option<String> = None;
+    if tc.hooks.has_event(hooks::HookEvent::UserPromptSubmit) {
+        let cwd = hooks::cwd();
+        let input = hooks::HookEventInput {
+            event: hooks::HookEvent::UserPromptSubmit,
+            session_id: &tc.session_id,
+            cwd: &cwd,
+            workspace_id: tc.workspace_id.as_deref(),
+            vps_targets: &tc.targets,
+            tool_name: None,
+            tool_input: None,
+            tool_response: None,
+            prompt: Some(&last_user_msg),
+        };
+        let decision = hooks::run_event(&tc.hooks, &input).await;
+        if let Some(msg) = &decision.system_message {
+            emit(Some(sink), StreamEvent::Status(msg.clone()));
+        }
+        if decision.blocks() {
+            let reason = decision
+                .reason
+                .unwrap_or_else(|| "blocked by a UserPromptSubmit hook".to_string());
+            emit(Some(sink), StreamEvent::Error(reason.clone()));
+            emit_ws("idle");
+            return Err(reason);
+        }
+        hook_user_context = decision.additional_context;
+    }
+
     let effective_intent = vps_snapshot::effective_user_intent(&messages);
     let casual_turn = vps_snapshot::is_casual_chat(&last_user_msg);
     let needs_live = vps_snapshot::needs_live_data(&messages);
@@ -394,6 +428,12 @@ pub async fn run_turn(
         }),
     );
 
+    // Fold in any context a UserPromptSubmit hook injected, so the model sees it this turn.
+    if let Some(extra) = &hook_user_context {
+        system.push_str("\n\n## Additional context (from a UserPromptSubmit hook)\n");
+        system.push_str(extra);
+    }
+
     let mut last = ChatMessage::assistant("");
     let mut iters_used = 0usize;
 
@@ -499,6 +539,32 @@ pub async fn run_turn(
                     lessons.len()
                 )),
             );
+        }
+    }
+
+    // Stop hooks: fire once the turn has finished (notifications, formatting, running
+    // a test suite, etc.). xConsole doesn't force the agent to keep going, so this is
+    // fire-and-forget — any message/context the hook returns is surfaced as a status.
+    if tc.hooks.has_event(hooks::HookEvent::Stop) {
+        let cwd = hooks::cwd();
+        let input = hooks::HookEventInput {
+            event: hooks::HookEvent::Stop,
+            session_id: &tc.session_id,
+            cwd: &cwd,
+            workspace_id: tc.workspace_id.as_deref(),
+            vps_targets: &tc.targets,
+            tool_name: None,
+            tool_input: None,
+            tool_response: None,
+            prompt: None,
+        };
+        let decision = hooks::run_event(&tc.hooks, &input).await;
+        if let Some(msg) = decision
+            .system_message
+            .or(decision.additional_context)
+            .or(decision.reason)
+        {
+            emit(Some(sink), StreamEvent::Status(format!("Stop hook: {msg}")));
         }
     }
 

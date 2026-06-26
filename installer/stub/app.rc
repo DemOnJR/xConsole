@@ -1,0 +1,49 @@
+/*
+ * Win32 resource script for the xConsole Setup launcher (compiled by windres in build.rs).
+ *
+ * Embeds:
+ *   1. the application manifest (RT_MANIFEST, id 1), and
+ *   2. a full VERSIONINFO block so the launcher carries CompanyName / ProductName /
+ *      FileDescription / versions / copyright like ordinary software.
+ *
+ * The launcher previously shipped with ZERO version metadata, which — combined with its
+ * embedded inner exe — made AV ML models score it as a malicious dropper. Numeric
+ * constants are hardcoded so this needs no SDK headers (windres alone, no winver.h).
+ */
+
+1 24 "app.manifest"
+
+#define VER_FILEVERSION        0,1,0,0
+#define VER_PRODUCTVERSION     0,1,0,0
+#define VS_VERSION_INFO        1
+#define VOS_NT_WINDOWS32       0x00040004L
+#define VFT_APP                0x00000001L
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION    VER_FILEVERSION
+PRODUCTVERSION VER_PRODUCTVERSION
+FILEFLAGSMASK  0x3fL
+FILEFLAGS      0x0L
+FILEOS         VOS_NT_WINDOWS32
+FILETYPE       VFT_APP
+FILESUBTYPE    0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "xConsole"
+            VALUE "FileDescription",  "xConsole Setup"
+            VALUE "FileVersion",      "0.1.0.0"
+            VALUE "InternalName",     "xConsole-Setup"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 xConsole. Licensed under MIT."
+            VALUE "OriginalFilename", "xConsole-Setup.exe"
+            VALUE "ProductName",      "xConsole Setup"
+            VALUE "ProductVersion",   "0.1.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

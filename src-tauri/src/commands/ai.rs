@@ -41,6 +41,7 @@ pub async fn ai_chat(
     session_state: State<'_, SessionState>,
     llama: State<'_, crate::ai::llama::LlamaServer>,
     edits: State<'_, crate::ai::edits::EditJournal>,
+    hooks_state: State<'_, crate::ai::hooks::HooksState>,
     session_id: String,
     messages: Vec<ChatMessage>,
     provider_id: Option<String>,
@@ -74,6 +75,19 @@ pub async fn ai_chat(
             targets.push(n.vps_id.clone());
         }
     }
+    // Hooks: use the startup snapshot unless globally disabled. Empty = no hook code runs.
+    let hooks_cfg = if db_inner
+        .get_setting("agent.hooks_enabled")
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("false")
+    {
+        crate::ai::hooks::HooksConfig::default()
+    } else {
+        hooks_state.snapshot()
+    };
+
     let tc = ToolContext {
         app: app.clone(),
         db: db_inner.clone(),
@@ -89,6 +103,7 @@ pub async fn ai_chat(
         workspace_id: workspace_id.filter(|s| !s.is_empty()),
         canvas,
         edits: edits.inner().clone(),
+        hooks: hooks_cfg,
     };
 
     // If the chosen provider runs a local server, make sure it's up first so the
@@ -664,6 +679,88 @@ pub fn save_memory_doc(home: State<'_, AgentHome>, content: String) -> Result<()
 #[tauri::command]
 pub fn save_user_doc(home: State<'_, AgentHome>, content: String) -> Result<(), String> {
     crate::ai::memory::save_user(&home, &content)
+}
+
+// ----- Hooks (Claude Code–style lifecycle hooks) -----
+
+/// Per-event hook counts + enable state, for the settings UI.
+#[derive(serde::Serialize)]
+pub struct HooksStatus {
+    pub enabled: bool,
+    pub total: usize,
+    pub pre_tool_use: usize,
+    pub post_tool_use: usize,
+    pub user_prompt_submit: usize,
+    pub stop: usize,
+    /// A parse error in the on-disk `hooks.json`, if any (the live snapshot is unchanged).
+    pub error: Option<String>,
+}
+
+/// Raw text of `hooks.json` so the editor shows exactly what's on disk. Empty if absent.
+#[tauri::command]
+pub fn get_hooks_config(home: State<'_, AgentHome>) -> String {
+    std::fs::read_to_string(home.0.join(crate::ai::hooks::HOOKS_FILE)).unwrap_or_default()
+}
+
+/// Validate + write `hooks.json`, then reload the startup snapshot so it takes effect.
+/// Returns the number of hook commands loaded. A malformed config is rejected (not written).
+#[tauri::command]
+pub fn save_hooks_config(
+    home: State<'_, AgentHome>,
+    hooks_state: State<'_, crate::ai::hooks::HooksState>,
+    content: String,
+) -> Result<usize, String> {
+    use crate::ai::hooks::{HooksConfig, HOOKS_FILE};
+    let trimmed = content.trim();
+    if !trimmed.is_empty() {
+        HooksConfig::parse(trimmed)?; // validate before persisting
+    }
+    let path = home.0.join(HOOKS_FILE);
+    std::fs::write(&path, &content)
+        .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    hooks_state.reload(&home)
+}
+
+/// Reload `hooks.json` from disk into the live snapshot (returns the hook count).
+#[tauri::command]
+pub fn reload_hooks(
+    home: State<'_, AgentHome>,
+    hooks_state: State<'_, crate::ai::hooks::HooksState>,
+) -> Result<usize, String> {
+    hooks_state.reload(&home)
+}
+
+/// Current hooks status for the settings UI.
+#[tauri::command]
+pub fn hooks_status(
+    db: State<'_, Db>,
+    home: State<'_, AgentHome>,
+    hooks_state: State<'_, crate::ai::hooks::HooksState>,
+) -> HooksStatus {
+    use crate::ai::hooks::{HookEvent, HooksConfig, HOOKS_FILE};
+    let enabled = db
+        .get_setting("agent.hooks_enabled")
+        .ok()
+        .flatten()
+        .as_deref()
+        != Some("false");
+    let cfg = hooks_state.snapshot();
+    // Surface a parse error in the current file (the snapshot keeps the last good config).
+    let raw = std::fs::read_to_string(home.0.join(HOOKS_FILE)).unwrap_or_default();
+    let error = if raw.trim().is_empty() {
+        None
+    } else {
+        HooksConfig::parse(&raw).err()
+    };
+    HooksStatus {
+        enabled,
+        total: cfg.total(),
+        pre_tool_use: cfg.count(HookEvent::PreToolUse),
+        post_tool_use: cfg.count(HookEvent::PostToolUse),
+        user_prompt_submit: cfg.count(HookEvent::UserPromptSubmit),
+        stop: cfg.count(HookEvent::Stop),
+        error,
+    }
 }
 
 // ----- Skills -----

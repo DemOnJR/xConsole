@@ -3,8 +3,10 @@
 // The GNU build of the Tauri installer dynamically imports WebView2Loader.dll at LOAD
 // time (webview2-com-sys only static-links the loader under MSVC), so that exe cannot
 // even start without the DLL beside it. This launcher embeds the installer exe AND the
-// loader DLL, unpacks both to a private %TEMP% folder, and runs the installer from
-// there (where it finds the DLL). The user ships/handles a SINGLE exe.
+// loader DLL, unpacks both to a private per-process folder under a named, app-owned
+// `%LOCALAPPDATA%\xConsole-Setup` directory (a sibling of the install base, see
+// `unpack_root`), and runs the installer from there (where it finds the DLL). The user
+// ships/handles a SINGLE exe.
 //
 // It forwards CLI args verbatim (--install / --uninstall / --update / none=GUI) and
 // propagates the installer's exit code, so it's a transparent stand-in. It also tells
@@ -23,17 +25,37 @@ use std::time::Duration;
 const INNER_EXE: &[u8] = include_bytes!("../../target/release/xConsole-Setup.exe");
 const LOADER_DLL: &[u8] = include_bytes!("../../target/release/WebView2Loader.dll");
 
+/// Root for the per-process unpack dir. Prefer a NAMED per-user directory
+/// (`%LOCALAPPDATA%\xConsole-Setup`) over a random name under `%TEMP%`: AV behavioral
+/// heuristics specifically watch for an executable written to and run from %TEMP%, so
+/// staging in a stable, clearly-named folder is both tidier and far less suspicious.
+///
+/// It is deliberately a SIBLING of the install base (`%LOCALAPPDATA%\xConsole`), never a
+/// child of it: `--uninstall` spawns a detached `rmdir /s /q "%LOCALAPPDATA%\xConsole"`,
+/// and we must not stage the running inner exe inside the very tree being deleted. Falls
+/// back to the system temp dir if LOCALAPPDATA is somehow unset.
+fn unpack_root() -> PathBuf {
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        if !local.is_empty() {
+            return PathBuf::from(local).join("xConsole-Setup");
+        }
+    }
+    std::env::temp_dir().join("xConsole-Setup")
+}
+
 /// Drop a diagnostic breadcrumb (there's no stderr in the windows subsystem). Per-pid so
 /// concurrent runs don't clobber each other.
 fn diag(msg: String) {
-    let p = std::env::temp_dir().join(format!("xConsole-Setup-{}-error.txt", std::process::id()));
+    let root = unpack_root();
+    let _ = std::fs::create_dir_all(&root);
+    let p = root.join(format!("setup-{}-error.txt", std::process::id()));
     let _ = std::fs::write(p, msg);
 }
 
 fn main() {
     // A per-process unpack dir so concurrent runs (and a long-lived update window) never
     // clobber each other's files.
-    let dir = std::env::temp_dir().join(format!("xConsole-Setup-{}", std::process::id()));
+    let dir = unpack_root().join(std::process::id().to_string());
     let exe = dir.join("xConsole-Setup.exe");
     let dll = dir.join("WebView2Loader.dll");
 
