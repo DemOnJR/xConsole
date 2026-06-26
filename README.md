@@ -69,6 +69,25 @@ own user folder.
 
 *(Windows is supported today. macOS/Linux builds are on the roadmap.)*
 
+> ### 🛡️ If your antivirus warns about it
+>
+> Because xConsole **compiles a fresh build on your own PC**, the resulting `xconsole.exe`
+> is **unsigned and unique to your machine** — so it has no "reputation" yet with
+> SmartScreen or antivirus engines like Kaspersky. Some may show a warning, or (in
+> Kaspersky's case) quarantine the running app. **This is a false positive, not malware** —
+> the app is fully open source and scans statically clean on VirusTotal (0 detections,
+> Kaspersky's own engine included). It's flagged purely for being a brand-new unsigned
+> binary that opens SSH/network connections.
+>
+> If it happens, you can safely allow it:
+> - **Windows SmartScreen:** click **More info → Run anyway**.
+> - **Kaspersky:** *Settings → Threats and Exclusions → Manage exclusions* → add the folder
+>   `%LOCALAPPDATA%\xConsole` (and add `xconsole.exe` under *trusted applications*). Helping
+>   everyone: report it as a false alarm at <https://opentip.kaspersky.com/>.
+>
+> Technical details and the full remedy (code signing) are in
+> **[installer/ANTIVIRUS.md](installer/ANTIVIRUS.md)**.
+
 ## 🛠️ Build from source (for developers)
 
 Prefer to build it yourself? You'll need:
