@@ -1,0 +1,29 @@
+# Self-extracting single-exe wrapper for the GNU build of the installer.
+#
+# On the GNU toolchain, webview2-com-sys links WebView2Loader.dll dynamically (it only
+# static-links under MSVC), so the Tauri installer exe needs that DLL beside it at load
+# time — two files. This tiny launcher embeds BOTH the installer exe and the loader DLL
+# and, on run, unpacks them to %TEMP% and launches the real installer (which then finds
+# the DLL next to it). The shipped artifact is a SINGLE self-contained exe.
+#
+# It has NO Tauri/WebView2 dependency itself, so it builds and starts with zero loose
+# DLLs. Build order: build the installer first (../), then this (it embeds ../target).
+[workspace]
+
+[package]
+name = "xconsole-setup-stub"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "xConsole-Setup"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"
