@@ -2,32 +2,32 @@
   "cases": [
     {
       "case": "short-no-tools",
-      "completion_tokens": 25,
+      "completion_tokens": 44,
       "error": null,
-      "gen_tps": 46.3046989440918,
+      "gen_tps": 44.69309997558594,
       "prompt_tokens": 1503,
-      "total_ms": 1795,
-      "ttft_ms": 1255,
+      "total_ms": 2233,
+      "ttft_ms": 1248,
       "with_tools": true
     },
     {
       "case": "short-with-tools",
-      "completion_tokens": 32,
+      "completion_tokens": 28,
       "error": null,
-      "gen_tps": 45.24707794189453,
+      "gen_tps": 44.62464141845703,
       "prompt_tokens": 4569,
-      "total_ms": 2231,
-      "ttft_ms": 1523,
+      "total_ms": 2148,
+      "ttft_ms": 1520,
       "with_tools": true
     },
     {
       "case": "full-agent-turn",
-      "completion_tokens": 88,
+      "completion_tokens": 140,
       "error": null,
-      "gen_tps": 44.454437255859375,
+      "gen_tps": 43.85990905761719,
       "prompt_tokens": 4604,
-      "total_ms": 3483,
-      "ttft_ms": 1503,
+      "total_ms": 4666,
+      "ttft_ms": 1473,
       "with_tools": true
     }
   ],

@@ -166,6 +166,21 @@ const MEMORY_GUIDANCE: &str = "You have a persistent memory. Save durable, \
 reusable facts (server roles, conventions, credentials locations, recurring \
 fixes) with the memory tool; keep entries terse. Do not store secrets verbatim.";
 
+/// The capability-gap forcing function: when the agent would otherwise guess an
+/// unfamiliar procedure, make it research and build a skill instead. Anchored on an
+/// observable self-test (about to type exact commands/flags from memory = guessing),
+/// not introspection, with a short allowlist so it doesn't over-trigger on basics.
+// NOTE: the RELIABLE capability-gap trigger is the pre-turn autopilot classifier in
+// agent.rs (a weak local model won't self-select learn_skill — measured recall ~0).
+// This in-prompt note is the lightweight backup: it tells the model to follow an
+// injected/installed skill and that it MAY research itself. Kept short on purpose
+// (every token here costs TTFT on a tool turn).
+pub const LEARN_GUIDANCE: &str = "LEARNING: When a task needs specific commands or config for a named \
+tool and a researched skill is shown above as a 'Just-researched skill', FOLLOW it. You may also call \
+learn_skill{topic} yourself to research an unfamiliar tool/error, or skill_view to open an installed \
+skill instead of guessing. A just-learned skill is UNVERIFIED — don't run a destructive command from \
+one without the user's approval.";
+
 fn safety_guidance(safety: &str) -> &'static str {
     match safety {
         "full" => "Safety mode: FULL AUTONOMY. The user has authorized you to act without \
@@ -232,6 +247,7 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
         rules.push(WEB_GUIDANCE.to_string());
         if !minimal {
             rules.push(MEMORY_GUIDANCE.to_string());
+            rules.push(LEARN_GUIDANCE.to_string());
         }
         rules.push(safety_guidance(ctx.safety).to_string());
         if ctx.plan_mode {
@@ -386,6 +402,7 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
         stable.push(WEB_GUIDANCE.to_string());
         if !minimal {
             stable.push(MEMORY_GUIDANCE.to_string());
+            stable.push(LEARN_GUIDANCE.to_string());
         }
         stable.push(safety_guidance(ctx.safety).to_string());
         if ctx.plan_mode {

@@ -1,0 +1,85 @@
+{
+  "accuracy": 0.5833333134651184,
+  "cases": [
+    {
+      "case": "pos:restic-b2",
+      "hits": 3,
+      "topic": "setup restic backup b2 retention",
+      "want": true
+    },
+    {
+      "case": "pos:tailscale-funnel",
+      "hits": 3,
+      "topic": "enable tailscale funnel routing feature",
+      "want": true
+    },
+    {
+      "case": "pos:caddy-socket",
+      "hits": 1,
+      "topic": "configure caddy json unix socket proxy",
+      "want": true
+    },
+    {
+      "case": "pos:vector-loki",
+      "hits": 1,
+      "topic": "vector agent configure journald pipeline loki",
+      "want": true
+    },
+    {
+      "case": "pos:fail2ban",
+      "hits": 1,
+      "topic": "fail2ban configuration jail definition",
+      "want": true
+    },
+    {
+      "case": "pos:fiction",
+      "hits": 0,
+      "topic": "",
+      "want": true
+    },
+    {
+      "case": "pos:zellij-kdl",
+      "hits": 3,
+      "topic": "write zellij kdl splitter definition",
+      "want": true
+    },
+    {
+      "case": "pos:err255",
+      "hits": 3,
+      "topic": "troubleshoot rsync connection reset",
+      "want": true
+    },
+    {
+      "case": "neg:ls",
+      "hits": 0,
+      "topic": "",
+      "want": false
+    },
+    {
+      "case": "neg:disk",
+      "hits": 0,
+      "topic": "",
+      "want": false
+    },
+    {
+      "case": "neg:math",
+      "hits": 0,
+      "topic": "",
+      "want": false
+    },
+    {
+      "case": "neg:oneliner",
+      "hits": 2,
+      "topic": "count lines using wc command",
+      "want": false
+    }
+  ],
+  "fn": 4,
+  "fp": 1,
+  "mode": "learnclassify",
+  "model": "qwen3.5:9b",
+  "precision": 0.800000011920929,
+  "recall": 0.5,
+  "tn": 3,
+  "tp": 4
+}

@@ -6,29 +6,29 @@
     {
       "delta_pass": 1,
       "delta_prompt_tokens": 122,
-      "delta_total_ms": 679,
-      "delta_ttft_ms": 250,
+      "delta_total_ms": 147,
+      "delta_ttft_ms": 152,
       "system": "soul"
     },
     {
-      "delta_pass": 1,
+      "delta_pass": 0,
       "delta_prompt_tokens": 254,
-      "delta_total_ms": 230,
-      "delta_ttft_ms": 89,
+      "delta_total_ms": -57,
+      "delta_ttft_ms": -72,
       "system": "memory"
     },
     {
       "delta_pass": 0,
       "delta_prompt_tokens": 176,
-      "delta_total_ms": 43,
-      "delta_ttft_ms": -292,
+      "delta_total_ms": 199,
+      "delta_ttft_ms": 102,
       "system": "skills"
     },
     {
-      "delta_pass": 1,
+      "delta_pass": 2,
       "delta_prompt_tokens": 155,
-      "delta_total_ms": 233,
-      "delta_ttft_ms": 248,
+      "delta_total_ms": -265,
+      "delta_ttft_ms": 82,
       "system": "brief"
     }
   ],
@@ -36,7 +36,7 @@
   "variants": [
     {
       "brief": true,
-      "gen_tps": 54.746524810791016,
+      "gen_tps": 56.03731918334961,
       "memory": true,
       "pass": 7,
       "prompt_tokens_avg": 4546,
@@ -47,17 +47,17 @@
           "passed_samples": 3,
           "prompt_tokens": 4977,
           "scenario": "route:single",
-          "total_ms_avg": 3702,
-          "ttft_ms_avg": 3702
+          "total_ms_avg": 4310,
+          "ttft_ms_avg": 4310
         },
         {
-          "last_selected": "list_vps_targets",
+          "last_selected": "run_command_all",
           "pass": true,
           "passed_samples": 3,
           "prompt_tokens": 5012,
           "scenario": "route:all",
-          "total_ms_avg": 2384,
-          "ttft_ms_avg": 2384
+          "total_ms_avg": 2423,
+          "ttft_ms_avg": 2423
         },
         {
           "last_selected": "(text)",
@@ -65,8 +65,8 @@
           "passed_samples": 3,
           "prompt_tokens": 4992,
           "scenario": "route:in-chat",
-          "total_ms_avg": 2216,
-          "ttft_ms_avg": 820
+          "total_ms_avg": 1538,
+          "ttft_ms_avg": 843
         },
         {
           "last_selected": "(text)",
@@ -74,8 +74,8 @@
           "passed_samples": 3,
           "prompt_tokens": 3437,
           "scenario": "persona",
-          "total_ms_avg": 2982,
-          "ttft_ms_avg": 1074
+          "total_ms_avg": 2815,
+          "ttft_ms_avg": 1128
         },
         {
           "last_selected": "(text)",
@@ -83,38 +83,38 @@
           "passed_samples": 3,
           "prompt_tokens": 4986,
           "scenario": "know:deploy",
-          "total_ms_avg": 2602,
-          "ttft_ms_avg": 1367
-        },
-        {
-          "last_selected": "read_file",
-          "pass": true,
-          "passed_samples": 2,
-          "prompt_tokens": 4984,
-          "scenario": "know:pkgmgr",
-          "total_ms_avg": 1581,
-          "ttft_ms_avg": 1376
+          "total_ms_avg": 1437,
+          "ttft_ms_avg": 889
         },
         {
           "last_selected": "(text)",
           "pass": true,
           "passed_samples": 3,
+          "prompt_tokens": 4984,
+          "scenario": "know:pkgmgr",
+          "total_ms_avg": 1144,
+          "ttft_ms_avg": 855
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 2,
           "prompt_tokens": 3437,
           "scenario": "control:math",
-          "total_ms_avg": 895,
-          "ttft_ms_avg": 822
+          "total_ms_avg": 928,
+          "ttft_ms_avg": 856
         }
       ],
       "skills": true,
       "soul": true,
       "total": 7,
-      "total_ms_avg": 2337,
-      "ttft_ms_avg": 1649,
+      "total_ms_avg": 2085,
+      "ttft_ms_avg": 1615,
       "variant": "full"
     },
     {
       "brief": true,
-      "gen_tps": 55.78955841064453,
+      "gen_tps": 55.48851013183594,
       "memory": true,
       "pass": 6,
       "prompt_tokens_avg": 4424,
@@ -125,8 +125,8 @@
           "passed_samples": 3,
           "prompt_tokens": 4855,
           "scenario": "route:single",
-          "total_ms_avg": 2899,
-          "ttft_ms_avg": 2899
+          "total_ms_avg": 3436,
+          "ttft_ms_avg": 3436
         },
         {
           "last_selected": "run_command_all",
@@ -134,8 +134,8 @@
           "passed_samples": 3,
           "prompt_tokens": 4890,
           "scenario": "route:all",
-          "total_ms_avg": 2491,
-          "ttft_ms_avg": 2491
+          "total_ms_avg": 2657,
+          "ttft_ms_avg": 2657
         },
         {
           "last_selected": "(text)",
@@ -143,17 +143,17 @@
           "passed_samples": 3,
           "prompt_tokens": 4870,
           "scenario": "route:in-chat",
-          "total_ms_avg": 1103,
-          "ttft_ms_avg": 804
+          "total_ms_avg": 1900,
+          "ttft_ms_avg": 827
         },
         {
           "last_selected": "(text)",
           "pass": true,
-          "passed_samples": 3,
+          "passed_samples": 2,
           "prompt_tokens": 3315,
           "scenario": "persona",
-          "total_ms_avg": 2013,
-          "ttft_ms_avg": 820
+          "total_ms_avg": 2258,
+          "ttft_ms_avg": 828
         },
         {
           "last_selected": "(text)",
@@ -161,8 +161,8 @@
           "passed_samples": 3,
           "prompt_tokens": 4864,
           "scenario": "know:deploy",
-          "total_ms_avg": 1278,
-          "ttft_ms_avg": 1161
+          "total_ms_avg": 1020,
+          "ttft_ms_avg": 849
         },
         {
           "last_selected": "(text)",
@@ -170,8 +170,8 @@
           "passed_samples": 3,
           "prompt_tokens": 4862,
           "scenario": "know:pkgmgr",
-          "total_ms_avg": 934,
-          "ttft_ms_avg": 806
+          "total_ms_avg": 1393,
+          "ttft_ms_avg": 817
         },
         {
           "last_selected": "(text)",
@@ -179,22 +179,22 @@
           "passed_samples": 1,
           "prompt_tokens": 3315,
           "scenario": "control:math",
-          "total_ms_avg": 887,
-          "ttft_ms_avg": 815
+          "total_ms_avg": 902,
+          "ttft_ms_avg": 830
         }
       ],
       "skills": true,
       "soul": false,
       "total": 7,
-      "total_ms_avg": 1658,
-      "ttft_ms_avg": 1399,
+      "total_ms_avg": 1938,
+      "ttft_ms_avg": 1463,
       "variant": "-soul"
     },
     {
       "brief": true,
-      "gen_tps": 54.82756423950195,
+      "gen_tps": 55.1609992980957,
       "memory": false,
-      "pass": 6,
+      "pass": 7,
       "prompt_tokens_avg": 4292,
       "scenarios": [
         {
@@ -203,8 +203,8 @@
           "passed_samples": 3,
           "prompt_tokens": 4723,
           "scenario": "route:single",
-          "total_ms_avg": 3854,
-          "ttft_ms_avg": 3854
+          "total_ms_avg": 3668,
+          "ttft_ms_avg": 3668
         },
         {
           "last_selected": "run_command_all",
@@ -212,8 +212,8 @@
           "passed_samples": 3,
           "prompt_tokens": 4758,
           "scenario": "route:all",
-          "total_ms_avg": 2580,
-          "ttft_ms_avg": 2580
+          "total_ms_avg": 2930,
+          "ttft_ms_avg": 2930
         },
         {
           "last_selected": "(text)",
@@ -221,8 +221,8 @@
           "passed_samples": 3,
           "prompt_tokens": 4738,
           "scenario": "route:in-chat",
-          "total_ms_avg": 1564,
-          "ttft_ms_avg": 769
+          "total_ms_avg": 1553,
+          "ttft_ms_avg": 783
         },
         {
           "last_selected": "(text)",
@@ -230,8 +230,8 @@
           "passed_samples": 3,
           "prompt_tokens": 3183,
           "scenario": "persona",
-          "total_ms_avg": 2290,
-          "ttft_ms_avg": 767
+          "total_ms_avg": 2265,
+          "ttft_ms_avg": 773
         },
         {
           "last_selected": "(text)",
@@ -239,8 +239,8 @@
           "passed_samples": 3,
           "prompt_tokens": 4732,
           "scenario": "know:deploy",
-          "total_ms_avg": 2100,
-          "ttft_ms_avg": 792
+          "total_ms_avg": 1639,
+          "ttft_ms_avg": 791
         },
         {
           "last_selected": "(text)",
@@ -248,29 +248,29 @@
           "passed_samples": 3,
           "prompt_tokens": 4730,
           "scenario": "know:pkgmgr",
-          "total_ms_avg": 1529,
-          "ttft_ms_avg": 1398
+          "total_ms_avg": 2106,
+          "ttft_ms_avg": 2106
         },
         {
           "last_selected": "(text)",
-          "pass": false,
-          "passed_samples": 1,
+          "pass": true,
+          "passed_samples": 3,
           "prompt_tokens": 3183,
           "scenario": "control:math",
-          "total_ms_avg": 831,
-          "ttft_ms_avg": 758
+          "total_ms_avg": 832,
+          "ttft_ms_avg": 759
         }
       ],
       "skills": true,
       "soul": true,
       "total": 7,
-      "total_ms_avg": 2107,
-      "ttft_ms_avg": 1560,
+      "total_ms_avg": 2142,
+      "ttft_ms_avg": 1687,
       "variant": "-memory"
     },
     {
       "brief": true,
-      "gen_tps": 55.79189682006836,
+      "gen_tps": 55.1746940612793,
       "memory": true,
       "pass": 7,
       "prompt_tokens_avg": 4370,
@@ -281,17 +281,17 @@
           "passed_samples": 3,
           "prompt_tokens": 4801,
           "scenario": "route:single",
-          "total_ms_avg": 3063,
-          "ttft_ms_avg": 3063
+          "total_ms_avg": 3309,
+          "ttft_ms_avg": 3309
         },
         {
-          "last_selected": "terminal_capture,terminal_capture",
+          "last_selected": "run_command_all",
           "pass": true,
-          "passed_samples": 2,
+          "passed_samples": 3,
           "prompt_tokens": 4836,
           "scenario": "route:all",
-          "total_ms_avg": 2724,
-          "ttft_ms_avg": 2724
+          "total_ms_avg": 2994,
+          "ttft_ms_avg": 2994
         },
         {
           "last_selected": "(text)",
@@ -299,8 +299,8 @@
           "passed_samples": 3,
           "prompt_tokens": 4816,
           "scenario": "route:in-chat",
-          "total_ms_avg": 1785,
-          "ttft_ms_avg": 787
+          "total_ms_avg": 1484,
+          "ttft_ms_avg": 777
         },
         {
           "last_selected": "(text)",
@@ -308,8 +308,8 @@
           "passed_samples": 3,
           "prompt_tokens": 3261,
           "scenario": "persona",
-          "total_ms_avg": 2025,
-          "ttft_ms_avg": 784
+          "total_ms_avg": 2299,
+          "ttft_ms_avg": 789
         },
         {
           "last_selected": "(text)",
@@ -317,8 +317,8 @@
           "passed_samples": 3,
           "prompt_tokens": 4810,
           "scenario": "know:deploy",
-          "total_ms_avg": 968,
-          "ttft_ms_avg": 812
+          "total_ms_avg": 1042,
+          "ttft_ms_avg": 810
         },
         {
           "last_selected": "(text)",
@@ -326,13 +326,13 @@
           "passed_samples": 3,
           "prompt_tokens": 4808,
           "scenario": "know:pkgmgr",
-          "total_ms_avg": 4639,
-          "ttft_ms_avg": 4639
+          "total_ms_avg": 1219,
+          "ttft_ms_avg": 1132
         },
         {
           "last_selected": "(text)",
           "pass": true,
-          "passed_samples": 2,
+          "passed_samples": 3,
           "prompt_tokens": 3261,
           "scenario": "control:math",
           "total_ms_avg": 853,
@@ -342,25 +342,25 @@
       "skills": false,
       "soul": true,
       "total": 7,
-      "total_ms_avg": 2294,
-      "ttft_ms_avg": 1941,
+      "total_ms_avg": 1886,
+      "ttft_ms_avg": 1513,
       "variant": "-skills"
     },
     {
       "brief": false,
-      "gen_tps": 56.651607513427734,
+      "gen_tps": 56.6179313659668,
       "memory": true,
-      "pass": 6,
+      "pass": 5,
       "prompt_tokens_avg": 4391,
       "scenarios": [
         {
-          "last_selected": "list_vps_targets",
+          "last_selected": "run_command_all",
           "pass": true,
           "passed_samples": 3,
           "prompt_tokens": 4822,
           "scenario": "route:single",
-          "total_ms_avg": 2610,
-          "ttft_ms_avg": 2610
+          "total_ms_avg": 2904,
+          "ttft_ms_avg": 2904
         },
         {
           "last_selected": "run_command_all",
@@ -368,8 +368,8 @@
           "passed_samples": 3,
           "prompt_tokens": 4857,
           "scenario": "route:all",
-          "total_ms_avg": 2326,
-          "ttft_ms_avg": 2326
+          "total_ms_avg": 2420,
+          "ttft_ms_avg": 2420
         },
         {
           "last_selected": "(text)",
@@ -377,8 +377,8 @@
           "passed_samples": 3,
           "prompt_tokens": 4837,
           "scenario": "route:in-chat",
-          "total_ms_avg": 1773,
-          "ttft_ms_avg": 782
+          "total_ms_avg": 997,
+          "ttft_ms_avg": 773
         },
         {
           "last_selected": "(text)",
@@ -386,59 +386,59 @@
           "passed_samples": 3,
           "prompt_tokens": 3282,
           "scenario": "persona",
-          "total_ms_avg": 1914,
-          "ttft_ms_avg": 797
-        },
-        {
-          "last_selected": "(text)",
-          "pass": true,
-          "passed_samples": 2,
-          "prompt_tokens": 4831,
-          "scenario": "know:deploy",
-          "total_ms_avg": 2949,
-          "ttft_ms_avg": 1722
+          "total_ms_avg": 2038,
+          "ttft_ms_avg": 796
         },
         {
           "last_selected": "(text)",
           "pass": false,
           "passed_samples": 1,
-          "prompt_tokens": 4829,
-          "scenario": "know:pkgmgr",
-          "total_ms_avg": 2299,
-          "ttft_ms_avg": 778
+          "prompt_tokens": 4831,
+          "scenario": "know:deploy",
+          "total_ms_avg": 3986,
+          "ttft_ms_avg": 2252
         },
         {
           "last_selected": "(text)",
           "pass": true,
-          "passed_samples": 2,
+          "passed_samples": 3,
+          "prompt_tokens": 4829,
+          "scenario": "know:pkgmgr",
+          "total_ms_avg": 3224,
+          "ttft_ms_avg": 777
+        },
+        {
+          "last_selected": "(text)",
+          "pass": false,
+          "passed_samples": 1,
           "prompt_tokens": 3282,
           "scenario": "control:math",
-          "total_ms_avg": 862,
-          "ttft_ms_avg": 790
+          "total_ms_avg": 884,
+          "ttft_ms_avg": 812
         }
       ],
       "skills": true,
       "soul": true,
       "total": 7,
-      "total_ms_avg": 2104,
-      "ttft_ms_avg": 1401,
+      "total_ms_avg": 2350,
+      "ttft_ms_avg": 1533,
       "variant": "-brief"
     },
     {
       "brief": false,
-      "gen_tps": 56.50116729736328,
+      "gen_tps": 53.83797073364258,
       "memory": false,
       "pass": 4,
       "prompt_tokens_avg": 3839,
       "scenarios": [
         {
           "last_selected": "run_command_all",
-          "pass": false,
-          "passed_samples": 1,
+          "pass": true,
+          "passed_samples": 2,
           "prompt_tokens": 4270,
           "scenario": "route:single",
-          "total_ms_avg": 2211,
-          "ttft_ms_avg": 1347
+          "total_ms_avg": 2449,
+          "ttft_ms_avg": 2029
         },
         {
           "last_selected": "run_command_all",
@@ -446,8 +446,8 @@
           "passed_samples": 3,
           "prompt_tokens": 4305,
           "scenario": "route:all",
-          "total_ms_avg": 2466,
-          "ttft_ms_avg": 2466
+          "total_ms_avg": 2201,
+          "ttft_ms_avg": 2201
         },
         {
           "last_selected": "(text)",
@@ -455,17 +455,17 @@
           "passed_samples": 3,
           "prompt_tokens": 4285,
           "scenario": "route:in-chat",
-          "total_ms_avg": 1691,
-          "ttft_ms_avg": 617
+          "total_ms_avg": 1657,
+          "ttft_ms_avg": 663
         },
         {
           "last_selected": "(text)",
-          "pass": true,
-          "passed_samples": 2,
+          "pass": false,
+          "passed_samples": 1,
           "prompt_tokens": 2730,
           "scenario": "persona",
-          "total_ms_avg": 2379,
-          "ttft_ms_avg": 628
+          "total_ms_avg": 2189,
+          "ttft_ms_avg": 665
         },
         {
           "last_selected": "(text)",
@@ -473,8 +473,8 @@
           "passed_samples": 0,
           "prompt_tokens": 4279,
           "scenario": "know:deploy",
-          "total_ms_avg": 3295,
-          "ttft_ms_avg": 655
+          "total_ms_avg": 3133,
+          "ttft_ms_avg": 657
         },
         {
           "last_selected": "(text)",
@@ -482,24 +482,24 @@
           "passed_samples": 0,
           "prompt_tokens": 4277,
           "scenario": "know:pkgmgr",
-          "total_ms_avg": 748,
-          "ttft_ms_avg": 609
+          "total_ms_avg": 1991,
+          "ttft_ms_avg": 635
         },
         {
           "last_selected": "(text)",
           "pass": true,
-          "passed_samples": 3,
+          "passed_samples": 2,
           "prompt_tokens": 2730,
           "scenario": "control:math",
-          "total_ms_avg": 702,
-          "ttft_ms_avg": 631
+          "total_ms_avg": 732,
+          "ttft_ms_avg": 659
         }
       ],
       "skills": false,
       "soul": false,
       "total": 7,
-      "total_ms_avg": 1927,
-      "ttft_ms_avg": 993,
+      "total_ms_avg": 2050,
+      "ttft_ms_avg": 1073,
       "variant": "bare"
     }
   ]

@@ -18,6 +18,29 @@ use crate::ai::{memory, AgentHome};
 /// (and de-duplicated) without disturbing user/agent-authored memory.
 const LESSON_TAG: &str = "[lesson]";
 
+/// Capability-gap bullets — the agent told the user it couldn't do something. These
+/// prime the NEXT turn to research-and-build-a-skill (`learn_skill`) instead of
+/// declining again. A prime, not a safety net (the in-prompt forcing function is that).
+const GAP_TAG: &str = "[gap]";
+
+/// Phrases that signal the agent declined / professed ignorance rather than acting.
+const IGNORANCE_PHRASES: &[&str] = &[
+    "i don't know how",
+    "i do not know how",
+    "i'm not sure how",
+    "i am not sure how",
+    "don't know how to",
+    "not sure how to",
+    "i can't do that",
+    "i cannot do that",
+    "i'm not able to",
+    "i am not able to",
+    "i don't have a way to",
+    "i'm unable to",
+    "i am unable to",
+    "no idea how",
+];
+
 /// A failed tool invocation observed in a finished turn.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolFailure {
@@ -34,11 +57,17 @@ pub struct TurnOutcome {
     pub repeated_tools: Vec<String>,
     /// The turn used up its whole tool-iteration budget without settling.
     pub hit_max_iters: bool,
+    /// Short snippets of user requests the agent declined / professed ignorance on —
+    /// candidates for `learn_skill` next time.
+    pub gaps: Vec<String>,
 }
 
 impl TurnOutcome {
     pub fn had_trouble(&self) -> bool {
-        !self.failures.is_empty() || !self.repeated_tools.is_empty() || self.hit_max_iters
+        !self.failures.is_empty()
+            || !self.repeated_tools.is_empty()
+            || self.hit_max_iters
+            || !self.gaps.is_empty()
     }
 }
 
@@ -109,6 +138,24 @@ pub fn analyze_turn(messages: &[ChatMessage], iters_used: usize, max_iters: usiz
     }
 
     out.hit_max_iters = max_iters > 0 && iters_used >= max_iters;
+
+    // Capability gaps: the agent's prose professed ignorance / declined. Capture the
+    // user request that prompted it so the next turn can research it with learn_skill.
+    let mut last_user = String::new();
+    let mut gap_seen: HashSet<String> = HashSet::new();
+    for m in messages {
+        if m.role == "user" {
+            last_user = first_line(&m.content).to_string();
+        } else if m.role == "assistant" && !m.content.trim().is_empty() {
+            let lc = m.content.to_lowercase();
+            if IGNORANCE_PHRASES.iter().any(|p| lc.contains(p)) {
+                let topic = take_chars(&last_user, 80);
+                if !topic.is_empty() && gap_seen.insert(topic.to_lowercase()) {
+                    out.gaps.push(topic);
+                }
+            }
+        }
+    }
     out
 }
 
@@ -158,6 +205,12 @@ pub fn distill_lessons(outcome: &TurnOutcome) -> Vec<String> {
     if outcome.hit_max_iters {
         lessons.push(format!(
             "{LESSON_TAG} A task hit the tool-iteration limit without finishing — break large tasks into smaller, individually-verified steps rather than looping."
+        ));
+    }
+    for g in &outcome.gaps {
+        lessons.push(format!(
+            "{GAP_TAG} I told the user I couldn't help with \"{g}\". Next time, call learn_skill to \
+             research it and build a skill before answering, instead of declining."
         ));
     }
     lessons
@@ -272,6 +325,28 @@ mod tests {
         let outcome = analyze_turn(&msgs, 12, 12);
         assert!(outcome.hit_max_iters);
         assert!(distill_lessons(&outcome).iter().any(|l| l.contains("iteration limit")));
+    }
+
+    #[test]
+    fn detects_capability_gap_and_primes_learn_skill() {
+        let msgs = vec![
+            ChatMessage::user("set up a wireguard vpn on my server"),
+            ChatMessage::assistant("Sorry, I don't know how to configure WireGuard."),
+        ];
+        let outcome = analyze_turn(&msgs, 1, 12);
+        assert_eq!(outcome.gaps.len(), 1);
+        assert!(outcome.had_trouble());
+        let lessons = distill_lessons(&outcome);
+        assert!(lessons.iter().any(|l| l.contains("[gap]") && l.contains("learn_skill")));
+    }
+
+    #[test]
+    fn clean_action_turn_has_no_gap() {
+        let msgs = vec![
+            ChatMessage::user("restart nginx"),
+            ChatMessage::assistant("Done — nginx restarted."),
+        ];
+        assert!(analyze_turn(&msgs, 1, 12).gaps.is_empty());
     }
 
     #[test]

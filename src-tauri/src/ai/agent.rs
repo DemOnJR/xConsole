@@ -434,6 +434,91 @@ pub async fn run_turn(
         system.push_str(extra);
     }
 
+    // ---- Capability-gap autopilot (autoresearch) -------------------------
+    // A weak local model won't reliably pick learn_skill itself (measured: trigger
+    // recall ~0 across prompt wordings), but it answers a focused YES/NO-style classifier
+    // reliably (recall ~0.75, zero false positives). So before the turn we run one cheap
+    // classification; on a detected gap with no covering skill we research it and inject
+    // the resulting skill here, so the model applies it THIS turn — acknowledging and
+    // building the skill automatically instead of guessing. Gated to local tool turns
+    // and `agent.learn_autopilot` (default on); the expensive research only runs on a
+    // genuine detected gap.
+    let learn_autopilot = tc
+        .db
+        .get_setting("agent.learn_autopilot")
+        .ok()
+        .flatten()
+        .map(|v| v != "false")
+        .unwrap_or(true);
+    if learn_autopilot
+        && ollama_mode
+        && !cli_mode
+        && !casual_turn
+        && !conversation
+        && !tool_defs_for_turn.is_empty()
+        && !last_user_msg.trim().is_empty()
+    {
+        let installed: Vec<String> = crate::ai::skills::discover(&tc.home)
+            .into_iter()
+            .map(|s| {
+                if s.description.is_empty() {
+                    s.name.replace('-', " ")
+                } else {
+                    format!("{} ({})", s.name.replace('-', " "), s.description)
+                }
+            })
+            .collect();
+        if let Some(topic) = crate::ai::autoresearch::assess_gap(
+            resolved.provider.as_ref(),
+            &resolved.model,
+            &last_user_msg,
+            &installed,
+        )
+        .await
+        {
+            let known_hosts: Vec<String> = tc
+                .targets
+                .iter()
+                .filter_map(|id| tc.db.get_vps(id).ok().flatten())
+                .flat_map(|v| [v.host, v.name])
+                .collect();
+            let res = crate::ai::autoresearch::learn(
+                &tc.home,
+                resolved.provider.as_ref(),
+                &resolved.model,
+                &topic,
+                None,
+                &known_hosts,
+                None,
+                Some(sink),
+            )
+            .await;
+            use crate::ai::autoresearch::LearnStatus;
+            match res.status {
+                LearnStatus::Saved | LearnStatus::Exists => {
+                    emit(
+                        Some(sink),
+                        StreamEvent::Status(format!("Learned a skill for \"{topic}\" — applying it.")),
+                    );
+                    system.push_str(&format!(
+                        "\n\n# Just-researched skill for this task — APPLY IT to answer\n\
+                         (UNVERIFIED, built from web research: follow its steps, but get the user's \
+                         approval before any destructive command.)\n{}",
+                        res.body
+                    ));
+                }
+                LearnStatus::NoSources | LearnStatus::Refused => {
+                    system.push_str(
+                        "\n\n# Note: a web search for this task didn't yield a reliable procedure. \
+                         Tell the user honestly that you're not certain of the exact steps rather \
+                         than guessing commands.",
+                    );
+                }
+                LearnStatus::Error => {}
+            }
+        }
+    }
+
     let mut last = ChatMessage::assistant("");
     let mut iters_used = 0usize;
 

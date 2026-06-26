@@ -1,0 +1,134 @@
+{
+  "best": "G2-action-first",
+  "mode": "learntune",
+  "model": "qwen3.5:9b",
+  "samples": 2,
+  "variants": [
+    {
+      "detail": [
+        "pos:restic-b2=0/2",
+        "pos:tailscale-funnel=0/2",
+        "pos:caddy-socket=0/2",
+        "pos:vector-loki=0/2",
+        "pos:fail2ban=0/2",
+        "neg:ls=0/2",
+        "neg:disk=0/2",
+        "neg:math=0/2",
+        "neg:oneliner=0/2"
+      ],
+      "f1": 0.0,
+      "fn": 5,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.0,
+      "tn": 4,
+      "tp": 0,
+      "variant": "G1-current"
+    },
+    {
+      "detail": [
+        "pos:restic-b2=0/2",
+        "pos:tailscale-funnel=0/2",
+        "pos:caddy-socket=1/2",
+        "pos:vector-loki=1/2",
+        "pos:fail2ban=2/2",
+        "neg:ls=0/2",
+        "neg:disk=0/2",
+        "neg:math=0/2",
+        "neg:oneliner=0/2"
+      ],
+      "f1": 0.3333333134651184,
+      "fn": 4,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.20000000298023224,
+      "tn": 4,
+      "tp": 1,
+      "variant": "G2-action-first"
+    },
+    {
+      "detail": [
+        "pos:restic-b2=0/2",
+        "pos:tailscale-funnel=0/2",
+        "pos:caddy-socket=0/2",
+        "pos:vector-loki=0/2",
+        "pos:fail2ban=0/2",
+        "neg:ls=0/2",
+        "neg:disk=0/2",
+        "neg:math=0/2",
+        "neg:oneliner=0/2"
+      ],
+      "f1": 0.0,
+      "fn": 5,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.0,
+      "tn": 4,
+      "tp": 0,
+      "variant": "G3-no-knowledge"
+    },
+    {
+      "detail": [
+        "pos:restic-b2=0/2",
+        "pos:tailscale-funnel=0/2",
+        "pos:caddy-socket=0/2",
+        "pos:vector-loki=0/2",
+        "pos:fail2ban=1/2",
+        "neg:ls=0/2",
+        "neg:disk=0/2",
+        "neg:math=0/2",
+        "neg:oneliner=0/2"
+      ],
+      "f1": 0.0,
+      "fn": 5,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.0,
+      "tn": 4,
+      "tp": 0,
+      "variant": "G4-decision-proc"
+    },
+    {
+      "detail": [
+        "pos:restic-b2=0/2",
+        "pos:tailscale-funnel=0/2",
+        "pos:caddy-socket=0/2",
+        "pos:vector-loki=0/2",
+        "pos:fail2ban=0/2",
+        "neg:ls=0/2",
+        "neg:disk=0/2",
+        "neg:math=0/2",
+        "neg:oneliner=0/2"
+      ],
+      "f1": 0.0,
+      "fn": 5,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.0,
+      "tn": 4,
+      "tp": 0,
+      "variant": "G5-toolled"
+    },
+    {
+      "detail": [
+        "pos:restic-b2=0/2",
+        "pos:tailscale-funnel=0/2",
+        "pos:caddy-socket=0/2",
+        "pos:vector-loki=0/2",
+        "pos:fail2ban=1/2",
+        "neg:ls=0/2",
+        "neg:disk=0/2",
+        "neg:math=0/2",
+        "neg:oneliner=0/2"
+      ],
+      "f1": 0.0,
+      "fn": 5,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.0,
+      "tn": 4,
+      "tp": 0,
+      "variant": "G6-harm"
+    }
+  ]
+}
