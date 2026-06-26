@@ -1,7 +1,7 @@
 {
   "block_works": true,
-  "live_hook_ms": 38.03333333333333,
+  "live_hook_ms": 40.06666666666667,
   "live_runs": 30,
   "mode": "hooks",
-  "pure_select_ns": 135
+  "pure_select_ns": 132
 }

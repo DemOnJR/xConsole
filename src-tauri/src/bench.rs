@@ -12,6 +12,7 @@
 //!
 //! Usage:
 //!   xconsole-bench agent    [--model qwen3.5:9b] [--base http://localhost:11434] [--ctx 65536] [--out results.json]
+//!   xconsole-bench ablation [--model ...] [--samples N]   # soul/memory/skills/brief cost vs quality
 //!   xconsole-bench llm      [--model ...] [--ctx ...]
 //!   xconsole-bench all
 //!   xconsole-bench hooks    [--out results.json]   # hooks dispatch overhead (no model)
@@ -28,7 +29,7 @@ use serde_json::{json, Value};
 use crate::ai::context::{self, PromptContext};
 use crate::ai::provider::{ChatMessage, ChatRequest, Provider, StreamEvent, StreamStats, ToolDef};
 use crate::ai::registry::{self, ResolvedProvider};
-use crate::ai::{skills, tools, AgentHome};
+use crate::ai::{skills, soul, tools, AgentHome};
 use crate::storage::models::AiProviderInput;
 use crate::storage::Db;
 
@@ -111,6 +112,7 @@ async fn run_async(args: &[String]) -> i32 {
     let report = match mode.as_str() {
         "llm" => bench_llm(&env).await,
         "agent" => bench_agent(&env).await,
+        "ablation" => bench_ablation(&env).await,
         "all" => {
             let mut a = bench_llm(&env).await;
             let b = bench_agent(&env).await;
@@ -118,7 +120,9 @@ async fn run_async(args: &[String]) -> i32 {
             a
         }
         other => {
-            eprintln!("bench: unknown mode '{other}' (use: agent | llm | all | hooks | selftest)");
+            eprintln!(
+                "bench: unknown mode '{other}' (use: agent | ablation | llm | all | hooks | selftest)"
+            );
             return 1;
         }
     };
@@ -220,6 +224,40 @@ impl BenchEnv {
         (context::build_system_prompt(&ctx), tool_defs)
     }
 
+    /// Build the prompt against an arbitrary agent home + optional workspace brief
+    /// block — used by the ablation to seed each tier (soul/memory/skills) into a
+    /// dedicated home and toggle the project brief via `workspace_context`.
+    fn build_prompt_with(
+        &self,
+        home: &AgentHome,
+        workspace_context: Option<String>,
+        targets: &[String],
+        casual: bool,
+    ) -> (String, Vec<ToolDef>) {
+        let tool_defs = tools::definitions_for_ollama(home, targets.len(), casual);
+        let ctx = PromptContext {
+            home,
+            db: &self.db,
+            model_label: &self.model,
+            provider_label: "bench (Ollama local)",
+            safety: "full",
+            target_count: targets.len(),
+            conversation_summary: None,
+            has_tools: !tool_defs.is_empty(),
+            vps_tools_only: true,
+            ollama_num_ctx: Some(self.num_ctx),
+            target_ids: targets,
+            casual_turn: casual,
+            target_selection_note: None,
+            force_minimal_prompt: false,
+            plan_mode: false,
+            workspace_context,
+            canvas_context: None,
+            conversation: false,
+        };
+        (context::build_system_prompt(&ctx), tool_defs)
+    }
+
     fn cleanup(&self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
@@ -312,6 +350,8 @@ enum Expect {
     ToolOneOf(&'static [&'static str]),
     /// A no-tool answer that must contain this (case-insensitive) substring.
     Contains(&'static str),
+    /// A no-tool answer that must contain at least one of these substrings.
+    ContainsAny(&'static [&'static str]),
 }
 
 struct Scenario {
@@ -432,6 +472,10 @@ fn score(expect: &Expect, r: &TurnResult) -> bool {
         Expect::Contains(s) => {
             r.tool_calls.is_empty() && r.content.to_lowercase().contains(&s.to_lowercase())
         }
+        Expect::ContainsAny(subs) => {
+            let lc = r.content.to_lowercase();
+            r.tool_calls.is_empty() && subs.iter().any(|s| lc.contains(&s.to_lowercase()))
+        }
     }
 }
 
@@ -539,6 +583,356 @@ async fn bench_agent(env: &BenchEnv) -> Value {
         "total": scns.len(),
         "avg_turn_ms": if total_turns > 0 { total_ms_sum / total_turns } else { 0 },
         "scenarios": results,
+    })
+}
+
+// ---- Ablation: cost vs. quality of each prompt system --------------------
+//
+// Measures what the four "agent-brain" systems — SOUL (identity), MEMORY
+// (MEMORY.md + USER.md), SKILLS (the skills index), and the PROJECT BRIEF (the
+// per-workspace CONTEXT.md the agent keeps updated) — cost in prompt tokens /
+// latency and what they buy in answer quality, by toggling each one off in turn
+// and re-running the same scenarios on the real production prompt assembly.
+
+/// One ablation configuration: which of the four systems are present.
+struct Variant {
+    name: &'static str,
+    soul: bool,
+    memory: bool,
+    skills: bool,
+    brief: bool,
+}
+
+fn ablation_variants() -> Vec<Variant> {
+    vec![
+        Variant { name: "full",    soul: true,  memory: true,  skills: true,  brief: true },
+        Variant { name: "-soul",   soul: false, memory: true,  skills: true,  brief: true },
+        Variant { name: "-memory", soul: true,  memory: false, skills: true,  brief: true },
+        Variant { name: "-skills", soul: true,  memory: true,  skills: false, brief: true },
+        Variant { name: "-brief",  soul: true,  memory: true,  skills: true,  brief: false },
+        Variant { name: "bare",    soul: false, memory: false, skills: false, brief: false },
+    ]
+}
+
+// Realistic seed content representative of the user's real uses: coding,
+// VPS/server management, and a personal agent. The ablation removes one block at
+// a time so the measured deltas reflect the cost/benefit of THAT system.
+const ABL_MEMORY: &str = "\
+- The user's primary VPS `web-1` runs Ubuntu 22.04 with nginx + a Node.js app under pm2; deploy with `pm2 restart shopfront`.
+- The database server `db-1` runs PostgreSQL 16; never run destructive SQL without a `pg_dump` backup first.
+- [lesson] When `apt` fails with a dpkg lock error, wait and retry — do NOT kill dpkg; an alternative is to check `/var/lib/dpkg/lock`.
+- Code style: the user's projects use TypeScript strict mode and pnpm. Always use pnpm, never npm.
+- The user prefers concise, direct answers with no filler.";
+
+const ABL_USER: &str = "\
+# About the user
+- Solo developer running a few personal VPS servers and side projects.
+- Uses xConsole for coding, managing VPS servers, and as a general personal agent.
+- Hardware: Ryzen 9 5900X, 32 GB RAM, RX 9060 XT; runs local models via Ollama.
+- Comfortable in the terminal; wants no-fluff answers.";
+
+/// The per-workspace project brief block, in the exact shape
+/// `workspace_context::build_workspace_block` produces for the prompt's context tier.
+fn ablation_brief_block() -> String {
+    "# Active workspace: shopfront\n\
+This is the project the user is working in. Use this context; keep the brief current \
+with set_project_brief; save durable project facts with the memory tool.\n\n\
+## Project brief\n\
+Purpose: deploy and operate the \"shopfront\" Node.js web app on web-1.\n\
+Stack: Node 20, Express, PostgreSQL (db-1), nginx reverse proxy, pm2.\n\
+Important paths: /srv/shopfront (app), /etc/nginx/sites-enabled/shopfront.\n\
+Run/build/test: `pnpm install`, `pnpm build`, `pnpm test`.\n\
+Deploy: `pm2 restart shopfront`.\n\
+Conventions: TypeScript strict, conventional commits, never edit on prod without a backup."
+        .to_string()
+}
+
+/// Seed a dedicated agent home for a variant (soul / memory / skills toggled via
+/// on-disk content, exactly as production reads them). Returns the home plus the
+/// optional brief block to pass as `workspace_context`.
+fn seed_variant_home(root: &std::path::Path, v: &Variant) -> (AgentHome, Option<String>) {
+    let dir = root.join(format!("abl-{}", v.name.trim_start_matches('-')));
+    let _ = std::fs::remove_dir_all(&dir);
+    let home = AgentHome::new(dir);
+    // SOUL.md: realistic identity when on; explicitly emptied when off.
+    let _ = std::fs::write(home.soul(), if v.soul { soul::DEFAULT_SOUL_MD } else { "" });
+    // MEMORY.md + USER.md: written only when memory is on.
+    if v.memory {
+        let _ = std::fs::write(home.memory(), ABL_MEMORY);
+        let _ = std::fs::write(home.user(), ABL_USER);
+    }
+    // Skills: seed the default skill set only when skills are on.
+    if v.skills {
+        skills::seed_defaults(&home);
+    }
+    let brief = if v.brief { Some(ablation_brief_block()) } else { None };
+    (home, brief)
+}
+
+/// Ablation scenario set — chosen to exercise each system: tool routing (soul/
+/// skills shouldn't break it), persona grounding (soul), and knowledge that only
+/// MEMORY or the BRIEF carries (deploy command, package manager). `math` is a
+/// system-independent control.
+fn ablation_scenarios() -> Vec<Scenario> {
+    vec![
+        Scenario {
+            name: "route:single",
+            user: "Show me the disk usage on my server.",
+            targets: 1,
+            casual: false,
+            conversation: false,
+            expect: Expect::ToolOneOf(&["run_command", "run_command_all", "list_vps_targets"]),
+        },
+        Scenario {
+            name: "route:all",
+            user: "Check uptime on all of my servers.",
+            targets: 2,
+            casual: false,
+            conversation: false,
+            expect: Expect::ToolOneOf(&["run_command_all", "run_command", "list_vps_targets"]),
+        },
+        Scenario {
+            name: "route:in-chat",
+            user: "Just show me, in chat, a bash one-liner to count lines in a file. Don't run anything.",
+            targets: 1,
+            casual: false,
+            conversation: false,
+            expect: Expect::NoTools,
+        },
+        Scenario {
+            name: "persona",
+            user: "In one sentence: who are you and what do you help with?",
+            targets: 0,
+            casual: false,
+            conversation: false,
+            // Soul grounds the identity; without it the model gives a generic answer.
+            expect: Expect::ContainsAny(&["xconsole", "devops", "server", "infrastructure", "vps"]),
+        },
+        Scenario {
+            name: "know:deploy",
+            user: "Without running anything, give me the exact one-line command to deploy this project's app.",
+            targets: 1,
+            casual: false,
+            conversation: false,
+            // The deploy command lives in the project brief (and memory).
+            expect: Expect::Contains("pm2"),
+        },
+        Scenario {
+            name: "know:pkgmgr",
+            user: "Without running anything, what command installs this project's dependencies? Just the command.",
+            targets: 1,
+            casual: false,
+            conversation: false,
+            // Memory (and the brief) say pnpm, never npm.
+            expect: Expect::Contains("pnpm"),
+        },
+        Scenario {
+            name: "control:math",
+            user: "What is 17 * 23? Just the number.",
+            targets: 0,
+            casual: false,
+            conversation: false,
+            expect: Expect::Contains("391"),
+        },
+    ]
+}
+
+/// Aggregate numbers for one variant across all ablation scenarios.
+struct VariantAgg {
+    name: String,
+    passes: usize,
+    total: usize,
+    ptok_avg: u32,
+    ttft_avg: u128,
+    total_ms_avg: u128,
+    gen_tps: f32,
+}
+
+async fn bench_ablation(env: &BenchEnv) -> Value {
+    let resolved = match env.resolve() {
+        Ok(r) => r,
+        Err(e) => return json!({ "mode": "ablation", "error": e }),
+    };
+    let abl_root = env.root.join("ablation");
+    let _ = std::fs::create_dir_all(&abl_root);
+
+    let variants = ablation_variants();
+    let scns = ablation_scenarios();
+
+    // Warm the model into VRAM so per-variant latencies reflect steady state.
+    println!("\n(warming model…)");
+    let warm_home = AgentHome::new(abl_root.join("warm"));
+    let (warm_sys, _) = env.build_prompt_with(&warm_home, None, &[], true);
+    let _ = one_turn(resolved.provider.as_ref(), &env.model, warm_sys, vec![], "hi").await;
+
+    println!(
+        "\n=== ABLATION: soul / memory / skills / project-brief ({} scenarios × {} sample(s)) ===",
+        scns.len(),
+        env.samples
+    );
+
+    let mut variant_aggs: Vec<VariantAgg> = Vec::new();
+    let mut per_variant_json: Vec<Value> = Vec::new();
+
+    for v in &variants {
+        let (home, brief) = seed_variant_home(&abl_root, v);
+        println!(
+            "\n--- variant {:<8} (soul={} memory={} skills={} brief={}) ---",
+            v.name, v.soul as u8, v.memory as u8, v.skills as u8, v.brief as u8
+        );
+        println!(
+            "{:<14} {:>6} {:>8} {:>8} {:>7} {:>6}  {}",
+            "scenario", "pass", "ttft_ms", "total_ms", "gen_t/s", "ptok", "selected"
+        );
+
+        let mut passes = 0usize;
+        let mut ptok_sum = 0u64;
+        let mut ttft_sum = 0u128;
+        let mut total_sum = 0u128;
+        let mut gen_tps_last = 0.0f32;
+        let mut turns = 0u128;
+        let mut scn_json: Vec<Value> = Vec::new();
+
+        for s in &scns {
+            let targets: Vec<String> = (0..s.targets).map(|i| format!("vps-{i}")).collect();
+            let mut k = 0usize;
+            let mut s_ttft = 0u128;
+            let mut s_total = 0u128;
+            let mut s_ptok = 0u32;
+            let mut s_gen = 0.0f32;
+            let mut last_selected = String::new();
+            for _ in 0..env.samples {
+                let (system, tool_defs) =
+                    env.build_prompt_with(&home, brief.clone(), &targets, s.casual);
+                let r = one_turn(resolved.provider.as_ref(), &env.model, system, tool_defs, s.user)
+                    .await;
+                if score(&s.expect, &r) {
+                    k += 1;
+                }
+                s_ttft += r.ttft_ms;
+                s_total += r.total_ms;
+                s_ptok = r.prompt_tokens;
+                s_gen = r.gen_tps;
+                last_selected = if r.tool_calls.is_empty() {
+                    r.error
+                        .as_ref()
+                        .map(|e| format!("ERROR: {}", e.chars().take(30).collect::<String>()))
+                        .unwrap_or_else(|| "(text)".to_string())
+                } else {
+                    r.tool_calls.join(",")
+                };
+            }
+            let n = env.samples as u128;
+            let ok = k * 2 > env.samples;
+            if ok {
+                passes += 1;
+            }
+            ptok_sum += s_ptok as u64;
+            ttft_sum += s_ttft;
+            total_sum += s_total;
+            gen_tps_last = s_gen;
+            turns += n;
+            println!(
+                "{:<14} {:>6} {:>8} {:>8} {:>7.1} {:>6}  {}",
+                s.name,
+                format!("{k}/{}", env.samples),
+                s_ttft / n,
+                s_total / n,
+                s_gen,
+                s_ptok,
+                last_selected
+            );
+            scn_json.push(json!({
+                "scenario": s.name,
+                "pass": ok,
+                "passed_samples": k,
+                "prompt_tokens": s_ptok,
+                "ttft_ms_avg": s_ttft / n,
+                "total_ms_avg": s_total / n,
+                "last_selected": last_selected,
+            }));
+        }
+
+        let nscn = scns.len().max(1) as u64;
+        let agg = VariantAgg {
+            name: v.name.to_string(),
+            passes,
+            total: scns.len(),
+            ptok_avg: (ptok_sum / nscn) as u32,
+            ttft_avg: if turns > 0 { ttft_sum / turns } else { 0 },
+            total_ms_avg: if turns > 0 { total_sum / turns } else { 0 },
+            gen_tps: gen_tps_last,
+        };
+        println!(
+            "variant {:<8} PASS {}/{}  ptok~{}  ttft~{}ms  total~{}ms",
+            v.name, agg.passes, agg.total, agg.ptok_avg, agg.ttft_avg, agg.total_ms_avg
+        );
+        per_variant_json.push(json!({
+            "variant": v.name,
+            "soul": v.soul, "memory": v.memory, "skills": v.skills, "brief": v.brief,
+            "pass": agg.passes, "total": agg.total,
+            "prompt_tokens_avg": agg.ptok_avg,
+            "ttft_ms_avg": agg.ttft_avg,
+            "total_ms_avg": agg.total_ms_avg,
+            "gen_tps": agg.gen_tps,
+            "scenarios": scn_json,
+        }));
+        variant_aggs.push(agg);
+    }
+
+    // Per-system contribution = full − ablated. +Δpass means the system HELPS
+    // quality; Δptok is the prompt-token cost the system adds to every turn.
+    let full = variant_aggs.iter().find(|a| a.name == "full");
+    let mut contrib_json: Vec<Value> = Vec::new();
+    if let Some(full) = full {
+        println!("\n=== PER-SYSTEM CONTRIBUTION (full − without) ===");
+        println!(
+            "{:<9} {:>7} {:>9} {:>9} {:>10}",
+            "system", "Δpass", "Δptok", "Δttft_ms", "Δtotal_ms"
+        );
+        for (sys, vname) in [
+            ("soul", "-soul"),
+            ("memory", "-memory"),
+            ("skills", "-skills"),
+            ("brief", "-brief"),
+        ] {
+            if let Some(ab) = variant_aggs.iter().find(|a| a.name == vname) {
+                let dpass = full.passes as i64 - ab.passes as i64;
+                let dptok = full.ptok_avg as i64 - ab.ptok_avg as i64;
+                let dttft = full.ttft_avg as i64 - ab.ttft_avg as i64;
+                let dtotal = full.total_ms_avg as i64 - ab.total_ms_avg as i64;
+                println!(
+                    "{:<9} {:>+7} {:>+9} {:>+9} {:>+10}",
+                    sys, dpass, dptok, dttft, dtotal
+                );
+                contrib_json.push(json!({
+                    "system": sys,
+                    "delta_pass": dpass,
+                    "delta_prompt_tokens": dptok,
+                    "delta_ttft_ms": dttft,
+                    "delta_total_ms": dtotal,
+                }));
+            }
+        }
+        if let Some(bare) = variant_aggs.iter().find(|a| a.name == "bare") {
+            println!(
+                "\nfull: {}/{} pass @ {} ptok   bare (no systems): {}/{} pass @ {} ptok   \
+                 → all four systems together add {} prompt tokens and {:+} passes",
+                full.passes, full.total, full.ptok_avg,
+                bare.passes, bare.total, bare.ptok_avg,
+                full.ptok_avg as i64 - bare.ptok_avg as i64,
+                full.passes as i64 - bare.passes as i64,
+            );
+        }
+    }
+
+    json!({
+        "mode": "ablation",
+        "model": env.model,
+        "num_ctx": env.num_ctx,
+        "samples": env.samples,
+        "variants": per_variant_json,
+        "per_system_contribution": contrib_json,
     })
 }
 
