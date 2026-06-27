@@ -73,6 +73,79 @@ With **no hooks configured the loop skips the hook path entirely (0 ms)** — ho
 opt-in, so they cost nothing until you add one. The `live_hook_ms` figure is dominated
 by process-spawn latency (lower on Unix `sh -c`); a hook that does real work adds its own time.
 
+## 1a. Harder suites — `hard` and `recall`
+
+The core `agent` suite saturates at 100% on `qwen3.5:9b`, so it no longer
+discriminates. Two harder, **scored** suites add headroom (so the history can show
+learning/regressions):
+
+```bash
+# Discriminative agent suite — tool-boundary routing traps + adversarial
+# action-vs-explain restraint (a 9B does NOT ace these). Reports an overall pass-rate
+# (with a Wilson CI) and a per-tier breakdown (hard / expert).
+./src-tauri/target/release/xconsole-bench.exe hard --samples 3
+
+# Reasoning-unlocks-recall experiment — single-hop factual questions answered three
+# ways: direct, reason-first, and a dummy "Let me think" buffer.
+./src-tauri/target/release/xconsole-bench.exe recall --samples 3
+
+# Closed learning loop — answer unfamiliar-tool tasks COLD (memory), let the
+# autoresearch loop build a skill for each, then answer WARM (skill injected).
+# Records cold/warm as two history points so the dashboard shows the before/after.
+./src-tauri/target/release/xconsole-bench.exe learnloop --samples 3
+```
+
+`learnloop` is the experiment that asks "does the agent actually get better by
+learning?" — cold vs warm pass-rate, plus a persistence check (a second `learn()`
+must dedup to the existing skill, no re-research). It also honestly catches the
+failure mode: a low-quality researched skill can *regress* a task, which is why
+draft skills stay quarantined until execution-verified.
+
+`recall` tests Google Research's *"Thinking to Recall: how reasoning unlocks parametric
+knowledge in LLMs"* on our local model: does a reasoning trace surface facts the model
+has in its weights but can't recall when answering directly? It reports `direct`,
+`reason`, and `buffer` accuracy and the **reasoning gain** (`reason − direct`). Per the
+paper, a large positive gain means reasoning unlocks recall (factual priming); a gain
+from the dummy `buffer` condition isolates the pure compute-buffer effect; a *negative*
+gain flags the paper's failure mode (a hallucinated intermediate fact derailing the
+answer). The `hard`/`recall` scenarios were generated and adversarially fact-checked by
+a multi-agent workflow so their expected answers are correct.
+
+## 1b. Benchmark history — scores over time (HTML dashboard + OKF bundle)
+
+Every **scored** run (`agent`, `hard`, `recall`, `ablation`, `learn`, `llm`, `all`) is
+appended to `bench/results/history.jsonl` and rendered two ways automatically:
+
+- **`bench/results/history.html`** — a self-contained dashboard (open it in any
+  browser; no server, no external assets) charting pass-rate and latency over time,
+  with a **Wilson 95% confidence interval** on every pass-rate.
+- **`bench/history/`** — the same history as an **[Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)**
+  bundle (Google's portable markdown+YAML standard): one typed concept per run
+  (`runs/*.md`), a chronological `log.md`, and an `index.md`. Portable, vendor-neutral,
+  readable in any editor and on GitHub.
+
+```bash
+# Rebuild the dashboard + OKF bundle from the existing history (no model needed):
+./src-tauri/target/release/xconsole-bench.exe report
+
+# Skip recording a run (e.g. a throwaway/tuning run):
+./src-tauri/target/release/xconsole-bench.exe agent --no-history
+```
+
+**Methodology** (applied + cited in the dashboard footer):
+
+- **Confidence intervals, not point estimates.** A pass-rate from a few samples is
+  noisy — 3–5 samples is *often insufficient* and the same source can wander ±1 pass.
+  Each pass-rate is reported with a Wilson 95% CI; when two runs' intervals overlap,
+  the difference isn't real. (Google Research, *"Building better AI benchmarks: how
+  many raters are enough?"* — more items beats more samples for an accuracy metric.)
+- **`time for 100 output tokens` = TTFT + 100 / (tok/s)** — one comparable latency
+  number across runs. (Artificial Analysis methodology.)
+- **Revealed behavior vs. self-report.** The learn-loop eval measures what the model
+  *does* (does it route to `learn_skill`?) against what it *claims* (the classifier's
+  self-assessment) — the gap is the model's overconfidence. (Google Research,
+  *"Evaluating alignment of behavioral dispositions in LLMs."*)
+
 ## 2. `ollama_latency.ps1` — zero-build latency probe
 
 Quick TTFT / tok/s read without compiling, straight against `/api/chat`:

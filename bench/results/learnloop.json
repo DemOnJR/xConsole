@@ -1,0 +1,80 @@
+{
+  "cautious_pass": 5,
+  "cautious_regressions": 0,
+  "cold_pass": 4,
+  "forceful_pass": 5,
+  "forceful_regressions": 0,
+  "mode": "learnloop",
+  "model": "qwen3.5:9b",
+  "persisted": 6,
+  "samples": 3,
+  "tasks": [
+    {
+      "cold": 0,
+      "final_status": "draft",
+      "samples": 3,
+      "skill": "caddyfile-reverse_proxy-to-unix-socket",
+      "source": "web",
+      "task": "caddy-unix-socket",
+      "topic": "caddyfile reverse_proxy to unix socket",
+      "warm_cautious": 0,
+      "warm_forceful": 0
+    },
+    {
+      "cold": 0,
+      "final_status": "draft",
+      "samples": 3,
+      "skill": "restic-forget-keep-last-7-daily-snapshots-flag",
+      "source": "web",
+      "task": "restic-keep-daily",
+      "topic": "restic forget keep last 7 daily snapshots flag",
+      "warm_cautious": 3,
+      "warm_forceful": 3
+    },
+    {
+      "cold": 3,
+      "final_status": "draft",
+      "samples": 3,
+      "skill": "borg-create-repository-archive-name-separator",
+      "source": "web",
+      "task": "borg-archive-sep",
+      "topic": "borg create repository archive name separator",
+      "warm_cautious": 2,
+      "warm_forceful": 2
+    },
+    {
+      "cold": 2,
+      "final_status": "draft",
+      "samples": 3,
+      "skill": "systemd-unit-auto-restart-on-failure-directive",
+      "source": "web",
+      "task": "systemd-restart-onfailure",
+      "topic": "systemd unit auto restart on failure directive",
+      "warm_cautious": 3,
+      "warm_forceful": 3
+    },
+    {
+      "cold": 3,
+      "final_status": "draft",
+      "samples": 3,
+      "skill": "nginx-increase-max-upload-body-size-directive",
+      "source": "web",
+      "task": "nginx-upload-size",
+      "topic": "nginx increase max upload body size directive",
+      "warm_cautious": 3,
+      "warm_forceful": 3
+    },
+    {
+      "cold": 3,
+      "final_status": "draft",
+      "samples": 3,
+      "skill": "jq-filter-first-element-of-an-array",
+      "source": "web",
+      "task": "jq-first-element",
+      "topic": "jq filter first element of an array",
+      "warm_cautious": 2,
+      "warm_forceful": 2
+    }
+  ],
+  "total": 6
+}

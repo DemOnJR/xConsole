@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xConsole — Benchmark History</title>
+<style>
+:root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#e6edf3;--muted:#8b949e;--accent:#58a6ff;--good:#3fb950;--warn:#d29922;--bad:#f85149}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:28px 20px 60px}
+h1{font-size:22px;margin:0 0 4px}.sub{color:var(--muted);margin:0 0 24px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:28px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px}
+.card .m{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.card .v{font-size:26px;font-weight:600;margin-top:4px}
+.card .d{font-size:12px;color:var(--muted);margin-top:2px}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:22px}
+.panel h2{font-size:14px;margin:0 0 12px;color:var(--text)}
+svg{width:100%;height:280px;display:block}
+.legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:8px;font-size:12px;color:var(--muted)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--border)}
+th{color:var(--muted);font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.tag{font-size:11px;padding:1px 7px;border-radius:99px;background:#1f6feb22;color:var(--accent)}
+.muted{color:var(--muted)}.foot{color:var(--muted);font-size:12px;margin-top:24px;line-height:1.7}
+.foot a{color:var(--accent);text-decoration:none}
+.empty{color:var(--muted);text-align:center;padding:40px}
+</style></head>
+<body><div class="wrap">
+<h1>xConsole — Benchmark History</h1>
+<p class="sub">Local-model agent scores &amp; latency over time. Pass-rates show a Wilson 95% confidence interval.</p>
+<div id="cards" class="cards"></div>
+<div class="panel"><h2>Score over time (pass-rate %, with 95% CI)</h2><svg id="chartScore" viewBox="0 0 1000 280" preserveAspectRatio="none"></svg><div id="legScore" class="legend"></div></div>
+<div class="panel"><h2>Latency over time — time for 100 output tokens (ms, lower is better)</h2><svg id="chartLat" viewBox="0 0 1000 280" preserveAspectRatio="none"></svg><div id="legLat" class="legend"></div></div>
+<div class="panel"><h2>All runs</h2><div id="tableWrap"></div></div>
+<div class="foot" id="foot"></div>
+</div>
+<script>window.BENCH_DATA = [{"ci_hi":1.0,"ci_lo":0.0,"extra":{},"gen_tps":44.0,"metric":null,"metric_label":"latency only","mode":"llm","model":"qwen3.5:9b","pass":0,"ptok":4860,"samples":1,"t100_ms":4124,"total":0,"total_ms":5329,"ts":"2026-06-27T00:52:32.133470100+00:00","ts_display":"Jun 27 2026 02:52","ttft_ms":1853},{"ci_hi":1.0,"ci_lo":0.741,"extra":{},"gen_tps":45.4,"metric":1.0,"metric_label":"scenario pass-rate","mode":"agent","model":"qwen3.5:9b","pass":11,"ptok":3413,"samples":3,"t100_ms":3899,"total":11,"total_ms":2197,"ts":"2026-06-27T00:53:47.450689500+00:00","ts_display":"Jun 27 2026 02:53","ttft_ms":1699},{"ci_hi":1.0,"ci_lo":0.741,"extra":{},"gen_tps":45.8,"metric":1.0,"metric_label":"scenario pass-rate","mode":"agent","model":"qwen3.5:9b","pass":11,"ptok":3413,"samples":3,"t100_ms":3900,"total":11,"total_ms":2168,"ts":"2026-06-27T00:55:00.556526200+00:00","ts_display":"Jun 27 2026 02:55","ttft_ms":1718},{"ci_hi":1.0,"ci_lo":0.646,"extra":[{"delta_pass":0,"delta_prompt_tokens":122,"delta_total_ms":1484,"delta_ttft_ms":92,"system":"soul"},{"delta_pass":0,"delta_prompt_tokens":254,"delta_total_ms":1387,"delta_ttft_ms":66,"system":"memory"},{"delta_pass":1,"delta_prompt_tokens":176,"delta_total_ms":1315,"delta_ttft_ms":-116,"system":"skills"},{"delta_pass":1,"delta_prompt_tokens":155,"delta_total_ms":1472,"delta_ttft_ms":11,"system":"brief"}],"gen_tps":55.6,"metric":1.0,"metric_label":"full-prompt pass-rate","mode":"ablation","model":"qwen3.5:9b","pass":7,"ptok":4802,"samples":3,"t100_ms":3337,"total":7,"total_ms":3476,"ts":"2026-06-27T00:59:48.523315+00:00","ts_display":"Jun 27 2026 02:59","ttft_ms":1539},{"ci_hi":0.609,"ci_lo":0.138,"extra":{"fn":8,"fp":0,"precision":0.0,"recall":0.0,"tn":4,"tp":0},"gen_tps":0.0,"metric":0.3333333333333333,"metric_label":"gap-routing accuracy","mode":"learn","model":"qwen3.5:9b","pass":4,"ptok":0,"samples":3,"t100_ms":0,"total":12,"total_ms":0,"ts":"2026-06-27T01:02:38.235947400+00:00","ts_display":"Jun 27 2026 03:02","ttft_ms":0},{"ci_hi":0.96,"ci_lo":0.601,"extra":{"expert":{"pass":2,"total":4},"hard":{"pass":10,"total":10}},"gen_tps":44.4,"metric":0.8571428571428571,"metric_label":"hard-suite pass-rate","mode":"hard","model":"qwen3.5:9b","pass":12,"ptok":4855,"samples":3,"t100_ms":4148,"total":14,"total_ms":5916,"ts":"2026-06-27T01:26:04.406853+00:00","ts_display":"Jun 27 2026 03:26","ttft_ms":1897},{"ci_hi":0.948,"ci_lo":0.778,"extra":{"buffer_acc":0.9074074074074074,"buffer_gain":0.0185185185185186,"reason_acc":0.9629629629629628,"reason_gain":0.07407407407407407},"gen_tps":0.0,"metric":0.8888888888888888,"metric_label":"recall accuracy (direct)","mode":"recall","model":"qwen3.5:9b","pass":48,"ptok":0,"samples":3,"t100_ms":0,"total":54,"total_ms":0,"ts":"2026-06-27T12:01:49.604207400+00:00","ts_display":"Jun 27 2026 14:01","ttft_ms":0},{"ci_hi":0.964,"ci_lo":0.376,"extra":{"persisted":5,"total":5},"gen_tps":0,"metric":0.8,"metric_label":"unfamiliar-tool: memory only","mode":"learnloop-cold","model":"qwen3.5:9b","pass":4,"ptok":0,"samples":3,"t100_ms":0,"total":5,"total_ms":0,"ts":"2026-06-27T13:09:35.915794+00:00","ts_display":"Jun 27 2026 15:09","ttft_ms":0},{"ci_hi":0.964,"ci_lo":0.376,"extra":{"persisted":5,"total":5},"gen_tps":0,"metric":0.8,"metric_label":"unfamiliar-tool: after learning","mode":"learnloop-warm","model":"qwen3.5:9b","pass":4,"ptok":0,"samples":3,"t100_ms":0,"total":5,"total_ms":0,"ts":"2026-06-27T13:09:35.916153600+00:00","ts_display":"Jun 27 2026 15:09","ttft_ms":0},{"ci_hi":0.903,"ci_lo":0.3,"extra":{"cautious_pass":5,"cautious_regressions":1,"forceful_pass":5,"forceful_regressions":1,"persisted":6,"total":6},"gen_tps":0,"metric":0.6666666666666666,"metric_label":"unfamiliar-tool: memory only","mode":"learnloop-cold","model":"qwen3.5:9b","pass":4,"ptok":0,"samples":3,"t100_ms":0,"total":6,"total_ms":0,"ts":"2026-06-27T14:09:49.628492+00:00","ts_display":"Jun 27 2026 16:09","ttft_ms":0},{"ci_hi":0.97,"ci_lo":0.436,"extra":{"cautious_pass":5,"cautious_regressions":1,"forceful_pass":5,"forceful_regressions":1,"persisted":6,"total":6},"gen_tps":0,"metric":0.8333333333333334,"metric_label":"unfamiliar-tool: after learning (cautious)","mode":"learnloop-warm","model":"qwen3.5:9b","pass":5,"ptok":0,"samples":3,"t100_ms":0,"total":6,"total_ms":0,"ts":"2026-06-27T14:09:49.628854400+00:00","ts_display":"Jun 27 2026 16:09","ttft_ms":0},{"ci_hi":0.903,"ci_lo":0.3,"extra":{"cautious_pass":5,"cautious_regressions":0,"forceful_pass":5,"forceful_regressions":0,"persisted":6,"total":6},"gen_tps":0,"metric":0.6666666666666666,"metric_label":"unfamiliar-tool: memory only","mode":"learnloop-cold","model":"qwen3.5:9b","pass":4,"ptok":0,"samples":3,"t100_ms":0,"total":6,"total_ms":0,"ts":"2026-06-27T14:28:07.173732500+00:00","ts_display":"Jun 27 2026 16:28","ttft_ms":0},{"ci_hi":0.97,"ci_lo":0.436,"extra":{"cautious_pass":5,"cautious_regressions":0,"forceful_pass":5,"forceful_regressions":0,"persisted":6,"total":6},"gen_tps":0,"metric":0.8333333333333334,"metric_label":"unfamiliar-tool: after learning (cautious)","mode":"learnloop-warm","model":"qwen3.5:9b","pass":5,"ptok":0,"samples":3,"t100_ms":0,"total":6,"total_ms":0,"ts":"2026-06-27T14:28:07.174123100+00:00","ts_display":"Jun 27 2026 16:28","ttft_ms":0}];</script>
+<script>
+(function(){
+  var D = (window.BENCH_DATA||[]).slice();
+  var COLORS={agent:"#58a6ff",ablation:"#3fb950",learn:"#d29922",llm:"#bc8cff",all:"#f778ba"};
+  var elc=document.getElementById('cards');
+  if(!D.length){elc.innerHTML='<div class="empty">No benchmark runs recorded yet. Run <code>xconsole-bench agent</code>.</div>';
+    document.getElementById('foot').innerHTML=foot();return;}
+  // Summary cards: latest run per mode.
+  var latest={};D.forEach(function(r){latest[r.mode]=r;});
+  Object.keys(latest).forEach(function(m){var r=latest[m];var c=document.createElement('div');c.className='card';
+    var v=r.metric==null?(r.t100_ms+'ms'):(Math.round(r.metric*100)+'%');
+    var d=r.metric==null?(r.gen_tps+' tok/s · '+r.model):(r.pass+'/'+r.total+' · CI '+Math.round(r.ci_lo*100)+'–'+Math.round(r.ci_hi*100)+'%');
+    c.innerHTML='<div class="m">'+m+'</div><div class="v">'+v+'</div><div class="d">'+d+'</div>';elc.appendChild(c);});
+  // Charts.
+  drawChart('chartScore','legScore',function(r){return r.metric==null?null:r.metric*100;},function(r){return [r.ci_lo*100,r.ci_hi*100];},'%');
+  drawChart('chartLat','legLat',function(r){return r.t100_ms||null;},null,'ms');
+  // Table.
+  var rows=D.slice().reverse().map(function(r){
+    var score=r.metric==null?'<span class="muted">—</span>':(Math.round(r.metric*100)+'% <span class="muted">('+r.pass+'/'+r.total+')</span>');
+    var ci=r.metric==null?'':('<span class="muted">'+Math.round(r.ci_lo*100)+'–'+Math.round(r.ci_hi*100)+'%</span>');
+    return '<tr><td>'+r.ts_display+'</td><td><span class="tag">'+r.mode+'</span></td><td class="muted">'+r.model+'</td>'+
+      '<td class="num">'+(r.samples||'')+'</td><td>'+score+'</td><td>'+ci+'</td>'+
+      '<td class="num">'+(r.ptok||'')+'</td><td class="num">'+(r.ttft_ms||'')+'</td><td class="num">'+(r.t100_ms||'')+'</td><td class="num">'+(r.gen_tps||'')+'</td></tr>';
+  }).join('');
+  document.getElementById('tableWrap').innerHTML='<table><thead><tr><th>When</th><th>Mode</th><th>Model</th><th class="num">N</th><th>Score</th><th>95% CI</th><th class="num">ptok</th><th class="num">TTFT</th><th class="num">t100</th><th class="num">tok/s</th></tr></thead><tbody>'+rows+'</tbody></table>';
+  document.getElementById('foot').innerHTML=foot();
+
+  function drawChart(svgId,legId,yf,cif,unit){
+    var svg=document.getElementById(svgId);var W=1000,H=280,pl=46,pr=14,pt=14,pb=26;
+    var modes={};D.forEach(function(r){var y=yf(r);if(y==null)return;(modes[r.mode]=modes[r.mode]||[]).push({r:r,y:y});});
+    var ks=Object.keys(modes);if(!ks.length){svg.innerHTML='<text x="500" y="140" fill="#8b949e" text-anchor="middle">no data for this metric</text>';return;}
+    var maxN=1,maxY=0;ks.forEach(function(m){maxN=Math.max(maxN,modes[m].length);modes[m].forEach(function(p){maxY=Math.max(maxY,cif?cif(p.r)[1]:p.y);});});
+    if(unit==='%')maxY=100;else maxY=Math.ceil(maxY/500)*500||100;
+    var X=function(i){return pl+(maxN<=1?0:(i/(maxN-1)))*(W-pl-pr);};
+    var Y=function(v){return pt+(1-v/maxY)*(H-pt-pb);};
+    var g='';
+    for(var t=0;t<=4;t++){var gv=maxY*t/4,gy=Y(gv);g+='<line x1="'+pl+'" y1="'+gy+'" x2="'+(W-pr)+'" y2="'+gy+'" stroke="#21262d"/>'+
+      '<text x="'+(pl-6)+'" y="'+(gy+4)+'" fill="#8b949e" font-size="11" text-anchor="end">'+Math.round(gv)+'</text>';}
+    ks.forEach(function(m){var col=COLORS[m]||'#888';var pts=modes[m];
+      var path=pts.map(function(p,i){return (i?'L':'M')+X(i)+' '+Y(p.y);}).join(' ');
+      g+='<path d="'+path+'" fill="none" stroke="'+col+'" stroke-width="2"/>';
+      pts.forEach(function(p,i){
+        if(cif){var ci=cif(p.r);g+='<line x1="'+X(i)+'" y1="'+Y(ci[0])+'" x2="'+X(i)+'" y2="'+Y(ci[1])+'" stroke="'+col+'" stroke-width="1" opacity="0.45"/>';}
+        g+='<circle cx="'+X(i)+'" cy="'+Y(p.y)+'" r="3.2" fill="'+col+'"><title>'+m+' · '+p.r.ts_display+' · '+(unit==='%'?Math.round(p.y)+'%':Math.round(p.y)+'ms')+'</title></circle>';});
+    });
+    svg.innerHTML=g;
+    document.getElementById(legId).innerHTML=ks.map(function(m){return '<span><i style="background:'+(COLORS[m]||'#888')+'"></i>'+m+'</span>';}).join('');
+  }
+  function foot(){return 'Methodology — pass-rates carry a <b>Wilson 95% confidence interval</b>; with small N (a few samples) intervals are wide, so a single number shouldn\'t be over-read '+
+    '(<a href="https://research.google/blog/building-better-ai-benchmarks-how-many-raters-are-enough/">Google: how many raters are enough?</a>). '+
+    'Latency is <b>time for 100 output tokens</b> = TTFT + 100/(tok/s) (<a href="https://artificialanalysis.ai/methodology">Artificial Analysis</a>). '+
+    'The agent\'s tool-routing measures <b>revealed behavior vs. self-report</b> (<a href="https://research.google/blog/evaluating-alignment-of-behavioral-dispositions-in-llms/">Google: behavioral dispositions</a>). '+
+    'This history is also an <a href="https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf">Open Knowledge Format</a> bundle under <code>bench/history/</code>.';}
+})();
+</script>
+</body></html>

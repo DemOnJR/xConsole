@@ -256,6 +256,8 @@ pub fn run() {
             commands::ai::clear_file_changes,
             commands::ai::revert_file_change,
             commands::ai::scan_skill_path,
+            commands::ai::skill_scanner_status,
+            commands::ai::install_skill_scanner,
             commands::ai::get_system_capabilities,
             commands::ai::search_models,
             commands::ai::hf_model_files,

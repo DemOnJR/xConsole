@@ -434,6 +434,111 @@ pub async fn run_turn(
         system.push_str(extra);
     }
 
+    // ---- Capability-gap autopilot (autoresearch) -------------------------
+    // A weak local model won't reliably pick learn_skill itself (measured: trigger
+    // recall ~0 across prompt wordings), but it answers a focused YES/NO-style classifier
+    // reliably (recall ~0.75, zero false positives). So before the turn we run one cheap
+    // classification; on a detected gap with no covering skill we research it and inject
+    // the resulting skill here, so the model applies it THIS turn — acknowledging and
+    // building the skill automatically instead of guessing. Gated to local tool turns
+    // and `agent.learn_autopilot` (default on); the expensive research only runs on a
+    // genuine detected gap.
+    // When the autopilot applies a researched skill this turn, its name is held here so
+    // the turn's outcome (clean vs troubled) can update the skill's verified status.
+    let mut autopilot_skill: Option<String> = None;
+    let learn_autopilot = tc
+        .db
+        .get_setting("agent.learn_autopilot")
+        .ok()
+        .flatten()
+        .map(|v| v != "false")
+        .unwrap_or(true);
+    if learn_autopilot
+        && ollama_mode
+        && !cli_mode
+        && !casual_turn
+        && !conversation
+        && !tool_defs_for_turn.is_empty()
+        && !last_user_msg.trim().is_empty()
+    {
+        let installed: Vec<String> = crate::ai::skills::discover(&tc.home)
+            .into_iter()
+            .map(|s| {
+                if s.description.is_empty() {
+                    s.name.replace('-', " ")
+                } else {
+                    format!("{} ({})", s.name.replace('-', " "), s.description)
+                }
+            })
+            .collect();
+        if let Some(topic) = crate::ai::autoresearch::assess_gap(
+            resolved.provider.as_ref(),
+            &resolved.model,
+            &last_user_msg,
+            &installed,
+        )
+        .await
+        {
+            let known_hosts: Vec<String> = tc
+                .targets
+                .iter()
+                .filter_map(|id| tc.db.get_vps(id).ok().flatten())
+                .flat_map(|v| [v.host, v.name])
+                .collect();
+            let scan_opts = crate::ai::skill_scan::scan_options_from_db(&tc.db);
+            let res = crate::ai::autoresearch::learn(
+                &tc.home,
+                resolved.provider.as_ref(),
+                &resolved.model,
+                &topic,
+                None,
+                &known_hosts,
+                None,
+                &scan_opts,
+                Some(sink),
+            )
+            .await;
+            use crate::ai::autoresearch::LearnStatus;
+            match res.status {
+                LearnStatus::Saved | LearnStatus::Exists => {
+                    // Trust the skill according to its verification status: a verified
+                    // skill is applied forcefully; a draft is offered as cautious notes
+                    // (so a possibly-wrong skill can't override a correct instinct); a
+                    // quarantined skill is not applied at all.
+                    let status = crate::ai::autoresearch::skill_status(&tc.home, &res.name);
+                    match crate::ai::autoresearch::injection_block(&status, &res.body) {
+                        Some(block) => {
+                            emit(
+                                Some(sink),
+                                StreamEvent::Status(format!(
+                                    "Learned a skill for \"{topic}\" ({status}) — applying it."
+                                )),
+                            );
+                            system.push_str(&block);
+                            // Record this turn's outcome against the skill at end-of-turn.
+                            autopilot_skill = Some(res.name.clone());
+                        }
+                        None => {
+                            system.push_str(
+                                "\n\n# Note: the researched approach for this task is quarantined \
+                                 (it failed before). Don't rely on it; tell the user you're not \
+                                 certain of the exact steps.",
+                            );
+                        }
+                    }
+                }
+                LearnStatus::NoSources | LearnStatus::Refused => {
+                    system.push_str(
+                        "\n\n# Note: a web search for this task didn't yield a reliable procedure. \
+                         Tell the user honestly that you're not certain of the exact steps rather \
+                         than guessing commands.",
+                    );
+                }
+                LearnStatus::Error => {}
+            }
+        }
+    }
+
     let mut last = ChatMessage::assistant("");
     let mut iters_used = 0usize;
 
@@ -537,6 +642,29 @@ pub async fn run_turn(
                 StreamEvent::Status(format!(
                     "Self-improvement: learned {} lesson(s) from this turn and saved them to memory.",
                     lessons.len()
+                )),
+            );
+        }
+    }
+
+    // Skill verification: if the autopilot APPLIED a researched skill this turn AND the
+    // agent actually acted (ran tools), record whether the turn ran clean. Clean uses
+    // promote a draft to `verified`; failures eventually quarantine it — so a skill only
+    // earns trust by working, and a bad one stops being applied. Knowledge-only turns
+    // (no tool calls) carry no execution signal, so they don't move the status.
+    if let Some(skill) = autopilot_skill {
+        let acted = messages
+            .iter()
+            .any(|m| m.role == "assistant" && !m.tool_calls.is_empty());
+        if acted {
+            let outcome = crate::ai::reflection::analyze_turn(&messages, iters_used, MAX_ITERS);
+            let new_status =
+                crate::ai::autoresearch::record_outcome(&tc.home, &skill, !outcome.had_trouble());
+            emit(
+                Some(sink),
+                StreamEvent::Status(format!(
+                    "Skill `{skill}` {} this turn → status: {new_status}.",
+                    if outcome.had_trouble() { "had trouble" } else { "ran clean" }
                 )),
             );
         }

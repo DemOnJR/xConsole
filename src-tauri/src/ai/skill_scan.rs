@@ -12,6 +12,8 @@ use std::path::Path;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::storage::Db;
+
 /// Risk score at or above which an install is blocked.
 pub const BLOCK_THRESHOLD: u8 = 60;
 
@@ -26,10 +28,13 @@ pub struct ScanReport {
 }
 
 impl ScanReport {
-    /// Whether this result should block installation.
+    /// Whether this result should block installation. Any of: a risk score over the
+    /// threshold, a high/critical severity, or SkillSpector's explicit DO_NOT_INSTALL
+    /// recommendation (its most authoritative verdict).
     pub fn is_blocking(&self) -> bool {
         self.risk_score >= BLOCK_THRESHOLD
             || matches!(self.severity.to_lowercase().as_str(), "high" | "critical")
+            || self.recommendation.to_uppercase().contains("DO_NOT_INSTALL")
     }
 
     pub fn summary(&self) -> String {
@@ -55,67 +60,211 @@ pub fn is_trusted_source(source: &str) -> bool {
     host_ok
 }
 
-/// Scan a directory (or single SKILL.md) and return a risk report. Tries
-/// SkillSpector first, then the built-in heuristic scanner.
-pub async fn scan_skill(path: &Path) -> ScanReport {
-    if let Some(report) = scan_with_skillspector(path).await {
+/// Options for a skill scan. By default the scan is STATIC-ONLY (`--no-llm`, fast, no
+/// API key). When `deep` is set, SkillSpector's LLM analysis runs against an
+/// OpenAI-compatible endpoint (e.g. local Ollama) for deeper semantic checks.
+#[derive(Debug, Clone, Default)]
+pub struct ScanOptions {
+    pub deep: bool,
+    /// OpenAI-compatible base URL (Ollama: `http://localhost:11434/v1`).
+    pub base_url: Option<String>,
+    /// Model id for the deep analysis (e.g. `qwen3.5:9b`).
+    pub model: Option<String>,
+}
+
+/// Build scan options from settings + the active provider. `skills.scanner_deep` ("true")
+/// turns on LLM analysis; the endpoint/model come from `skills.scanner_model` (override)
+/// or the active Ollama provider, defaulting to local Ollama.
+pub fn scan_options_from_db(db: &Db) -> ScanOptions {
+    let deep = db
+        .get_setting("skills.scanner_deep")
+        .ok()
+        .flatten()
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    if !deep {
+        return ScanOptions::default();
+    }
+
+    // Derive the endpoint + model from the active Ollama provider when available.
+    let (mut base, mut model) = (None, None);
+    if let Ok(id) = crate::ai::registry::active_provider_id(db, None) {
+        if let Ok(Some(p)) = db.get_provider(&id) {
+            if p.kind == "ollama" {
+                base = p.base_url;
+                model = p.model;
+            }
+        }
+    }
+    let model_override = db
+        .get_setting("skills.scanner_model")
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty());
+
+    let base = base.unwrap_or_else(|| "http://localhost:11434".to_string());
+    let base = format!("{}/v1", base.trim_end_matches('/'));
+    ScanOptions {
+        deep: true,
+        base_url: Some(base),
+        model: model_override.or(model).or_else(|| Some("qwen3.5:9b".to_string())),
+    }
+}
+
+/// Scan a directory (or single SKILL.md) and return a risk report, with explicit options
+/// (static-only by default, or LLM-backed deep analysis via a local OpenAI-compatible
+/// endpoint). Tries SkillSpector first, falling back to the built-in heuristic when it
+/// isn't installed.
+pub async fn scan_skill_with(path: &Path, opts: &ScanOptions) -> ScanReport {
+    if let Some(report) = scan_with_skillspector(path, opts).await {
         return report;
     }
     scan_builtin(path)
 }
 
-/// Run the SkillSpector CLI if available: `skillspector scan <path> -f json --no-llm`.
-async fn scan_with_skillspector(path: &Path) -> Option<ScanReport> {
-    // Probe availability cheaply first; if absent, fall back silently.
-    let probe = crate::proc::quiet_tokio("skillspector").arg("--version").output().await;
-    if probe.map(|o| !o.status.success()).unwrap_or(true) {
-        return None;
+/// Run the NVIDIA SkillSpector CLI if available. Static-only by default; with `opts.deep`
+/// it adds the LLM analysis against the configured OpenAI-compatible endpoint (local
+/// Ollama). If a deep scan fails or times out, it falls back to the STATIC SkillSpector
+/// scan (still the strong scanner) — never silently down to the weak built-in heuristic.
+/// Returns None only when SkillSpector isn't installed.
+async fn scan_with_skillspector(path: &Path, opts: &ScanOptions) -> Option<ScanReport> {
+    let argv = skillspector_argv().await?;
+    let want_deep = opts.deep && opts.base_url.is_some() && opts.model.is_some();
+
+    if want_deep {
+        if let Some(r) = run_skillspector(&argv, path, opts).await {
+            return Some(r);
+        }
+        // Deep scan failed/timed out (e.g. a slow or thinking model exhausting the
+        // completion budget) — fall through to the strong static scan, not the builtin.
+    }
+    run_skillspector(&argv, path, &ScanOptions::default()).await
+}
+
+/// One SkillSpector invocation (`scan <path> -f json [--no-llm | LLM env]`), bounded by a
+/// timeout. Returns None on absence, timeout, error, or unparseable output.
+async fn run_skillspector(argv: &[String], path: &Path, opts: &ScanOptions) -> Option<ScanReport> {
+    let (cmd, base) = argv.split_first()?;
+    let mut command = crate::proc::quiet_tokio(cmd);
+    command.args(base);
+    command.arg("scan").arg(path).args(["-f", "json"]);
+
+    let deep = opts.deep && opts.base_url.is_some() && opts.model.is_some();
+    if deep {
+        // LLM analysis via an OpenAI-compatible endpoint. Ollama ignores the API key but
+        // the OpenAI client wants a non-empty one.
+        command.env("SKILLSPECTOR_PROVIDER", "openai");
+        command.env("OPENAI_BASE_URL", opts.base_url.as_deref().unwrap_or(""));
+        command.env("OPENAI_API_KEY", "ollama");
+        command.env("SKILLSPECTOR_MODEL", opts.model.as_deref().unwrap_or(""));
+    } else {
+        command.arg("--no-llm");
     }
 
-    let out = crate::proc::quiet_tokio("skillspector")
-        .arg("scan")
-        .arg(path)
-        .args(["-f", "json", "--no-llm"])
+    // Bound the scan so a hung/slow LLM endpoint can't stall the caller. Deep gets a
+    // larger budget but still falls back to static if it overruns.
+    let dur = std::time::Duration::from_secs(if deep { 90 } else { 45 });
+    let out = tokio::time::timeout(dur, command.output()).await.ok()?.ok()?;
+    parse_skillspector_json(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Resolve how to invoke SkillSpector. Prefer a `skillspector` on PATH; else find the
+/// uv tool-bin shim (`uv tool dir --bin` → `<bin>/skillspector[.exe]`), since uv installs
+/// tool executables to `~/.local/bin` which is often not on the app's PATH. Returns the
+/// argv prefix (a single program path), or None if it isn't installed.
+async fn skillspector_argv() -> Option<Vec<String>> {
+    // 1) Direct `skillspector` on PATH.
+    let direct = crate::proc::quiet_tokio("skillspector")
+        .arg("--version")
+        .output()
+        .await;
+    if direct.map(|o| o.status.success()).unwrap_or(false) {
+        return Some(vec!["skillspector".to_string()]);
+    }
+    // 2) uv tool-bin shim. `uv tool run` does NOT work for a git-installed tool (it
+    //    resolves from PyPI), so locate the actual executable instead.
+    let bin = crate::proc::quiet_tokio("uv")
+        .args(["tool", "dir", "--bin"])
         .output()
         .await
         .ok()?;
+    if !bin.status.success() {
+        return None;
+    }
+    let dir = String::from_utf8_lossy(&bin.stdout).trim().to_string();
+    if dir.is_empty() {
+        return None;
+    }
+    for exe in ["skillspector.exe", "skillspector"] {
+        let p = std::path::Path::new(&dir).join(exe);
+        if p.exists() {
+            return Some(vec![p.to_string_lossy().to_string()]);
+        }
+    }
+    None
+}
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    // The JSON object may be preceded by progress lines; grab from the first '{'.
+/// Parse SkillSpector's JSON report into a `ScanReport`. Pure + testable. The real
+/// schema nests the verdict under `risk_assessment` and lists findings under `issues`:
+/// `{ "risk_assessment": {"score","severity","recommendation"}, "issues": [ {...} ] }`.
+pub fn parse_skillspector_json(stdout: &str) -> Option<ScanReport> {
+    // The JSON object may be preceded by progress/log lines; grab from the first '{'.
     let json_start = stdout.find('{')?;
     let v: Value = serde_json::from_str(stdout[json_start..].trim()).ok()?;
 
-    let risk_score = v
-        .get("risk_score")
+    let ra = v.get("risk_assessment");
+    let risk_score = ra
+        .and_then(|r| r.get("score"))
         .and_then(|n| n.as_u64())
+        // Tolerate an older/flat `risk_score` shape too.
+        .or_else(|| v.get("risk_score").and_then(|n| n.as_u64()))
         .unwrap_or(0)
         .min(100) as u8;
-    let severity = v
-        .get("risk_severity")
+    let severity = ra
+        .and_then(|r| r.get("severity"))
         .and_then(|s| s.as_str())
+        .or_else(|| v.get("risk_severity").and_then(|s| s.as_str()))
         .unwrap_or("unknown")
         .to_string();
-    let recommendation = v
-        .get("risk_recommendation")
+    let recommendation = ra
+        .and_then(|r| r.get("recommendation"))
         .and_then(|s| s.as_str())
+        .or_else(|| v.get("risk_recommendation").and_then(|s| s.as_str()))
         .unwrap_or("")
         .to_string();
+
     let mut findings: Vec<String> = Vec::new();
-    if let Some(arr) = v.get("filtered_findings").and_then(|f| f.as_array()) {
+    let issues = v
+        .get("issues")
+        .or_else(|| v.get("filtered_findings"))
+        .and_then(|f| f.as_array());
+    if let Some(arr) = issues {
         for f in arr.iter().take(30) {
-            // Findings are objects; render a compact line from common fields.
-            let title = f
-                .get("title")
+            let id = f.get("id").and_then(|s| s.as_str()).unwrap_or("");
+            let cat = f
+                .get("category")
+                .or_else(|| f.get("title"))
                 .or_else(|| f.get("rule"))
-                .or_else(|| f.get("category"))
                 .and_then(|s| s.as_str())
                 .unwrap_or("finding");
             let sev = f.get("severity").and_then(|s| s.as_str()).unwrap_or("");
-            findings.push(if sev.is_empty() {
-                title.to_string()
-            } else {
-                format!("[{sev}] {title}")
-            });
+            let file = f
+                .get("location")
+                .and_then(|l| l.get("file"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            let mut line = String::new();
+            if !sev.is_empty() {
+                line.push_str(&format!("[{sev}] "));
+            }
+            if !id.is_empty() {
+                line.push_str(&format!("{id} "));
+            }
+            line.push_str(cat);
+            if !file.is_empty() {
+                line.push_str(&format!(" ({file})"));
+            }
+            findings.push(line);
         }
     }
 
@@ -126,6 +275,90 @@ async fn scan_with_skillspector(path: &Path) -> Option<ScanReport> {
         findings,
         scanner: "skillspector".to_string(),
     })
+}
+
+/// Availability of the strong external scanner.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScannerStatus {
+    /// Whether NVIDIA SkillSpector is installed and runnable.
+    pub installed: bool,
+    /// SkillSpector version string (e.g. "SkillSpector v2.3.7") when installed.
+    pub version: Option<String>,
+    /// The active engine: "skillspector" when installed, else "builtin".
+    pub engine: String,
+    /// Whether `uv` is available (needed to install SkillSpector).
+    pub uv_available: bool,
+}
+
+/// Report whether the strong scanner (SkillSpector) is installed, plus whether `uv` is
+/// present to install it. Used by the Settings UI and the `skill_scanner_status` command.
+pub async fn scanner_status() -> ScannerStatus {
+    let uv_available = crate::proc::quiet_tokio("uv")
+        .arg("--version")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    let version = match skillspector_argv().await {
+        Some(argv) => {
+            let (cmd, base) = argv.split_first().unwrap();
+            let mut c = crate::proc::quiet_tokio(cmd);
+            c.args(base).arg("--version");
+            c.output().await.ok().and_then(|o| {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                (!s.is_empty()).then_some(s)
+            })
+        }
+        None => None,
+    };
+
+    let installed = version.is_some();
+    ScannerStatus {
+        installed,
+        version,
+        engine: if installed { "skillspector".into() } else { "builtin".into() },
+        uv_available,
+    }
+}
+
+/// Install NVIDIA SkillSpector via `uv tool install`. Requires `uv` (which provisions a
+/// compatible Python automatically). Returns a short status string on success.
+pub async fn install_scanner() -> Result<String, String> {
+    let uv_ok = crate::proc::quiet_tokio("uv")
+        .arg("--version")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !uv_ok {
+        return Err(
+            "uv is required to install SkillSpector. Install uv from https://docs.astral.sh/uv/ \
+             (or `winget install astral-sh.uv`), then try again."
+                .into(),
+        );
+    }
+
+    let out = crate::proc::quiet_tokio("uv")
+        .args(["tool", "install", "--force", "git+https://github.com/NVIDIA/skillspector.git"])
+        .output()
+        .await
+        .map_err(|e| format!("failed to run uv: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("uv tool install failed: {}", err.trim()));
+    }
+
+    // Confirm it now resolves.
+    let status = scanner_status().await;
+    if status.installed {
+        Ok(format!(
+            "Installed NVIDIA SkillSpector ({}).",
+            status.version.unwrap_or_else(|| "version unknown".into())
+        ))
+    } else {
+        Err("Install reported success but SkillSpector is still not runnable.".into())
+    }
 }
 
 /// Pure-Rust heuristic scan: looks for high-signal malicious patterns across
@@ -309,6 +542,38 @@ mod tests {
         assert!(report.is_blocking(), "report: {report:?}");
         assert_eq!(report.scanner, "builtin");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_real_skillspector_schema() {
+        // Mirrors actual `skillspector scan -f json --no-llm` output (v2.3.7).
+        let json = r#"Scanning...
+{"skill":{"name":"bad"},"risk_assessment":{"score":71,"severity":"HIGH","recommendation":"DO_NOT_INSTALL"},
+"issues":[{"id":"E1","category":"Data Exfiltration","severity":"MEDIUM","confidence":0.6,"location":{"file":"SKILL.md","start_line":6}},
+{"id":"P1","category":"Instruction Override","severity":"HIGH","location":{"file":"SKILL.md","start_line":3}}]}"#;
+        let r = parse_skillspector_json(json).expect("parses");
+        assert_eq!(r.risk_score, 71);
+        assert_eq!(r.severity, "HIGH");
+        assert_eq!(r.recommendation, "DO_NOT_INSTALL");
+        assert_eq!(r.scanner, "skillspector");
+        assert!(r.is_blocking());
+        assert_eq!(r.findings.len(), 2);
+        assert!(r.findings[0].contains("E1") && r.findings[0].contains("Data Exfiltration"));
+    }
+
+    #[test]
+    fn safe_skillspector_verdict_does_not_block() {
+        let json = r#"{"risk_assessment":{"score":0,"severity":"LOW","recommendation":"SAFE"},"issues":[]}"#;
+        let r = parse_skillspector_json(json).expect("parses");
+        assert!(!r.is_blocking());
+        assert_eq!(r.risk_score, 0);
+    }
+
+    #[test]
+    fn do_not_install_blocks_even_at_medium_severity() {
+        let json = r#"{"risk_assessment":{"score":45,"severity":"MEDIUM","recommendation":"DO_NOT_INSTALL"},"issues":[]}"#;
+        let r = parse_skillspector_json(json).expect("parses");
+        assert!(r.is_blocking(), "DO_NOT_INSTALL must block regardless of score/severity");
     }
 
     #[test]

@@ -1,0 +1,26 @@
+{
+  "clean": {
+    "blocking": false,
+    "scanner": "skillspector",
+    "score": 0,
+    "severity": "LOW"
+  },
+  "engine": "skillspector",
+  "malicious": {
+    "blocking": true,
+    "findings": [
+      "[MEDIUM] E1 Data Exfiltration (SKILL.md)",
+      "[HIGH] PE3 Privilege Escalation (SKILL.md)",
+      "[HIGH] PE3 Privilege Escalation (SKILL.md)",
+      "[HIGH] P1 Prompt Injection (SKILL.md)",
+      "[HIGH] SC2 Supply Chain (SKILL.md)"
+    ],
+    "recommendation": "DO_NOT_INSTALL",
+    "scanner": "skillspector",
+    "score": 71,
+    "severity": "HIGH"
+  },
+  "mode": "scanner",
+  "pass": true,
+  "skillspector_installed": true
+}

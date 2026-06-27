@@ -1,0 +1,143 @@
+{
+  "autopilot": {
+    "ask": "Set up fail2ban to ban an IP after 3 failed SSH logins for one hour.",
+    "gated": true,
+    "research_status": "NoSources",
+    "topic": "fail2ban filter configuration steps"
+  },
+  "full_loop": [
+    {
+      "category": "",
+      "commands": 0,
+      "defanged": false,
+      "ms": 6820,
+      "name": "",
+      "notes": [],
+      "provenance": false,
+      "status": "NoSources",
+      "topic": "configure ufw firewall to allow ssh and http on ubuntu"
+    }
+  ],
+  "mode": "learn",
+  "model": "qwen3.5:9b",
+  "routing": {
+    "accuracy": 0.3333333432674408,
+    "cases": [
+      {
+        "case": "pos:restic-b2",
+        "correct": false,
+        "last_selected": "(text)",
+        "learn_hits": 0,
+        "learned": false,
+        "samples": 2,
+        "want_learn": true
+      },
+      {
+        "case": "pos:tailscale-funnel",
+        "correct": false,
+        "last_selected": "(text)",
+        "learn_hits": 0,
+        "learned": false,
+        "samples": 2,
+        "want_learn": true
+      },
+      {
+        "case": "pos:caddy-socket",
+        "correct": false,
+        "last_selected": "(text)",
+        "learn_hits": 0,
+        "learned": false,
+        "samples": 2,
+        "want_learn": true
+      },
+      {
+        "case": "pos:vector-loki",
+        "correct": false,
+        "last_selected": "(text)",
+        "learn_hits": 0,
+        "learned": false,
+        "samples": 2,
+        "want_learn": true
+      },
+      {
+        "case": "pos:fail2ban",
+        "correct": false,
+        "last_selected": "learn_skill",
+        "learn_hits": 1,
+        "learned": false,
+        "samples": 2,
+        "want_learn": true
+      },
+      {
+        "case": "pos:fiction",
+        "correct": false,
+        "last_selected": "run_command",
+        "learn_hits": 0,
+        "learned": false,
+        "samples": 2,
+        "want_learn": true
+      },
+      {
+        "case": "pos:zellij-kdl",
+        "correct": false,
+        "last_selected": "(text)",
+        "learn_hits": 0,
+        "learned": false,
+        "samples": 2,
+        "want_learn": true
+      },
+      {
+        "case": "pos:err255",
+        "correct": false,
+        "last_selected": "(text)",
+        "learn_hits": 0,
+        "learned": false,
+        "samples": 2,
+        "want_learn": true
+      },
+      {
+        "case": "neg:ls",
+        "correct": true,
+        "last_selected": "run_command",
+        "learn_hits": 0,
+        "learned": false,
+        "samples": 2,
+        "want_learn": false
+      },
+      {
+        "case": "neg:disk",
+        "correct": true,
+        "last_selected": "list_vps_targets",
+        "learn_hits": 0,
+        "learned": false,
+        "samples": 2,
+        "want_learn": false
+      },
+      {
+        "case": "neg:math",
+        "correct": true,
+        "last_selected": "(text)",
+        "learn_hits": 0,
+        "learned": false,
+        "samples": 2,
+        "want_learn": false
+      },
+      {
+        "case": "neg:oneliner",
+        "correct": true,
+        "last_selected": "(text)",
+        "learn_hits": 0,
+        "learned": false,
+        "samples": 2,
+        "want_learn": false
+      }
+    ],
+    "fn": 8,
+    "fp": 0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "tn": 4,
+    "tp": 0
+  },
+  "samples": 2
+}

@@ -1,0 +1,37 @@
+{
+  "cases": [
+    {
+      "case": "short-no-tools",
+      "completion_tokens": 44,
+      "error": null,
+      "gen_tps": 44.69309997558594,
+      "prompt_tokens": 1503,
+      "total_ms": 2233,
+      "ttft_ms": 1248,
+      "with_tools": true
+    },
+    {
+      "case": "short-with-tools",
+      "completion_tokens": 28,
+      "error": null,
+      "gen_tps": 44.62464141845703,
+      "prompt_tokens": 4569,
+      "total_ms": 2148,
+      "ttft_ms": 1520,
+      "with_tools": true
+    },
+    {
+      "case": "full-agent-turn",
+      "completion_tokens": 140,
+      "error": null,
+      "gen_tps": 43.85990905761719,
+      "prompt_tokens": 4604,
+      "total_ms": 4666,
+      "ttft_ms": 1473,
+      "with_tools": true
+    }
+  ],
+  "mode": "llm",
+  "model": "qwen3.5:9b",
+  "num_ctx": 65536
+}

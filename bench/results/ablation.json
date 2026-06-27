@@ -1,0 +1,506 @@
+{
+  "mode": "ablation",
+  "model": "qwen3.5:9b",
+  "num_ctx": 65536,
+  "per_system_contribution": [
+    {
+      "delta_pass": 1,
+      "delta_prompt_tokens": 122,
+      "delta_total_ms": 147,
+      "delta_ttft_ms": 152,
+      "system": "soul"
+    },
+    {
+      "delta_pass": 0,
+      "delta_prompt_tokens": 254,
+      "delta_total_ms": -57,
+      "delta_ttft_ms": -72,
+      "system": "memory"
+    },
+    {
+      "delta_pass": 0,
+      "delta_prompt_tokens": 176,
+      "delta_total_ms": 199,
+      "delta_ttft_ms": 102,
+      "system": "skills"
+    },
+    {
+      "delta_pass": 2,
+      "delta_prompt_tokens": 155,
+      "delta_total_ms": -265,
+      "delta_ttft_ms": 82,
+      "system": "brief"
+    }
+  ],
+  "samples": 3,
+  "variants": [
+    {
+      "brief": true,
+      "gen_tps": 56.03731918334961,
+      "memory": true,
+      "pass": 7,
+      "prompt_tokens_avg": 4546,
+      "scenarios": [
+        {
+          "last_selected": "run_command_all",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4977,
+          "scenario": "route:single",
+          "total_ms_avg": 4310,
+          "ttft_ms_avg": 4310
+        },
+        {
+          "last_selected": "run_command_all",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 5012,
+          "scenario": "route:all",
+          "total_ms_avg": 2423,
+          "ttft_ms_avg": 2423
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4992,
+          "scenario": "route:in-chat",
+          "total_ms_avg": 1538,
+          "ttft_ms_avg": 843
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 3437,
+          "scenario": "persona",
+          "total_ms_avg": 2815,
+          "ttft_ms_avg": 1128
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4986,
+          "scenario": "know:deploy",
+          "total_ms_avg": 1437,
+          "ttft_ms_avg": 889
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4984,
+          "scenario": "know:pkgmgr",
+          "total_ms_avg": 1144,
+          "ttft_ms_avg": 855
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 2,
+          "prompt_tokens": 3437,
+          "scenario": "control:math",
+          "total_ms_avg": 928,
+          "ttft_ms_avg": 856
+        }
+      ],
+      "skills": true,
+      "soul": true,
+      "total": 7,
+      "total_ms_avg": 2085,
+      "ttft_ms_avg": 1615,
+      "variant": "full"
+    },
+    {
+      "brief": true,
+      "gen_tps": 55.48851013183594,
+      "memory": true,
+      "pass": 6,
+      "prompt_tokens_avg": 4424,
+      "scenarios": [
+        {
+          "last_selected": "run_command_all",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4855,
+          "scenario": "route:single",
+          "total_ms_avg": 3436,
+          "ttft_ms_avg": 3436
+        },
+        {
+          "last_selected": "run_command_all",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4890,
+          "scenario": "route:all",
+          "total_ms_avg": 2657,
+          "ttft_ms_avg": 2657
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4870,
+          "scenario": "route:in-chat",
+          "total_ms_avg": 1900,
+          "ttft_ms_avg": 827
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 2,
+          "prompt_tokens": 3315,
+          "scenario": "persona",
+          "total_ms_avg": 2258,
+          "ttft_ms_avg": 828
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4864,
+          "scenario": "know:deploy",
+          "total_ms_avg": 1020,
+          "ttft_ms_avg": 849
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4862,
+          "scenario": "know:pkgmgr",
+          "total_ms_avg": 1393,
+          "ttft_ms_avg": 817
+        },
+        {
+          "last_selected": "(text)",
+          "pass": false,
+          "passed_samples": 1,
+          "prompt_tokens": 3315,
+          "scenario": "control:math",
+          "total_ms_avg": 902,
+          "ttft_ms_avg": 830
+        }
+      ],
+      "skills": true,
+      "soul": false,
+      "total": 7,
+      "total_ms_avg": 1938,
+      "ttft_ms_avg": 1463,
+      "variant": "-soul"
+    },
+    {
+      "brief": true,
+      "gen_tps": 55.1609992980957,
+      "memory": false,
+      "pass": 7,
+      "prompt_tokens_avg": 4292,
+      "scenarios": [
+        {
+          "last_selected": "run_command_all",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4723,
+          "scenario": "route:single",
+          "total_ms_avg": 3668,
+          "ttft_ms_avg": 3668
+        },
+        {
+          "last_selected": "run_command_all",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4758,
+          "scenario": "route:all",
+          "total_ms_avg": 2930,
+          "ttft_ms_avg": 2930
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4738,
+          "scenario": "route:in-chat",
+          "total_ms_avg": 1553,
+          "ttft_ms_avg": 783
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 3183,
+          "scenario": "persona",
+          "total_ms_avg": 2265,
+          "ttft_ms_avg": 773
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4732,
+          "scenario": "know:deploy",
+          "total_ms_avg": 1639,
+          "ttft_ms_avg": 791
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4730,
+          "scenario": "know:pkgmgr",
+          "total_ms_avg": 2106,
+          "ttft_ms_avg": 2106
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 3183,
+          "scenario": "control:math",
+          "total_ms_avg": 832,
+          "ttft_ms_avg": 759
+        }
+      ],
+      "skills": true,
+      "soul": true,
+      "total": 7,
+      "total_ms_avg": 2142,
+      "ttft_ms_avg": 1687,
+      "variant": "-memory"
+    },
+    {
+      "brief": true,
+      "gen_tps": 55.1746940612793,
+      "memory": true,
+      "pass": 7,
+      "prompt_tokens_avg": 4370,
+      "scenarios": [
+        {
+          "last_selected": "run_command_all",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4801,
+          "scenario": "route:single",
+          "total_ms_avg": 3309,
+          "ttft_ms_avg": 3309
+        },
+        {
+          "last_selected": "run_command_all",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4836,
+          "scenario": "route:all",
+          "total_ms_avg": 2994,
+          "ttft_ms_avg": 2994
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4816,
+          "scenario": "route:in-chat",
+          "total_ms_avg": 1484,
+          "ttft_ms_avg": 777
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 3261,
+          "scenario": "persona",
+          "total_ms_avg": 2299,
+          "ttft_ms_avg": 789
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4810,
+          "scenario": "know:deploy",
+          "total_ms_avg": 1042,
+          "ttft_ms_avg": 810
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4808,
+          "scenario": "know:pkgmgr",
+          "total_ms_avg": 1219,
+          "ttft_ms_avg": 1132
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 3261,
+          "scenario": "control:math",
+          "total_ms_avg": 853,
+          "ttft_ms_avg": 781
+        }
+      ],
+      "skills": false,
+      "soul": true,
+      "total": 7,
+      "total_ms_avg": 1886,
+      "ttft_ms_avg": 1513,
+      "variant": "-skills"
+    },
+    {
+      "brief": false,
+      "gen_tps": 56.6179313659668,
+      "memory": true,
+      "pass": 5,
+      "prompt_tokens_avg": 4391,
+      "scenarios": [
+        {
+          "last_selected": "run_command_all",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4822,
+          "scenario": "route:single",
+          "total_ms_avg": 2904,
+          "ttft_ms_avg": 2904
+        },
+        {
+          "last_selected": "run_command_all",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4857,
+          "scenario": "route:all",
+          "total_ms_avg": 2420,
+          "ttft_ms_avg": 2420
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4837,
+          "scenario": "route:in-chat",
+          "total_ms_avg": 997,
+          "ttft_ms_avg": 773
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 3282,
+          "scenario": "persona",
+          "total_ms_avg": 2038,
+          "ttft_ms_avg": 796
+        },
+        {
+          "last_selected": "(text)",
+          "pass": false,
+          "passed_samples": 1,
+          "prompt_tokens": 4831,
+          "scenario": "know:deploy",
+          "total_ms_avg": 3986,
+          "ttft_ms_avg": 2252
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4829,
+          "scenario": "know:pkgmgr",
+          "total_ms_avg": 3224,
+          "ttft_ms_avg": 777
+        },
+        {
+          "last_selected": "(text)",
+          "pass": false,
+          "passed_samples": 1,
+          "prompt_tokens": 3282,
+          "scenario": "control:math",
+          "total_ms_avg": 884,
+          "ttft_ms_avg": 812
+        }
+      ],
+      "skills": true,
+      "soul": true,
+      "total": 7,
+      "total_ms_avg": 2350,
+      "ttft_ms_avg": 1533,
+      "variant": "-brief"
+    },
+    {
+      "brief": false,
+      "gen_tps": 53.83797073364258,
+      "memory": false,
+      "pass": 4,
+      "prompt_tokens_avg": 3839,
+      "scenarios": [
+        {
+          "last_selected": "run_command_all",
+          "pass": true,
+          "passed_samples": 2,
+          "prompt_tokens": 4270,
+          "scenario": "route:single",
+          "total_ms_avg": 2449,
+          "ttft_ms_avg": 2029
+        },
+        {
+          "last_selected": "run_command_all",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4305,
+          "scenario": "route:all",
+          "total_ms_avg": 2201,
+          "ttft_ms_avg": 2201
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 3,
+          "prompt_tokens": 4285,
+          "scenario": "route:in-chat",
+          "total_ms_avg": 1657,
+          "ttft_ms_avg": 663
+        },
+        {
+          "last_selected": "(text)",
+          "pass": false,
+          "passed_samples": 1,
+          "prompt_tokens": 2730,
+          "scenario": "persona",
+          "total_ms_avg": 2189,
+          "ttft_ms_avg": 665
+        },
+        {
+          "last_selected": "(text)",
+          "pass": false,
+          "passed_samples": 0,
+          "prompt_tokens": 4279,
+          "scenario": "know:deploy",
+          "total_ms_avg": 3133,
+          "ttft_ms_avg": 657
+        },
+        {
+          "last_selected": "(text)",
+          "pass": false,
+          "passed_samples": 0,
+          "prompt_tokens": 4277,
+          "scenario": "know:pkgmgr",
+          "total_ms_avg": 1991,
+          "ttft_ms_avg": 635
+        },
+        {
+          "last_selected": "(text)",
+          "pass": true,
+          "passed_samples": 2,
+          "prompt_tokens": 2730,
+          "scenario": "control:math",
+          "total_ms_avg": 732,
+          "ttft_ms_avg": 659
+        }
+      ],
+      "skills": false,
+      "soul": false,
+      "total": 7,
+      "total_ms_avg": 2050,
+      "ttft_ms_avg": 1073,
+      "variant": "bare"
+    }
+  ]
+}

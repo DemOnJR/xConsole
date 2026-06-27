@@ -333,24 +333,26 @@ async fn web_fetch(args: &Value) -> String {
         Some(u) if !u.trim().is_empty() => u.trim(),
         _ => return "error: missing 'url'".into(),
     };
+    match fetch_text(url_str).await {
+        Ok(text) => text,
+        Err(e) => e,
+    }
+}
 
-    let url = match validate_public_url(url_str) {
-        Ok(u) => u,
-        Err(e) => return e,
-    };
+/// Fetch a public URL and return its plain text (HTML stripped, SSRF-guarded, size-capped).
+/// Public so the autoresearch loop can read source pages through the same hardened path
+/// the `web_fetch` tool uses. Returns an `error: …` string on failure.
+pub async fn fetch_text(url_str: &str) -> Result<String, String> {
+    let url = validate_public_url(url_str)?;
+    let client = http_client()?;
 
-    let client = match http_client() {
-        Ok(c) => c,
-        Err(e) => return e,
-    };
-
-    let resp = match client.get(url.clone()).send().await {
-        Ok(r) => r,
-        Err(e) => return format!("error: fetch failed: {e}"),
-    };
-
+    let resp = client
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(|e| format!("error: fetch failed: {e}"))?;
     if !resp.status().is_success() {
-        return format!("error: HTTP {} for {url}", resp.status());
+        return Err(format!("error: HTTP {} for {url}", resp.status()));
     }
 
     let content_type = resp
@@ -360,16 +362,15 @@ async fn web_fetch(args: &Value) -> String {
         .unwrap_or("")
         .to_lowercase();
 
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(e) => return format!("error: read body: {e}"),
-    };
-
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("error: read body: {e}"))?;
     if bytes.len() > MAX_BODY {
-        return format!(
+        return Err(format!(
             "error: response too large ({} bytes, max {MAX_BODY})",
             bytes.len()
-        );
+        ));
     }
 
     let raw = String::from_utf8_lossy(&bytes);
@@ -378,8 +379,142 @@ async fn web_fetch(args: &Value) -> String {
     } else {
         raw.into_owned()
     };
+    Ok(truncate_text(&text, MAX_BODY))
+}
 
-    truncate_text(&text, MAX_BODY)
+/// Public wrapper for the search tool — returns the same DuckDuckGo summary block the
+/// `web_search` tool produces (titles + snippets), for autoresearch grounding.
+pub async fn search_summary(query: &str) -> String {
+    web_search(&json!({ "query": query })).await
+}
+
+/// Gather research source pages for a topic: run a DuckDuckGo search, extract the top
+/// result URLs, and fetch up to `max_fetch` of them. Returns `(url, body_text)` pairs.
+/// This is the load-bearing input for skill synthesis — snippets alone are too thin to
+/// ground real commands, so the loop reads the actual pages. Best-effort: an empty Vec
+/// means search/fetch found nothing usable (the caller degrades gracefully).
+pub async fn research_sources(query: &str, max_fetch: usize) -> Vec<(String, String)> {
+    let Ok(client) = http_client() else {
+        return Vec::new();
+    };
+    let urls = ddg_result_urls(&client, query).await.unwrap_or_default();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for url in urls.into_iter() {
+        if out.len() >= max_fetch.max(1) {
+            break;
+        }
+        // Each page goes through the same SSRF-guarded fetch as the tool.
+        if let Ok(body) = fetch_text(&url).await {
+            if !body.trim().is_empty() && !body.starts_with("error:") {
+                out.push((url, body));
+            }
+        }
+    }
+    out
+}
+
+/// Top organic result URLs from DuckDuckGo's HTML endpoint, decoded from its `uddg`
+/// redirect wrapper and SSRF-validated. Used by [`research_sources`].
+async fn ddg_result_urls(client: &reqwest::Client, query: &str) -> Result<Vec<String>, String> {
+    let resp = client
+        .get("https://html.duckduckgo.com/html/")
+        .query(&[("q", query)])
+        .header(
+            reqwest::header::USER_AGENT,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        )
+        .send()
+        .await
+        .map_err(|e| format!("error: search request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("error: search HTTP {}", resp.status()));
+    }
+    let html = resp.text().await.map_err(|e| e.to_string())?;
+    Ok(parse_ddg_result_urls(&html))
+}
+
+/// Parse + decode organic result URLs from DuckDuckGo HTML (pure, testable). DDG wraps
+/// each hit in `<a class="result__a" href="//duckduckgo.com/l/?uddg=<percent-encoded>">`.
+fn parse_ddg_result_urls(html: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let needle = "class=\"result__a\"";
+    let mut from = 0;
+    while let Some(rel) = html[from..].find(needle) {
+        let cls = from + rel;
+        // Find the href on this anchor (search backwards a little and forwards to the tag end).
+        let tag_start = html[..cls].rfind('<').unwrap_or(cls);
+        let tag_end = html[cls..].find('>').map(|g| cls + g).unwrap_or(html.len());
+        let tag = &html[tag_start..tag_end];
+        if let Some(href) = extract_attr(tag, "href") {
+            if let Some(decoded) = decode_ddg_href(&href) {
+                if validate_public_url(&decoded).is_ok() && !out.contains(&decoded) {
+                    out.push(decoded);
+                }
+            }
+        }
+        from = tag_end.max(cls + needle.len());
+    }
+    out
+}
+
+/// Value of an HTML attribute (`name="value"`) within a single tag string.
+fn extract_attr(tag: &str, name: &str) -> Option<String> {
+    let key = format!("{name}=\"");
+    let start = tag.find(&key)? + key.len();
+    let end = tag[start..].find('"')? + start;
+    Some(tag[start..end].to_string())
+}
+
+/// Decode DuckDuckGo's `/l/?uddg=<url>` redirect wrapper into the real target URL.
+/// Also accepts already-absolute hrefs. Returns None for non-result links.
+fn decode_ddg_href(href: &str) -> Option<String> {
+    let h = decode_entities(href);
+    // Wrapped form: //duckduckgo.com/l/?uddg=<percent-encoded>&rut=…
+    if let Some(idx) = h.find("uddg=") {
+        let rest = &h[idx + 5..];
+        let enc = rest.split('&').next().unwrap_or(rest);
+        let dec = percent_decode(enc);
+        if dec.starts_with("http://") || dec.starts_with("https://") {
+            return Some(dec);
+        }
+    }
+    // Already-absolute (some layouts): take as-is.
+    if h.starts_with("http://") || h.starts_with("https://") {
+        return Some(h);
+    }
+    None
+}
+
+/// Minimal percent-decoder (no extra crate) for the `uddg` query value.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(h), Some(l)) = (hi, lo) {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                    continue;
+                }
+                out.push(b'%');
+                i += 1;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 pub fn http_client() -> Result<reqwest::Client, String> {
@@ -445,6 +580,12 @@ pub fn validate_public_url(raw: &str) -> Result<reqwest::Url, String> {
         return Err(format!("error: {reason}"));
     }
     Ok(url)
+}
+
+/// Public wrapper so the autoresearch query sanitizer can reuse the same
+/// private/reserved-IP classification used by the SSRF guard.
+pub fn is_private_ip_pub(ip: IpAddr) -> bool {
+    is_private_ip(ip)
 }
 
 fn is_private_ip(ip: IpAddr) -> bool {

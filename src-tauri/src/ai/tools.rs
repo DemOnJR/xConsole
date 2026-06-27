@@ -189,6 +189,20 @@ pick one to install with skill_install.".into(),
             parameters: json!({"type": "object", "properties": {}}),
         },
         ToolDef {
+            name: "learn_skill".into(),
+            description: "Research an unfamiliar tool, API, error, or procedure on the web and build a \
+reusable skill, then return it so you can apply it right now. Use this instead of stating commands, \
+flags, or steps from memory when you're not certain — it learns the capability for you.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "The capability to learn, as a generic phrase (no private hostnames/IPs/secrets), e.g. 'configure ufw firewall on ubuntu'."},
+                    "name": {"type": "string", "description": "Optional skill name (derived from the topic if omitted)."}
+                },
+                "required": ["topic"]
+            }),
+        },
+        ToolDef {
             name: "local_run_command".into(),
             description: "Run a shell command on the user's LOCAL machine (this PC), not a remote \
 server. Use this when the user says 'my pc', 'locally', 'this machine', or asks to check local \
@@ -448,6 +462,7 @@ const OLLAMA_VPS_TOOLS: &[&str] = &[
     "skill_save",
     "skill_install",
     "list_official_skills",
+    "learn_skill",
 ];
 
 // Even with no VPS target selected, the agent can still act on the local PC.
@@ -465,6 +480,7 @@ const OLLAMA_LOCAL_TOOLS: &[&str] = &[
     "skill_save",
     "skill_install",
     "list_official_skills",
+    "learn_skill",
 ];
 
 /// Tool schemas for local Ollama — always includes web; VPS tools when targets are set.
@@ -611,6 +627,7 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
         "skills_list" => skills_list(ctx),
         "skill_view" => skill_view(ctx, args),
         "skill_save" => skill_save(ctx, args),
+        "learn_skill" => learn_skill(ctx, args, sink).await,
         name if web_tools::is_web_tool(name) => web_tools::dispatch(name, args).await,
         name if name.starts_with("project_")
             || name.starts_with("terraform_")
@@ -762,6 +779,10 @@ fn tool_activity_label(ctx: &ToolContext, call: &ToolCall) -> String {
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("?");
             format!("Save skill {cat}/{name}")
         }
+        "learn_skill" => {
+            let topic = args.get("topic").and_then(|v| v.as_str()).unwrap_or("…");
+            format!("Learn skill · {topic}")
+        }
         "web_search" => {
             let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("…");
             format!("Web search · {q}")
@@ -866,7 +887,7 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
         // non-destructive canvas/UI actions.
         "read_file" | "local_read_file" | "local_list_dir" | "list_vps_targets"
         | "ssh_key_status" | "memory_save" | "skills_list" | "skill_view" | "skill_save"
-        | "ask_user" | "present_plan" | "terminal_capture" | "canvas_open_terminal"
+        | "learn_skill" | "ask_user" | "present_plan" | "terminal_capture" | "canvas_open_terminal"
         | "canvas_open_sftp" | "canvas_tile" | "canvas_close" | "canvas_refresh" => false,
         // Typing into a live shell runs commands → mutating.
         "terminal_send" => true,
@@ -1306,7 +1327,7 @@ async fn skill_install_tool(ctx: &ToolContext, args: &Value) -> String {
         let _ = std::fs::remove_dir_all(&tmp);
         return format!("error: staging skill: {e}");
     }
-    let report = skill_scan::scan_skill(&tmp).await;
+    let report = skill_scan::scan_skill_with(&tmp, &skill_scan::scan_options_from_db(&ctx.db)).await;
     let _ = std::fs::remove_dir_all(&tmp);
 
     if report.is_blocking() {
@@ -1489,6 +1510,63 @@ fn skill_save(ctx: &ToolContext, args: &Value) -> String {
         Ok(()) => format!("saved skill {category}/{name}"),
         Err(e) => format!("error: {e}"),
     }
+}
+
+/// Autoresearch: research an unfamiliar capability on the web and build a quarantined,
+/// security-scanned skill the agent can apply immediately. Resolves the active provider
+/// for the (low-temperature) synthesis call. See `ai::autoresearch`.
+async fn learn_skill(ctx: &ToolContext, args: &Value, sink: &EventSink) -> String {
+    let topic = match args.get("topic").and_then(|v| v.as_str()) {
+        Some(t) if !t.trim().is_empty() => t.trim(),
+        _ => return "error: missing 'topic'".into(),
+    };
+    let name_hint = args.get("name").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty());
+
+    // Resolve a provider for synthesis (the active agent provider).
+    let provider_id = match crate::ai::registry::active_provider_id(&ctx.db, None) {
+        Ok(id) => id,
+        Err(e) => return format!("error: cannot research — no AI provider available ({e})"),
+    };
+    let resolved = match crate::ai::registry::build(&ctx.db, &provider_id) {
+        Ok(r) => r,
+        Err(e) => return format!("error: cannot research — provider unavailable ({e})"),
+    };
+
+    // The user's own server hostnames/IPs, scrubbed from the outbound search query.
+    let mut known_hosts: Vec<String> = Vec::new();
+    for id in &ctx.targets {
+        if let Ok(Some(vps)) = ctx.db.get_vps(id) {
+            known_hosts.push(vps.host);
+            known_hosts.push(vps.name);
+        }
+    }
+
+    let scan_opts = skill_scan::scan_options_from_db(&ctx.db);
+    let result = crate::ai::autoresearch::learn(
+        &ctx.home,
+        resolved.provider.as_ref(),
+        &resolved.model,
+        topic,
+        name_hint,
+        &known_hosts,
+        None,
+        &scan_opts,
+        Some(sink),
+    )
+    .await;
+
+    // Surface a saved skill in the activity feed like skill_save does.
+    if result.status == crate::ai::autoresearch::LearnStatus::Saved {
+        emit(
+            Some(sink),
+            StreamEvent::Activity(ActivityEvent::SkillSaved {
+                id: String::new(),
+                category: result.category.clone(),
+                name: result.name.clone(),
+            }),
+        );
+    }
+    result.to_tool_result()
 }
 
 // ---- Local-PC tools (this machine, not a VPS) -----------------------------

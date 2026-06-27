@@ -120,6 +120,13 @@ export interface SkillScanReport {
   scanner: string;
 }
 
+export interface ScannerStatus {
+  installed: boolean;
+  version: string | null;
+  engine: string;
+  uv_available: boolean;
+}
+
 export interface ConnectOutcome {
   session_id: string;
   vps_id: string;
@@ -487,6 +494,8 @@ export const api = {
     invoke<void>("save_workspace_brief", { id, content }),
   scanSkillPath: (path: string) =>
     invoke<SkillScanReport>("scan_skill_path", { path }),
+  skillScannerStatus: () => invoke<ScannerStatus>("skill_scanner_status"),
+  installSkillScanner: () => invoke<string>("install_skill_scanner"),
 
   getSystemCapabilities: () =>
     invoke<SystemCaps>("get_system_capabilities"),
