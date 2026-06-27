@@ -11,6 +11,8 @@ A portable [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowle
 
 ## Runs (newest first)
 
+- [Jun 27 2026 14:01 — recall](runs/2026-06-27T12-01-49.604207400-00-00-recall.md) — recall accuracy (direct): 89% (48/54) [95% CI 78–95%]
+- [Jun 27 2026 03:26 — hard](runs/2026-06-27T01-26-04.406853-00-00-hard.md) — hard-suite pass-rate: 86% (12/14) [95% CI 60–96%]
 - [Jun 27 2026 03:02 — learn](runs/2026-06-27T01-02-38.235947400-00-00-learn.md) — gap-routing accuracy: 33% (4/12) [95% CI 14–61%]
 - [Jun 27 2026 02:59 — ablation](runs/2026-06-27T00-59-48.523315-00-00-ablation.md) — full-prompt pass-rate: 100% (7/7) [95% CI 65–100%]
 - [Jun 27 2026 02:55 — agent](runs/2026-06-27T00-55-00.556526200-00-00-agent.md) — scenario pass-rate: 100% (11/11) [95% CI 74–100%]

@@ -212,17 +212,20 @@ impl OllamaProvider {
             .collect()
     }
 
-    fn append_content_delta(out: &mut ChatResponse, piece: &str, sink: Option<&EventSink>) {
+    pub(crate) fn append_content_delta(out: &mut ChatResponse, piece: &str, sink: Option<&EventSink>) {
         if piece.is_empty() {
             return;
         }
         // Ollama may stream incremental tokens or cumulative text — handle both.
+        // A cumulative chunk is STRICTLY LONGER than what we have and contains it as a
+        // prefix. We must require strictly-longer: otherwise a normal incremental token
+        // that happens to equal or prefix the accumulated tail (e.g. the second "2" of
+        // "22", or a repeated digit in "443"/"8446") is misread as a duplicate and
+        // dropped — silently clipping characters from replies.
         let delta = if out.content.is_empty() {
             piece.to_string()
-        } else if piece.starts_with(&out.content) {
+        } else if piece.len() > out.content.len() && piece.starts_with(&out.content) {
             piece[out.content.len()..].to_string()
-        } else if out.content.ends_with(piece) {
-            String::new()
         } else {
             piece.to_string()
         };
