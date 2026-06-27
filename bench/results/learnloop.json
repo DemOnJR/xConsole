@@ -1,9 +1,9 @@
 {
   "cautious_pass": 5,
-  "cautious_regressions": 1,
+  "cautious_regressions": 0,
   "cold_pass": 4,
   "forceful_pass": 5,
-  "forceful_regressions": 1,
+  "forceful_regressions": 0,
   "mode": "learnloop",
   "model": "qwen3.5:9b",
   "persisted": 6,
@@ -17,8 +17,8 @@
       "source": "web",
       "task": "caddy-unix-socket",
       "topic": "caddyfile reverse_proxy to unix socket",
-      "warm_cautious": 2,
-      "warm_forceful": 3
+      "warm_cautious": 0,
+      "warm_forceful": 0
     },
     {
       "cold": 0,
@@ -39,11 +39,11 @@
       "source": "web",
       "task": "borg-archive-sep",
       "topic": "borg create repository archive name separator",
-      "warm_cautious": 0,
-      "warm_forceful": 0
+      "warm_cautious": 2,
+      "warm_forceful": 2
     },
     {
-      "cold": 3,
+      "cold": 2,
       "final_status": "draft",
       "samples": 3,
       "skill": "systemd-unit-auto-restart-on-failure-directive",
@@ -72,8 +72,8 @@
       "source": "web",
       "task": "jq-first-element",
       "topic": "jq filter first element of an array",
-      "warm_cautious": 3,
-      "warm_forceful": 3
+      "warm_cautious": 2,
+      "warm_forceful": 2
     }
   ],
   "total": 6

@@ -223,6 +223,11 @@ pub async fn learn(
         Err(_) => return LearnResult::err("synthesis timed out"),
     };
 
+    // Self-critique faithfulness pass: re-check the draft against the sources and strip
+    // anything the sources don't support (the main defense against a confabulated skill
+    // that would regress a task). Best-effort — falls back to the draft.
+    let raw = critique_and_fix(provider, model, topic, &sources, &raw).await;
+
     // 3) Validate → de-fang → SCAN (SkillSpector + built-in) → save.
     let fetched_urls: Vec<String> = sources.iter().map(|(u, _)| u.clone()).collect();
     let mut result = match build_candidate(topic, name_hint, &raw, &fetched_urls) {
@@ -529,9 +534,10 @@ pub fn injection_block(status: &str, body: &str) -> Option<String> {
         )),
         _ => Some(format!(
             "\n\n# Researched notes for this task (UNVERIFIED — may be wrong)\n\
-             These were auto-researched and are NOT yet confirmed. Use them only if they look \
-             correct and don't contradict something you're confident about; otherwise rely on your \
-             own judgment. Get the user's approval before any destructive command.\n{body}"
+             These were auto-researched and are NOT yet confirmed. If you ALREADY know the answer \
+             confidently, PREFER YOUR OWN ANSWER — only use these notes for the parts you're \
+             genuinely unsure of, and ignore anything here that contradicts what you're confident \
+             about. Get the user's approval before any destructive command.\n{body}"
         )),
     }
 }
@@ -717,6 +723,44 @@ SKILL.md, no preamble. Fill exactly this skeleton:\n\n\
     }
     user.push_str("\nNow write the SKILL.md, grounded only in the SOURCES above.");
     (system, user)
+}
+
+// ---- Self-critique: faithfulness pass against the sources ----------------
+
+/// A second, low-temperature pass that re-reads the synthesized draft against its SOURCES
+/// and removes/fixes any command the sources don't actually support — the main lever
+/// against confabulation (the 9B inventing or mangling a command, which is what makes a
+/// researched skill REGRESS a task). Falls back to the draft on any failure, so it can
+/// only help. One extra ~3-5s model call per learn.
+async fn critique_and_fix(
+    provider: &dyn Provider,
+    model: &str,
+    topic: &str,
+    sources: &[(String, String)],
+    draft: &str,
+) -> String {
+    let system = "You are reviewing a DRAFT skill against its SOURCES for faithfulness. Output a \
+CORRECTED SKILL.md that keeps the same front-matter and section layout, but: for EVERY command, \
+keep it ONLY if its binary, flags, and key syntax are actually supported by the SOURCES — otherwise \
+remove it or replace it with `# TODO: not found in sources`; FIX any command, flag, path, or value \
+that contradicts the sources; put the single most important EXACT command first; cut invented detail \
+and filler. Do not add anything that isn't in the sources. Output ONLY the corrected SKILL.md.";
+
+    let mut user = format!("TOPIC: {topic}\n\nSOURCES:\n");
+    for (i, (url, body)) in sources.iter().enumerate() {
+        user.push_str(&format!("\n--- SOURCE {} ({}) ---\n{}\n", i + 1, url, take_chars(body, 5000)));
+    }
+    user.push_str(&format!("\n\nDRAFT SKILL:\n{draft}\n\nReturn the corrected SKILL.md."));
+
+    let mut req = ChatRequest::new(model);
+    req.system = system.to_string();
+    req.messages = vec![ChatMessage::user(user)];
+    req.temperature = 0.1;
+    req.max_tokens = 1400;
+    match tokio::time::timeout(Duration::from_secs(25), provider.chat(&req, None)).await {
+        Ok(Ok(resp)) if resp.content.trim().len() > 40 => resp.content,
+        _ => draft.to_string(),
+    }
 }
 
 // ---- Structural validation -----------------------------------------------

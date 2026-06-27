@@ -14,3 +14,4 @@ title: Benchmark run log
 - Jun 27 2026 14:01 — **recall** recall accuracy (direct): 89% (48/54) [95% CI 78–95%] (model qwen3.5:9b)
 - Jun 27 2026 15:09 — **learnloop-warm** unfamiliar-tool: after learning: 80% (4/5) [95% CI 38–96%] (model qwen3.5:9b)
 - Jun 27 2026 16:09 — **learnloop-warm** unfamiliar-tool: after learning (cautious): 83% (5/6) [95% CI 44–97%] (model qwen3.5:9b)
+- Jun 27 2026 16:28 — **learnloop-warm** unfamiliar-tool: after learning (cautious): 83% (5/6) [95% CI 44–97%] (model qwen3.5:9b)
