@@ -459,6 +459,126 @@ pub fn process_synthesized(
     }
 }
 
+// ---- Skill lifecycle: draft → verified → quarantined ----------------------
+//
+// A researched skill is born `draft` (unverified). It earns trust only by being USED
+// successfully; it loses trust by failing. This is the execution-outcome metric from
+// the design review — reuse reflection's clean/troubled classification of a turn that
+// applied the skill. The point is the caddy regression: an unverified draft that hurts
+// must NOT be trusted, and must eventually be quarantined so it stops being applied.
+
+/// Successful uses needed to promote a draft to `verified`.
+pub const PROMOTE_AFTER: u32 = 2;
+/// Failed uses that quarantine a skill (stop auto-applying it).
+pub const QUARANTINE_AFTER: u32 = 3;
+
+/// Read a quarantined skill's `status` front-matter (draft|verified|quarantined).
+pub fn skill_status(home: &AgentHome, name: &str) -> String {
+    skills::read_skill(home, QUARANTINE_CATEGORY, name)
+        .and_then(|md| front_field(&md, "status"))
+        .unwrap_or_else(|| "unknown".into())
+}
+
+/// Record the outcome of a turn that APPLIED a researched skill, updating its ledger and
+/// status. `success` = the turn ran clean (no `error:` tool results). Promotes to
+/// `verified` after PROMOTE_AFTER successes; quarantines after QUARANTINE_AFTER failures.
+/// Returns the new status. No-op (returns "missing") if the skill isn't found.
+pub fn record_outcome(home: &AgentHome, name: &str, success: bool) -> String {
+    let Some(md) = skills::read_skill(home, QUARANTINE_CATEGORY, name) else {
+        return "missing".into();
+    };
+    let mut uses: u32 = front_field(&md, "uses").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let mut succ: u32 = front_field(&md, "successes").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let mut status = front_field(&md, "status").unwrap_or_else(|| "draft".into());
+    uses += 1;
+    if success {
+        succ += 1;
+    }
+    let failures = uses.saturating_sub(succ);
+    // Once verified or quarantined, the status is sticky (don't flip on a single turn).
+    if status != "verified" && status != "quarantined" {
+        if succ >= PROMOTE_AFTER {
+            status = "verified".into();
+        } else if failures >= QUARANTINE_AFTER {
+            status = "quarantined".into();
+        }
+    }
+    let verified = if status == "verified" { "true" } else { "false" };
+    let updated = set_front_fields(
+        &md,
+        &[
+            ("uses", &uses.to_string()),
+            ("successes", &succ.to_string()),
+            ("status", &status),
+            ("verified", verified),
+        ],
+    );
+    let _ = skills::save_skill(home, QUARANTINE_CATEGORY, name, &updated);
+    status
+}
+
+/// The system-prompt block for applying a researched skill, tuned to its trust level.
+/// A `verified` skill is applied forcefully; a `draft` is offered as cautious notes (so
+/// a possibly-wrong skill doesn't override the model's own correct instinct — the fix
+/// for the measured regression); a `quarantined` skill is NOT applied at all.
+pub fn injection_block(status: &str, body: &str) -> Option<String> {
+    match status {
+        "quarantined" => None,
+        "verified" => Some(format!(
+            "\n\n# Verified skill for this task — APPLY IT\n{body}"
+        )),
+        _ => Some(format!(
+            "\n\n# Researched notes for this task (UNVERIFIED — may be wrong)\n\
+             These were auto-researched and are NOT yet confirmed. Use them only if they look \
+             correct and don't contradict something you're confident about; otherwise rely on your \
+             own judgment. Get the user's approval before any destructive command.\n{body}"
+        )),
+    }
+}
+
+/// Value of a `key:` line in the leading front-matter (first block only). Pure.
+pub fn front_field(md: &str, key: &str) -> Option<String> {
+    let t = md.trim_start();
+    if !t.starts_with("---") {
+        return None;
+    }
+    for line in t[3..].lines() {
+        let l = line.trim();
+        if l == "---" {
+            break;
+        }
+        if let Some(rest) = l.strip_prefix(&format!("{key}:")) {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Update (or append) `key: value` lines in the leading front-matter, leaving the body
+/// untouched. Pure.
+fn set_front_fields(md: &str, kvs: &[(&str, &str)]) -> String {
+    let t = md.trim_start();
+    if !t.starts_with("---") {
+        return md.to_string();
+    }
+    let after = &t[3..];
+    let Some(end) = after.find("\n---") else {
+        return md.to_string();
+    };
+    let fm = after[..end].trim_matches('\n');
+    let body = &after[end + 4..];
+    let mut lines: Vec<String> = fm.lines().map(|l| l.to_string()).collect();
+    for (k, v) in kvs {
+        let prefix = format!("{k}:");
+        if let Some(i) = lines.iter().position(|l| l.trim_start().starts_with(&prefix)) {
+            lines[i] = format!("{k}: {v}");
+        } else {
+            lines.push(format!("{k}: {v}"));
+        }
+    }
+    format!("---\n{}\n---{}", lines.join("\n"), body)
+}
+
 /// A temp scratch dir unique per call. Keyed on pid + a process-wide atomic counter so
 /// CONCURRENT scans (cargo runs unit tests in parallel in one process; the app may learn
 /// on multiple turns at once) never share a dir and clobber each other's SKILL.md.

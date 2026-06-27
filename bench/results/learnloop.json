@@ -1,72 +1,80 @@
 {
+  "cautious_pass": 5,
+  "cautious_regressions": 1,
   "cold_pass": 4,
-  "lift": 0,
+  "forceful_pass": 5,
+  "forceful_regressions": 1,
   "mode": "learnloop",
   "model": "qwen3.5:9b",
-  "persisted": 5,
+  "persisted": 6,
   "samples": 3,
   "tasks": [
     {
-      "cold_ok": true,
-      "cold_pass": 2,
-      "samples": 3,
-      "skill": "fail2ban-override-default-jail-settings-file",
-      "source": "web",
-      "status": "Saved",
-      "task": "fail2ban-jail-local",
-      "topic": "fail2ban override default jail settings file",
-      "warm_ok": true,
-      "warm_pass": 3
-    },
-    {
-      "cold_ok": true,
-      "cold_pass": 3,
-      "samples": 3,
-      "skill": "restic-initialize-repository-on-backblaze-b2",
-      "source": "web",
-      "status": "Saved",
-      "task": "restic-b2-init",
-      "topic": "restic initialize repository on backblaze b2",
-      "warm_ok": true,
-      "warm_pass": 3
-    },
-    {
-      "cold_ok": false,
-      "cold_pass": 1,
+      "cold": 0,
+      "final_status": "draft",
       "samples": 3,
       "skill": "caddyfile-reverse_proxy-to-unix-socket",
       "source": "web",
-      "status": "Saved",
       "task": "caddy-unix-socket",
       "topic": "caddyfile reverse_proxy to unix socket",
-      "warm_ok": false,
-      "warm_pass": 0
+      "warm_cautious": 2,
+      "warm_forceful": 3
     },
     {
-      "cold_ok": true,
-      "cold_pass": 3,
+      "cold": 0,
+      "final_status": "draft",
       "samples": 3,
-      "skill": "systemctl-list-all-active-timers",
+      "skill": "restic-forget-keep-last-7-daily-snapshots-flag",
       "source": "web",
-      "status": "Saved",
-      "task": "systemd-list-timers",
-      "topic": "systemctl list all active timers",
-      "warm_ok": true,
-      "warm_pass": 3
+      "task": "restic-keep-daily",
+      "topic": "restic forget keep last 7 daily snapshots flag",
+      "warm_cautious": 3,
+      "warm_forceful": 3
     },
     {
-      "cold_ok": true,
-      "cold_pass": 3,
+      "cold": 3,
+      "final_status": "draft",
       "samples": 3,
-      "skill": "tailscale-funnel-expose-local-port-to-internet",
+      "skill": "borg-create-repository-archive-name-separator",
       "source": "web",
-      "status": "Saved",
-      "task": "tailscale-funnel",
-      "topic": "tailscale funnel expose local port to internet",
-      "warm_ok": true,
-      "warm_pass": 3
+      "task": "borg-archive-sep",
+      "topic": "borg create repository archive name separator",
+      "warm_cautious": 0,
+      "warm_forceful": 0
+    },
+    {
+      "cold": 3,
+      "final_status": "draft",
+      "samples": 3,
+      "skill": "systemd-unit-auto-restart-on-failure-directive",
+      "source": "web",
+      "task": "systemd-restart-onfailure",
+      "topic": "systemd unit auto restart on failure directive",
+      "warm_cautious": 3,
+      "warm_forceful": 3
+    },
+    {
+      "cold": 3,
+      "final_status": "draft",
+      "samples": 3,
+      "skill": "nginx-increase-max-upload-body-size-directive",
+      "source": "web",
+      "task": "nginx-upload-size",
+      "topic": "nginx increase max upload body size directive",
+      "warm_cautious": 3,
+      "warm_forceful": 3
+    },
+    {
+      "cold": 3,
+      "final_status": "draft",
+      "samples": 3,
+      "skill": "jq-filter-first-element-of-an-array",
+      "source": "web",
+      "task": "jq-first-element",
+      "topic": "jq filter first element of an array",
+      "warm_cautious": 3,
+      "warm_forceful": 3
     }
   ],
-  "total": 5,
-  "warm_pass": 4
+  "total": 6
 }

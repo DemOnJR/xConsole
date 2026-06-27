@@ -1092,39 +1092,46 @@ struct LoopTask {
 fn learnloop_tasks() -> Vec<LoopTask> {
     vec![
         LoopTask {
-            name: "fail2ban-jail-local",
-            topic: "fail2ban override default jail settings file",
-            ask: "In chat only (do not run anything): to override fail2ban's default jail settings, which exact file should you put your custom configuration in?",
-            accept: &["jail.local"],
-            fixture: "Fail2Ban configuration: never edit jail.conf directly (a package update overwrites it). Instead create /etc/fail2ban/jail.local and put your overrides there — jail.local takes precedence over jail.conf.",
-        },
-        LoopTask {
-            name: "restic-b2-init",
-            topic: "restic initialize repository on backblaze b2",
-            ask: "In chat only (don't run anything): give the exact restic command to initialize a repository stored in a Backblaze B2 bucket named mybucket.",
-            accept: &["restic", "b2:"],
-            fixture: "restic with Backblaze B2: export B2_ACCOUNT_ID and B2_ACCOUNT_KEY, then initialize with: restic -r b2:mybucket:/ init . The b2: prefix selects the Backblaze backend.",
-        },
-        LoopTask {
             name: "caddy-unix-socket",
             topic: "caddyfile reverse_proxy to unix socket",
             ask: "In chat only: in a Caddyfile, what reverse_proxy target syntax proxies to a Unix domain socket at /run/app.sock?",
             accept: &["reverse_proxy", "unix/"],
-            fixture: "Caddy reverse proxy to a Unix socket: use reverse_proxy unix//run/app.sock — prefix the socket path with unix/ (a leading slash on the path yields unix//...).",
+            fixture: "Caddy reverse proxy to a Unix socket: use `reverse_proxy unix//run/app.sock` — prefix the socket path with unix/ (a leading slash on the path yields unix//...).",
         },
         LoopTask {
-            name: "systemd-list-timers",
-            topic: "systemctl list all active timers",
-            ask: "In chat only: what's the exact systemctl command to list all active timers and when they next run?",
-            accept: &["systemctl", "list-timers"],
-            fixture: "systemd timers: run systemctl list-timers --all to list every timer with its next elapse time and the unit it activates.",
+            name: "restic-keep-daily",
+            topic: "restic forget keep last 7 daily snapshots flag",
+            ask: "In chat only (don't run anything): which exact restic forget flag keeps only the last 7 daily snapshots?",
+            accept: &["--keep-daily 7"],
+            fixture: "restic forget: to retain the last 7 daily snapshots use the flag --keep-daily 7 (combine with restic forget --prune to also delete the data).",
         },
         LoopTask {
-            name: "tailscale-funnel",
-            topic: "tailscale funnel expose local port to internet",
-            ask: "In chat only: what's the tailscale command to expose local port 8080 to the public internet using Funnel?",
-            accept: &["tailscale", "funnel", "8080"],
-            fixture: "Tailscale Funnel exposes a local service to the public internet: run tailscale funnel 8080 to serve the service on port 8080 to anyone over your tailnet's funnel.",
+            name: "borg-archive-sep",
+            topic: "borg create repository archive name separator",
+            ask: "In chat only: in a borg create command, what punctuation separates the repository path from the archive name?",
+            accept: &["::"],
+            fixture: "BorgBackup: borg create uses a double-colon to separate the repo from the archive name, e.g. borg create /path/to/repo::archive-name ~/data . The :: is required.",
+        },
+        LoopTask {
+            name: "systemd-restart-onfailure",
+            topic: "systemd unit auto restart on failure directive",
+            ask: "In chat only: in a systemd service unit, what exact directive makes the service restart automatically only when it fails?",
+            accept: &["restart=on-failure"],
+            fixture: "systemd: in the [Service] section, set Restart=on-failure so the unit is restarted automatically only on a non-clean exit (combine with RestartSec= to delay).",
+        },
+        LoopTask {
+            name: "nginx-upload-size",
+            topic: "nginx increase max upload body size directive",
+            ask: "In chat only: which exact nginx directive sets the maximum allowed client request (upload) body size?",
+            accept: &["client_max_body_size"],
+            fixture: "nginx: the client_max_body_size directive sets the maximum allowed size of the client request body, e.g. client_max_body_size 50m; placed in http, server, or location.",
+        },
+        LoopTask {
+            name: "jq-first-element",
+            topic: "jq filter first element of an array",
+            ask: "In chat only: what jq filter returns the first element of a JSON array?",
+            accept: &[".[0]"],
+            fixture: "jq: to get the first element of an array use the filter .[0] (for example: jq '.[0]' file.json).",
         },
     ]
 }
@@ -1172,10 +1179,16 @@ async fn bench_learnloop(env: &BenchEnv) -> Value {
         tasks.len(),
         env.samples
     );
-    println!("{:<22} {:>6} {:>6} {:>5}  {}", "task", "cold", "warm", "src", "topic");
+    println!(
+        "{:<24} {:>5} {:>6} {:>6} {:>5}  {}",
+        "task", "cold", "force", "caut", "src", "status"
+    );
 
     let mut cold_pass = 0usize;
-    let mut warm_pass = 0usize;
+    let mut forceful_pass = 0usize;
+    let mut cautious_pass = 0usize;
+    let mut forceful_regressions = 0usize;
+    let mut cautious_regressions = 0usize;
     let mut persisted = 0usize;
     let mut rows = Vec::new();
 
@@ -1226,73 +1239,108 @@ async fn bench_learnloop(env: &BenchEnv) -> Value {
             persisted += 1;
         }
 
-        // WARM — answer with the researched skill injected (the autopilot's behavior).
-        let mut kw = 0usize;
-        for _ in 0..env.samples {
-            let (mut system, tools) = env.build_prompt_with(&home, None, &targets, false);
-            if !skill_body.trim().is_empty() {
-                system.push_str(&format!(
-                    "\n\n# Just-researched skill for this task — APPLY IT\n{}",
-                    skill_body
-                ));
-            }
-            let r = one_turn(resolved.provider.as_ref(), &env.model, system, tools, t.ask, 0.3).await;
-            if contains_all(&r.content, t.accept) {
-                kw += 1;
+        // WARM under two injection styles, to measure whether verification-aware CAUTION
+        // (the fix) regresses less than the old forceful "APPLY IT".
+        let forceful_block = if skill_body.trim().is_empty() {
+            String::new()
+        } else {
+            format!("\n\n# Just-researched skill for this task — APPLY IT\n{skill_body}")
+        };
+        let cautious_block = if skill_body.trim().is_empty() {
+            String::new()
+        } else {
+            crate::ai::autoresearch::injection_block("draft", &skill_body).unwrap_or_default()
+        };
+
+        let mut kwf = 0usize;
+        let mut kwc = 0usize;
+        for (k, block) in [(&mut kwf, &forceful_block), (&mut kwc, &cautious_block)] {
+            for _ in 0..env.samples {
+                let (mut system, tools) = env.build_prompt_with(&home, None, &targets, false);
+                if !block.trim().is_empty() {
+                    system.push_str(block.as_str());
+                }
+                let r = one_turn(resolved.provider.as_ref(), &env.model, system, tools, t.ask, 0.3).await;
+                if contains_all(&r.content, t.accept) {
+                    *k += 1;
+                }
             }
         }
-        let warm_ok = kw * 2 > env.samples;
+        let forceful_ok = kwf * 2 > env.samples;
+        let cautious_ok = kwc * 2 > env.samples;
+
+        // Lifecycle: record the (cautious) outcome against the skill — success when it
+        // answered correctly. Drafts that keep failing get quarantined.
+        let final_status = crate::ai::autoresearch::record_outcome(&home, &res.name, cautious_ok);
 
         if cold_ok {
             cold_pass += 1;
         }
-        if warm_ok {
-            warm_pass += 1;
+        if forceful_ok {
+            forceful_pass += 1;
         }
-        let flag = if !cold_ok && warm_ok { " ← learned" } else if cold_ok && !warm_ok { " ← REGRESSED" } else { "" };
+        if cautious_ok {
+            cautious_pass += 1;
+        }
+        if cold_ok && !forceful_ok {
+            forceful_regressions += 1;
+        }
+        if cold_ok && !cautious_ok {
+            cautious_regressions += 1;
+        }
+        let flag = if !cold_ok && cautious_ok {
+            " ← learned"
+        } else if cold_ok && !cautious_ok {
+            " ← regressed"
+        } else {
+            ""
+        };
         println!(
-            "{:<22} {:>6} {:>6} {:>5}  {}{}",
+            "{:<24} {:>5} {:>6} {:>6} {:>5}  {}{}",
             t.name,
             format!("{kc}/{}", env.samples),
-            format!("{kw}/{}", env.samples),
+            format!("{kwf}/{}", env.samples),
+            format!("{kwc}/{}", env.samples),
             src,
-            t.topic,
+            final_status,
             flag
         );
         rows.push(json!({
             "task": t.name, "topic": t.topic, "source": src,
-            "cold_pass": kc, "warm_pass": kw, "samples": env.samples,
-            "cold_ok": cold_ok, "warm_ok": warm_ok,
-            "skill": res.name, "status": format!("{:?}", res.status),
+            "cold": kc, "warm_forceful": kwf, "warm_cautious": kwc, "samples": env.samples,
+            "skill": res.name, "final_status": final_status,
         }));
     }
 
     let n = tasks.len();
-    let (cl, ch) = wilson_interval(cold_pass as u32, n as u32);
-    let (wl, wh) = wilson_interval(warm_pass as u32, n as u32);
     println!(
-        "\nCOLD (memory only): {cold_pass}/{n} [{:.0}–{:.0}%]   WARM (with learned skill): {warm_pass}/{n} [{:.0}–{:.0}%]",
-        cl * 100.0, ch * 100.0, wl * 100.0, wh * 100.0
+        "\nCOLD (memory only): {cold_pass}/{n}   WARM forceful: {forceful_pass}/{n} ({forceful_regressions} regressed)   WARM cautious: {cautious_pass}/{n} ({cautious_regressions} regressed)"
     );
     println!(
-        "learning lift: {:+} task(s)   skills persisted (dedup on re-ask): {persisted}/{n}",
-        warm_pass as i64 - cold_pass as i64
+        "skills persisted (dedup on re-ask): {persisted}/{n}   verification cut regressions: {} → {}",
+        forceful_regressions, cautious_regressions
     );
     println!(
         "→ {}",
-        if warm_pass > cold_pass {
-            "The agent LEARNED — researching and building its own skill improved its answers."
-        } else if warm_pass < cold_pass {
-            "Regression — the researched skills hurt (check skill quality)."
+        if cautious_regressions < forceful_regressions {
+            "Verification-aware CAUTION reduced the regressions a blindly-applied draft caused — the fix works."
+        } else if cautious_pass > cold_pass {
+            "Researched skills lifted answers with no added regression."
+        } else if cautious_pass < cold_pass {
+            "Skills still net-regress — quarantine is catching them; needs better skill quality / more uses to verify."
         } else {
-            "No net change (the model already knew these, or the skills didn't add the key detail)."
+            "No net change on this set (mostly known, or web research didn't add the key detail)."
         }
     );
 
-    // Self-record COLD and WARM as two history points so the dashboard shows the jump.
-    let extra = json!({ "persisted": persisted, "total": n });
+    // Record COLD and the (safer) CAUTIOUS WARM as history points for the dashboard.
+    let extra = json!({
+        "persisted": persisted, "total": n,
+        "forceful_pass": forceful_pass, "cautious_pass": cautious_pass,
+        "forceful_regressions": forceful_regressions, "cautious_regressions": cautious_regressions,
+    });
     append_score_record("learnloop-cold", &env.model, env.samples, cold_pass as u32, n as u32, "unfamiliar-tool: memory only", extra.clone());
-    append_score_record("learnloop-warm", &env.model, env.samples, warm_pass as u32, n as u32, "unfamiliar-tool: after learning", extra);
+    append_score_record("learnloop-warm", &env.model, env.samples, cautious_pass as u32, n as u32, "unfamiliar-tool: after learning (cautious)", extra);
     let records = read_history();
     render_and_write_history(&records);
     if let Some(last) = records.last() {
@@ -1303,9 +1351,10 @@ async fn bench_learnloop(env: &BenchEnv) -> Value {
         "mode": "learnloop",
         "model": env.model,
         "samples": env.samples,
-        "cold_pass": cold_pass, "warm_pass": warm_pass, "total": n,
-        "lift": warm_pass as i64 - cold_pass as i64,
-        "persisted": persisted,
+        "cold_pass": cold_pass,
+        "forceful_pass": forceful_pass, "cautious_pass": cautious_pass,
+        "forceful_regressions": forceful_regressions, "cautious_regressions": cautious_regressions,
+        "persisted": persisted, "total": n,
         "tasks": rows,
     })
 }
@@ -2384,7 +2433,31 @@ fn selftest() -> i32 {
         let issues = ar::validate_structure(fabricated, &["https://real.example/page".into()]);
         check("validation flags fabricated/mismatched sources", issues.iter().any(|i| i.contains("don't match")));
 
-        // 6) Gap-classifier reply parsing (the reliable pre-turn trigger).
+        // 6) Skill lifecycle: a draft earns `verified` by succeeding, gets `quarantined`
+        //    by failing, and injection trust follows the status.
+        let mk_draft = |home: &AgentHome, nm: &str| {
+            crate::ai::skills::save_skill(
+                home,
+                ar::QUARANTINE_CATEGORY,
+                nm,
+                "---\ndescription: x\nstatus: draft\nverified: false\nuses: 0\nsuccesses: 0\n---\n# x\nrun `ls`",
+            )
+            .unwrap();
+        };
+        mk_draft(&home, "promote-me");
+        ar::record_outcome(&home, "promote-me", true);
+        let s1 = ar::record_outcome(&home, "promote-me", true);
+        check("draft promotes to verified after 2 successes", s1 == "verified");
+        mk_draft(&home, "kill-me");
+        ar::record_outcome(&home, "kill-me", false);
+        ar::record_outcome(&home, "kill-me", false);
+        let s2 = ar::record_outcome(&home, "kill-me", false);
+        check("draft quarantines after 3 failures", s2 == "quarantined");
+        check("verified skill is applied forcefully", ar::injection_block("verified", "B").map(|b| b.contains("APPLY IT")).unwrap_or(false));
+        check("draft skill is applied cautiously", ar::injection_block("draft", "B").map(|b| b.contains("UNVERIFIED")).unwrap_or(false));
+        check("quarantined skill is NOT applied", ar::injection_block("quarantined", "B").is_none());
+
+        // 7) Gap-classifier reply parsing (the reliable pre-turn trigger).
         check("classifier 'NONE' → no gap", ar::parse_gap_reply("NONE").is_none());
         check("classifier 'None.' → no gap", ar::parse_gap_reply("None.").is_none());
         check(

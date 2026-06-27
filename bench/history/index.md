@@ -11,6 +11,8 @@ A portable [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowle
 
 ## Runs (newest first)
 
+- [Jun 27 2026 16:09 — learnloop-warm](runs/2026-06-27T14-09-49.628854400-00-00-learnloop-warm.md) — unfamiliar-tool: after learning (cautious): 83% (5/6) [95% CI 44–97%]
+- [Jun 27 2026 16:09 — learnloop-cold](runs/2026-06-27T14-09-49.628492-00-00-learnloop-cold.md) — unfamiliar-tool: memory only: 67% (4/6) [95% CI 30–90%]
 - [Jun 27 2026 15:09 — learnloop-warm](runs/2026-06-27T13-09-35.916153600-00-00-learnloop-warm.md) — unfamiliar-tool: after learning: 80% (4/5) [95% CI 38–96%]
 - [Jun 27 2026 15:09 — learnloop-cold](runs/2026-06-27T13-09-35.915794-00-00-learnloop-cold.md) — unfamiliar-tool: memory only: 80% (4/5) [95% CI 38–96%]
 - [Jun 27 2026 14:01 — recall](runs/2026-06-27T12-01-49.604207400-00-00-recall.md) — recall accuracy (direct): 89% (48/54) [95% CI 78–95%]
