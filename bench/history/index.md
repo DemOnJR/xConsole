@@ -1,0 +1,18 @@
+---
+type: index
+title: xConsole benchmark history
+description: Scores and latency of the local-model agent over time, as an Open Knowledge Format bundle.
+tags: [benchmark, index]
+---
+
+# xConsole benchmark history
+
+A portable [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) bundle: one markdown concept per run, a chronological [log](log.md), and the dashboard at [`../results/history.html`](../results/history.html).
+
+## Runs (newest first)
+
+- [Jun 27 2026 03:02 — learn](runs/2026-06-27T01-02-38.235947400-00-00-learn.md) — gap-routing accuracy: 33% (4/12) [95% CI 14–61%]
+- [Jun 27 2026 02:59 — ablation](runs/2026-06-27T00-59-48.523315-00-00-ablation.md) — full-prompt pass-rate: 100% (7/7) [95% CI 65–100%]
+- [Jun 27 2026 02:55 — agent](runs/2026-06-27T00-55-00.556526200-00-00-agent.md) — scenario pass-rate: 100% (11/11) [95% CI 74–100%]
+- [Jun 27 2026 02:53 — agent](runs/2026-06-27T00-53-47.450689500-00-00-agent.md) — scenario pass-rate: 100% (11/11) [95% CI 74–100%]
+- [Jun 27 2026 02:52 — llm](runs/2026-06-27T00-52-32.133470100-00-00-llm.md) — latency t100=4124ms, 44.0 tok/s

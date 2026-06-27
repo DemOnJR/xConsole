@@ -24,6 +24,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use chrono::{Local, Utc};
 use serde_json::{json, Value};
 
 use crate::ai::context::{self, PromptContext};
@@ -91,6 +92,22 @@ async fn run_async(args: &[String]) -> i32 {
         return bench_hooks(out).await;
     }
 
+    // Regenerate the history HTML dashboard + OKF bundle from the existing history log
+    // (no model needed). Useful after editing the renderer or to rebuild on a new machine.
+    if mode == "report" {
+        let records = read_history();
+        let n = records.len();
+        render_and_write_history(&records);
+        write_okf_bundle_all(&records);
+        let root = bench_root();
+        println!(
+            "Rebuilt {} from {n} run(s); OKF bundle at {}",
+            root.join("results").join("history.html").display(),
+            root.join("history").display()
+        );
+        return 0;
+    }
+
     // Skill security scanner check (SkillSpector + built-in). `--deep` exercises the
     // LLM-backed analysis against the local OpenAI-compatible endpoint.
     if mode == "scanner" {
@@ -140,11 +157,29 @@ async fn run_async(args: &[String]) -> i32 {
         }
         other => {
             eprintln!(
-                "bench: unknown mode '{other}' (use: agent | ablation | learn | llm | all | hooks | scanner | selftest)"
+                "bench: unknown mode '{other}' (use: agent | ablation | learn | llm | all | report | hooks | scanner | selftest)"
             );
             return 1;
         }
     };
+
+    // Record this run to the benchmark history (unless suppressed) and regenerate the
+    // HTML dashboard + OKF bundle. Tuning modes are excluded — they're not scored runs.
+    let record_history = !args.iter().any(|a| a == "--no-history")
+        && matches!(mode.as_str(), "agent" | "ablation" | "learn" | "llm" | "all");
+    if record_history {
+        if let Some(rec) = summarize_run(&mode, &env.model, samples, &report) {
+            append_history(&rec);
+            let records = read_history();
+            render_and_write_history(&records);
+            write_okf_bundle(&rec);
+            let root = bench_root();
+            println!(
+                "\nRecorded to benchmark history → {}",
+                root.join("results").join("history.html").display()
+            );
+        }
+    }
 
     if let Some(path) = out {
         match std::fs::write(&path, serde_json::to_string_pretty(&report).unwrap_or_default()) {
@@ -2070,3 +2105,424 @@ async fn preflight(base: &str, model: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+// ==========================================================================
+// Benchmark history: OKF bundle + self-contained HTML dashboard
+// ==========================================================================
+//
+// Each scored run is appended to `bench/results/history.jsonl`, then rendered:
+//   - a self-contained HTML dashboard (`bench/results/history.html`) charting scores and
+//     latency over time, each pass-rate with a Wilson 95% confidence interval;
+//   - an Open Knowledge Format bundle (`bench/history/`, Google's OKF v0.1: markdown +
+//     YAML frontmatter per run, a chronological `log.md`, and an `index.md`) so the
+//     history is portable, vendor-neutral, agent- and human-readable knowledge.
+//
+// Methodology applied (cited in the dashboard footer):
+//   - Wilson 95% CI + "3-5 samples is often insufficient" → don't over-read one number:
+//     Google Research, "Building better AI benchmarks: how many raters are enough?".
+//   - "Time for 100 output tokens" composite latency: Artificial Analysis methodology.
+//   - Self-report vs. revealed behavior / overconfidence framing: Google Research,
+//     "Evaluating alignment of behavioral dispositions in LLMs".
+//   - Portable knowledge format (markdown+YAML, log.md, index.md, HTML visualizer):
+//     Google Cloud, "Open Knowledge Format".
+
+/// Repo `bench/` directory, discovered from the cwd (the bench runs from `src-tauri/`).
+fn bench_root() -> PathBuf {
+    for cand in ["bench", "../bench", "../../bench"] {
+        let p = PathBuf::from(cand);
+        if p.join("results").is_dir() || p.join("README.md").is_file() {
+            return p;
+        }
+    }
+    let p = PathBuf::from("../bench");
+    let _ = std::fs::create_dir_all(p.join("results"));
+    p
+}
+
+/// Wilson score 95% confidence interval for k successes out of n (binomial). The rater
+/// paper's lesson: report an interval, not a point estimate — small N (our 2-3 samples)
+/// yields wide intervals, so a single pass-rate shouldn't be over-read.
+fn wilson_interval(k: u32, n: u32) -> (f64, f64) {
+    if n == 0 {
+        return (0.0, 1.0);
+    }
+    let z = 1.96f64; // 95%
+    let n = n as f64;
+    let phat = k as f64 / n;
+    let z2 = z * z;
+    let denom = 1.0 + z2 / n;
+    let center = phat + z2 / (2.0 * n);
+    let margin = z * ((phat * (1.0 - phat) + z2 / (4.0 * n)) / n).sqrt();
+    (((center - margin) / denom).max(0.0), ((center + margin) / denom).min(1.0))
+}
+
+/// "Time for 100 output tokens" (ms) = TTFT + 100/(tok/s) — one comparable latency number
+/// (Artificial Analysis). 0 when speed is unknown.
+fn t100_ms(ttft_ms: u128, gen_tps: f64) -> u128 {
+    if gen_tps <= 0.0 {
+        return ttft_ms;
+    }
+    ttft_ms + (100_000.0 / gen_tps) as u128
+}
+
+fn jf(v: &Value, k: &str) -> f64 {
+    v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0)
+}
+fn ju(v: &Value, k: &str) -> u64 {
+    v.get(k).and_then(|x| x.as_u64()).unwrap_or(0)
+}
+
+/// Mean of a numeric field across an array of objects.
+fn mean_of(arr: &[Value], k: &str) -> f64 {
+    if arr.is_empty() {
+        return 0.0;
+    }
+    arr.iter().map(|v| jf(v, k)).sum::<f64>() / arr.len() as f64
+}
+
+/// Flatten a mode's report into a uniform, timestamped history record (with a Wilson CI on
+/// the headline pass-rate). Returns None when the report errored.
+fn summarize_run(mode: &str, model: &str, samples: usize, report: &Value) -> Option<Value> {
+    if report.get("error").is_some() {
+        return None;
+    }
+    let now = Utc::now();
+    let mut rec = json!({
+        "ts": now.to_rfc3339(),
+        "ts_display": Local::now().format("%b %d %Y %H:%M").to_string(),
+        "mode": mode,
+        "model": model,
+        "samples": samples,
+    });
+    let o = rec.as_object_mut().unwrap();
+
+    // Headline metric (pass k/n) + latency, extracted per mode.
+    let (mut k, mut n) = (0u32, 0u32);
+    let (mut ttft, mut total, mut gtps, mut ptok) = (0u128, 0u128, 0.0f64, 0u64);
+    let mut metric_label = "pass-rate".to_string();
+    let mut extra = json!({});
+
+    let empty: Vec<Value> = vec![];
+    match mode {
+        "agent" => {
+            k = ju(report, "pass") as u32;
+            n = ju(report, "total") as u32;
+            metric_label = "scenario pass-rate".into();
+            let scns = report.get("scenarios").and_then(|v| v.as_array()).unwrap_or(&empty);
+            ttft = mean_of(scns, "ttft_ms_avg") as u128;
+            total = ju(report, "avg_turn_ms") as u128;
+            gtps = mean_of(scns, "gen_tps");
+            ptok = mean_of(scns, "prompt_tokens") as u64;
+        }
+        "all" => {
+            // `all` = llm report with the agent report nested under "agent".
+            if let Some(ag) = report.get("agent") {
+                k = ju(ag, "pass") as u32;
+                n = ju(ag, "total") as u32;
+                let scns = ag.get("scenarios").and_then(|v| v.as_array()).unwrap_or(&empty);
+                ttft = mean_of(scns, "ttft_ms_avg") as u128;
+                total = ju(ag, "avg_turn_ms") as u128;
+                gtps = mean_of(scns, "gen_tps");
+                ptok = mean_of(scns, "prompt_tokens") as u64;
+            }
+            metric_label = "scenario pass-rate".into();
+        }
+        "ablation" => {
+            // Use the "full" variant (all systems on) as the headline.
+            let vs = report.get("variants").and_then(|v| v.as_array()).unwrap_or(&empty);
+            if let Some(full) = vs.iter().find(|v| v.get("variant").and_then(|x| x.as_str()) == Some("full")) {
+                k = ju(full, "pass") as u32;
+                n = ju(full, "total") as u32;
+                ttft = ju(full, "ttft_ms_avg") as u128;
+                total = ju(full, "total_ms_avg") as u128;
+                gtps = jf(full, "gen_tps");
+                ptok = ju(full, "prompt_tokens_avg");
+            }
+            metric_label = "full-prompt pass-rate".into();
+            extra = report.get("per_system_contribution").cloned().unwrap_or(json!([]));
+        }
+        "learn" => {
+            if let Some(r) = report.get("routing") {
+                let tp = ju(r, "tp") as u32;
+                let fp = ju(r, "fp") as u32;
+                let tn = ju(r, "tn") as u32;
+                let fnn = ju(r, "fn") as u32;
+                k = tp + tn;
+                n = tp + fp + tn + fnn;
+                metric_label = "gap-routing accuracy".into();
+                extra = json!({
+                    "recall": jf(r, "recall"), "precision": jf(r, "precision"),
+                    "tp": tp, "fp": fp, "tn": tn, "fn": fnn,
+                });
+            }
+        }
+        "llm" => {
+            metric_label = "latency only".into();
+            let cases = report.get("cases").and_then(|v| v.as_array()).unwrap_or(&empty);
+            if let Some(c) = cases.iter().find(|c| c.get("case").and_then(|x| x.as_str()) == Some("full-agent-turn")).or_else(|| cases.last()) {
+                ttft = ju(c, "ttft_ms") as u128;
+                total = ju(c, "total_ms") as u128;
+                gtps = jf(c, "gen_tps");
+                ptok = ju(c, "prompt_tokens");
+            }
+        }
+        _ => {}
+    }
+
+    let (lo, hi) = wilson_interval(k, n);
+    let metric = if n > 0 { Some(k as f64 / n as f64) } else { None };
+    o.insert("metric".into(), json!(metric));
+    o.insert("metric_label".into(), json!(metric_label));
+    o.insert("pass".into(), json!(k));
+    o.insert("total".into(), json!(n));
+    o.insert("ci_lo".into(), json!((lo * 1000.0).round() / 1000.0));
+    o.insert("ci_hi".into(), json!((hi * 1000.0).round() / 1000.0));
+    o.insert("ttft_ms".into(), json!(ttft));
+    o.insert("total_ms".into(), json!(total));
+    o.insert("gen_tps".into(), json!((gtps * 10.0).round() / 10.0));
+    o.insert("ptok".into(), json!(ptok));
+    o.insert("t100_ms".into(), json!(t100_ms(ttft, gtps)));
+    o.insert("extra".into(), extra);
+    Some(rec)
+}
+
+fn append_history(rec: &Value) {
+    let path = bench_root().join("results").join("history.jsonl");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let line = format!("{}\n", serde_json::to_string(rec).unwrap_or_default());
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+fn read_history() -> Vec<Value> {
+    let path = bench_root().join("results").join("history.jsonl");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .collect()
+}
+
+fn render_and_write_history(records: &[Value]) {
+    let html = render_history_html(records);
+    let path = bench_root().join("results").join("history.html");
+    let _ = std::fs::write(&path, html);
+}
+
+/// Build the self-contained HTML dashboard. Data is embedded; charts are drawn by inline
+/// JS (no external assets), so the file works offline / in any browser / on GitHub.
+fn render_history_html(records: &[Value]) -> String {
+    let data = serde_json::to_string(records).unwrap_or_else(|_| "[]".into());
+    let mut s = String::with_capacity(HTML_HEAD.len() + data.len() + HTML_TAIL.len() + 64);
+    s.push_str(HTML_HEAD);
+    s.push_str("\n<script>window.BENCH_DATA = ");
+    s.push_str(&data);
+    s.push_str(";</script>\n");
+    s.push_str(HTML_TAIL);
+    s
+}
+
+// ---- OKF bundle (Google's Open Knowledge Format v0.1) --------------------
+
+fn okf_dir() -> PathBuf {
+    bench_root().join("history")
+}
+
+/// Write/refresh the OKF representation for one run: a typed markdown concept file, a
+/// chronological `log.md` line, and a refreshed `index.md`.
+fn write_okf_bundle(rec: &Value) {
+    let runs = okf_dir().join("runs");
+    let _ = std::fs::create_dir_all(&runs);
+
+    let ts = rec.get("ts").and_then(|v| v.as_str()).unwrap_or("").replace([':', '+'], "-");
+    let mode = rec.get("mode").and_then(|v| v.as_str()).unwrap_or("run");
+    let slug = format!("{ts}-{mode}");
+    let _ = std::fs::write(runs.join(format!("{slug}.md")), okf_run_md(rec));
+
+    // log.md — OKF chronological history pattern.
+    let log = okf_dir().join("log.md");
+    let line = format!(
+        "- {} — **{}** {} (model {})\n",
+        rec.get("ts_display").and_then(|v| v.as_str()).unwrap_or(""),
+        mode,
+        okf_score_str(rec),
+        rec.get("model").and_then(|v| v.as_str()).unwrap_or("?"),
+    );
+    use std::io::Write;
+    if !log.exists() {
+        let _ = std::fs::write(&log, "---\ntype: log\ntitle: Benchmark run log\n---\n\n# Benchmark run log\n\n");
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+        let _ = f.write_all(line.as_bytes());
+    }
+
+    // index.md — refreshed each time from the full history.
+    let _ = std::fs::write(okf_dir().join("index.md"), okf_index_md(&read_history()));
+}
+
+fn write_okf_bundle_all(records: &[Value]) {
+    let _ = std::fs::remove_dir_all(okf_dir().join("runs"));
+    let _ = std::fs::remove_file(okf_dir().join("log.md"));
+    for r in records {
+        write_okf_bundle(r);
+    }
+    let _ = std::fs::write(okf_dir().join("index.md"), okf_index_md(records));
+}
+
+fn okf_score_str(rec: &Value) -> String {
+    match rec.get("metric").and_then(|v| v.as_f64()) {
+        Some(m) => format!(
+            "{}: {:.0}% ({}/{}) [95% CI {:.0}–{:.0}%]",
+            rec.get("metric_label").and_then(|v| v.as_str()).unwrap_or("score"),
+            m * 100.0,
+            ju(rec, "pass"),
+            ju(rec, "total"),
+            jf(rec, "ci_lo") * 100.0,
+            jf(rec, "ci_hi") * 100.0,
+        ),
+        None => format!("latency t100={}ms, {:.1} tok/s", ju(rec, "t100_ms"), jf(rec, "gen_tps")),
+    }
+}
+
+fn okf_run_md(rec: &Value) -> String {
+    let mode = rec.get("mode").and_then(|v| v.as_str()).unwrap_or("run");
+    format!(
+        "---\ntype: benchmark-run\ntitle: {mode} — {ts_disp}\nmode: {mode}\nmodel: {model}\ntimestamp: {ts}\nsamples: {samples}\nmetric: {metric}\nmetric_label: {mlabel}\nci_low: {lo}\nci_high: {hi}\ntags: [benchmark, {mode}]\n---\n\n# {mode} run — {ts_disp}\n\n{score}\n\n| metric | value |\n|---|---|\n| model | {model} |\n| samples (N) | {samples} |\n| prompt tokens | {ptok} |\n| TTFT (ms) | {ttft} |\n| total/turn (ms) | {total} |\n| gen tok/s | {gtps} |\n| time for 100 tok (ms) | {t100} |\n\nMethodology: pass-rates carry a Wilson 95% CI (small N is often insufficient — \
+Google \"how many raters are enough?\"); latency uses \"time for 100 output tokens\" \
+(Artificial Analysis). See [the log](../log.md) and [index](../index.md).\n",
+        mode = mode,
+        ts_disp = rec.get("ts_display").and_then(|v| v.as_str()).unwrap_or(""),
+        model = rec.get("model").and_then(|v| v.as_str()).unwrap_or("?"),
+        ts = rec.get("ts").and_then(|v| v.as_str()).unwrap_or(""),
+        samples = ju(rec, "samples"),
+        metric = rec.get("metric").map(|m| m.to_string()).unwrap_or_else(|| "null".into()),
+        mlabel = rec.get("metric_label").and_then(|v| v.as_str()).unwrap_or(""),
+        lo = jf(rec, "ci_lo"),
+        hi = jf(rec, "ci_hi"),
+        score = okf_score_str(rec),
+        ptok = ju(rec, "ptok"),
+        ttft = ju(rec, "ttft_ms"),
+        total = ju(rec, "total_ms"),
+        gtps = jf(rec, "gen_tps"),
+        t100 = ju(rec, "t100_ms"),
+    )
+}
+
+fn okf_index_md(records: &[Value]) -> String {
+    let mut s = String::from(
+        "---\ntype: index\ntitle: xConsole benchmark history\ndescription: Scores and latency of the local-model agent over time, as an Open Knowledge Format bundle.\ntags: [benchmark, index]\n---\n\n# xConsole benchmark history\n\nA portable [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) bundle: one markdown concept per run, a chronological [log](log.md), and the dashboard at [`../results/history.html`](../results/history.html).\n\n## Runs (newest first)\n\n",
+    );
+    for r in records.iter().rev().take(100) {
+        let ts = r.get("ts").and_then(|v| v.as_str()).unwrap_or("").replace([':', '+'], "-");
+        let mode = r.get("mode").and_then(|v| v.as_str()).unwrap_or("run");
+        s.push_str(&format!(
+            "- [{} — {}](runs/{}-{}.md) — {}\n",
+            r.get("ts_display").and_then(|v| v.as_str()).unwrap_or(""),
+            mode,
+            ts,
+            mode,
+            okf_score_str(r),
+        ));
+    }
+    s
+}
+
+const HTML_HEAD: &str = r##"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xConsole — Benchmark History</title>
+<style>
+:root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#e6edf3;--muted:#8b949e;--accent:#58a6ff;--good:#3fb950;--warn:#d29922;--bad:#f85149}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:28px 20px 60px}
+h1{font-size:22px;margin:0 0 4px}.sub{color:var(--muted);margin:0 0 24px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:28px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px}
+.card .m{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.card .v{font-size:26px;font-weight:600;margin-top:4px}
+.card .d{font-size:12px;color:var(--muted);margin-top:2px}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:22px}
+.panel h2{font-size:14px;margin:0 0 12px;color:var(--text)}
+svg{width:100%;height:280px;display:block}
+.legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:8px;font-size:12px;color:var(--muted)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--border)}
+th{color:var(--muted);font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.tag{font-size:11px;padding:1px 7px;border-radius:99px;background:#1f6feb22;color:var(--accent)}
+.muted{color:var(--muted)}.foot{color:var(--muted);font-size:12px;margin-top:24px;line-height:1.7}
+.foot a{color:var(--accent);text-decoration:none}
+.empty{color:var(--muted);text-align:center;padding:40px}
+</style></head>
+<body><div class="wrap">
+<h1>xConsole — Benchmark History</h1>
+<p class="sub">Local-model agent scores &amp; latency over time. Pass-rates show a Wilson 95% confidence interval.</p>
+<div id="cards" class="cards"></div>
+<div class="panel"><h2>Score over time (pass-rate %, with 95% CI)</h2><svg id="chartScore" viewBox="0 0 1000 280" preserveAspectRatio="none"></svg><div id="legScore" class="legend"></div></div>
+<div class="panel"><h2>Latency over time — time for 100 output tokens (ms, lower is better)</h2><svg id="chartLat" viewBox="0 0 1000 280" preserveAspectRatio="none"></svg><div id="legLat" class="legend"></div></div>
+<div class="panel"><h2>All runs</h2><div id="tableWrap"></div></div>
+<div class="foot" id="foot"></div>
+</div>"##;
+
+const HTML_TAIL: &str = r##"<script>
+(function(){
+  var D = (window.BENCH_DATA||[]).slice();
+  var COLORS={agent:"#58a6ff",ablation:"#3fb950",learn:"#d29922",llm:"#bc8cff",all:"#f778ba"};
+  var elc=document.getElementById('cards');
+  if(!D.length){elc.innerHTML='<div class="empty">No benchmark runs recorded yet. Run <code>xconsole-bench agent</code>.</div>';
+    document.getElementById('foot').innerHTML=foot();return;}
+  // Summary cards: latest run per mode.
+  var latest={};D.forEach(function(r){latest[r.mode]=r;});
+  Object.keys(latest).forEach(function(m){var r=latest[m];var c=document.createElement('div');c.className='card';
+    var v=r.metric==null?(r.t100_ms+'ms'):(Math.round(r.metric*100)+'%');
+    var d=r.metric==null?(r.gen_tps+' tok/s · '+r.model):(r.pass+'/'+r.total+' · CI '+Math.round(r.ci_lo*100)+'–'+Math.round(r.ci_hi*100)+'%');
+    c.innerHTML='<div class="m">'+m+'</div><div class="v">'+v+'</div><div class="d">'+d+'</div>';elc.appendChild(c);});
+  // Charts.
+  drawChart('chartScore','legScore',function(r){return r.metric==null?null:r.metric*100;},function(r){return [r.ci_lo*100,r.ci_hi*100];},'%');
+  drawChart('chartLat','legLat',function(r){return r.t100_ms||null;},null,'ms');
+  // Table.
+  var rows=D.slice().reverse().map(function(r){
+    var score=r.metric==null?'<span class="muted">—</span>':(Math.round(r.metric*100)+'% <span class="muted">('+r.pass+'/'+r.total+')</span>');
+    var ci=r.metric==null?'':('<span class="muted">'+Math.round(r.ci_lo*100)+'–'+Math.round(r.ci_hi*100)+'%</span>');
+    return '<tr><td>'+r.ts_display+'</td><td><span class="tag">'+r.mode+'</span></td><td class="muted">'+r.model+'</td>'+
+      '<td class="num">'+(r.samples||'')+'</td><td>'+score+'</td><td>'+ci+'</td>'+
+      '<td class="num">'+(r.ptok||'')+'</td><td class="num">'+(r.ttft_ms||'')+'</td><td class="num">'+(r.t100_ms||'')+'</td><td class="num">'+(r.gen_tps||'')+'</td></tr>';
+  }).join('');
+  document.getElementById('tableWrap').innerHTML='<table><thead><tr><th>When</th><th>Mode</th><th>Model</th><th class="num">N</th><th>Score</th><th>95% CI</th><th class="num">ptok</th><th class="num">TTFT</th><th class="num">t100</th><th class="num">tok/s</th></tr></thead><tbody>'+rows+'</tbody></table>';
+  document.getElementById('foot').innerHTML=foot();
+
+  function drawChart(svgId,legId,yf,cif,unit){
+    var svg=document.getElementById(svgId);var W=1000,H=280,pl=46,pr=14,pt=14,pb=26;
+    var modes={};D.forEach(function(r){var y=yf(r);if(y==null)return;(modes[r.mode]=modes[r.mode]||[]).push({r:r,y:y});});
+    var ks=Object.keys(modes);if(!ks.length){svg.innerHTML='<text x="500" y="140" fill="#8b949e" text-anchor="middle">no data for this metric</text>';return;}
+    var maxN=1,maxY=0;ks.forEach(function(m){maxN=Math.max(maxN,modes[m].length);modes[m].forEach(function(p){maxY=Math.max(maxY,cif?cif(p.r)[1]:p.y);});});
+    if(unit==='%')maxY=100;else maxY=Math.ceil(maxY/500)*500||100;
+    var X=function(i){return pl+(maxN<=1?0:(i/(maxN-1)))*(W-pl-pr);};
+    var Y=function(v){return pt+(1-v/maxY)*(H-pt-pb);};
+    var g='';
+    for(var t=0;t<=4;t++){var gv=maxY*t/4,gy=Y(gv);g+='<line x1="'+pl+'" y1="'+gy+'" x2="'+(W-pr)+'" y2="'+gy+'" stroke="#21262d"/>'+
+      '<text x="'+(pl-6)+'" y="'+(gy+4)+'" fill="#8b949e" font-size="11" text-anchor="end">'+Math.round(gv)+'</text>';}
+    ks.forEach(function(m){var col=COLORS[m]||'#888';var pts=modes[m];
+      var path=pts.map(function(p,i){return (i?'L':'M')+X(i)+' '+Y(p.y);}).join(' ');
+      g+='<path d="'+path+'" fill="none" stroke="'+col+'" stroke-width="2"/>';
+      pts.forEach(function(p,i){
+        if(cif){var ci=cif(p.r);g+='<line x1="'+X(i)+'" y1="'+Y(ci[0])+'" x2="'+X(i)+'" y2="'+Y(ci[1])+'" stroke="'+col+'" stroke-width="1" opacity="0.45"/>';}
+        g+='<circle cx="'+X(i)+'" cy="'+Y(p.y)+'" r="3.2" fill="'+col+'"><title>'+m+' · '+p.r.ts_display+' · '+(unit==='%'?Math.round(p.y)+'%':Math.round(p.y)+'ms')+'</title></circle>';});
+    });
+    svg.innerHTML=g;
+    document.getElementById(legId).innerHTML=ks.map(function(m){return '<span><i style="background:'+(COLORS[m]||'#888')+'"></i>'+m+'</span>';}).join('');
+  }
+  function foot(){return 'Methodology — pass-rates carry a <b>Wilson 95% confidence interval</b>; with small N (a few samples) intervals are wide, so a single number shouldn\'t be over-read '+
+    '(<a href="https://research.google/blog/building-better-ai-benchmarks-how-many-raters-are-enough/">Google: how many raters are enough?</a>). '+
+    'Latency is <b>time for 100 output tokens</b> = TTFT + 100/(tok/s) (<a href="https://artificialanalysis.ai/methodology">Artificial Analysis</a>). '+
+    'The agent\'s tool-routing measures <b>revealed behavior vs. self-report</b> (<a href="https://research.google/blog/evaluating-alignment-of-behavioral-dispositions-in-llms/">Google: behavioral dispositions</a>). '+
+    'This history is also an <a href="https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf">Open Knowledge Format</a> bundle under <code>bench/history/</code>.';}
+})();
+</script>
+</body></html>"##;

@@ -73,6 +73,41 @@ With **no hooks configured the loop skips the hook path entirely (0 ms)** — ho
 opt-in, so they cost nothing until you add one. The `live_hook_ms` figure is dominated
 by process-spawn latency (lower on Unix `sh -c`); a hook that does real work adds its own time.
 
+## 1b. Benchmark history — scores over time (HTML dashboard + OKF bundle)
+
+Every **scored** run (`agent`, `ablation`, `learn`, `llm`, `all`) is appended to
+`bench/results/history.jsonl` and rendered two ways automatically:
+
+- **`bench/results/history.html`** — a self-contained dashboard (open it in any
+  browser; no server, no external assets) charting pass-rate and latency over time,
+  with a **Wilson 95% confidence interval** on every pass-rate.
+- **`bench/history/`** — the same history as an **[Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)**
+  bundle (Google's portable markdown+YAML standard): one typed concept per run
+  (`runs/*.md`), a chronological `log.md`, and an `index.md`. Portable, vendor-neutral,
+  readable in any editor and on GitHub.
+
+```bash
+# Rebuild the dashboard + OKF bundle from the existing history (no model needed):
+./src-tauri/target/release/xconsole-bench.exe report
+
+# Skip recording a run (e.g. a throwaway/tuning run):
+./src-tauri/target/release/xconsole-bench.exe agent --no-history
+```
+
+**Methodology** (applied + cited in the dashboard footer):
+
+- **Confidence intervals, not point estimates.** A pass-rate from a few samples is
+  noisy — 3–5 samples is *often insufficient* and the same source can wander ±1 pass.
+  Each pass-rate is reported with a Wilson 95% CI; when two runs' intervals overlap,
+  the difference isn't real. (Google Research, *"Building better AI benchmarks: how
+  many raters are enough?"* — more items beats more samples for an accuracy metric.)
+- **`time for 100 output tokens` = TTFT + 100 / (tok/s)** — one comparable latency
+  number across runs. (Artificial Analysis methodology.)
+- **Revealed behavior vs. self-report.** The learn-loop eval measures what the model
+  *does* (does it route to `learn_skill`?) against what it *claims* (the classifier's
+  self-assessment) — the gap is the model's overconfidence. (Google Research,
+  *"Evaluating alignment of behavioral dispositions in LLMs."*)
+
 ## 2. `ollama_latency.ps1` — zero-build latency probe
 
 Quick TTFT / tok/s read without compiling, straight against `/api/chat`:
