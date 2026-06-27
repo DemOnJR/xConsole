@@ -88,7 +88,18 @@ learning/regressions):
 # Reasoning-unlocks-recall experiment — single-hop factual questions answered three
 # ways: direct, reason-first, and a dummy "Let me think" buffer.
 ./src-tauri/target/release/xconsole-bench.exe recall --samples 3
+
+# Closed learning loop — answer unfamiliar-tool tasks COLD (memory), let the
+# autoresearch loop build a skill for each, then answer WARM (skill injected).
+# Records cold/warm as two history points so the dashboard shows the before/after.
+./src-tauri/target/release/xconsole-bench.exe learnloop --samples 3
 ```
+
+`learnloop` is the experiment that asks "does the agent actually get better by
+learning?" — cold vs warm pass-rate, plus a persistence check (a second `learn()`
+must dedup to the existing skill, no re-research). It also honestly catches the
+failure mode: a low-quality researched skill can *regress* a task, which is why
+draft skills stay quarantined until execution-verified.
 
 `recall` tests Google Research's *"Thinking to Recall: how reasoning unlocks parametric
 knowledge in LLMs"* on our local model: does a reasoning trace surface facts the model

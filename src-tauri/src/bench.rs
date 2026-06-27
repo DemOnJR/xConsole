@@ -151,6 +151,7 @@ async fn run_async(args: &[String]) -> i32 {
         "learntune" => bench_learntune(&env).await,
         "learnclassify" => bench_learnclassify(&env).await,
         "recall" => bench_recall(&env).await,
+        "learnloop" => bench_learnloop(&env).await,
         "all" => {
             let mut a = bench_llm(&env).await;
             let b = bench_agent(&env).await;
@@ -159,7 +160,7 @@ async fn run_async(args: &[String]) -> i32 {
         }
         other => {
             eprintln!(
-                "bench: unknown mode '{other}' (use: agent | hard | recall | ablation | learn | llm | all | report | hooks | scanner | selftest)"
+                "bench: unknown mode '{other}' (use: agent | hard | recall | learnloop | ablation | learn | llm | all | report | hooks | scanner | selftest)"
             );
             return 1;
         }
@@ -1065,6 +1066,247 @@ async fn bench_ablation(env: &BenchEnv) -> Value {
         "samples": env.samples,
         "variants": per_variant_json,
         "per_system_contribution": contrib_json,
+    })
+}
+
+// ---- Closed learning loop (cold → learn → warm) --------------------------
+//
+// The experiment that proves the agent LEARNS: answer unfamiliar-tool tasks COLD
+// (from memory, no skill), then run the autoresearch loop to build a skill for each,
+// then answer WARM (with the researched skill injected, as the autopilot does). If
+// warm > cold, having researched-and-built its own skill made the agent measurably
+// better — and a second learn() per task confirms the skill PERSISTS (dedup, no
+// re-research). Web research is live; a fixture source is the fallback when DuckDuckGo
+// returns nothing, so the learning signal isn't hostage to DDG's uptime.
+
+struct LoopTask {
+    name: &'static str,
+    topic: &'static str,
+    ask: &'static str,
+    /// ALL of these (lowercased) must appear in a correct answer.
+    accept: &'static [&'static str],
+    /// Fallback source page (used only if live web research finds nothing).
+    fixture: &'static str,
+}
+
+fn learnloop_tasks() -> Vec<LoopTask> {
+    vec![
+        LoopTask {
+            name: "fail2ban-jail-local",
+            topic: "fail2ban override default jail settings file",
+            ask: "In chat only (do not run anything): to override fail2ban's default jail settings, which exact file should you put your custom configuration in?",
+            accept: &["jail.local"],
+            fixture: "Fail2Ban configuration: never edit jail.conf directly (a package update overwrites it). Instead create /etc/fail2ban/jail.local and put your overrides there — jail.local takes precedence over jail.conf.",
+        },
+        LoopTask {
+            name: "restic-b2-init",
+            topic: "restic initialize repository on backblaze b2",
+            ask: "In chat only (don't run anything): give the exact restic command to initialize a repository stored in a Backblaze B2 bucket named mybucket.",
+            accept: &["restic", "b2:"],
+            fixture: "restic with Backblaze B2: export B2_ACCOUNT_ID and B2_ACCOUNT_KEY, then initialize with: restic -r b2:mybucket:/ init . The b2: prefix selects the Backblaze backend.",
+        },
+        LoopTask {
+            name: "caddy-unix-socket",
+            topic: "caddyfile reverse_proxy to unix socket",
+            ask: "In chat only: in a Caddyfile, what reverse_proxy target syntax proxies to a Unix domain socket at /run/app.sock?",
+            accept: &["reverse_proxy", "unix/"],
+            fixture: "Caddy reverse proxy to a Unix socket: use reverse_proxy unix//run/app.sock — prefix the socket path with unix/ (a leading slash on the path yields unix//...).",
+        },
+        LoopTask {
+            name: "systemd-list-timers",
+            topic: "systemctl list all active timers",
+            ask: "In chat only: what's the exact systemctl command to list all active timers and when they next run?",
+            accept: &["systemctl", "list-timers"],
+            fixture: "systemd timers: run systemctl list-timers --all to list every timer with its next elapse time and the unit it activates.",
+        },
+        LoopTask {
+            name: "tailscale-funnel",
+            topic: "tailscale funnel expose local port to internet",
+            ask: "In chat only: what's the tailscale command to expose local port 8080 to the public internet using Funnel?",
+            accept: &["tailscale", "funnel", "8080"],
+            fixture: "Tailscale Funnel exposes a local service to the public internet: run tailscale funnel 8080 to serve the service on port 8080 to anyone over your tailnet's funnel.",
+        },
+    ]
+}
+
+fn contains_all(content: &str, accept: &[&str]) -> bool {
+    let lc = content.to_lowercase();
+    accept.iter().all(|a| lc.contains(&a.to_lowercase()))
+}
+
+/// Append a pre-computed pass/total run to history (for self-recorded experiments).
+fn append_score_record(mode: &str, model: &str, samples: usize, k: u32, n: u32, label: &str, extra: Value) {
+    let (lo, hi) = wilson_interval(k, n);
+    let rec = json!({
+        "ts": Utc::now().to_rfc3339(),
+        "ts_display": Local::now().format("%b %d %Y %H:%M").to_string(),
+        "mode": mode, "model": model, "samples": samples,
+        "metric": if n > 0 { Some(k as f64 / n as f64) } else { None },
+        "metric_label": label,
+        "pass": k, "total": n,
+        "ci_lo": (lo * 1000.0).round() / 1000.0, "ci_hi": (hi * 1000.0).round() / 1000.0,
+        "ttft_ms": 0, "total_ms": 0, "gen_tps": 0, "ptok": 0, "t100_ms": 0,
+        "extra": extra,
+    });
+    append_history(&rec);
+}
+
+async fn bench_learnloop(env: &BenchEnv) -> Value {
+    let resolved = match env.resolve() {
+        Ok(r) => r,
+        Err(e) => return json!({ "mode": "learnloop", "error": e }),
+    };
+    // A fresh, EMPTY agent home so COLD genuinely has no covering skill.
+    let home_dir = env.root.join("learnloop-home");
+    let _ = std::fs::remove_dir_all(&home_dir);
+    let home = AgentHome::new(home_dir);
+
+    println!("\n(warming model…)");
+    let (warm_sys, _) = env.build_prompt_with(&home, None, &[], true);
+    let _ = one_turn(resolved.provider.as_ref(), &env.model, warm_sys, vec![], "hi", 0.7).await;
+
+    let tasks = learnloop_tasks();
+    let scan_opts = crate::ai::skill_scan::ScanOptions::default();
+    println!(
+        "\n=== CLOSED LEARNING LOOP ({} tasks × {} sample(s)) ===",
+        tasks.len(),
+        env.samples
+    );
+    println!("{:<22} {:>6} {:>6} {:>5}  {}", "task", "cold", "warm", "src", "topic");
+
+    let mut cold_pass = 0usize;
+    let mut warm_pass = 0usize;
+    let mut persisted = 0usize;
+    let mut rows = Vec::new();
+
+    for t in &tasks {
+        let targets: Vec<String> = vec![];
+
+        // COLD — answer from memory, no skill present.
+        let mut kc = 0usize;
+        for _ in 0..env.samples {
+            let (system, tools) = env.build_prompt_with(&home, None, &targets, false);
+            let r = one_turn(resolved.provider.as_ref(), &env.model, system, tools, t.ask, 0.3).await;
+            if contains_all(&r.content, t.accept) {
+                kc += 1;
+            }
+        }
+        let cold_ok = kc * 2 > env.samples;
+
+        // LEARN — research + build the skill (live web; fixture fallback if DDG empty).
+        let mut res = crate::ai::autoresearch::learn(
+            &home, resolved.provider.as_ref(), &env.model, t.topic, None, &[], None, &scan_opts, None,
+        )
+        .await;
+        let mut src = "web";
+        if !matches!(res.status, crate::ai::autoresearch::LearnStatus::Saved | crate::ai::autoresearch::LearnStatus::Exists) {
+            // Fall back to a canned source so the learning signal survives DDG outages.
+            src = "fixture";
+            res = crate::ai::autoresearch::learn(
+                &home,
+                resolved.provider.as_ref(),
+                &env.model,
+                t.topic,
+                None,
+                &[],
+                Some(vec![(format!("https://docs.example/{}", t.name), t.fixture.to_string())]),
+                &scan_opts,
+                None,
+            )
+            .await;
+        }
+        let skill_body = res.body.clone();
+
+        // PERSISTENCE — a second learn() must dedup to the existing skill (no re-research).
+        let again = crate::ai::autoresearch::learn(
+            &home, resolved.provider.as_ref(), &env.model, t.topic, None, &[], None, &scan_opts, None,
+        )
+        .await;
+        if matches!(again.status, crate::ai::autoresearch::LearnStatus::Exists) {
+            persisted += 1;
+        }
+
+        // WARM — answer with the researched skill injected (the autopilot's behavior).
+        let mut kw = 0usize;
+        for _ in 0..env.samples {
+            let (mut system, tools) = env.build_prompt_with(&home, None, &targets, false);
+            if !skill_body.trim().is_empty() {
+                system.push_str(&format!(
+                    "\n\n# Just-researched skill for this task — APPLY IT\n{}",
+                    skill_body
+                ));
+            }
+            let r = one_turn(resolved.provider.as_ref(), &env.model, system, tools, t.ask, 0.3).await;
+            if contains_all(&r.content, t.accept) {
+                kw += 1;
+            }
+        }
+        let warm_ok = kw * 2 > env.samples;
+
+        if cold_ok {
+            cold_pass += 1;
+        }
+        if warm_ok {
+            warm_pass += 1;
+        }
+        let flag = if !cold_ok && warm_ok { " ← learned" } else if cold_ok && !warm_ok { " ← REGRESSED" } else { "" };
+        println!(
+            "{:<22} {:>6} {:>6} {:>5}  {}{}",
+            t.name,
+            format!("{kc}/{}", env.samples),
+            format!("{kw}/{}", env.samples),
+            src,
+            t.topic,
+            flag
+        );
+        rows.push(json!({
+            "task": t.name, "topic": t.topic, "source": src,
+            "cold_pass": kc, "warm_pass": kw, "samples": env.samples,
+            "cold_ok": cold_ok, "warm_ok": warm_ok,
+            "skill": res.name, "status": format!("{:?}", res.status),
+        }));
+    }
+
+    let n = tasks.len();
+    let (cl, ch) = wilson_interval(cold_pass as u32, n as u32);
+    let (wl, wh) = wilson_interval(warm_pass as u32, n as u32);
+    println!(
+        "\nCOLD (memory only): {cold_pass}/{n} [{:.0}–{:.0}%]   WARM (with learned skill): {warm_pass}/{n} [{:.0}–{:.0}%]",
+        cl * 100.0, ch * 100.0, wl * 100.0, wh * 100.0
+    );
+    println!(
+        "learning lift: {:+} task(s)   skills persisted (dedup on re-ask): {persisted}/{n}",
+        warm_pass as i64 - cold_pass as i64
+    );
+    println!(
+        "→ {}",
+        if warm_pass > cold_pass {
+            "The agent LEARNED — researching and building its own skill improved its answers."
+        } else if warm_pass < cold_pass {
+            "Regression — the researched skills hurt (check skill quality)."
+        } else {
+            "No net change (the model already knew these, or the skills didn't add the key detail)."
+        }
+    );
+
+    // Self-record COLD and WARM as two history points so the dashboard shows the jump.
+    let extra = json!({ "persisted": persisted, "total": n });
+    append_score_record("learnloop-cold", &env.model, env.samples, cold_pass as u32, n as u32, "unfamiliar-tool: memory only", extra.clone());
+    append_score_record("learnloop-warm", &env.model, env.samples, warm_pass as u32, n as u32, "unfamiliar-tool: after learning", extra);
+    let records = read_history();
+    render_and_write_history(&records);
+    if let Some(last) = records.last() {
+        write_okf_bundle(last);
+    }
+
+    json!({
+        "mode": "learnloop",
+        "model": env.model,
+        "samples": env.samples,
+        "cold_pass": cold_pass, "warm_pass": warm_pass, "total": n,
+        "lift": warm_pass as i64 - cold_pass as i64,
+        "persisted": persisted,
+        "tasks": rows,
     })
 }
 

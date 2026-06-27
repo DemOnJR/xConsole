@@ -1,0 +1,72 @@
+{
+  "cold_pass": 4,
+  "lift": 0,
+  "mode": "learnloop",
+  "model": "qwen3.5:9b",
+  "persisted": 5,
+  "samples": 3,
+  "tasks": [
+    {
+      "cold_ok": true,
+      "cold_pass": 2,
+      "samples": 3,
+      "skill": "fail2ban-override-default-jail-settings-file",
+      "source": "web",
+      "status": "Saved",
+      "task": "fail2ban-jail-local",
+      "topic": "fail2ban override default jail settings file",
+      "warm_ok": true,
+      "warm_pass": 3
+    },
+    {
+      "cold_ok": true,
+      "cold_pass": 3,
+      "samples": 3,
+      "skill": "restic-initialize-repository-on-backblaze-b2",
+      "source": "web",
+      "status": "Saved",
+      "task": "restic-b2-init",
+      "topic": "restic initialize repository on backblaze b2",
+      "warm_ok": true,
+      "warm_pass": 3
+    },
+    {
+      "cold_ok": false,
+      "cold_pass": 1,
+      "samples": 3,
+      "skill": "caddyfile-reverse_proxy-to-unix-socket",
+      "source": "web",
+      "status": "Saved",
+      "task": "caddy-unix-socket",
+      "topic": "caddyfile reverse_proxy to unix socket",
+      "warm_ok": false,
+      "warm_pass": 0
+    },
+    {
+      "cold_ok": true,
+      "cold_pass": 3,
+      "samples": 3,
+      "skill": "systemctl-list-all-active-timers",
+      "source": "web",
+      "status": "Saved",
+      "task": "systemd-list-timers",
+      "topic": "systemctl list all active timers",
+      "warm_ok": true,
+      "warm_pass": 3
+    },
+    {
+      "cold_ok": true,
+      "cold_pass": 3,
+      "samples": 3,
+      "skill": "tailscale-funnel-expose-local-port-to-internet",
+      "source": "web",
+      "status": "Saved",
+      "task": "tailscale-funnel",
+      "topic": "tailscale funnel expose local port to internet",
+      "warm_ok": true,
+      "warm_pass": 3
+    }
+  ],
+  "total": 5,
+  "warm_pass": 4
+}
