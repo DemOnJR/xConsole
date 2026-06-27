@@ -1,8 +1,147 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, type Skill } from "../../../lib/tauri";
+import { api, type ScannerStatus, type Skill } from "../../../lib/tauri";
 import { dialog } from "../../../stores/dialogStore";
 import { PlusIcon, TrashIcon } from "../../icons";
 import { Button, Card, Field, SectionHeader, TextArea, TextInput } from "../ui";
+
+/**
+ * Skill security scanner: install/status of NVIDIA SkillSpector + an opt-in deep
+ * (LLM-backed) analysis that runs against the local model. Every skill — including ones
+ * the agent researches itself — is scanned before it's saved or installed.
+ */
+function SkillScannerCard() {
+  const [status, setStatus] = useState<ScannerStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [deep, setDeep] = useState(false);
+  const [model, setModel] = useState("");
+
+  const refresh = () => api.skillScannerStatus().then(setStatus).catch(() => {});
+  useEffect(() => {
+    refresh();
+    api.getSetting("skills.scanner_deep").then((v) => setDeep(v === "true"));
+    api.getSetting("skills.scanner_model").then((v) => setModel(v ?? ""));
+  }, []);
+
+  const install = async () => {
+    setBusy(true);
+    setMsg("Installing SkillSpector (this can take a minute)…");
+    try {
+      setMsg(await api.installSkillScanner());
+    } catch (e) {
+      setMsg(String(e));
+    } finally {
+      setBusy(false);
+      refresh();
+    }
+  };
+
+  const toggleDeep = async () => {
+    const next = !deep;
+    setDeep(next);
+    await api.setSetting("skills.scanner_deep", next ? "true" : "false");
+  };
+
+  const saveModel = async () => {
+    await api.setSetting("skills.scanner_model", model.trim());
+    setMsg(model.trim() ? `Deep-scan model set to ${model.trim()}.` : "Deep-scan model cleared (uses the active model).");
+  };
+
+  const installed = status?.installed ?? false;
+
+  return (
+    <Card className="mb-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm text-gray-200">Skill security scanner</div>
+          <div className="mt-0.5 text-xs text-gray-500">
+            Skills — including ones the agent researches with{" "}
+            <span className="font-mono">learn_skill</span> — are scanned before they're
+            saved or installed. NVIDIA SkillSpector is the strong static analyzer; without
+            it a built-in heuristic is the fallback.
+          </div>
+        </div>
+        <div className="shrink-0">
+          {installed ? (
+            <span className="rounded-full bg-emerald-500/15 px-2 py-1 text-[11px] text-emerald-400">
+              SkillSpector active
+            </span>
+          ) : (
+            <span className="rounded-full bg-amber-500/15 px-2 py-1 text-[11px] text-amber-400">
+              Built-in heuristic
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-2 font-mono text-[11px] text-gray-500">
+        {installed
+          ? status?.version ?? "SkillSpector installed"
+          : status?.uv_available
+            ? "SkillSpector not installed (uv is available)"
+            : "SkillSpector not installed — uv is required to install it"}
+      </div>
+
+      {!installed && (
+        <div className="mt-3 flex items-center gap-2">
+          <Button
+            onClick={() => void install()}
+            disabled={busy || !(status?.uv_available ?? false)}
+            title={status?.uv_available ? "Install SkillSpector via uv" : "Install uv first"}
+          >
+            {busy ? "Installing…" : "Install SkillSpector"}
+          </Button>
+          {!status?.uv_available && (
+            <span className="text-[11px] text-gray-500">
+              Install uv from docs.astral.sh/uv first.
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Deep (LLM-backed) analysis via the local model. */}
+      <div className="mt-3 border-t border-[var(--border)] pt-3">
+        <label className="flex items-start gap-2.5 text-sm text-gray-200">
+          <input
+            type="checkbox"
+            className="mt-0.5 accent-[var(--accent)]"
+            checked={deep}
+            onChange={() => void toggleDeep()}
+            disabled={!installed}
+          />
+          <span>
+            Deep analysis with the local model
+            <span className="ml-2 block text-xs font-normal text-gray-500">
+              Adds SkillSpector's LLM-backed semantic checks, run against your local
+              Ollama (no API key, nothing leaves your machine). Slower — best for
+              installs. Use a non-thinking instruct model (or a cloud model); thinking
+              models (qwen3.x) overrun the scanner's token budget and it falls back to the
+              fast static scan, which always runs regardless.
+              {!installed && " Requires SkillSpector."}
+            </span>
+          </span>
+        </label>
+
+        {deep && installed && (
+          <div className="mt-2 flex items-end gap-2">
+            <div className="flex-1">
+              <Field label="Deep-scan model (optional — defaults to the active model)">
+                <TextInput
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  placeholder="qwen3.5:9b"
+                />
+              </Field>
+            </div>
+            <Button onClick={() => void saveModel()}>Save</Button>
+          </div>
+        )}
+      </div>
+
+      {msg && <div className="mt-2 text-[11px] text-gray-400">{msg}</div>}
+    </Card>
+  );
+}
 
 const SKILL_TEMPLATE =
   "---\ndescription: One-line summary of what this skill does.\n---\n\n# Skill title\n\nSteps the agent should follow...\n";
@@ -130,6 +269,8 @@ export function SkillsSection() {
           </Button>
         }
       />
+
+      <SkillScannerCard />
 
       {skills.length === 0 && (
         <Card className="text-center text-xs text-gray-500">No skills yet.</Card>

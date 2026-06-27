@@ -482,6 +482,7 @@ pub async fn run_turn(
                 .filter_map(|id| tc.db.get_vps(id).ok().flatten())
                 .flat_map(|v| [v.host, v.name])
                 .collect();
+            let scan_opts = crate::ai::skill_scan::scan_options_from_db(&tc.db);
             let res = crate::ai::autoresearch::learn(
                 &tc.home,
                 resolved.provider.as_ref(),
@@ -490,6 +491,7 @@ pub async fn run_turn(
                 None,
                 &known_hosts,
                 None,
+                &scan_opts,
                 Some(sink),
             )
             .await;

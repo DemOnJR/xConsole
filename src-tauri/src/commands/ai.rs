@@ -331,12 +331,16 @@ pub fn agent_answer_prompt(
 /// Security-scan a skill at a local path (file or directory) on demand. Uses
 /// NVIDIA SkillSpector when installed, else the built-in heuristic scanner.
 #[tauri::command]
-pub async fn scan_skill_path(path: String) -> Result<crate::ai::skill_scan::ScanReport, String> {
+pub async fn scan_skill_path(
+    path: String,
+    db: State<'_, Db>,
+) -> Result<crate::ai::skill_scan::ScanReport, String> {
     let p = std::path::PathBuf::from(&path);
     if !p.exists() {
         return Err(format!("path not found: {path}"));
     }
-    Ok(crate::ai::skill_scan::scan_skill(&p).await)
+    let opts = crate::ai::skill_scan::scan_options_from_db(&db);
+    Ok(crate::ai::skill_scan::scan_skill_with(&p, &opts).await)
 }
 
 /// Whether the strong skill scanner (NVIDIA SkillSpector) is installed, and whether `uv`

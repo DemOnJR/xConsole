@@ -93,12 +93,21 @@ when installed, falling back to a built-in pure-Rust heuristic otherwise.
   `uv tool install git+https://github.com/NVIDIA/skillspector.git` (uv provisions
   the required Python 3.12 automatically). The app finds the executable via
   `uv tool dir --bin` even when it isn't on `PATH`.
-- Runs **static-only** (`scan … -f json --no-llm`) — no API key, no network beyond
-  the optional OSV.dev dependency check.
+- Runs **static-only** by default (`scan … -f json --no-llm`) — no API key, no network
+  beyond the optional OSV.dev dependency check.
+- **Deep analysis (opt-in)**: Settings → Skills → "Deep analysis with the local model"
+  adds SkillSpector's LLM semantic checks against your local Ollama (OpenAI-compatible
+  endpoint; nothing leaves the machine). Use a **non-thinking instruct model** (or a
+  cloud model) — *thinking* models (qwen3.x) emit long `<think>` traces that overrun
+  SkillSpector's completion budget, so a deep scan with them fails and **falls back to
+  the static SkillSpector scan** (never down to the weak built-in heuristic). Stored in
+  `skills.scanner_deep` / `skills.scanner_model`; the endpoint/model derive from the
+  active Ollama provider.
 - Verdict: `risk_assessment.{score,severity,recommendation}` + an `issues[]` list.
   Blocking on score ≥ threshold, HIGH/CRITICAL severity, or a `DO_NOT_INSTALL`
   recommendation. Verify with `xconsole-bench scanner` (a malicious sample scores
-  71/HIGH/DO_NOT_INSTALL → blocked; a clean one 0/LOW → allowed).
+  71/HIGH/DO_NOT_INSTALL → blocked; a clean one 0/LOW → allowed); `--deep` exercises the
+  LLM path.
 
 ## Settings
 

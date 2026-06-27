@@ -153,6 +153,7 @@ fn fmt_notes(notes: &[String]) -> String {
 /// Research `topic`, synthesize a SKILL.md, and save it (quarantined). `injected`
 /// lets tests/bench supply canned `(url, body)` sources instead of hitting the live
 /// web. `known_hosts` are the user's own VPS hostnames/IPs to scrub from the query.
+#[allow(clippy::too_many_arguments)]
 pub async fn learn(
     home: &AgentHome,
     provider: &dyn Provider,
@@ -161,6 +162,7 @@ pub async fn learn(
     name_hint: Option<&str>,
     known_hosts: &[String],
     injected: Option<Vec<(String, String)>>,
+    scan_opts: &skill_scan::ScanOptions,
     sink: Option<&EventSink>,
 ) -> LearnResult {
     let topic = topic.trim();
@@ -227,7 +229,7 @@ pub async fn learn(
         Ok(cand) => {
             // NVIDIA SkillSpector is the primary scanner when installed; the built-in
             // heuristic is the always-on backstop inside commit_candidate.
-            let external = external_scan(&cand.final_md).await;
+            let external = external_scan(&cand.final_md, scan_opts).await;
             commit_candidate(home, cand, external.as_ref())
         }
         Err(e) => e,
@@ -459,11 +461,11 @@ pub fn process_synthesized(
 
 /// Run NVIDIA SkillSpector on a candidate skill body, returning its report ONLY when it
 /// actually ran (so the built-in backstop isn't double-counted when it's not installed).
-async fn external_scan(md: &str) -> Option<skill_scan::ScanReport> {
+async fn external_scan(md: &str, opts: &skill_scan::ScanOptions) -> Option<skill_scan::ScanReport> {
     let dir = std::env::temp_dir().join(format!("xc-learn-ext-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::write(dir.join("SKILL.md"), md);
-    let report = skill_scan::scan_skill(&dir).await;
+    let report = skill_scan::scan_skill_with(&dir, opts).await;
     let _ = std::fs::remove_dir_all(&dir);
     (report.scanner == "skillspector").then_some(report)
 }

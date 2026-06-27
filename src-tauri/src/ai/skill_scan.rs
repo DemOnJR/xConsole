@@ -12,6 +12,8 @@ use std::path::Path;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::storage::Db;
+
 /// Risk score at or above which an install is blocked.
 pub const BLOCK_THRESHOLD: u8 = 60;
 
@@ -58,29 +60,112 @@ pub fn is_trusted_source(source: &str) -> bool {
     host_ok
 }
 
-/// Scan a directory (or single SKILL.md) and return a risk report. Tries
-/// SkillSpector first, then the built-in heuristic scanner.
-pub async fn scan_skill(path: &Path) -> ScanReport {
-    if let Some(report) = scan_with_skillspector(path).await {
+/// Options for a skill scan. By default the scan is STATIC-ONLY (`--no-llm`, fast, no
+/// API key). When `deep` is set, SkillSpector's LLM analysis runs against an
+/// OpenAI-compatible endpoint (e.g. local Ollama) for deeper semantic checks.
+#[derive(Debug, Clone, Default)]
+pub struct ScanOptions {
+    pub deep: bool,
+    /// OpenAI-compatible base URL (Ollama: `http://localhost:11434/v1`).
+    pub base_url: Option<String>,
+    /// Model id for the deep analysis (e.g. `qwen3.5:9b`).
+    pub model: Option<String>,
+}
+
+/// Build scan options from settings + the active provider. `skills.scanner_deep` ("true")
+/// turns on LLM analysis; the endpoint/model come from `skills.scanner_model` (override)
+/// or the active Ollama provider, defaulting to local Ollama.
+pub fn scan_options_from_db(db: &Db) -> ScanOptions {
+    let deep = db
+        .get_setting("skills.scanner_deep")
+        .ok()
+        .flatten()
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    if !deep {
+        return ScanOptions::default();
+    }
+
+    // Derive the endpoint + model from the active Ollama provider when available.
+    let (mut base, mut model) = (None, None);
+    if let Ok(id) = crate::ai::registry::active_provider_id(db, None) {
+        if let Ok(Some(p)) = db.get_provider(&id) {
+            if p.kind == "ollama" {
+                base = p.base_url;
+                model = p.model;
+            }
+        }
+    }
+    let model_override = db
+        .get_setting("skills.scanner_model")
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty());
+
+    let base = base.unwrap_or_else(|| "http://localhost:11434".to_string());
+    let base = format!("{}/v1", base.trim_end_matches('/'));
+    ScanOptions {
+        deep: true,
+        base_url: Some(base),
+        model: model_override.or(model).or_else(|| Some("qwen3.5:9b".to_string())),
+    }
+}
+
+/// Scan a directory (or single SKILL.md) and return a risk report, with explicit options
+/// (static-only by default, or LLM-backed deep analysis via a local OpenAI-compatible
+/// endpoint). Tries SkillSpector first, falling back to the built-in heuristic when it
+/// isn't installed.
+pub async fn scan_skill_with(path: &Path, opts: &ScanOptions) -> ScanReport {
+    if let Some(report) = scan_with_skillspector(path, opts).await {
         return report;
     }
     scan_builtin(path)
 }
 
-/// Run the NVIDIA SkillSpector CLI if available: `skillspector scan <path> -f json --no-llm`
-/// (static analysis only — no LLM/API key needed). Returns None when the CLI is absent or
-/// produced unparseable output, so the caller falls back to the built-in scanner.
-async fn scan_with_skillspector(path: &Path) -> Option<ScanReport> {
+/// Run the NVIDIA SkillSpector CLI if available. Static-only by default; with `opts.deep`
+/// it adds the LLM analysis against the configured OpenAI-compatible endpoint (local
+/// Ollama). If a deep scan fails or times out, it falls back to the STATIC SkillSpector
+/// scan (still the strong scanner) — never silently down to the weak built-in heuristic.
+/// Returns None only when SkillSpector isn't installed.
+async fn scan_with_skillspector(path: &Path, opts: &ScanOptions) -> Option<ScanReport> {
     let argv = skillspector_argv().await?;
-    let (cmd, base) = argv.split_first()?;
+    let want_deep = opts.deep && opts.base_url.is_some() && opts.model.is_some();
 
+    if want_deep {
+        if let Some(r) = run_skillspector(&argv, path, opts).await {
+            return Some(r);
+        }
+        // Deep scan failed/timed out (e.g. a slow or thinking model exhausting the
+        // completion budget) — fall through to the strong static scan, not the builtin.
+    }
+    run_skillspector(&argv, path, &ScanOptions::default()).await
+}
+
+/// One SkillSpector invocation (`scan <path> -f json [--no-llm | LLM env]`), bounded by a
+/// timeout. Returns None on absence, timeout, error, or unparseable output.
+async fn run_skillspector(argv: &[String], path: &Path, opts: &ScanOptions) -> Option<ScanReport> {
+    let (cmd, base) = argv.split_first()?;
     let mut command = crate::proc::quiet_tokio(cmd);
     command.args(base);
-    command.arg("scan").arg(path).args(["-f", "json", "--no-llm"]);
-    let out = command.output().await.ok()?;
+    command.arg("scan").arg(path).args(["-f", "json"]);
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    parse_skillspector_json(&stdout)
+    let deep = opts.deep && opts.base_url.is_some() && opts.model.is_some();
+    if deep {
+        // LLM analysis via an OpenAI-compatible endpoint. Ollama ignores the API key but
+        // the OpenAI client wants a non-empty one.
+        command.env("SKILLSPECTOR_PROVIDER", "openai");
+        command.env("OPENAI_BASE_URL", opts.base_url.as_deref().unwrap_or(""));
+        command.env("OPENAI_API_KEY", "ollama");
+        command.env("SKILLSPECTOR_MODEL", opts.model.as_deref().unwrap_or(""));
+    } else {
+        command.arg("--no-llm");
+    }
+
+    // Bound the scan so a hung/slow LLM endpoint can't stall the caller. Deep gets a
+    // larger budget but still falls back to static if it overruns.
+    let dur = std::time::Duration::from_secs(if deep { 90 } else { 45 });
+    let out = tokio::time::timeout(dur, command.output()).await.ok()?.ok()?;
+    parse_skillspector_json(&String::from_utf8_lossy(&out.stdout))
 }
 
 /// Resolve how to invoke SkillSpector. Prefer a `skillspector` on PATH; else find the

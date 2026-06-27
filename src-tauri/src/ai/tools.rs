@@ -1327,7 +1327,7 @@ async fn skill_install_tool(ctx: &ToolContext, args: &Value) -> String {
         let _ = std::fs::remove_dir_all(&tmp);
         return format!("error: staging skill: {e}");
     }
-    let report = skill_scan::scan_skill(&tmp).await;
+    let report = skill_scan::scan_skill_with(&tmp, &skill_scan::scan_options_from_db(&ctx.db)).await;
     let _ = std::fs::remove_dir_all(&tmp);
 
     if report.is_blocking() {
@@ -1541,6 +1541,7 @@ async fn learn_skill(ctx: &ToolContext, args: &Value, sink: &EventSink) -> Strin
         }
     }
 
+    let scan_opts = skill_scan::scan_options_from_db(&ctx.db);
     let result = crate::ai::autoresearch::learn(
         &ctx.home,
         resolved.provider.as_ref(),
@@ -1549,6 +1550,7 @@ async fn learn_skill(ctx: &ToolContext, args: &Value, sink: &EventSink) -> Strin
         name_hint,
         &known_hosts,
         None,
+        &scan_opts,
         Some(sink),
     )
     .await;
