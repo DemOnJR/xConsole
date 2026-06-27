@@ -459,10 +459,20 @@ pub fn process_synthesized(
     }
 }
 
+/// A temp scratch dir unique per call. Keyed on pid + a process-wide atomic counter so
+/// CONCURRENT scans (cargo runs unit tests in parallel in one process; the app may learn
+/// on multiple turns at once) never share a dir and clobber each other's SKILL.md.
+fn unique_scratch_dir(tag: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("xc-{tag}-{}-{}", std::process::id(), seq))
+}
+
 /// Run NVIDIA SkillSpector on a candidate skill body, returning its report ONLY when it
 /// actually ran (so the built-in backstop isn't double-counted when it's not installed).
 async fn external_scan(md: &str, opts: &skill_scan::ScanOptions) -> Option<skill_scan::ScanReport> {
-    let dir = std::env::temp_dir().join(format!("xc-learn-ext-{}", std::process::id()));
+    let dir = unique_scratch_dir("learn-ext");
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::write(dir.join("SKILL.md"), md);
     let report = skill_scan::scan_skill_with(&dir, opts).await;
@@ -475,7 +485,7 @@ async fn external_scan(md: &str, opts: &skill_scan::ScanOptions) -> Option<skill
 /// fails (fail-open is acceptable here because the de-fang + validation already ran;
 /// the scanner is the malice catcher on top).
 fn scan_or_none(md: &str) -> Option<skill_scan::ScanReport> {
-    let dir = std::env::temp_dir().join(format!("xc-learn-scan-{}", std::process::id()));
+    let dir = unique_scratch_dir("learn-scan");
     let _ = std::fs::create_dir_all(&dir);
     let file = dir.join("SKILL.md");
     let report = match std::fs::write(&file, md) {
