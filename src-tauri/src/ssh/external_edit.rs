@@ -169,7 +169,10 @@ pub async fn start(
 
     let watch_id = id.clone();
     let watch_remote = remote_path.clone();
-    tokio::spawn(async move {
+    // `tauri::async_runtime::spawn` throughout, so this never depends on whether the
+    // caller happened to be an async command (sync Tauri commands have no ambient Tokio
+    // runtime, and `tokio::spawn` panics there).
+    tauri::async_runtime::spawn(async move {
         let mut last_pushed = stamp(&local_path);
         let mut pending: Option<(u64, SystemTime)> = None;
         let mut idle = Duration::ZERO;

@@ -561,7 +561,12 @@ pub fn spawn_job(
     emit(&app, &job, true);
 
     let workers = concurrency.clamp(1, MAX_CONCURRENCY);
-    tokio::spawn(async move {
+    // `tauri::async_runtime::spawn`, NOT `tokio::spawn`. This is reached from
+    // `sftp_transfer_start`, which is a *synchronous* Tauri command, and sync commands do
+    // not run inside the Tokio runtime — `tokio::spawn` there panics with "there is no
+    // reactor running", and a panic in a command handler aborts the whole process. That
+    // was a hard crash the moment a download started.
+    tauri::async_runtime::spawn(async move {
         let outcome = run_job(&app, &job, refs.ssh, direction, sources, destination, workers).await;
         match outcome {
             Ok(()) if job.cancelled() => job.set_state(JobState::Cancelled),
@@ -696,7 +701,7 @@ async fn run_job(
         let cursor = cursor.clone();
         let job = job.clone();
         let app = app.clone();
-        handles.push(tokio::spawn(async move {
+        handles.push(tauri::async_runtime::spawn(async move {
             loop {
                 let idx = cursor.fetch_add(1, Ordering::Relaxed) as usize;
                 if idx >= items.len() || job.cancelled() {
@@ -824,7 +829,9 @@ pub fn spawn_archive_job(
 
     let vps_id = refs.vps_id.clone();
     let ssh = refs.ssh.clone();
-    tokio::spawn(async move {
+    // Same reason as in `spawn_job`: `sftp_archive_start` is a sync command, so there is
+    // no ambient Tokio runtime here.
+    tauri::async_runtime::spawn(async move {
         // A path under the archive's own parent would land inside the next archive of
         // that directory, so build in the system temp dir instead.
         let remote_tmp = format!("/tmp/xconsole-{}.{}", Uuid::new_v4().simple(), format.extension());
