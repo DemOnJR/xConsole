@@ -17,7 +17,7 @@
 
 use serde::Serialize;
 
-use crate::ssh::{shell_quote, SessionManager};
+use crate::ssh::SessionManager;
 
 /// Ports worth treating as "probably a database" when scanning listeners.
 const MYSQL_PORTS: &[u16] = &[3306, 3307, 3308, 33060];
@@ -284,20 +284,6 @@ fn parse_container_ips(text: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Build the `mysql` CLI probe used to confirm credentials without a driver. Kept here
-/// so the quoting lives next to everything else that shells out.
-pub fn version_probe(container: Option<&str>, user: &str, password: &str) -> String {
-    let inner = format!(
-        "mysql -u {} -p{} -N -B -e 'select version()'",
-        shell_quote(user),
-        shell_quote(password),
-    );
-    match container {
-        Some(c) => format!("docker exec -i {} sh -lc {}", shell_quote(c), shell_quote(&inner)),
-        None => inner,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,11 +361,4 @@ hidden-db\tmysql:8\t3306/tcp\n\
         assert_eq!(found[0].port, 3307);
     }
 
-    #[test]
-    fn version_probe_quotes_credentials() {
-        let cmd = version_probe(None, "root", "p'wd; rm -rf /");
-        assert!(cmd.contains(r#"'p'\''wd; rm -rf /'"#), "got: {cmd}");
-        let in_container = version_probe(Some("db main"), "root", "x");
-        assert!(in_container.starts_with("docker exec -i 'db main'"), "got: {in_container}");
-    }
 }

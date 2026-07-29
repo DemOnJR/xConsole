@@ -8,6 +8,21 @@ minimumReleaseAgeExclude: [] # only add a package here with a written, reviewed 
 # Pin exact versions on `pnpm add` so dependency updates are always deliberate.
 savePrefix: ''
 
+# Force a patched transitive dependency.
+#
+# postcss <=8.5.17 is GHSA-r28c-9q8g-f849 (high): its sourceMappingURL handling follows
+# a path out of the source directory, disclosing arbitrary .map files. It reaches us only
+# through vite (via @tailwindcss/vite, @vitejs/plugin-react and vite itself), so there is
+# no direct dependency to bump — an override is the only way to pull the fix without
+# waiting for three upstreams to release.
+#
+# Build-time only: postcss runs in our own build, never in the shipped app, so exposure
+# here is to a malicious stylesheet in the repo rather than to anything a user does.
+# Overridden anyway, because `pnpm audit` is a merge gate and silently lowering the gate
+# is worse than taking the patch.
+overrides:
+  postcss: '>=8.5.18'
+
 # Allow-list of dependencies permitted to run install/build scripts (pnpm blocks
 # all by default as a supply-chain measure). Only well-known build tooling here.
 onlyBuiltDependencies:
