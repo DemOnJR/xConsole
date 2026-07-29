@@ -16,6 +16,32 @@ ignore = [
   # app-managed keys are Ed25519 and we connect only to user-configured trusted
   # servers, so practical exposure is low. Revisit when rsa ships a constant-time fix.
   "RUSTSEC-2023-0071",
+
+  # quick-xml denial-of-service pair: quadratic time when checking a start tag for
+  # duplicate attribute names (RUSTSEC-2026-0194) and unbounded namespace-declaration
+  # allocation in `NsReader` (RUSTSEC-2026-0195). Both are fixed in >=0.41.0.
+  #
+  # We cannot take that fix: quick-xml reaches us only transitively, and both parents
+  # pin an incompatible range —
+  #   quick-xml 0.39.x  <- plist 1.9 (`^0.39.2`)          <- tauri-utils <- tauri
+  #   quick-xml 0.37.x  <- tauri-winrt-notification 0.7.2 <- notify-rust <- tauri-plugin-notification
+  # so `cargo update` cannot reach 0.41 and only a release of `plist` and
+  # `tauri-winrt-notification` can resolve it. Forking two crates to dodge a DoS in an
+  # XML parser would add more supply-chain risk than it removes.
+  #
+  # Both advisories are in the *reader*, and require the attacker to control the XML:
+  #   - tauri-winrt-notification never parses. It only builds Windows toast XML, and
+  #     escapes every interpolated value with `quick_xml::escape::escape` (verified in
+  #     its lib.rs), so text we pass through — including agent-derived notification
+  #     bodies — becomes escaped character data and cannot introduce attributes or
+  #     namespace declarations at all.
+  #   - plist parses Apple property lists for bundling. That is our own build
+  #     configuration, not input from a user or a network peer, and it is not exercised
+  #     at runtime on the platforms this app ships to.
+  #
+  # Remove both as soon as plist and tauri-winrt-notification ship quick-xml >=0.41.
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
 ]
 
 [bans]

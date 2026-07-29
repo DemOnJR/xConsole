@@ -36,9 +36,19 @@ jobs:
         run: cargo cooldown check --locked
       - name: Security audit (RustSec)
         working-directory: src-tauri
-        # RUSTSEC-2023-0071 (rsa "Marvin Attack") has no fixed upstream release and
-        # reaches us only via russh's `rsa` feature. See deny.toml for the rationale.
-        run: cargo audit --ignore RUSTSEC-2023-0071
+        # Every ignore here is justified in deny.toml — keep the two lists in step, and
+        # read the rationale there before adding to either.
+        #   RUSTSEC-2023-0071  rsa "Marvin Attack" — no fixed release exists upstream.
+        #   RUSTSEC-2026-0194  quick-xml quadratic attribute check (DoS).
+        #   RUSTSEC-2026-0195  quick-xml unbounded namespace allocation (DoS).
+        # Both quick-xml advisories are in its reader; the two paths that reach us either
+        # never parse (toast XML is written and escaped) or parse only our own build
+        # config. Fixed in >=0.41, which plist/tauri-winrt-notification pin us away from.
+        run: |
+          cargo audit \
+            --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195
       - name: Policy check (advisories, licenses, sources)
         working-directory: src-tauri
         run: cargo deny check
