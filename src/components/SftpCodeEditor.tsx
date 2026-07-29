@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, type SftpEntry } from "../lib/tauri";
 import { dialog } from "../stores/dialogStore";
+import { CodeEditArea } from "./CodeEditArea";
 
 /** Decode base64 (raw file bytes) into UTF-8 text. */
 function bytesToText(b64: string): string {
@@ -139,24 +140,7 @@ export function SftpCodeEditor({ sessionId, entry, onClose, onSaved }: Props) {
           {loading ? (
             <p className="p-2 text-xs text-gray-500">Loading…</p>
           ) : (
-            <textarea
-              value={content}
-              spellCheck={false}
-              onChange={(e) => setContent(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Tab") {
-                  e.preventDefault();
-                  const el = e.currentTarget;
-                  const { selectionStart: s, selectionEnd: en } = el;
-                  const next = `${content.slice(0, s)}  ${content.slice(en)}`;
-                  setContent(next);
-                  requestAnimationFrame(() => {
-                    el.selectionStart = el.selectionEnd = s + 2;
-                  });
-                }
-              }}
-              className="h-full w-full resize-none rounded bg-[var(--bg)] p-3 font-mono text-xs leading-relaxed text-gray-200 outline-none"
-            />
+            <CodeEditArea value={content} onChange={setContent} path={entry.path} />
           )}
         </div>
 

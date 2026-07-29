@@ -1386,7 +1386,12 @@ async fn terminal_send(ctx: &ToolContext, args: &Value) -> String {
             .into();
     }
     // Typing into a live shell runs commands → gate like any command.
-    if let Err(e) = authorize_vps(ctx, &vps_id, &format!("type into live terminal: {text}")).await {
+    //
+    // Gate on the RAW text. Prefixing it with prose used to hand the safety check a
+    // string whose leading token was "type" — which is on the read-only allowlist — so
+    // `is_read_only` approved the sentence rather than the command, and anything at all
+    // (`rm -rf /var/www`) sailed through unattended in allowlist mode.
+    if let Err(e) = authorize_vps(ctx, &vps_id, text).await {
         return format!("error: {e}");
     }
     let submit = args.get("submit").and_then(|v| v.as_bool()).unwrap_or(true);

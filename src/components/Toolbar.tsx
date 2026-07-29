@@ -11,6 +11,7 @@ import {
   SaveAsIcon,
   SaveIcon,
 } from "./icons";
+import { TileLayoutMenu } from "./TileLayoutMenu";
 
 const MODES: { id: LayoutMode; label: string; title: string }[] = [
   { id: "freeform", label: "Freeform", title: "Drag terminals anywhere" },
@@ -105,6 +106,7 @@ export function Toolbar() {
         <button data-tooltip="Re-tile now (fill the window)" onClick={tileToFit} className={ICON_BTN}>
           <GridIcon size={15} />
         </button>
+        {layoutMode === "tile" ? <TileLayoutMenu /> : null}
         <button
           data-tooltip="Fit all terminals in view"
           onClick={() => fitView({ duration: 300, padding: 0.15 })}

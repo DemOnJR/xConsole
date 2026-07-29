@@ -12,9 +12,12 @@ function AppLockCard() {
   const [status, setStatus] = useState<LockStatus | null>(null);
   const [pw, setPw] = useState("");
   const [pw2, setPw2] = useState("");
-  const [remember, setRemember] = useState(true);
+  // Opt-in, not opt-out: remembering the device stores the decryption key on this PC,
+  // where any process running as this user can read it.
+  const [remember, setRemember] = useState(false);
   const [ack, setAck] = useState(false);
   const [oldPw, setOldPw] = useState("");
+  const [exportPw, setExportPw] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
 
@@ -64,6 +67,12 @@ function AppLockCard() {
             Encrypt your database (chats, servers, workspaces, settings) at rest with a master
             password, so a stolen <code>.db</code> file is useless without it.
           </p>
+          <div className="mb-3 rounded-md border border-red-500/40 bg-red-500/10 p-2.5 text-[11px] text-red-200">
+            Your saved <b>SSH passwords, private keys and API tokens</b> are currently stored
+            in the OS credential store <b>unencrypted</b> — anything running under your
+            Windows account can read them. Turning on the app lock encrypts them with your
+            master password, so copying the credential store gets an attacker nothing.
+          </div>
           <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5 text-[11px] text-amber-200">
             ⚠ There is <b>no password reset and no recovery</b>. If you forget this password and
             don't have this device remembered, your data is gone <b>forever</b>. Consider exporting
@@ -84,7 +93,9 @@ function AppLockCard() {
               <Button variant="primary" onClick={enable} disabled={busy}>
                 {busy ? "Working…" : "Enable app lock"}
               </Button>
-              <Button onClick={() => void run(() => api.exportUnencryptedBackup(), "Exporting…")} disabled={busy}>
+              {/* No lock configured yet, so there is no password to check against —
+                  the database is already plaintext on disk at this point. */}
+              <Button onClick={() => void run(() => api.exportUnencryptedBackup(""), "Exporting…")} disabled={busy}>
                 Export unencrypted backup
               </Button>
             </div>
@@ -92,10 +103,31 @@ function AppLockCard() {
         </>
       ) : (
         <>
-          <p className="mb-3 text-xs text-gray-400">
+          <p className="mb-2 text-xs text-gray-400">
             Your database is <b>encrypted at rest</b>.{" "}
             {status.remembered ? "This device is remembered (silent unlock)." : "This device is not remembered — you'll enter your password each launch."}
           </p>
+          <p className="mb-3 text-xs text-gray-400">
+            {status.secrets_encrypted ? (
+              <>
+                ✅ Saved <b>SSH passwords, private keys and API tokens</b> are encrypted with
+                your master password before they reach the OS credential store — copying it
+                yields ciphertext only.
+              </>
+            ) : (
+              <span className="text-amber-300">
+                Saved credentials are not encrypted right now. Unlock with your master
+                password to re-encrypt them.
+              </span>
+            )}
+          </p>
+          {status.remembered ? (
+            <div className="mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5 text-[11px] text-amber-200">
+              This device is remembered, so the decryption key is stored on this PC. That
+              means anything running as you can open your data and credentials without the
+              master password. Use <b>Forget this device</b> below for the strongest setting.
+            </div>
+          ) : null}
           <div className="space-y-3">
             <div>
               <div className="mb-1 text-[11px] uppercase tracking-wide text-gray-500">Change master password</div>
@@ -107,8 +139,26 @@ function AppLockCard() {
                 </Button>
               </div>
             </div>
-            <div className="flex flex-wrap gap-2 border-t border-[var(--border)] pt-3">
-              <Button onClick={() => void run(() => api.exportUnencryptedBackup(), "Exporting…")} disabled={busy}>
+            <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border)] pt-3">
+              {/* An unencrypted export undoes the lock for whoever finds the file, so
+                  it is gated on the master password rather than a single click. */}
+              <input
+                type="password"
+                value={exportPw}
+                onChange={(e) => setExportPw(e.target.value)}
+                placeholder="Master password"
+                className={`${inputCls} max-w-[190px]`}
+              />
+              <Button
+                onClick={() =>
+                  void run(async () => {
+                    const path = await api.exportUnencryptedBackup(exportPw);
+                    setExportPw("");
+                    return path;
+                  }, "Exporting…")
+                }
+                disabled={busy || !exportPw}
+              >
                 Export unencrypted backup
               </Button>
               <Button

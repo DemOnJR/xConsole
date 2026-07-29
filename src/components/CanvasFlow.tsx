@@ -30,19 +30,27 @@ function CanvasCommandBridge() {
   const addVps = useCanvasStore((s) => s.addVps);
   const addSftp = useCanvasStore((s) => s.addSftp);
   const arrangeTiles = useCanvasStore((s) => s.arrangeTiles);
+  const setPaneSize = useCanvasStore((s) => s.setPaneSize);
   const removeNode = useCanvasStore((s) => s.removeNode);
   const layoutMode = useCanvasStore((s) => s.layoutMode);
   const { setViewport } = useReactFlow();
   const paneW = useStore((s) => s.width);
   const paneH = useStore((s) => s.height);
 
-  // In tile mode, keep the grid filling the canvas: re-arrange whenever the pane
-  // resizes (e.g. opening/closing the agent chat or a sidebar) and pin zoom to 1.
+  // Publish the pane size to the store, which re-tiles on its own when the mode is
+  // "tile". Keeping the measurement here (React Flow owns it) and the arrangement
+  // there means keyboard layout edits can re-tile without going through this effect.
   useEffect(() => {
-    if (layoutMode !== "tile" || !paneW || !paneH) return;
-    arrangeTiles({ width: paneW, height: paneH });
+    if (!paneW || !paneH) return;
+    setPaneSize({ width: paneW, height: paneH });
+  }, [paneW, paneH, setPaneSize]);
+
+  // Tiles are laid out in flow coordinates starting at the origin, so the viewport
+  // has to sit at 1:1 for them to line up with the pane.
+  useEffect(() => {
+    if (layoutMode !== "tile") return;
     setViewport({ x: 0, y: 0, zoom: 1 });
-  }, [layoutMode, paneW, paneH, arrangeTiles, setViewport]);
+  }, [layoutMode, paneW, paneH, setViewport]);
 
   useEffect(() => {
     let un: UnlistenFn | undefined;

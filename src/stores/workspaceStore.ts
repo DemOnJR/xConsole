@@ -9,6 +9,7 @@ import {
   type LayoutMode,
 } from "./canvasStore";
 import { useSessionStore } from "./sessionStore";
+import { reconcile, type TileLayout } from "../lib/tileLayout";
 
 /** Deterministic node id for a workspace slot (stable across reopen). */
 export const workspaceNodeId = (workspaceId: string, index: number) =>
@@ -36,6 +37,18 @@ interface SavedEdge {
 }
 
 /**
+ * The tile arrangement, stored by node *index* rather than id.
+ *
+ * Restore derives node ids from the workspace id and the slot index
+ * (`workspaceNodeId`), so ids are not stable across a save that creates the
+ * workspace — indices are.
+ */
+interface SavedTileRow {
+  weight: number;
+  items: { index: number; weight: number }[];
+}
+
+/**
  * Parse a workspace's persisted `nodes_json`. It is stored as an object
  * `{ nodes, edges }`, but a legacy format stored a bare array — and a corrupt
  * blob must degrade gracefully rather than throw. Single source for every reader
@@ -43,15 +56,50 @@ interface SavedEdge {
  */
 export function parseSavedNodes(
   nodesJson: string | null | undefined,
-): { nodes: SavedNode[]; edges: SavedEdge[] } {
-  if (!nodesJson) return { nodes: [], edges: [] };
+): { nodes: SavedNode[]; edges: SavedEdge[]; tiles: SavedTileRow[] } {
+  if (!nodesJson) return { nodes: [], edges: [], tiles: [] };
   try {
     const raw = JSON.parse(nodesJson);
-    if (Array.isArray(raw)) return { nodes: raw, edges: [] };
-    return { nodes: raw.nodes ?? [], edges: raw.edges ?? [] };
+    if (Array.isArray(raw)) return { nodes: raw, edges: [], tiles: [] };
+    return { nodes: raw.nodes ?? [], edges: raw.edges ?? [], tiles: raw.tiles ?? [] };
   } catch {
-    return { nodes: [], edges: [] };
+    return { nodes: [], edges: [], tiles: [] };
   }
+}
+
+/** Tile layout → index form, for persistence. */
+function serializeTiles(
+  layout: TileLayout | null,
+  indexOf: (nodeId: string) => number,
+): SavedTileRow[] {
+  if (!layout) return [];
+  return layout.rows
+    .map((row) => ({
+      weight: row.weight,
+      items: row.items
+        .map((it) => ({ index: indexOf(it.id), weight: it.weight }))
+        .filter((it) => it.index >= 0),
+    }))
+    .filter((row) => row.items.length > 0);
+}
+
+/** Index form → tile layout, against the node ids a restore just produced. */
+function deserializeTiles(rows: SavedTileRow[], ids: string[]): TileLayout | null {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const layout: TileLayout = {
+    rows: rows
+      .map((row) => ({
+        weight: typeof row.weight === "number" ? row.weight : 1,
+        items: (row.items ?? [])
+          .filter((it) => it && it.index >= 0 && it.index < ids.length)
+          .map((it) => ({
+            id: ids[it.index],
+            weight: typeof it.weight === "number" ? it.weight : 1,
+          })),
+      }))
+      .filter((row) => row.items.length > 0),
+  };
+  return layout.rows.length > 0 ? layout : null;
 }
 
 export const WORKSPACE_COLORS = [
@@ -97,6 +145,8 @@ interface WorkspaceState {
     edges: CanvasEdge[];
     viewport: Viewport;
     layout: LayoutMode;
+    /** The saved tile arrangement, already keyed to the restored node ids. */
+    tiles: TileLayout | null;
   } | null>;
 }
 
@@ -110,7 +160,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   save: async (name, viewport, id, color, icon, colorMode) => {
-    const { nodes, edges, layoutMode } = useCanvasStore.getState();
+    const { nodes, edges, layoutMode, tileLayout } = useCanvasStore.getState();
     const existing = id ? get().workspaces.find((w) => w.id === id) : undefined;
     const saved: SavedNode[] = nodes.map((n) => {
       const base: SavedNode = {
@@ -140,12 +190,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         targetIndex: indexOf(e.target),
       }))
       .filter((e) => e.sourceIndex >= 0 && e.targetIndex >= 0);
+    // Reconcile first so a layout that predates the current node set is stored whole
+    // rather than half-empty.
+    const savedTiles = serializeTiles(
+      reconcile(tileLayout, nodes.map((n) => n.id)),
+      indexOf,
+    );
     const ws = await api.saveWorkspace({
       id,
       name,
       viewport_json: JSON.stringify(viewport),
       layout_mode: layoutMode,
-      nodes_json: JSON.stringify({ nodes: saved, edges: savedEdges }),
+      nodes_json: JSON.stringify({ nodes: saved, edges: savedEdges, tiles: savedTiles }),
       color: color ?? existing?.color ?? null,
       icon: icon ?? existing?.icon ?? null,
       color_mode: colorMode ?? existing?.color_mode ?? null,
@@ -181,6 +237,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     });
     useCanvasStore.getState().setNodes(rebound);
     useCanvasStore.getState().setEdges(reboundEdges);
+    // The nodes just changed id, so the in-memory tile layout would point at ids that
+    // no longer exist and silently reset to the balanced default. Re-point it.
+    useCanvasStore
+      .getState()
+      .setTileLayout(deserializeTiles(savedTiles, rebound.map((n) => n.id)));
 
     await get().load();
     set({ activeId: ws.id });
@@ -246,7 +307,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   restore: async (id) => {
     const ws = get().workspaces.find((w) => w.id === id);
     if (!ws) return null;
-    const { nodes: saved, edges: savedEdges } = parseSavedNodes(ws.nodes_json);
+    const { nodes: saved, edges: savedEdges, tiles: savedTiles } = parseSavedNodes(
+      ws.nodes_json,
+    );
     let viewport: Viewport = { x: 0, y: 0, zoom: 1 };
     if (ws.viewport_json) {
       try {
@@ -291,7 +354,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         data: { kind: "sftp-terminal" },
       };
     });
+    const tiles = deserializeTiles(savedTiles, nodes.map((n) => n.id));
     set({ activeId: id });
-    return { nodes, edges, viewport, layout };
+    return { nodes, edges, viewport, layout, tiles };
   },
 }));

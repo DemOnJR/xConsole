@@ -365,3 +365,16 @@ export function PaletteIcon(props: IconProps) {
     </svg>
   );
 }
+
+/** Freestyle tiling: an uneven grid — three cells on top, two below. */
+export function RowsIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <line x1="3" y1="12" x2="21" y2="12" />
+      <line x1="9" y1="4" x2="9" y2="12" />
+      <line x1="15" y1="4" x2="15" y2="12" />
+      <line x1="12" y1="12" x2="12" y2="20" />
+    </svg>
+  );
+}

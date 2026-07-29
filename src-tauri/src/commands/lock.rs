@@ -32,6 +32,10 @@ pub struct LockStatus {
     pub unlocked: bool,
     /// This device has the key remembered (keychain) — silent unlock at launch.
     pub remembered: bool,
+    /// Saved credentials (SSH passwords/keys, API tokens) are stored in the OS keychain
+    /// encrypted with the data key, so reading the credential store yields ciphertext.
+    /// False when no lock is configured — there is then no key to encrypt them with.
+    pub secrets_encrypted: bool,
 }
 
 fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -51,6 +55,7 @@ pub fn lock_status(app: AppHandle, datakey: State<DataKey>) -> Result<LockStatus
         enabled: lock::is_lock_enabled(&dir),
         unlocked: datakey.0.lock().unwrap().is_some(),
         remembered: secrets::get_data_key().ok().flatten().is_some(),
+        secrets_encrypted: secrets::wrapping_active(),
     })
 }
 
@@ -110,6 +115,12 @@ pub fn setup_lock(
     db.enable_encryption_in_place(&enc, &work, &dir, &data_key)
         .map_err(|e| e.to_string())?;
 
+    // 4b) Turning the lock on also puts every keychain secret behind it: from here on
+    //     SSH passwords, private keys and API tokens are stored encrypted with the data
+    //     key, so reading the OS credential store yields ciphertext instead of
+    //     credentials. Existing plaintext entries are converted in place.
+    secrets::rekey_all(&secrets::all_secret_keys(&db), Some(data_key));
+
     // 5) The encrypted DB is verified and live, so the plaintext rollback copy has done its
     //    job. Delete it now — otherwise a full unencrypted snapshot of all chats/workspaces/
     //    memory would sit on disk forever next to the encrypted blob, silently defeating the
@@ -141,6 +152,11 @@ pub fn unlock_with_password(
     if remember {
         secrets::set_data_key(&key).map_err(|e| format!("keychain: {e}"))?;
     }
+    // Secrets are encrypted with the data key, so they only become readable now. The
+    // re-key also catches up anything still stored in the clear — secrets written by a
+    // build from before wrapping existed, for instance.
+    secrets::set_wrapping_key(Some(key));
+    secrets::rekey_all(&secrets::all_secret_keys(&db), Some(key));
     *datakey.0.lock().unwrap() = Some(key);
     Ok(())
 }
@@ -190,6 +206,10 @@ pub fn disable_lock(
 
     let _ = db.persist_now_blocking();
     db.disable_encryption();
+    // Convert secrets back to plaintext while the data key is still available —
+    // afterwards there would be nothing left to decrypt them with, and every saved
+    // server would fail to connect.
+    secrets::rekey_all(&secrets::all_secret_keys(&db), None);
     let _ = secrets::clear_data_key();
     let enc = enc_path(&dir);
     let _ = std::fs::remove_file(&enc);
@@ -201,9 +221,27 @@ pub fn disable_lock(
 
 /// Export a PLAINTEXT copy of the DB (the user's own escape hatch — there is no recovery key).
 /// Writes to the app data dir and returns the path so the UI can show where it went.
+///
+/// Requires the master password when a lock is configured. Without that check this
+/// command is a one-call bypass of the entire lock: anything able to reach the IPC
+/// bridge — including script injected into the webview — could drop a decrypted copy of
+/// every server, chat and setting next to the encrypted blob, and nothing ever deletes
+/// it. The password is verified against the manifest, exactly as `disable_lock` does.
 #[tauri::command]
-pub fn export_unencrypted_backup(app: AppHandle, db: State<Db>) -> Result<String, String> {
+pub fn export_unencrypted_backup(
+    app: AppHandle,
+    db: State<Db>,
+    mut password: String,
+) -> Result<String, String> {
     let dir = data_dir(&app)?;
+    if let Some(manifest) = lock::read(&dir) {
+        let verdict = lock::unlock(&manifest, &password);
+        password.zeroize();
+        verdict.map_err(|_| "Password is incorrect.".to_string())?;
+    } else {
+        password.zeroize();
+    }
+
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let dest = dir.join(format!("xconsole-unencrypted-backup-{stamp}.db"));
     db.backup_to(&dest).map_err(|e| format!("export failed: {e}"))?;

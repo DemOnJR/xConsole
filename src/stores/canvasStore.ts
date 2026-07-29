@@ -11,8 +11,23 @@ import {
   type Viewport,
 } from "@xyflow/react";
 import type { Vps } from "../lib/tauri";
+import {
+  applyRowCounts,
+  autoLayout,
+  computeBoxes,
+  moveToRow,
+  moveWithinRow,
+  reconcile,
+  resizeRow,
+  resizeTile,
+  toggleFullWidth,
+  type TileLayout,
+} from "../lib/tileLayout";
 
 export type LayoutMode = "freeform" | "snap" | "tile";
+
+/** Which way a tile move goes: within its row, or to the row above/below. */
+export type TileMoveAxis = "horizontal" | "vertical";
 
 export interface TermData {
   vpsId: string;
@@ -53,6 +68,16 @@ interface CanvasState {
   /** LRU of node ids permitted to use the WebGL renderer (front = most recent). */
   webglIds: string[];
 
+  /**
+   * The tile arrangement: which nodes sit in which row, and their relative sizes.
+   * `null` means "follow the balanced default" and is re-derived on every change.
+   * Node ids only — the `nodes` array is never reordered, because its index is baked
+   * into the saved workspace node id.
+   */
+  tileLayout: TileLayout | null;
+  /** Last known canvas pane size, so layout edits can re-tile without the caller. */
+  paneSize: { width: number; height: number } | null;
+
   snapGrid: [number, number];
   setNodes: (nodes: CanvasNode[]) => void;
   setEdges: (edges: CanvasEdge[]) => void;
@@ -66,10 +91,83 @@ interface CanvasState {
   setLayout: (mode: LayoutMode) => void;
   focus: (id: string | null) => void;
   isWebgl: (id: string) => boolean;
-  /** Arrange nodes into a grid. With `dims` (the canvas pane size in px) each node
-   *  is resized to fill an equal cell so N terminals split the window evenly. */
+  /** Arrange nodes into the current tile layout. With `dims` (the canvas pane size in
+   *  px) every node is resized so the rows fill the window edge-to-edge. */
   arrangeTiles: (dims?: { width: number; height: number }) => void;
+  /** Record the live pane size so layout edits can re-tile on their own. */
+  setPaneSize: (dims: { width: number; height: number }) => void;
+  /** Install an arrangement wholesale (workspace restore, or after an id rebind). */
+  setTileLayout: (layout: TileLayout | null) => void;
+  /** Re-flow into rows of the given sizes, e.g. `[3, 2]` for 3 on top, 2 below. */
+  setTileRows: (counts: number[]) => void;
+  /** Discard any hand-tuned arrangement and go back to the balanced default. */
+  resetTileLayout: () => void;
+  /** Move a tile within its row (`horizontal`) or between rows (`vertical`). */
+  moveTile: (id: string, dir: -1 | 1, axis: TileMoveAxis) => void;
+  /** Grow/shrink a tile's width share, or its row's height share. */
+  growTile: (id: string, delta: number, axis: TileMoveAxis) => void;
+  /** Give a tile its own full-width row — or merge it back. */
+  toggleTileFullWidth: (id: string) => void;
   clear: () => void;
+}
+
+/** The slice of state `applyTiles` reads — keeps the helper testable and cheap. */
+type TileInput = Pick<CanvasState, "nodes" | "tileLayout">;
+
+/**
+ * Reconcile the layout against the live nodes and write the resulting geometry back
+ * onto them. Returns a state patch, so every layout action is a single `set`.
+ *
+ * With `dims` the rows fill the pane exactly. Without (no pane measured yet) nodes are
+ * merely flowed into their rows at their current size, which keeps the arrangement
+ * meaningful until the canvas reports its size.
+ */
+function applyTiles(
+  s: TileInput,
+  dims?: { width: number; height: number },
+): Partial<CanvasState> {
+  if (s.nodes.length === 0) return { tileLayout: null };
+
+  const layout = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
+
+  if (dims && dims.width > 0 && dims.height > 0) {
+    const boxes = new Map(computeBoxes(layout, dims.width, dims.height).map((b) => [b.id, b]));
+    const nodes = s.nodes.map((node) => {
+      const box = boxes.get(node.id);
+      if (!box) return node;
+      return {
+        ...node,
+        position: { x: box.x, y: box.y },
+        width: box.width,
+        height: box.height,
+      };
+    });
+    return { nodes, tileLayout: layout };
+  }
+
+  // No pane size yet: flow each row left-to-right at the nodes' existing sizes.
+  const byId = new Map(s.nodes.map((n) => [n.id, n]));
+  const pos = new Map<string, { x: number; y: number }>();
+  let y = GAP;
+  for (const row of layout.rows) {
+    let x = GAP;
+    let tallest = 0;
+    for (const item of row.items) {
+      const node = byId.get(item.id);
+      if (!node) continue;
+      const w = (node.width as number) || NODE_W;
+      const h = (node.height as number) || NODE_H;
+      pos.set(item.id, { x, y });
+      x += w + GAP;
+      tallest = Math.max(tallest, h);
+    }
+    y += (tallest || NODE_H) + GAP;
+  }
+  const nodes = s.nodes.map((node) => {
+    const p = pos.get(node.id);
+    return p ? { ...node, position: p } : node;
+  });
+  return { nodes, tileLayout: layout };
 }
 
 export const useCanvasStore = create<CanvasState>()(
@@ -80,6 +178,8 @@ export const useCanvasStore = create<CanvasState>()(
       layoutMode: "freeform",
       focusedId: null,
       webglIds: [],
+      tileLayout: null,
+      paneSize: null,
       snapGrid: SNAP_GRID,
 
       setNodes: (nodes) => set({ nodes }),
@@ -196,6 +296,9 @@ export const useCanvasStore = create<CanvasState>()(
           data: { vpsId: vps.id, name: vps.name, host: vps.host },
         };
         set((s) => ({ nodes: [...s.nodes, node] }));
+        // In tile mode a new node has to join the grid straight away, or it lands on
+        // the cascade position on top of the tiles until the user re-tiles by hand.
+        if (get().layoutMode === "tile") get().arrangeTiles();
         get().focus(id);
         return id;
       },
@@ -217,11 +320,12 @@ export const useCanvasStore = create<CanvasState>()(
           data: { vpsId: vps.id, name: vps.name, host: vps.host },
         };
         set((s) => ({ nodes: [...s.nodes, node] }));
+        if (get().layoutMode === "tile") get().arrangeTiles();
         get().focus(id);
         return id;
       },
 
-      removeNode: (id) =>
+      removeNode: (id) => {
         set((s) => ({
           // Drop the node, and unlink any SFTP node that followed it so it isn't
           // left with a dangling linkedTerminalId / followTerminal=true.
@@ -235,7 +339,10 @@ export const useCanvasStore = create<CanvasState>()(
           edges: s.edges.filter((e) => e.source !== id && e.target !== id),
           webglIds: s.webglIds.filter((w) => w !== id),
           focusedId: s.focusedId === id ? null : s.focusedId,
-        })),
+        }));
+        // Close the hole the removed tile left behind.
+        if (get().layoutMode === "tile") get().arrangeTiles();
+      },
 
       setLayout: (mode) => {
         set({ layoutMode: mode });
@@ -255,55 +362,70 @@ export const useCanvasStore = create<CanvasState>()(
       isWebgl: (id) => get().webglIds.includes(id),
 
       arrangeTiles: (dims) =>
+        set((s) => applyTiles(s, dims ?? s.paneSize ?? undefined)),
+
+      setPaneSize: (dims) =>
         set((s) => {
-          const n = s.nodes.length;
-          if (n === 0) return {};
-          const cols = Math.ceil(Math.sqrt(n));
-          const rows = Math.ceil(n / cols);
-
-          // With pane dimensions, resize every node to fill an equal cell so the
-          // terminals split the window edge-to-edge (2 → 50/50, 4 → 2×2, etc.),
-          // with no gaps or top/bottom margin.
-          if (dims && dims.width > 0 && dims.height > 0) {
-            const baseW = Math.floor(dims.width / cols);
-            const baseH = Math.floor(dims.height / rows);
-            const nodes = s.nodes.map((node, i) => {
-              const col = i % cols;
-              const row = Math.floor(i / cols);
-              // The last column/row absorbs the rounding remainder so the grid
-              // fills the pane exactly — no seam on the right or bottom edge.
-              const w = col === cols - 1 ? dims.width - baseW * (cols - 1) : baseW;
-              const h = row === rows - 1 ? dims.height - baseH * (rows - 1) : baseH;
-              return {
-                ...node,
-                position: { x: col * baseW, y: row * baseH },
-                width: w,
-                height: h,
-              };
-            });
-            return { nodes };
+          if (
+            s.paneSize &&
+            s.paneSize.width === dims.width &&
+            s.paneSize.height === dims.height
+          ) {
+            return {};
           }
-
-          // Fallback (no dims): grid-position at each node's current size.
-          const nodes = s.nodes.map((node, i) => {
-            const col = i % cols;
-            const row = Math.floor(i / cols);
-            const w = (node.width as number) || NODE_W;
-            const h = (node.height as number) || NODE_H;
-            return {
-              ...node,
-              position: { x: col * (w + GAP) + GAP, y: row * (h + GAP) + GAP },
-            };
-          });
-          return { nodes };
+          // Re-tile against the new pane immediately, so a panel toggle or window
+          // resize reflows in the same commit rather than a frame later.
+          return s.layoutMode === "tile"
+            ? { paneSize: dims, ...applyTiles(s, dims) }
+            : { paneSize: dims };
         }),
 
-      clear: () => set({ nodes: [], edges: [], webglIds: [], focusedId: null }),
+      setTileLayout: (layout) => set({ tileLayout: layout }),
+
+      setTileRows: (counts) =>
+        set((s) => {
+          const base = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
+          return applyTiles({ ...s, tileLayout: applyRowCounts(base, counts) });
+        }),
+
+      resetTileLayout: () =>
+        set((s) => applyTiles({ ...s, tileLayout: autoLayout(s.nodes.map((n) => n.id)) })),
+
+      moveTile: (id, dir, axis) =>
+        set((s) => {
+          const base = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
+          const next =
+            axis === "horizontal" ? moveWithinRow(base, id, dir) : moveToRow(base, id, dir);
+          return applyTiles({ ...s, tileLayout: next });
+        }),
+
+      growTile: (id, delta, axis) =>
+        set((s) => {
+          const base = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
+          const next =
+            axis === "horizontal" ? resizeTile(base, id, delta) : resizeRow(base, id, delta);
+          return applyTiles({ ...s, tileLayout: next });
+        }),
+
+      toggleTileFullWidth: (id) =>
+        set((s) => {
+          const base = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
+          return applyTiles({ ...s, tileLayout: toggleFullWidth(base, id) });
+        }),
+
+      clear: () =>
+        set({ nodes: [], edges: [], webglIds: [], focusedId: null, tileLayout: null }),
     }),
     {
       name: "xconsole-canvas",
       version: 1,
-      partialize: (state) => ({ layoutMode: state.layoutMode }),
+      // The arrangement rides along with the mode so a hand-tuned grid survives a
+      // restart. It references node ids that may be gone by then; `reconcile` drops
+      // stale ids and places new ones on the next tile.
+      partialize: (state) => ({
+        layoutMode: state.layoutMode,
+        tileLayout: state.tileLayout,
+      }),
     },
   ),
 );

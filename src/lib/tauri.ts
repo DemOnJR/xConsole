@@ -147,6 +147,45 @@ export interface SftpEntry {
   size: number;
 }
 
+export type TransferDirection = "download" | "upload";
+export type ArchiveFormat = "targz" | "zip";
+export type TransferFileState = "pending" | "active" | "done" | "failed" | "skipped";
+export type TransferJobState =
+  | "scanning"
+  | "running"
+  | "done"
+  | "failed"
+  | "cancelled";
+
+/** One file inside a transfer job (matches the Rust `FileProgress`). */
+export interface TransferFile {
+  name: string;
+  remote_path: string;
+  local_path: string;
+  size: number;
+  transferred: number;
+  state: TransferFileState;
+  error: string | null;
+}
+
+/** A whole-job progress snapshot (matches the Rust `TransferSnapshot`). */
+export interface TransferSnapshot {
+  id: string;
+  direction: TransferDirection;
+  state: TransferJobState;
+  label: string;
+  files_total: number;
+  files_done: number;
+  bytes_total: number;
+  bytes_done: number;
+  elapsed_ms: number;
+  eta_ms: number | null;
+  bytes_per_sec: number;
+  files: TransferFile[];
+  error: string | null;
+  destination: string | null;
+}
+
 export interface SftpListOutcome {
   path: string;
   entries: SftpEntry[];
@@ -463,6 +502,37 @@ export const api = {
   sftpDisconnect: (sessionId: string) =>
     invoke<void>("sftp_disconnect", { sessionId }),
 
+  // --- bulk transfers ---
+  pickDirectory: (title: string) =>
+    invoke<string | null>("pick_directory", { title }),
+  pickFiles: (title: string) => invoke<string[]>("pick_files", { title }),
+  sftpTransferStart: (
+    sessionId: string,
+    direction: TransferDirection,
+    sources: string[],
+    destination: string,
+    concurrency?: number,
+  ) =>
+    invoke<string>("sftp_transfer_start", {
+      sessionId,
+      direction,
+      sources,
+      destination,
+      concurrency: concurrency ?? null,
+    }),
+  sftpArchiveStart: (
+    sessionId: string,
+    remoteDir: string,
+    destination: string,
+    format: ArchiveFormat,
+  ) =>
+    invoke<string>("sftp_archive_start", { sessionId, remoteDir, destination, format }),
+  sftpTransferCancel: (id: string) => invoke<void>("sftp_transfer_cancel", { id }),
+  sftpTransferList: () => invoke<TransferSnapshot[]>("sftp_transfer_list"),
+  sftpTransferClearFinished: () => invoke<void>("sftp_transfer_clear_finished"),
+  sftpEditExternal: (sessionId: string, path: string) =>
+    invoke<{ id: string; local_path: string }>("sftp_edit_external", { sessionId, path }),
+
   vpsFileStat: (vpsId: string, path: string) =>
     invoke<RemoteFileStat>("vps_file_stat", { vpsId, path }),
   vpsFileChmod: (vpsId: string, path: string, mode: string, recursive: boolean) =>
@@ -612,7 +682,9 @@ export const api = {
     invoke<void>("change_password", { oldPassword, newPassword }),
   forgetDevice: () => invoke<void>("forget_device"),
   disableLock: (password: string) => invoke<void>("disable_lock", { password }),
-  exportUnencryptedBackup: () => invoke<string>("export_unencrypted_backup"),
+  /** Requires the master password whenever an app lock is configured. */
+  exportUnencryptedBackup: (password: string) =>
+    invoke<string>("export_unencrypted_backup", { password }),
 
   listFileChanges: (sessionId: string) =>
     invoke<FileChange[]>("list_file_changes", { sessionId }),
@@ -779,6 +851,8 @@ export interface LockStatus {
   enabled: boolean;
   unlocked: boolean;
   remembered: boolean;
+  /** Saved SSH/API credentials are encrypted in the OS keychain with the data key. */
+  secrets_encrypted: boolean;
 }
 
 /** Result of the in-app update check (matches the Rust `UpdateInfo`). */
@@ -804,6 +878,28 @@ export interface FileChange {
   is_new: boolean;
   reverted: boolean;
   ts: number;
+}
+
+/** Lifecycle of an external-editor session (matches the Rust `ExternalEditEvent`). */
+export type ExternalEditEvent =
+  | { kind: "opened"; id: string; remote_path: string; local_path: string }
+  | { kind: "saved"; id: string; remote_path: string; bytes: number }
+  | { kind: "skipped"; id: string; remote_path: string; reason: string }
+  | { kind: "failed"; id: string; remote_path: string; error: string }
+  | { kind: "closed"; id: string; remote_path: string };
+
+/** Fired when a file open in an external editor is saved back (or refused). */
+export function onExternalEdit(
+  cb: (e: ExternalEditEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<ExternalEditEvent>("sftp://external-edit", (e) => cb(e.payload));
+}
+
+/** Fired as an SFTP transfer progresses. Each event is a full job snapshot. */
+export function onTransferProgress(
+  cb: (t: TransferSnapshot) => void,
+): Promise<UnlistenFn> {
+  return listen<TransferSnapshot>("sftp://transfer", (e) => cb(e.payload));
 }
 
 /** Fired when the agent edits a file. */

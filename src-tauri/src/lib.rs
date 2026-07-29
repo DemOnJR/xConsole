@@ -17,6 +17,7 @@ mod storage;
 use ai::interaction::{PromptRegistry, SessionState};
 use ai::safety::ApprovalRegistry;
 use ai::AgentHome;
+use ssh::transfer::TransferManager;
 use ssh::{SessionManager, SftpManager};
 use storage::Db;
 use tauri::{Emitter, Manager};
@@ -26,6 +27,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         // Restore the window to where it was last left (position/size/maximized),
         // on whichever monitor it was on. Minimized isn't restored — see the guard
         // in setup() that centers an off-screen window instead.
@@ -85,6 +87,9 @@ pub fn run() {
                     Some(key) => match Db::open_encrypted(&enc_path, &db_path, &dir, &key) {
                         Ok(db) => {
                             initial_data_key = Some(key);
+                            // Keychain secrets are encrypted with this same key, so
+                            // install it before anything tries to read one.
+                            crate::secrets::set_wrapping_key(Some(key));
                             db
                         }
                         Err(e) => {
@@ -99,6 +104,28 @@ pub fn run() {
             };
             // Record the version we successfully opened at, for the next launch's check.
             let _ = std::fs::write(&version_marker, &current_version);
+
+            // Encrypt any keychain secret still stored in the clear.
+            //
+            // The other three migration points (enabling the lock, unlocking with the
+            // password, disabling it) all miss the most common configuration: a lock
+            // that is already on with the device remembered. That combination unlocks
+            // silently right here and never visits any of them, so without this the
+            // secrets of exactly the users who turned the lock on earliest would stay
+            // in plaintext forever.
+            //
+            // Off the main thread: this is one keychain round-trip per saved server,
+            // provider and cloud account, and none of it should delay the window. It is
+            // idempotent — an already-wrapped value re-wraps to an equivalent one.
+            if let Some(key) = initial_data_key {
+                let db_for_migration = db.clone();
+                tauri::async_runtime::spawn(async move {
+                    let keys = crate::secrets::all_secret_keys(&db_for_migration);
+                    if !keys.is_empty() {
+                        crate::secrets::rekey_all(&keys, Some(key));
+                    }
+                });
+            }
 
             let handle = app.handle().clone();
             let sessions = SessionManager::new(handle, db.clone());
@@ -128,6 +155,7 @@ pub fn run() {
             app.manage(db);
             app.manage(sessions);
             app.manage(sftp);
+            app.manage(TransferManager::new());
             // Claude Code–style lifecycle hooks: snapshot hooks.json at startup so a
             // mid-session edit (incl. one the agent might write) only takes effect on
             // an explicit reload. Loaded before agent_home is moved into managed state.
@@ -220,6 +248,14 @@ pub fn run() {
             commands::sftp::sftp_download,
             commands::sftp::sftp_write,
             commands::sftp::sftp_disconnect,
+            commands::sftp::pick_directory,
+            commands::sftp::pick_files,
+            commands::sftp::sftp_transfer_start,
+            commands::sftp::sftp_archive_start,
+            commands::sftp::sftp_transfer_cancel,
+            commands::sftp::sftp_transfer_list,
+            commands::sftp::sftp_transfer_clear_finished,
+            commands::sftp::sftp_edit_external,
             commands::remote_file::vps_file_stat,
             commands::remote_file::vps_file_chmod,
             commands::remote_file::vps_file_chown,
