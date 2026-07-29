@@ -628,7 +628,25 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
         "skill_view" => skill_view(ctx, args),
         "skill_save" => skill_save(ctx, args),
         "learn_skill" => learn_skill(ctx, args, sink).await,
-        name if web_tools::is_web_tool(name) => web_tools::dispatch(name, args).await,
+        name if web_tools::is_web_tool(name) => {
+            // Gate `web_fetch` like a command. Its URL is model-controlled, so with a
+            // file read in front of it this is a complete read-then-exfiltrate chain —
+            // reachable from prompt injection in a page it fetched, or in output it read
+            // off a server. The SSRF guard only blocks private/metadata addresses;
+            // arbitrary public hosts are allowed by design, which is precisely the risk.
+            // The system prompt asks the model to be careful here, but prose is not a
+            // control. Search and geo hit fixed endpoints and stay ungated.
+            let gate = if name == "web_fetch" {
+                let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                authorize_local(ctx, &format!("web_fetch {url}")).await
+            } else {
+                Ok(())
+            };
+            match gate {
+                Ok(()) => web_tools::dispatch(name, args).await,
+                Err(e) => format!("error: {e}"),
+            }
+        }
         name if name.starts_with("project_")
             || name.starts_with("terraform_")
             || name.starts_with("cloud_")
@@ -899,7 +917,12 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
         // Always change a server or the local PC.
         "write_file" | "local_write_file" | "upload_file" | "download_file"
         | "ssh_setup_key_auth" => true,
-        // Web tools (search/fetch/geo) are read-only.
+        // `web_fetch` reads nothing locally, but its URL is entirely model-chosen, so a
+        // GET is an outbound channel: paired with a file read it can carry data off the
+        // machine. Treating it as mutating is what makes plan mode — where the user has
+        // explicitly said "don't do anything yet" — actually withhold it.
+        "web_fetch" => true,
+        // Search and geo hit fixed endpoints, so they can't be aimed at an attacker.
         n if web_tools::is_web_tool(n) => false,
         // Infra tools: allow read-only verbs, treat the rest (apply/destroy/import) as mutating.
         n if n.starts_with("terraform_")

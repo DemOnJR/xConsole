@@ -2,6 +2,8 @@ mod ai;
 /// Headless benchmark / eval harness (driven by the `xconsole-bench` bin).
 pub mod bench;
 mod commands;
+/// MySQL/MariaDB client: discovery, SSH-tunnelled connections, browsing.
+mod db;
 /// At-rest encryption primitives (AES-256-GCM + PBKDF2) for DB encryption.
 pub mod crypto;
 /// The `db.lock.json` manifest (salt + wrapped data key) for the app lock.
@@ -164,6 +166,7 @@ pub fn run() {
             app.manage(sessions);
             app.manage(sftp);
             app.manage(TransferManager::new());
+            app.manage(commands::db::DbSessions::new());
             // Claude Code–style lifecycle hooks: snapshot hooks.json at startup so a
             // mid-session edit (incl. one the agent might write) only takes effect on
             // an explicit reload. Loaded before agent_home is moved into managed state.
@@ -349,6 +352,17 @@ pub fn run() {
             commands::cloud::delete_cloud_account,
             commands::cloud::list_tfc_workspaces,
             commands::cloud::list_cloud_resources,
+            commands::db::db_discover,
+            commands::db::db_connect,
+            commands::db::db_disconnect,
+            commands::db::db_use_database,
+            commands::db::db_list_databases,
+            commands::db::db_list_tables,
+            commands::db::db_describe_table,
+            commands::db::db_select_page,
+            commands::db::db_run_sql,
+            commands::db::db_update_cell,
+            commands::db::db_delete_row,
             commands::lock::lock_status,
             commands::lock::setup_lock,
             commands::lock::unlock_with_password,

@@ -54,9 +54,15 @@ impl ApprovalRegistry {
 /// Commands whose leading token is considered read-only / safe. Note that
 /// `curl`/`wget` are deliberately absent: they write to disk (`-o`, `-O`,
 /// `--output`) and so must go through approval.
+///
+/// `env`/`printenv` are also deliberately absent. They read nothing from disk, so they
+/// look harmless, but a service environment routinely holds database passwords, API
+/// tokens and cloud keys — and the output lands in the conversation, which is sent to
+/// the model provider and persisted in `agent_conversation`. That is a credential dump
+/// with no approval prompt, which is exactly what allowlist mode exists to prevent.
 const READ_ONLY: &[&str] = &[
     "ls", "cat", "pwd", "whoami", "id", "date", "uptime", "df", "du", "free", "ps", "top", "htop",
-    "stat", "head", "tail", "wc", "grep", "egrep", "rg", "find", "echo", "printf", "env", "uname",
+    "stat", "head", "tail", "wc", "grep", "egrep", "rg", "find", "echo", "printf", "uname",
     "hostname", "which", "type", "ip", "ss", "netstat", "ping", "dig", "nslookup",
     "tree", "file", "readlink", "realpath", "history", "lsblk", "lscpu", "lsof", "dmesg",
     "journalctl", "true", "test",
@@ -153,6 +159,10 @@ const SENSITIVE_PATH_MARKERS: &[&str] = &[
     ".env", "credential", "secret", "private_key", "privatekey", "passwd", "shadow",
     ".pem", ".pfx", ".p12", ".key", ".keystore", ".netrc", ".pgpass", "wallet",
     "xconsole.db", "db.lock.json", "id_rsa.pub",
+    // `/proc/<pid>/environ` and `/proc/self/environ` are the file-shaped route to the
+    // same credential dump that `env` gives, so `cat`-ing them must prompt too. The bare
+    // ".env" marker above does not match "environ".
+    "environ",
 ];
 
 /// Whether a command line references a likely credential/secret path (see
@@ -203,8 +213,100 @@ pub fn resolve_session_mode(
         .unwrap_or_else(|| base_mode.to_string())
 }
 
+/// Environment-variable name fragments whose value is a secret.
+///
+/// Matched case-insensitively against the name to the left of an `=`. Deliberately broad:
+/// masking one variable too many costs the user nothing, while missing one writes a live
+/// credential into the database.
+const SECRET_NAME_FRAGMENTS: &[&str] = &[
+    "SECRET", "TOKEN", "PASSWORD", "PASSWD", "APIKEY", "API_KEY", "ACCESS_KEY",
+    "PRIVATE_KEY", "CREDENTIAL", "AUTH", "SESSION_KEY", "SIGNING", "PASSPHRASE",
+];
+
+fn is_secret_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    SECRET_NAME_FRAGMENTS.iter().any(|f| upper.contains(f))
+}
+
+/// Mask secret values in a command so it is safe to persist, display and log.
+///
+/// Cloud credentials reach the agent as `export NAME=value && terraform …` strings
+/// (see `infra::cloud`). Those strings were being written verbatim into
+/// `agent_approval.command` — a table in the plaintext-by-default database whose rows are
+/// never deleted — and echoed back in denial/timeout messages that end up in the
+/// conversation and therefore at the model provider. So every approval of a Terraform run
+/// left a permanent, readable copy of an AWS secret access key on disk.
+///
+/// The value passed to the executor is untouched; only this rendering is masked.
+pub fn redact_secrets(command: &str) -> String {
+    let chars: Vec<char> = command.chars().collect();
+    let mut out = String::with_capacity(command.len());
+    let mut i = 0;
+
+    while i < chars.len() {
+        if chars[i] != '=' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        // Walk back over the just-emitted name to decide whether this is a secret.
+        let name: String = out
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+
+        out.push('=');
+        i += 1;
+
+        if name.is_empty() || !is_secret_name(&name) {
+            continue;
+        }
+
+        // Skip the value. A quoted value ends at its closing quote (honouring the POSIX
+        // '\'' escape, which would otherwise look like an early close); an unquoted one
+        // ends at whitespace.
+        match chars.get(i).copied() {
+            Some(q) if q == '\'' || q == '"' => {
+                i += 1; // opening quote
+                while i < chars.len() {
+                    if chars[i] == q {
+                        // `'\''` — a quote, a backslash-quote, then reopening.
+                        let escaped = q == '\''
+                            && chars.get(i + 1) == Some(&'\\')
+                            && chars.get(i + 2) == Some(&'\'')
+                            && chars.get(i + 3) == Some(&'\'');
+                        if escaped {
+                            i += 4;
+                            continue;
+                        }
+                        i += 1; // closing quote
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {
+                while i < chars.len() && !chars[i].is_whitespace() {
+                    i += 1;
+                }
+            }
+        }
+        out.push_str("***");
+    }
+
+    out
+}
+
 /// Decide whether a command may run under the active safety mode. Blocks until
 /// the user approves/denies when approval is required.
+///
+/// Note that what gets stored and shown is [`redact_secrets`] of the command, never the
+/// raw string — see that function for why.
 pub async fn authorize(
     app: &AppHandle,
     db: &Db,
@@ -224,8 +326,13 @@ pub async fn authorize(
         return Ok(());
     }
 
+    // Masked before it is persisted, emitted to the UI, or put in an error string. The
+    // user still sees the whole command and which variables it sets — just not their
+    // values, which they did not need to read in order to approve it.
+    let shown = redact_secrets(command);
+
     let approval = db
-        .create_approval(session_id, vps_id, command)
+        .create_approval(session_id, vps_id, &shown)
         .map_err(|e| e.to_string())?;
     let rx = approvals.register(approval.id.clone());
     let _ = app.emit("ai://approval", &approval);
@@ -237,14 +344,14 @@ pub async fn authorize(
         }
         Ok(Ok(false)) => {
             let _ = db.resolve_approval(&approval.id, "denied");
-            Err(format!("command denied by user: {command}"))
+            Err(format!("command denied by user: {shown}"))
         }
         Ok(Err(_)) => Err("approval channel closed".to_string()),
         Err(_) => {
             approvals.cancel(&approval.id);
             let _ = db.resolve_approval(&approval.id, "expired");
             Err(format!(
-                "approval timed out after {}s: {command}",
+                "approval timed out after {}s: {shown}",
                 APPROVAL_TIMEOUT.as_secs()
             ))
         }
@@ -292,6 +399,81 @@ mod tests {
     fn read_only_env_prefix() {
         assert!(is_read_only("FOO=bar ls"));
         assert!(!is_read_only("FOO=bar rm file"));
+    }
+
+    #[test]
+    fn redacts_cloud_credentials_from_an_approval() {
+        // The exact shape infra::cloud::aws_env builds.
+        let cmd = "export AWS_ACCESS_KEY_ID='AKIAIOSFODNN7EXAMPLE' \
+                   AWS_SECRET_ACCESS_KEY='wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' \
+                   AWS_DEFAULT_REGION='eu-central-1' && terraform apply";
+        let out = redact_secrets(cmd);
+        assert!(!out.contains("wJalrXUtnFEMI"), "secret survived: {out}");
+        assert!(!out.contains("AKIAIOSFODNN7EXAMPLE"), "key id survived: {out}");
+        // Non-secret values and the command itself must remain readable, or the user
+        // can't tell what they're approving.
+        assert!(out.contains("eu-central-1"), "{out}");
+        assert!(out.contains("terraform apply"), "{out}");
+        assert!(out.contains("AWS_SECRET_ACCESS_KEY=***"), "{out}");
+    }
+
+    #[test]
+    fn redacts_tokens_and_credentials_of_other_shapes() {
+        assert_eq!(redact_secrets("export TFC_TOKEN='abc.def'"), "export TFC_TOKEN=***");
+        assert_eq!(
+            redact_secrets("GOOGLE_APPLICATION_CREDENTIALS=/tmp/sa.json terraform init"),
+            "GOOGLE_APPLICATION_CREDENTIALS=*** terraform init"
+        );
+        // Double quotes and unquoted values.
+        assert_eq!(redact_secrets("PASSWORD=\"hunter2\" mysql"), "PASSWORD=*** mysql");
+        assert_eq!(redact_secrets("MY_PASSPHRASE=abc123 x"), "MY_PASSPHRASE=*** x");
+    }
+
+    #[test]
+    fn leaves_ordinary_commands_untouched() {
+        for cmd in [
+            "ls -la /var/www",
+            "systemctl restart nginx",
+            "grep -r TODO .",
+            // No `=` name, or a name that isn't secret-ish.
+            "FOO=bar ls",
+            "REGION=eu-west-1 terraform plan",
+            "find . -name '*.log'",
+        ] {
+            assert_eq!(redact_secrets(cmd), cmd, "should be unchanged: {cmd}");
+        }
+    }
+
+    #[test]
+    fn redaction_survives_an_escaped_quote_in_the_secret() {
+        // shell_quote renders a literal ' as '\'' — a naive scan would stop at the first
+        // quote and leak the rest of the password into the stored command.
+        let cmd = "export DB_PASSWORD='pa'\\''ss' && echo done";
+        let out = redact_secrets(cmd);
+        assert!(!out.contains("pa"), "leaked part of the secret: {out}");
+        assert!(out.contains("DB_PASSWORD=***"), "{out}");
+        assert!(out.contains("echo done"), "truncated the command: {out}");
+    }
+
+    #[test]
+    fn redacts_every_secret_when_there_are_several() {
+        let out = redact_secrets("A_TOKEN='x' B_SECRET='y' C_REGION='z'");
+        assert_eq!(out, "A_TOKEN=*** B_SECRET=*** C_REGION='z'");
+    }
+
+    #[test]
+    fn dumping_the_environment_requires_approval() {
+        // A service environment routinely holds DB passwords and API tokens, and the
+        // output goes into the conversation (and to the model provider), so this must
+        // never auto-run.
+        assert!(!is_read_only("env"));
+        assert!(!is_read_only("printenv"));
+        assert!(!is_allowlisted("env"));
+        // The file-shaped route to the same data.
+        assert!(touches_sensitive_path("cat /proc/self/environ"));
+        assert!(!is_allowlisted("cat /proc/1234/environ"));
+        // An env-var *prefix* is still fine — that is not reading the environment.
+        assert!(is_read_only("LANG=C ls -la"));
     }
 
     #[test]

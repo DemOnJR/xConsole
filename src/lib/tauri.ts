@@ -147,6 +147,63 @@ export interface SftpEntry {
   size: number;
 }
 
+// ----- Database client -----
+
+/** A database server found on a host (matches the Rust `DbEndpoint`). */
+export interface DbEndpoint {
+  id: string;
+  label: string;
+  kind: "native" | "docker";
+  host: string;
+  port: number;
+  container: string | null;
+  image: string | null;
+}
+
+/** Credentials + location for a connection (matches the Rust `DbTarget`). */
+export interface DbTargetInput {
+  vps_id: string;
+  container: string | null;
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  database: string | null;
+}
+
+export interface DbConnectOutcome {
+  session_id: string;
+  version: string;
+}
+
+export interface DbTable {
+  name: string;
+  kind: string;
+  rows: number;
+  bytes: number;
+  engine: string;
+}
+
+export interface DbColumn {
+  name: string;
+  data_type: string;
+  nullable: boolean;
+  primary: boolean;
+  default: string;
+  extra: string;
+}
+
+/** A tabular result. `null` in a cell is SQL NULL. */
+export interface DbResultSet {
+  columns: string[];
+  rows: (string | null)[][];
+  affected: number | null;
+  message: string | null;
+}
+
+/** Primary-key identification of a row, as `[column, value]` pairs. */
+export type DbRowKey = [string, string | null][];
+
 export type TransferDirection = "download" | "upload";
 export type ArchiveFormat = "targz" | "zip";
 export type TransferFileState = "pending" | "active" | "done" | "failed" | "skipped";
@@ -530,6 +587,47 @@ export const api = {
   sftpTransferCancel: (id: string) => invoke<void>("sftp_transfer_cancel", { id }),
   sftpTransferList: () => invoke<TransferSnapshot[]>("sftp_transfer_list"),
   sftpTransferClearFinished: () => invoke<void>("sftp_transfer_clear_finished"),
+  // --- database client ---
+  dbDiscover: (vpsId: string) => invoke<DbEndpoint[]>("db_discover", { vpsId }),
+  dbConnect: (target: DbTargetInput) =>
+    invoke<DbConnectOutcome>("db_connect", { target }),
+  dbDisconnect: (sessionId: string) => invoke<void>("db_disconnect", { sessionId }),
+  dbUseDatabase: (sessionId: string, database: string | null) =>
+    invoke<void>("db_use_database", { sessionId, database }),
+  dbListDatabases: (sessionId: string) =>
+    invoke<string[]>("db_list_databases", { sessionId }),
+  dbListTables: (sessionId: string, schema: string) =>
+    invoke<DbTable[]>("db_list_tables", { sessionId, schema }),
+  dbDescribeTable: (sessionId: string, schema: string, table: string) =>
+    invoke<DbColumn[]>("db_describe_table", { sessionId, schema, table }),
+  dbSelectPage: (
+    sessionId: string,
+    schema: string,
+    table: string,
+    limit: number,
+    offset: number,
+  ) => invoke<DbResultSet>("db_select_page", { sessionId, schema, table, limit, offset }),
+  dbRunSql: (sessionId: string, sql: string) =>
+    invoke<DbResultSet>("db_run_sql", { sessionId, sql }),
+  dbUpdateCell: (
+    sessionId: string,
+    schema: string,
+    table: string,
+    column: string,
+    value: string | null,
+    key: DbRowKey,
+  ) =>
+    invoke<DbResultSet>("db_update_cell", {
+      sessionId,
+      schema,
+      table,
+      column,
+      value,
+      key,
+    }),
+  dbDeleteRow: (sessionId: string, schema: string, table: string, key: DbRowKey) =>
+    invoke<DbResultSet>("db_delete_row", { sessionId, schema, table, key }),
+
   sftpEditExternal: (sessionId: string, path: string) =>
     invoke<{ id: string; local_path: string }>("sftp_edit_external", { sessionId, path }),
 
@@ -827,7 +925,9 @@ export interface CanvasCommand {
  * the user's live terminals / SFTP panels. Field names are snake_case to match
  * the Rust `CanvasNode` deserializer. */
 export interface CanvasSnapshotNode {
-  kind: "terminal" | "sftp";
+  /** The Rust side matches on this with a catch-all arm, so a kind it doesn't render
+   *  yet (like "db") is ignored rather than mislabelled. */
+  kind: "terminal" | "sftp" | "db";
   /** Canvas node id, so the agent can target one specific panel. */
   node_id: string;
   vps_id: string;

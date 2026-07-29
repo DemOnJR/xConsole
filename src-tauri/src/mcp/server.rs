@@ -282,7 +282,20 @@ impl McpSession {
     /// Authorize a read-only action (e.g. read_file). Gated on intent rather than
     /// re-parsing an assembled shell string, so paths containing shell
     /// metacharacters are read normally under allowlist mode.
-    fn allow_read(&self, vps_id: Option<&str>) -> Result<(), String> {
+    ///
+    /// `path` is checked against [`safety::touches_sensitive_path`] even so. Gating on
+    /// intent must not become a way around the credential-path rule: the in-app tools
+    /// refuse to auto-read `/root/.ssh/id_rsa` under allowlist mode, and this path — which
+    /// hands its output to a model in a separate process — has no business being more
+    /// permissive than they are.
+    fn allow_read(&self, vps_id: Option<&str>, path: &str) -> Result<(), String> {
+        if safety::touches_sensitive_path(path) {
+            return Err(
+                "that path looks like a credential store, so it needs explicit approval — \
+                 read it from the xConsole app instead"
+                    .into(),
+            );
+        }
         match self.effective_safety(vps_id).as_str() {
             "full" | "allowlist" => Ok(()),
             _ => Err(APPROVE_BLOCKED.into()),
@@ -338,7 +351,7 @@ impl McpSession {
                     Err(e) => return (format!("error: {e}"), true),
                 };
                 let cmd = format!("cat -- {}", shell_quote(path));
-                if let Err(e) = self.allow_read(Some(&vps_id)) {
+                if let Err(e) = self.allow_read(Some(&vps_id), path) {
                     return (format!("error: {e}"), true);
                 }
                 match run_vps_command(&self.db, &vps_id, &cmd).await {

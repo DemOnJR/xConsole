@@ -16,7 +16,11 @@ import { TileLayoutMenu } from "./TileLayoutMenu";
 const MODES: { id: LayoutMode; label: string; title: string }[] = [
   { id: "freeform", label: "Freeform", title: "Drag terminals anywhere" },
   { id: "snap", label: "Snap", title: "Snap to grid while dragging" },
-  { id: "tile", label: "Tile", title: "Auto-arrange into a grid" },
+  {
+    id: "tile",
+    label: "Tile",
+    title: "Snap into a grid, keeping how you've arranged them",
+  },
 ];
 
 const ICON_BTN =
@@ -25,7 +29,7 @@ const ICON_BTN =
 export function Toolbar() {
   const layoutMode = useCanvasStore((s) => s.layoutMode);
   const setLayout = useCanvasStore((s) => s.setLayout);
-  const arrangeTiles = useCanvasStore((s) => s.arrangeTiles);
+  const retileFromPositions = useCanvasStore((s) => s.retileFromPositions);
   const clear = useCanvasStore((s) => s.clear);
   const nodes = useCanvasStore((s) => s.nodes);
   const sessions = useSessionStore((s) => s.sessions);
@@ -33,10 +37,11 @@ export function Toolbar() {
   const paneW = useStore((s) => s.width);
   const paneH = useStore((s) => s.height);
 
-  // Tile to fill the visible window (equal cells), then reset zoom to 1 so the
-  // terminals render at their normal font size.
+  // Tile to fill the visible window, taking the arrangement from where the terminals
+  // currently sit — drag them roughly into place, press this, and the grid adopts that
+  // shape. Then reset zoom to 1 so the terminals render at their normal font size.
   const tileToFit = () => {
-    arrangeTiles({ width: paneW, height: paneH });
+    retileFromPositions({ width: paneW, height: paneH });
     setViewport({ x: 0, y: 0, zoom: 1 }, { duration: 300 });
   };
 
@@ -90,6 +95,8 @@ export function Toolbar() {
               data-tooltip={m.title}
               onClick={() => {
                 setLayout(m.id);
+                // Entering tile mode adopts however the user has them arranged now,
+                // rather than imposing a fresh grid over their arrangement.
                 if (m.id === "tile") tileToFit();
               }}
               className={`px-2.5 py-1 text-xs ${
@@ -103,7 +110,11 @@ export function Toolbar() {
           ))}
         </div>
 
-        <button data-tooltip="Re-tile now (fill the window)" onClick={tileToFit} className={ICON_BTN}>
+        <button
+          data-tooltip="Re-tile from where they sit now — drag them first, then press this"
+          onClick={tileToFit}
+          className={ICON_BTN}
+        >
           <GridIcon size={15} />
         </button>
         {layoutMode === "tile" ? <TileLayoutMenu /> : null}

@@ -90,6 +90,87 @@ export function autoLayout(ids: string[]): TileLayout {
   return layoutFromCounts(ids, defaultRowCounts(ids.length));
 }
 
+/** A node as the position reader sees it. */
+export interface PlacedNode {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Read a layout back out of where the nodes currently sit.
+ *
+ * This is what makes "drag them roughly where you want, then press Tile" work: three
+ * terminals side by side become one row of three, two-over-one becomes `[2, 1]`, and so
+ * on. Without it, Tile can only ever impose its own idea of the arrangement, and
+ * dragging is purely cosmetic until the next re-tile wipes it out.
+ *
+ * Rows are found by banding on the vertical centre rather than the top edge, so tiles
+ * that are roughly level still group together even when their heights differ. A node
+ * joins the row being built when its centre is within half the row's mean height of the
+ * row's mean centre — comparing against the running mean (not a growing envelope) stops
+ * a staircase of slightly-offset nodes from chaining into one giant row.
+ *
+ * Relative sizes carry over too: within a row, width becomes the tile's weight, and a
+ * row's height becomes the row's weight. So dragging one terminal wider and then tiling
+ * keeps it wider instead of snapping everything back to equal shares.
+ */
+export function rowsFromPositions(nodes: PlacedNode[]): TileLayout {
+  if (nodes.length === 0) return { rows: [] };
+
+  const byTop = [...nodes].sort(
+    (a, b) => a.y + a.height / 2 - (b.y + b.height / 2) || a.x - b.x,
+  );
+
+  const bands: PlacedNode[][] = [];
+  let current: PlacedNode[] = [];
+  let meanCentre = 0;
+  let meanHeight = 0;
+
+  for (const node of byTop) {
+    const centre = node.y + node.height / 2;
+    if (current.length === 0) {
+      current = [node];
+      meanCentre = centre;
+      meanHeight = node.height;
+      continue;
+    }
+    // Half the mean height is forgiving enough for hand-dragged tiles that are a little
+    // off, and tight enough that a deliberately separate row stays separate.
+    if (Math.abs(centre - meanCentre) <= Math.max(meanHeight, 1) / 2) {
+      current.push(node);
+      meanCentre = current.reduce((s, n) => s + n.y + n.height / 2, 0) / current.length;
+      meanHeight = current.reduce((s, n) => s + n.height, 0) / current.length;
+    } else {
+      bands.push(current);
+      current = [node];
+      meanCentre = centre;
+      meanHeight = node.height;
+    }
+  }
+  if (current.length > 0) bands.push(current);
+
+  const meanRowHeight =
+    bands.reduce((s, r) => s + r.reduce((m, n) => Math.max(m, n.height), 0), 0) /
+    Math.max(bands.length, 1);
+
+  return normalize({
+    rows: bands.map((band) => {
+      const ordered = [...band].sort(
+        (a, b) => a.x + a.width / 2 - (b.x + b.width / 2),
+      );
+      const meanWidth = ordered.reduce((s, n) => s + n.width, 0) / ordered.length || 1;
+      const rowHeight = ordered.reduce((m, n) => Math.max(m, n.height), 0);
+      return {
+        weight: meanRowHeight > 0 ? rowHeight / meanRowHeight : 1,
+        items: ordered.map((n) => ({ id: n.id, weight: n.width / meanWidth })),
+      };
+    }),
+  });
+}
+
 /** Every node id in a layout, top-to-bottom then left-to-right. */
 export function layoutIds(layout: TileLayout): string[] {
   return layout.rows.flatMap((r) => r.items.map((it) => it.id));

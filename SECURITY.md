@@ -2,8 +2,11 @@
 
 xConsole is **open source**: anyone can read every line of this code. Its security is
 designed accordingly — it never depends on the source being secret (Kerckhoffs's
-principle). Keys are random, secrets live in the OS keychain (never in the repo or the
-database), and the encryption is standard, public, and auditable.
+principle). Keys are random, credentials live in the OS keychain rather than in the repo or
+the database, and the encryption is standard, public, and auditable.
+
+Where the implementation falls short of the intent, this document says so — see
+**Known gaps** under SSH credential handling, and the caveats under at-rest encryption.
 
 ## Local-only deployment posture
 
@@ -24,12 +27,13 @@ on a public or internet-facing server, and must not be exposed on a public IP ad
 ## At-rest encryption (optional app lock)
 
 By default, your local database (`xconsole.db`) stores chats, workspaces, settings, and
-agent memory in your OS app-data directory. Secrets are **never** in this database — they
-live in the OS keychain (see below). You can additionally encrypt the whole database at
-rest by enabling the **app lock** with a master password (Settings → Security):
+agent memory in your OS app-data directory. Credentials (SSH passwords and keys, API
+tokens) live in the OS keychain, not here. You can additionally encrypt the whole database
+at rest by enabling the **app lock** with a master password (Settings → Security):
 
 - A random 256-bit **data key** encrypts the database with **AES-256-GCM** (authenticated
-  encryption, via `ring`). Each record uses a fresh CSPRNG nonce.
+  encryption, via `ring`), using a fresh CSPRNG nonce on every write of the blob. The
+  database is encrypted as a whole, not record by record.
 - The data key is **wrapped** (encrypted) by a key derived from your master password with
   **PBKDF2-HMAC-SHA256** and a random per-install salt. The wrapped blob lives in a small
   plaintext manifest (`db.lock.json`) and doubles as the password verifier — a wrong
@@ -47,10 +51,18 @@ rest by enabling the **app lock** with a master password (Settings → Security)
   a stolen encrypted database, so longer is strictly better.
 
 **Caveat — plaintext working window:** while the app is *unlocked and running* it operates
-on a decrypted working copy on disk; an unclean shutdown (crash/power loss) can leave that
-copy readable until the next clean launch reaps it. At-rest encryption protects an offline or
-stolen database **between** clean sessions — not a live, running, or improperly-closed one.
-The highest-value secrets (SSH/API keys) live in the OS keychain regardless, never in this DB.
+on a decrypted working copy on disk. That copy exists for the whole session, and an unclean
+shutdown (crash/power loss/kill) leaves it readable until the next clean launch reaps it.
+At-rest encryption protects an offline or stolen database **between** clean sessions — not a
+live, running, or improperly-closed one.
+
+**Caveat — what can still end up in the database:** credentials proper are in the keychain,
+but the database is not secret-free by construction. Agent conversations store tool output
+verbatim (`agent_conversation`), so anything a command you approved printed to stdout is
+persisted — and sent to your model provider. Approval records store the command that was
+run; secret-looking `NAME=value` assignments are masked before storage, but a credential
+passed some other way (a positional argument, `-pSECRET`) is not. Treat the database as
+sensitive, not merely as metadata.
 
 ## Dependency supply-chain hardening
 
@@ -88,11 +100,32 @@ Configured in [`pnpm-workspace.yaml`](pnpm-workspace.yaml):
 
 ## SSH credential handling
 
-- Prefer **ssh-agent** so the app never sees private key bytes.
 - Private keys are referenced by **path** only; key material is never copied into the
-  local database.
+  local database. Keys the app generates itself live only in the OS keychain.
 - Passphrases/passwords are stored in the **OS keychain** (`keyring`), never plaintext.
-- Decrypted key material is **zeroized** from memory after each connect.
-- Host keys are verified (trust-on-first-use `known_hosts`) to prevent MITM.
+  With **Encrypt saved credentials** on (Settings → Security), they are additionally
+  encrypted with the database data key *before* reaching the keychain, so reading the OS
+  credential store yields ciphertext rather than credentials.
+- Host keys are pinned trust-on-first-use in `known_hosts`, and a later **mismatch fails
+  the connection closed**.
+
+### Known gaps
+
+Stated plainly rather than omitted, because a security policy that overstates what the
+code does is worse than one that admits a gap:
+
+- **ssh-agent is not supported.** Selecting it returns an error
+  (`ConnectError::AgentUnsupported`); use a key file or the app-managed key instead. An
+  earlier version of this document claimed agent support as the preferred path.
+- **Passwords and passphrases are not zeroized.** They are read from the keychain into a
+  `Zeroizing` buffer but then copied into a plain `String` to hand to the SSH client, and
+  that copy is not wiped. Only app-managed private-key PEM bytes stay in `Zeroizing`
+  end-to-end.
+- **First contact with a host is trusted without asking.** The key is pinned silently on
+  the first connection, so an attacker in position at that exact moment can pin their own
+  key — and for password auth, receive the password. Mismatches afterwards are refused.
+- **Credentials are visible in the remote process list.** Cloud credentials for a
+  Terraform run on a VPS runner are exported in the command string, so they appear in
+  `ps` and execve auditing on that server for the duration of the run.
 
 Report vulnerabilities privately to the maintainers before public disclosure.

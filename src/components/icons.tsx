@@ -366,6 +366,17 @@ export function PaletteIcon(props: IconProps) {
   );
 }
 
+/** A database: stacked discs. */
+export function DatabaseIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <ellipse cx="12" cy="6" rx="8" ry="3" />
+      <path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6" />
+      <path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+    </svg>
+  );
+}
+
 /** Freestyle tiling: an uneven grid — three cells on top, two below. */
 export function RowsIcon(props: IconProps) {
   return (

@@ -45,6 +45,7 @@ const IGNORANCE_PHRASES: &[&str] = &[
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolFailure {
     pub tool: String,
+    /// The call's argument KEY NAMES, never their values — see [`arg_shape`].
     pub args_brief: String,
     pub error: String,
 }
@@ -77,6 +78,25 @@ fn take_chars(s: &str, n: usize) -> String {
 
 /// The tool name + brief args that produced the result at `result_idx`, by matching
 /// the result's `tool_call_id` back to the assistant message that issued the call.
+/// Describe a tool call's arguments by their KEY NAMES only — never their values.
+///
+/// A lesson built from a failed call is appended to `agent/MEMORY.md` on disk and then
+/// injected into the system prompt of every later turn. Storing the values meant a failed
+/// `local_run_command{"command":"mysql -u root -pHUNTER2"}` became a permanent, repeatedly
+/// re-transmitted copy of that password. `MEMORY_GUIDANCE` tells the model not to record
+/// secrets, but this write is code, not the model's choice.
+///
+/// Redaction was the obvious fix and is not enough: the credential shapes that show up
+/// here are `-pSECRET`, `--token SECRET` and bare positional arguments, and a pattern
+/// aggressive enough to catch those also mangles `find -print` and `docker run -p3306`.
+/// The key names carry the useful signal — which call shape failed — with nothing to leak.
+fn arg_shape(arguments: &serde_json::Value) -> String {
+    match arguments.as_object() {
+        Some(map) if !map.is_empty() => map.keys().cloned().collect::<Vec<_>>().join(", "),
+        _ => String::new(),
+    }
+}
+
 fn call_for_result(messages: &[ChatMessage], result_idx: usize) -> Option<(String, String)> {
     let id = messages[result_idx].tool_call_id.as_deref()?;
     for m in messages[..result_idx].iter().rev() {
@@ -85,7 +105,7 @@ fn call_for_result(messages: &[ChatMessage], result_idx: usize) -> Option<(Strin
         }
         for tc in &m.tool_calls {
             if tc.id == id {
-                return Some((tc.name.clone(), take_chars(&tc.arguments.to_string(), 100)));
+                return Some((tc.name.clone(), arg_shape(&tc.arguments)));
             }
         }
     }
@@ -188,7 +208,7 @@ pub fn distill_lessons(outcome: &TurnOutcome) -> Vec<String> {
         let where_ = if f.args_brief.is_empty() {
             String::new()
         } else {
-            format!(" (args: {})", f.args_brief)
+            format!(" (called with: {})", f.args_brief)
         };
         lessons.push(format!(
             "{LESSON_TAG} `{}`{where_} failed with \"{}\".{}",
@@ -304,6 +324,46 @@ mod tests {
         assert!(lessons[0].contains("run_command"));
         assert!(lessons[0].contains("command not found"));
         assert!(lessons[0].to_lowercase().contains("alternative")); // hint applied
+    }
+
+    #[test]
+    fn a_lesson_never_carries_argument_values() {
+        // These lessons are written to agent/MEMORY.md and re-sent to the provider on
+        // every later turn, so a credential in a failed call must not reach them.
+        let msgs = vec![
+            ChatMessage::user("check the db"),
+            assistant_call(
+                "t1",
+                "local_run_command",
+                json!({"command": "mysql -u root -pHUNTER2 -e 'select 1'"}),
+            ),
+            tool_result("t1", "error: ERROR 1045 (28000): Access denied"),
+        ];
+        let outcome = analyze_turn(&msgs, 1, 12);
+        let lessons = distill_lessons(&outcome);
+        assert_eq!(lessons.len(), 1);
+        assert!(!lessons[0].contains("HUNTER2"), "leaked a password: {}", lessons[0]);
+        // Not just the secret — none of the command text should be there, since a value
+        // anywhere in it could be a credential.
+        assert!(!lessons[0].contains("mysql"), "leaked the command: {}", lessons[0]);
+        // Still useful: names the tool, the argument shape, and the error.
+        assert!(lessons[0].contains("local_run_command"), "{}", lessons[0]);
+        assert!(lessons[0].contains("called with: command"), "{}", lessons[0]);
+        assert!(lessons[0].contains("Access denied"), "{}", lessons[0]);
+    }
+
+    #[test]
+    fn arg_shape_lists_keys_only() {
+        assert_eq!(arg_shape(&json!({"path": "/root/.ssh/id_rsa"})), "path");
+        // Order follows serde_json's map, which preserves insertion order only with the
+        // preserve_order feature; assert on content rather than exact ordering.
+        let shape = arg_shape(&json!({"host": "h", "token": "sekrit"}));
+        assert!(shape.contains("host") && shape.contains("token"), "{shape}");
+        assert!(!shape.contains("sekrit"), "{shape}");
+        // Non-objects and empty objects contribute nothing.
+        assert_eq!(arg_shape(&json!({})), "");
+        assert_eq!(arg_shape(&json!("just a string")), "");
+        assert_eq!(arg_shape(&json!(null)), "");
     }
 
     #[test]

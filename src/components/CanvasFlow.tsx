@@ -17,11 +17,16 @@ import { useVpsStore } from "../stores/vpsStore";
 import { onCanvasCommand } from "../lib/tauri";
 import { TerminalNode } from "./TerminalNode";
 import { SftpNode } from "./SftpNode";
+import { DatabaseNode } from "./DatabaseNode";
 import { FloatingEdge } from "./FloatingEdge";
 import { LockIcon, LockOpenIcon, RadarIcon } from "./icons";
 import { VPS_DND_MIME } from "./ServerPanel";
 
-const nodeTypes: NodeTypes = { terminal: TerminalNode, sftp: SftpNode };
+const nodeTypes: NodeTypes = {
+  terminal: TerminalNode,
+  sftp: SftpNode,
+  db: DatabaseNode,
+};
 const edgeTypes = { floating: FloatingEdge };
 
 /** Executes canvas actions the agent requests (open/close nodes, tile). Lives
@@ -29,7 +34,7 @@ const edgeTypes = { floating: FloatingEdge };
 function CanvasCommandBridge() {
   const addVps = useCanvasStore((s) => s.addVps);
   const addSftp = useCanvasStore((s) => s.addSftp);
-  const arrangeTiles = useCanvasStore((s) => s.arrangeTiles);
+  const retileFromPositions = useCanvasStore((s) => s.retileFromPositions);
   const setPaneSize = useCanvasStore((s) => s.setPaneSize);
   const removeNode = useCanvasStore((s) => s.removeNode);
   const layoutMode = useCanvasStore((s) => s.layoutMode);
@@ -66,7 +71,7 @@ function CanvasCommandBridge() {
           if (vps) addSftp(vps);
           break;
         case "tile":
-          arrangeTiles({ width: paneW, height: paneH });
+          retileFromPositions({ width: paneW, height: paneH });
           setViewport({ x: 0, y: 0, zoom: 1 }, { duration: 300 });
           break;
         case "close":
@@ -83,7 +88,7 @@ function CanvasCommandBridge() {
       }
     }).then((u) => (un = u));
     return () => un?.();
-  }, [addVps, addSftp, arrangeTiles, removeNode, setViewport, paneW, paneH]);
+  }, [addVps, addSftp, retileFromPositions, removeNode, setViewport, paneW, paneH]);
 
   return null;
 }

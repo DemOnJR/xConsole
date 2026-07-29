@@ -62,20 +62,29 @@ pub async fn run_local(
     })
 }
 
-/// Stable path for a GCP service-account JSON file on the agent host.
-pub fn gcp_cred_path(home: &AgentHome, account_id: &str) -> std::path::PathBuf {
+/// Where older builds wrote a GCP service-account JSON file.
+///
+/// Nothing writes here any more — the credential is passed to Terraform inline via
+/// `GOOGLE_CREDENTIALS` (see [`crate::infra::cloud::credential_env_map`]). The path is
+/// kept only so the leftover file can be deleted.
+fn legacy_gcp_cred_path(home: &AgentHome, account_id: &str) -> std::path::PathBuf {
     home.0
         .join(".cloud-creds")
         .join(format!("gcp-{account_id}.json"))
 }
 
-pub fn write_gcp_cred_file(home: &AgentHome, account_id: &str, secret: &str) -> Result<std::path::PathBuf, String> {
-    let path = gcp_cred_path(home, account_id);
+/// Delete a service-account key file left behind by an earlier build.
+///
+/// Best-effort and silent: this runs on a normal cloud operation, and failing to remove a
+/// stale file is not a reason to fail the user's Terraform run. It also tries to remove
+/// the containing directory, which is only possible once it is empty — so the last account
+/// cleaned up takes the directory with it.
+pub fn remove_legacy_gcp_cred_file(home: &AgentHome, account_id: &str) {
+    let path = legacy_gcp_cred_path(home, account_id);
+    let _ = std::fs::remove_file(&path);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_dir(parent);
     }
-    std::fs::write(&path, secret.trim()).map_err(|e| e.to_string())?;
-    Ok(path)
 }
 
 #[cfg(test)]

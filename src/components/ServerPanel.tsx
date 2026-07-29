@@ -4,7 +4,7 @@ import { useCanvasStore } from "../stores/canvasStore";
 import type { Vps } from "../lib/tauri";
 import { VpsForm } from "./VpsForm";
 import { dialog } from "../stores/dialogStore";
-import { PlusIcon, TrashIcon, FolderIcon } from "./icons";
+import { PlusIcon, TrashIcon, FolderIcon, DatabaseIcon } from "./icons";
 
 export const VPS_DND_MIME = "application/x-vps-id";
 
@@ -12,6 +12,7 @@ export function ServerPanel() {
   const { vpsList, load, remove, reorder } = useVpsStore();
   const addVps = useCanvasStore((s) => s.addVps);
   const addSftp = useCanvasStore((s) => s.addSftp);
+  const addDb = useCanvasStore((s) => s.addDb);
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
 
@@ -127,6 +128,16 @@ export function ServerPanel() {
                   }}
                 >
                   <FolderIcon size={14} />
+                </button>
+                <button
+                  className="rounded p-1 text-violet-400/80 hover:bg-[var(--border)] hover:text-violet-300"
+                  data-tooltip="Open databases on canvas"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    addDb(v);
+                  }}
+                >
+                  <DatabaseIcon size={14} />
                 </button>
                 <button
                   className="rounded px-1 text-xs text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"

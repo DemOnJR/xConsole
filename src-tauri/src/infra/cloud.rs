@@ -56,18 +56,32 @@ pub fn aws_env(account: &CloudAccount, secret: &str) -> Result<String, String> {
     ))
 }
 
-/// Write GCP service-account JSON to a temp file on the runner and export GOOGLE_APPLICATION_CREDENTIALS.
+/// Export GCP service-account JSON for a run on a VPS runner.
+///
+/// The JSON goes inline in `GOOGLE_CREDENTIALS`, which the Terraform Google provider
+/// accepts as either a path or the file's contents. No file is written.
+///
+/// What this replaces was both leaky and broken. It wrote
+/// `$HOME/.xconsole-gcp-<id>.json` and pointed `GOOGLE_APPLICATION_CREDENTIALS` at it,
+/// but the bytes it wrote were **base64** of the JSON, which that variable does not
+/// accept — so GCP runs could not have been working. And the file was created at the
+/// default umask before `chmod 600` (briefly world-readable), then left on the server
+/// forever, so a service-account private key accumulated in the home directory of every
+/// host used as a runner.
 pub fn gcp_env(account_id: &str, secret: &str) -> Result<String, String> {
-    let path = format!("$HOME/.xconsole-gcp-{account_id}.json");
-    let b64 = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        secret.trim().as_bytes(),
-    );
-    Ok(format!(
-        "printf %s {} > {path} && chmod 600 {path} && export GOOGLE_APPLICATION_CREDENTIALS={path}",
-        shell_quote(&b64),
-        path = path,
-    ))
+    let export = format!("export GOOGLE_CREDENTIALS={}", shell_quote(secret.trim()));
+
+    // Reap the key file older builds left behind. Guarded on the id's shape so this can
+    // never widen into an arbitrary `rm`: ids are UUIDs, and `$HOME` has to stay outside
+    // the quoting to expand, so the interpolated part must be known-safe.
+    let safe_id =
+        !account_id.is_empty() && account_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if safe_id {
+        return Ok(format!(
+            "rm -f \"$HOME/.xconsole-gcp-{account_id}.json\"; {export}"
+        ));
+    }
+    Ok(export)
 }
 
 /// TFC / Terraform Cloud API token for remote backend auth.
@@ -139,11 +153,19 @@ pub fn credential_env_map(
             env.insert("AWS_DEFAULT_REGION".into(), region.to_string());
         }
         "gcp" => {
-            let path = crate::infra::terraform_local::write_gcp_cred_file(home, &account.id, &raw)?;
-            env.insert(
-                "GOOGLE_APPLICATION_CREDENTIALS".into(),
-                path.to_string_lossy().into_owned(),
-            );
+            // Pass the service-account JSON inline. The Terraform Google provider accepts
+            // either a path or the file's contents in GOOGLE_CREDENTIALS, so there is no
+            // reason to materialise it.
+            //
+            // Previously this wrote the JSON — which contains an RSA private key — to
+            // `<app_data>/agent/.cloud-creds/gcp-<id>.json` at the default umask, and
+            // nothing ever deleted it. Copying the app data folder was enough to walk away
+            // with a working GCP service account: no keychain, no master password, not even
+            // a running app. An env var is visible to the same user via /proc, but it dies
+            // with the process instead of persisting indefinitely.
+            env.insert("GOOGLE_CREDENTIALS".into(), raw.trim().to_string());
+            // Reap a key an earlier build may already have left behind.
+            crate::infra::terraform_local::remove_legacy_gcp_cred_file(home, &account.id);
         }
         "tfc" => {
             env.insert(
@@ -188,5 +210,44 @@ mod tests {
         let (id, sec) = parse_aws_secret("AKIAEXAMPLE\nsecret123").unwrap();
         assert_eq!(id, "AKIAEXAMPLE");
         assert_eq!(sec, "secret123");
+    }
+
+    #[test]
+    fn gcp_env_writes_no_file_and_passes_json_inline() {
+        let json = r#"{"type":"service_account","private_key":"-----BEGIN PRIVATE KEY-----\nabc\n"}"#;
+        let out = gcp_env("11111111-2222-3333-4444-555555555555", json).unwrap();
+        // The whole point: nothing lands on disk.
+        assert!(!out.contains("printf"), "{out}");
+        assert!(!out.contains("chmod"), "{out}");
+        assert!(!out.contains("GOOGLE_APPLICATION_CREDENTIALS"), "{out}");
+        assert!(out.contains("export GOOGLE_CREDENTIALS='"), "{out}");
+        // Raw JSON, not base64 — the old code wrote base64 into a variable that only
+        // accepts a path or JSON, so it cannot have worked.
+        assert!(out.contains("service_account"), "{out}");
+        // And it cleans up what older builds left on the runner.
+        assert!(
+            out.contains(r#"rm -f "$HOME/.xconsole-gcp-11111111-2222-3333-4444-555555555555.json""#),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn gcp_env_refuses_to_build_an_rm_from_an_odd_id() {
+        // Defensive: an id that isn't UUID-shaped must not reach the `rm`, since $HOME
+        // has to sit outside the quoting in order to expand.
+        let out = gcp_env("../../etc; rm -rf /", "{}").unwrap();
+        assert!(!out.contains("rm -f"), "{out}");
+        assert!(out.starts_with("export GOOGLE_CREDENTIALS="), "{out}");
+    }
+
+    #[test]
+    fn gcp_env_quotes_a_json_payload_containing_quotes() {
+        let out = gcp_env("abc", r#"{"a":"it's"}"#).unwrap();
+        // POSIX close-escape-reopen keeps the payload as one argument. Note the
+        // surrounding characters here are the JSON's double quotes, not shell quotes,
+        // so match only the escape itself.
+        assert!(out.contains(r#"it'\''s"#), "{out}");
+        // The whole value is still wrapped in one pair of shell quotes.
+        assert!(out.contains(r#"GOOGLE_CREDENTIALS='{"a":"it'\''s"}'"#), "{out}");
     }
 }

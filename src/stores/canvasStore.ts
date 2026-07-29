@@ -19,6 +19,7 @@ import {
   moveWithinRow,
   reconcile,
   resizeRow,
+  rowsFromPositions,
   resizeTile,
   toggleFullWidth,
   type TileLayout,
@@ -47,11 +48,21 @@ export interface SftpData {
   [key: string]: unknown;
 }
 
+/** A database browser node. Connection state lives in the node, not the store, because
+ *  it holds a session id that must not outlive the component. */
+export interface DbData {
+  vpsId: string;
+  name: string;
+  host: string;
+  [key: string]: unknown;
+}
+
 export type CanvasEdge = Edge<{ kind: "sftp-terminal" }>;
 
 export type TermNode = Node<TermData, "terminal">;
 export type SftpNode = Node<SftpData, "sftp">;
-export type CanvasNode = TermNode | SftpNode;
+export type DbNode = Node<DbData, "db">;
+export type CanvasNode = TermNode | SftpNode | DbNode;
 
 export const NODE_W = 460;
 export const NODE_H = 320;
@@ -87,6 +98,8 @@ interface CanvasState {
   updateNodeData: (id: string, partial: Partial<SftpData>) => void;
   addVps: (vps: Vps, position?: { x: number; y: number }) => string;
   addSftp: (vps: Vps, position?: { x: number; y: number }) => string;
+  /** Drop a database browser for this server onto the canvas. */
+  addDb: (vps: Vps, position?: { x: number; y: number }) => string;
   removeNode: (id: string) => void;
   setLayout: (mode: LayoutMode) => void;
   focus: (id: string | null) => void;
@@ -96,6 +109,12 @@ interface CanvasState {
   arrangeTiles: (dims?: { width: number; height: number }) => void;
   /** Record the live pane size so layout edits can re-tile on their own. */
   setPaneSize: (dims: { width: number; height: number }) => void;
+  /**
+   * Re-tile, taking the arrangement from where the nodes currently sit. This is what
+   * the Tile button does: drag terminals roughly into place, press it, and the grid
+   * adopts that shape (three side by side become one row of three).
+   */
+  retileFromPositions: (dims?: { width: number; height: number }) => void;
   /** Install an arrangement wholesale (workspace restore, or after an id rebind). */
   setTileLayout: (layout: TileLayout | null) => void;
   /** Re-flow into rows of the given sizes, e.g. `[3, 2]` for 3 on top, 2 below. */
@@ -325,6 +344,29 @@ export const useCanvasStore = create<CanvasState>()(
         return id;
       },
 
+      addDb: (vps, position) => {
+        const id = crypto.randomUUID();
+        const count = get().nodes.length;
+        const pos =
+          position ?? {
+            x: 80 + (count % 4) * (NODE_W + GAP),
+            y: 80 + Math.floor(count / 4) * (NODE_H + GAP),
+          };
+        const node: DbNode = {
+          id,
+          type: "db",
+          position: pos,
+          // Wider by default: a data grid needs room in a way a terminal doesn't.
+          width: Math.round(NODE_W * 1.4),
+          height: NODE_H,
+          data: { vpsId: vps.id, name: vps.name, host: vps.host },
+        };
+        set((s) => ({ nodes: [...s.nodes, node] }));
+        if (get().layoutMode === "tile") get().arrangeTiles();
+        get().focus(id);
+        return id;
+      },
+
       removeNode: (id) => {
         set((s) => ({
           // Drop the node, and unlink any SFTP node that followed it so it isn't
@@ -346,7 +388,10 @@ export const useCanvasStore = create<CanvasState>()(
 
       setLayout: (mode) => {
         set({ layoutMode: mode });
-        if (mode === "tile") get().arrangeTiles();
+        // Adopt however the nodes are arranged right now. Applying the *stored* layout
+        // here would snap them into the previous grid first, and anything the user had
+        // just dragged would be gone before it could be read.
+        if (mode === "tile") get().retileFromPositions();
       },
 
       focus: (id) =>
@@ -381,6 +426,21 @@ export const useCanvasStore = create<CanvasState>()(
         }),
 
       setTileLayout: (layout) => set({ tileLayout: layout }),
+
+      retileFromPositions: (dims) =>
+        set((s) => {
+          if (s.nodes.length === 0) return {};
+          const derived = rowsFromPositions(
+            s.nodes.map((n) => ({
+              id: n.id,
+              x: n.position.x,
+              y: n.position.y,
+              width: (n.width as number) || NODE_W,
+              height: (n.height as number) || NODE_H,
+            })),
+          );
+          return applyTiles({ ...s, tileLayout: derived }, dims ?? s.paneSize ?? undefined);
+        }),
 
       setTileRows: (counts) =>
         set((s) => {
