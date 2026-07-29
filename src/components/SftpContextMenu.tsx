@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
-import type { SftpEntry } from "../lib/tauri";
+import type { ArchiveFormat, SftpEntry } from "../lib/tauri";
 
 export interface SftpMenuState {
   x: number;
@@ -13,7 +13,11 @@ interface Props {
   onClose: () => void;
   onOpen: (entry: SftpEntry) => void;
   onEdit: (entry: SftpEntry) => void;
+  onEditExternal: (entry: SftpEntry) => void;
   onDownload: (entry: SftpEntry) => void;
+  /** Directory → one archive, built on the server then transferred. */
+  onDownloadArchive: (entry: SftpEntry, format: ArchiveFormat) => void;
+  onUpload: () => void;
   onProperties: (entry: SftpEntry) => void;
   onRename: (entry: SftpEntry) => void;
   onDelete: (entry: SftpEntry) => void;
@@ -21,6 +25,8 @@ interface Props {
   onNewFolder: () => void;
   onNewFile: () => void;
   onRefresh: () => void;
+  /** Name of the configured external editor, e.g. "VS Code"; null hides the item. */
+  externalEditorName: string | null;
 }
 
 export function SftpContextMenu({
@@ -28,7 +34,10 @@ export function SftpContextMenu({
   onClose,
   onOpen,
   onEdit,
+  onEditExternal,
   onDownload,
+  onDownloadArchive,
+  onUpload,
   onProperties,
   onRename,
   onDelete,
@@ -36,6 +45,7 @@ export function SftpContextMenu({
   onNewFolder,
   onNewFile,
   onRefresh,
+  externalEditorName,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
 
@@ -92,13 +102,26 @@ export function SftpContextMenu({
       {entry ? (
         <>
           {entry.is_dir ? (
-            item("Open", () => onOpen(entry))
+            <>
+              {item("Open", () => onOpen(entry))}
+              {/* A folder downloads file-by-file (progress per file, resumable by
+                  retry) or as one archive (fewer round-trips, far faster on a tree
+                  of many small files). Both are offered because neither wins always. */}
+              {item("Download folder", () => onDownload(entry))}
+              {item("Download as .tar.gz", () => onDownloadArchive(entry, "targz"))}
+              {item("Download as .zip", () => onDownloadArchive(entry, "zip"))}
+            </>
           ) : (
             <>
               {item("Edit…", () => onEdit(entry))}
+              {externalEditorName
+                ? item(`Open in ${externalEditorName}`, () => onEditExternal(entry))
+                : null}
               {item("Download", () => onDownload(entry))}
             </>
           )}
+          <div className="my-1 border-t border-[var(--border)]" />
+          {item("Upload here…", onUpload)}
           <div className="my-1 border-t border-[var(--border)]" />
           {item("Properties…", () => onProperties(entry))}
           {item("Rename…", () => onRename(entry))}
@@ -108,6 +131,8 @@ export function SftpContextMenu({
         </>
       ) : (
         <>
+          {item("Upload here…", onUpload)}
+          <div className="my-1 border-t border-[var(--border)]" />
           {item("New directory…", onNewFolder)}
           {item("New file…", onNewFile)}
           <div className="my-1 border-t border-[var(--border)]" />

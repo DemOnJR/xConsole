@@ -7,9 +7,16 @@ import {
   useStore,
   type NodeProps,
 } from "@xyflow/react";
-import { api, type SftpEntry } from "../lib/tauri";
+import {
+  api,
+  onExternalEdit,
+  type ArchiveFormat,
+  type SftpEntry,
+} from "../lib/tauri";
+import { useSettingsStore } from "../stores/settingsStore";
 import { useCanvasStore, type SftpNode as SftpNodeType } from "../stores/canvasStore";
 import { useSessionStore } from "../stores/sessionStore";
+import { useTransferStore } from "../stores/transferStore";
 import { dialog } from "../stores/dialogStore";
 import { ChevronUpIcon, FolderIcon } from "./icons";
 import { SftpContextMenu, type SftpMenuState } from "./SftpContextMenu";
@@ -189,6 +196,30 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     void fetchTreeDir(sid, "/");
   }, [path, loadDir, fetchTreeDir]);
 
+  // The configured external editor, shown by name in the context menu. Derived from
+  // the command so "code --new-window" still reads as "VS Code".
+  const editorSetting = useSettingsStore((s) => s.settings["sftp.external_editor"]);
+  const externalEditorName = editorSetting?.trim()
+    ? /(^|[\\/])code(\.exe|\.cmd)?($|\s)/i.test(editorSetting)
+      ? "VS Code"
+      : "external editor"
+    : null;
+
+  // Report saves pushed back from the external editor — especially refusals, which
+  // are the whole point of the guard and must not be silent.
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void onExternalEdit((e) => {
+      if (e.kind === "skipped") setError(e.reason);
+      else if (e.kind === "failed") setError(`Save failed: ${e.error}`);
+      else if (e.kind === "saved") {
+        setError(null);
+        refreshListing();
+      }
+    }).then((u) => (un = u));
+    return () => un?.();
+  }, [refreshListing]);
+
   // Publish this panel's live path + status to the session store (keyed by node id)
   // so the agent's per-turn canvas snapshot knows what the user is browsing.
   useEffect(() => {
@@ -264,6 +295,21 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   };
 
   const refresh = () => refreshListing();
+
+  /**
+   * Hand the file to the configured external editor. Saves flow back automatically
+   * (see the Rust side); this only has to start it and surface the outcome.
+   */
+  const openExternally = async (entry: SftpEntry) => {
+    const sid = sessionRef.current;
+    if (!sid || entry.is_dir) return;
+    try {
+      await api.sftpEditExternal(sid, entry.path);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   const showContextMenu = (e: React.MouseEvent, entry: SftpEntry | null) => {
     e.preventDefault();
@@ -374,21 +420,42 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     void loadDir(sid, dir);
   };
 
-  const downloadFile = async (entry: SftpEntry) => {
+  /**
+   * Download a file or a whole directory.
+   *
+   * This used to pull the bytes through IPC as base64 and hand them to a browser blob
+   * download: capped at 10 MB, no progress, no cancel, and it landed wherever the
+   * webview's download directory happened to be. It now queues a real streaming
+   * transfer to a folder the user picked, with progress in the transfers panel.
+   */
+  const downloadEntry = async (entry: SftpEntry) => {
     const sid = sessionRef.current;
-    if (!sid || entry.is_dir) return;
+    if (!sid) return;
     try {
-      const b64 = await api.sftpDownload(sid, entry.path);
-      const bin = atob(b64);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
-      const blob = new Blob([bytes]);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = entry.name;
-      a.click();
-      URL.revokeObjectURL(url);
+      await useTransferStore.getState().download(sid, [entry.path]);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const downloadArchive = async (entry: SftpEntry, format: ArchiveFormat) => {
+    const sid = sessionRef.current;
+    if (!sid || !entry.is_dir) return;
+    try {
+      await useTransferStore.getState().downloadArchive(sid, entry.path, format);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  /** Upload into the directory currently shown. */
+  const uploadHere = async (localPaths?: string[]) => {
+    const sid = sessionRef.current;
+    if (!sid) return;
+    try {
+      await useTransferStore.getState().upload(sid, path, localPaths);
+      // The new files won't appear until the listing is re-read.
+      window.setTimeout(() => void refreshListing(), 600);
     } catch (e) {
       setError(String(e));
     }
@@ -653,15 +720,15 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                         </span>
                       )}
                     </button>
-                    {!entry.is_dir && (
-                      <button
-                        type="button"
-                        className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-gray-500 opacity-0 hover:bg-[var(--border)] hover:text-gray-200 group-hover:opacity-100"
-                        onClick={() => void downloadFile(entry)}
-                      >
-                        ↓
-                      </button>
-                    )}
+                    {/* Folders download too now — the engine walks them. */}
+                    <button
+                      type="button"
+                      className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-gray-500 opacity-0 hover:bg-[var(--border)] hover:text-gray-200 group-hover:opacity-100"
+                      data-tooltip={entry.is_dir ? "Download this folder" : "Download"}
+                      onClick={() => void downloadEntry(entry)}
+                    >
+                      ↓
+                    </button>
                   </div>
                 ))
               )}
@@ -676,7 +743,10 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           onClose={() => setMenu(null)}
           onOpen={openEntry}
           onEdit={(e) => setEditEntry(e)}
-          onDownload={(e) => void downloadFile(e)}
+          onEditExternal={(e) => void openExternally(e)}
+          onDownload={(e) => void downloadEntry(e)}
+          onDownloadArchive={(e, f) => void downloadArchive(e, f)}
+          onUpload={() => void uploadHere()}
           onProperties={(e) => setPropsEntry(e)}
           onRename={(e) => void handleRename(e)}
           onDelete={(e) => void handleDelete(e)}
@@ -684,6 +754,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           onNewFolder={() => void handleNewFolder()}
           onNewFile={() => void handleNewFile()}
           onRefresh={refresh}
+          externalEditorName={externalEditorName}
         />
       )}
 

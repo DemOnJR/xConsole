@@ -2,13 +2,14 @@ import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { useSettingsStore } from "../../../stores/settingsStore";
 import { useUpdateStore } from "../../../stores/updateStore";
-import { Card, Field, SectionHeader, Select, Toggle } from "../ui";
+import { Card, Field, SectionHeader, Select, TextInput, Toggle } from "../ui";
 
 export const SK = {
   agentEnabled: "agent.enabled",
   activeProvider: "agent.active_provider",
   safetyMode: "agent.safety_mode",
   contextTokens: "agent.context_tokens",
+  externalEditor: "sftp.external_editor",
 } as const;
 
 export function GeneralSection() {
@@ -65,6 +66,20 @@ export function GeneralSection() {
               </option>
             ))}
           </Select>
+        </Field>
+      </Card>
+
+      <Card className="mt-3">
+        <Field
+          label="External editor for remote files"
+          hint="Leave empty to use the built-in editor. Set to `code` for VS Code (or a full path, plus any flags). Choosing “Open in …” on a file in an SFTP panel downloads it, opens it there, and uploads every save back — verifying the byte count first, and refusing to replace a non-empty file with an empty one."
+        >
+          <TextInput
+            value={settings[SK.externalEditor] ?? ""}
+            onChange={(e) => void set(SK.externalEditor, e.target.value)}
+            placeholder="code"
+            spellCheck={false}
+          />
         </Field>
       </Card>
 

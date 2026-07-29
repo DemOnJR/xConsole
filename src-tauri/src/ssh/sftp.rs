@@ -1,18 +1,34 @@
 //! Persistent SFTP browser sessions (separate from interactive shell sessions).
+//!
+//! # One connection, many channels
+//!
+//! A session owns the SSH [`Handle`] itself rather than parking it in a task. russh's
+//! `connect` already spawns the task that drives the connection — `Handle` merely holds
+//! its `JoinHandle`, and `impl Future for Handle` only *waits for the session to end*.
+//! Awaiting it therefore buys nothing and costs everything: the handle is moved away
+//! and no further channel can ever be opened on that connection.
+//!
+//! Keeping it (as an `Arc`, since `channel_open_session` takes `&self`) is what makes
+//! parallel transfers possible — each worker gets its own SFTP channel instead of
+//! queueing behind one mutex — and lets the archive path run `tar` over an exec channel
+//! on the same authenticated connection, with no second handshake.
 
 use std::sync::Arc;
 
 use base64::Engine;
 use dashmap::DashMap;
+use russh::client::Handle;
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use super::client;
+use super::client::{self, Handler};
 use crate::storage::Db;
 
+/// Ceiling for the in-memory read/write path (`download`/`write`), which round-trips
+/// the whole body through base64 over IPC. Bulk transfers stream to disk instead and
+/// are not bounded by this — see [`super::transfer`].
 const MAX_DOWNLOAD: u64 = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
@@ -37,14 +53,26 @@ pub struct SftpListOutcome {
 }
 
 struct SftpHandle {
+    /// The live SSH connection. Kept so extra SFTP/exec channels can be opened on it.
+    ssh: Arc<Handle<Handler>>,
+    /// The browser's own channel, used for listing, stat and small reads/writes.
     sftp: Arc<Mutex<SftpSession>>,
-    pump: JoinHandle<()>,
+    /// Which server this session belongs to (for remote-command helpers).
+    vps_id: String,
 }
 
 #[derive(Clone)]
 pub struct SftpManager {
     map: Arc<DashMap<String, SftpHandle>>,
     db: Db,
+}
+
+/// A session's reusable pieces, handed to the transfer engine. Deliberately does not
+/// expose the browser's own channel: transfers open their own so they never block
+/// listing, which is the whole point of keeping the SSH handle around.
+pub struct SessionRefs {
+    pub ssh: Arc<Handle<Handler>>,
+    pub vps_id: String,
 }
 
 impl SftpManager {
@@ -82,10 +110,6 @@ impl SftpManager {
             .await
             .map_err(|e| format!("SFTP init failed: {e}"))?;
 
-        let pump = tokio::spawn(async move {
-            let _ = handle.await;
-        });
-
         let session_id = Uuid::new_v4().to_string();
         let start_path = sftp
             .canonicalize(".")
@@ -95,8 +119,9 @@ impl SftpManager {
         self.map.insert(
             session_id.clone(),
             SftpHandle {
+                ssh: Arc::new(handle),
                 sftp: Arc::new(Mutex::new(sftp)),
-                pump,
+                vps_id: vps.id.clone(),
             },
         );
 
@@ -184,12 +209,8 @@ impl SftpManager {
         Ok(base64::engine::general_purpose::STANDARD.encode(buf))
     }
 
-    /// Overwrite (or create) a remote file with `content_b64` (base64). Opens with
-    /// CREATE|TRUNCATE so a shorter new body fully replaces the old one.
+    /// Overwrite (or create) a remote file with `content_b64` (base64), atomically.
     pub async fn write(&self, session_id: &str, path: &str, content_b64: &str) -> Result<(), String> {
-        use russh_sftp::protocol::OpenFlags;
-        use tokio::io::AsyncWriteExt;
-
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(content_b64.as_bytes())
             .map_err(|e| format!("invalid base64: {e}"))?;
@@ -206,28 +227,128 @@ impl SftpManager {
         drop(entry);
 
         let sftp = sftp.lock().await;
-        if sftp.metadata(&path).await.map(|m| m.is_dir()).unwrap_or(false) {
-            return Err("cannot write to a directory".into());
-        }
+        write_atomic(&sftp, &path, &bytes).await
+    }
+
+    pub fn disconnect(&self, session_id: &str) -> Result<(), String> {
+        // Dropping the entry drops the last `Arc<Handle>` this manager holds; russh
+        // tears the session down once every clone is gone (a transfer still running on
+        // its own clone finishes first rather than being cut off mid-file).
+        self.map.remove(session_id);
+        Ok(())
+    }
+
+    /// The database handle, for helpers that need to run a remote command.
+    pub fn db_ref(&self) -> &Db {
+        &self.db
+    }
+
+    /// The reusable parts of a session, for the transfer engine.
+    pub fn session_refs(&self, session_id: &str) -> Result<SessionRefs, String> {
+        let entry = self
+            .map
+            .get(session_id)
+            .ok_or_else(|| "SFTP session not found".to_string())?;
+        Ok(SessionRefs {
+            ssh: entry.ssh.clone(),
+            vps_id: entry.vps_id.clone(),
+        })
+    }
+}
+
+/// Open an additional SFTP channel on an existing connection.
+///
+/// Each concurrent transfer worker gets its own channel so they genuinely overlap;
+/// sharing the browser's single channel would serialise them behind its mutex and make
+/// the concurrency setting meaningless.
+pub async fn open_channel(ssh: &Handle<Handler>) -> Result<SftpSession, String> {
+    let channel = ssh
+        .channel_open_session()
+        .await
+        .map_err(|e| format!("open channel failed: {e}"))?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| format!("SFTP subsystem unavailable: {e}"))?;
+    SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|e| format!("SFTP init failed: {e}"))
+}
+
+/// Write `bytes` to `path` without ever leaving a partial file behind.
+///
+/// The previous implementation opened the destination with `TRUNCATE` and then wrote
+/// into it, which **destroys the file before the first byte lands**. Any failure in
+/// between — dropped connection, full disk, a per-request timeout — left a truncated or
+/// zero-byte file and no way back. That is the classic "saved my config and it came
+/// back empty" failure, and it is why editors that save over SFTP naively can lose
+/// files.
+///
+/// Instead: write a sibling temp file, verify the server agrees on its size, then
+/// rename over the target. Rename is atomic on POSIX, so a reader sees either the old
+/// file or the new one, never an empty one. The size check is what makes a short write
+/// a *failed save* instead of a silent truncation — the original stays untouched.
+pub async fn write_atomic(sftp: &SftpSession, path: &str, bytes: &[u8]) -> Result<(), String> {
+    use russh_sftp::protocol::OpenFlags;
+    use tokio::io::AsyncWriteExt;
+
+    if sftp.metadata(path).await.map(|m| m.is_dir()).unwrap_or(false) {
+        return Err("cannot write to a directory".into());
+    }
+
+    // Same directory, so the rename stays on one filesystem and preserves the
+    // destination's ownership semantics.
+    let tmp = format!("{path}.xconsole-{}.tmp", Uuid::new_v4().simple());
+
+    let result = async {
         let mut file = sftp
-            .open_with_flags(&path, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE)
+            .open_with_flags(
+                &tmp,
+                OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
+            )
             .await
             .map_err(|e| format!("open for write failed: {e}"))?;
-        file.write_all(&bytes)
+        file.write_all(bytes)
             .await
             .map_err(|e| format!("write failed: {e}"))?;
         file.shutdown()
             .await
             .map_err(|e| format!("flush failed: {e}"))?;
-        Ok(())
-    }
+        drop(file);
 
-    pub fn disconnect(&self, session_id: &str) -> Result<(), String> {
-        if let Some((_, handle)) = self.map.remove(session_id) {
-            handle.pump.abort();
+        // Confirm the server really stored everything before anything is overwritten.
+        let wrote = sftp
+            .metadata(&tmp)
+            .await
+            .map_err(|e| format!("could not verify the upload: {e}"))?
+            .size
+            .unwrap_or(0);
+        if wrote != bytes.len() as u64 {
+            return Err(format!(
+                "short write — sent {} bytes but the server stored {wrote}; \
+                 the original file was left untouched",
+                bytes.len()
+            ));
         }
         Ok(())
     }
+    .await;
+
+    if let Err(e) = result {
+        let _ = sftp.remove_file(&tmp).await;
+        return Err(e);
+    }
+
+    // `rename` fails on most servers when the target exists, so try the atomic
+    // POSIX-extension rename first and fall back to unlink+rename.
+    if sftp.rename(&tmp, path).await.is_err() {
+        let _ = sftp.remove_file(path).await;
+        if let Err(e) = sftp.rename(&tmp, path).await {
+            let _ = sftp.remove_file(&tmp).await;
+            return Err(format!("could not replace the file: {e}"));
+        }
+    }
+    Ok(())
 }
 
 fn normalize_path(path: &str) -> String {

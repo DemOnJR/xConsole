@@ -139,9 +139,96 @@ pub fn unwrap_data_key(
     Ok(key)
 }
 
+/// Marks a stored secret as ciphertext rather than a raw value. Values without this
+/// prefix are legacy plaintext, written before secret wrapping existed.
+pub const WRAPPED_PREFIX: &str = "xcw1:";
+
+/// Encode a secret for storage in the OS keychain: `xcw1:` + base64 of the AES-GCM
+/// blob. With no key (app lock off) the secret is returned unchanged, because there is
+/// nothing to derive an encryption key from.
+///
+/// Kept here rather than in `secrets` so it stays free of the keychain dependency and
+/// can be tested on its own.
+pub fn wrap_secret(key: Option<&[u8; KEY_LEN]>, secret: &str) -> Result<String, String> {
+    let Some(key) = key else {
+        return Ok(secret.to_string());
+    };
+    let ct = encrypt(key, secret.as_bytes())?;
+    Ok(format!(
+        "{WRAPPED_PREFIX}{}",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, ct)
+    ))
+}
+
+/// Decode a value produced by [`wrap_secret`]. Untagged values pass through as-is, so
+/// enabling the lock never orphans secrets saved by an older build.
+pub fn unwrap_secret(key: Option<&[u8; KEY_LEN]>, stored: &str) -> Result<String, String> {
+    let Some(b64) = stored.strip_prefix(WRAPPED_PREFIX) else {
+        return Ok(stored.to_string());
+    };
+    let key = key.ok_or_else(|| {
+        "this secret is encrypted — unlock xConsole with your master password first".to_string()
+    })?;
+    let ct = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
+        .map_err(|e| format!("decode secret: {e}"))?;
+    let raw = decrypt(key, &ct)?;
+    String::from_utf8(raw).map_err(|_| "secret is not valid UTF-8".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secret_wrapping_round_trips_and_hides_the_value() {
+        let key = new_data_key();
+        let stored = wrap_secret(Some(&key), "hunter2").unwrap();
+        assert!(stored.starts_with(WRAPPED_PREFIX), "value must be tagged");
+        assert!(!stored.contains("hunter2"), "plaintext must not survive");
+        assert_eq!(unwrap_secret(Some(&key), &stored).unwrap(), "hunter2");
+    }
+
+    #[test]
+    fn wrapped_secret_is_useless_without_the_right_key() {
+        let key = new_data_key();
+        let stored = wrap_secret(Some(&key), "id_rsa-contents").unwrap();
+        // Copied the credential store but has no data key.
+        assert!(unwrap_secret(None, &stored).is_err());
+        // Has a data key, but from a different master password.
+        assert!(unwrap_secret(Some(&new_data_key()), &stored).is_err());
+    }
+
+    #[test]
+    fn legacy_plaintext_values_still_read_either_way() {
+        assert_eq!(unwrap_secret(None, "plain-token").unwrap(), "plain-token");
+        let key = new_data_key();
+        assert_eq!(unwrap_secret(Some(&key), "plain-token").unwrap(), "plain-token");
+    }
+
+    #[test]
+    fn no_key_means_no_encryption() {
+        assert_eq!(wrap_secret(None, "abc").unwrap(), "abc");
+    }
+
+    #[test]
+    fn identical_secrets_encrypt_differently() {
+        let key = new_data_key();
+        let a = wrap_secret(Some(&key), "same").unwrap();
+        let b = wrap_secret(Some(&key), "same").unwrap();
+        assert_ne!(a, b, "a fresh nonce per write must prevent ciphertext equality");
+    }
+
+    #[test]
+    fn tampered_ciphertext_is_rejected() {
+        let key = new_data_key();
+        let stored = wrap_secret(Some(&key), "root-password").unwrap();
+        // Flip a byte in the base64 body; GCM authentication must catch it.
+        let mut bytes: Vec<u8> = stored.into_bytes();
+        let last = bytes.len() - 1;
+        bytes[last] = if bytes[last] == b'A' { b'B' } else { b'A' };
+        let tampered = String::from_utf8(bytes).unwrap();
+        assert!(unwrap_secret(Some(&key), &tampered).is_err());
+    }
 
     #[test]
     fn roundtrip_and_wrong_key() {

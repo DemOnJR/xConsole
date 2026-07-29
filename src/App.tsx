@@ -11,16 +11,19 @@ import { AgentPanel } from "./components/agent/AgentPanel";
 import { AppToolbar } from "./components/AppToolbar";
 import { ChangesPanel } from "./components/agent/ChangesPanel";
 import { UpdateNotice } from "./components/UpdateNotice";
+import { TransfersPanel } from "./components/TransfersPanel";
 import { useUpdateStore } from "./stores/updateStore";
 import { useCanvasStore } from "./stores/canvasStore";
 import { useAgentStore } from "./stores/agentStore";
 import { useEditsStore } from "./stores/editsStore";
 import { useUiStore } from "./stores/uiStore";
 import { useThemeStore } from "./stores/themeStore";
+import { useSettingsStore } from "./stores/settingsStore";
 import { useAgentStatusStore } from "./stores/agentStatusStore";
 import { onAgentWorkspaceStatus, onFileChange, onFileChangeReverted } from "./lib/tauri";
 import { useLockStore } from "./stores/lockStore";
 import { SplashScreen, UnlockScreen } from "./components/lock/UnlockScreen";
+import { useTileShortcuts } from "./hooks/useTileShortcuts";
 
 // The real app body. Only mounts once unlocked, so none of its DB-touching effects
 // (theme load, agent/edits subscriptions) run while the database is still encrypted/locked.
@@ -42,8 +45,15 @@ function UnlockedApp() {
   const pendingQuestionsCount = useAgentStore((s) => s.pendingQuestions.length);
   const hasPendingPlan = useAgentStore((s) => s.pendingPlan !== null);
 
+  // Alt+arrows / Alt+F / Alt+R reshape the tile grid (see the hook for the full map).
+  useTileShortcuts();
+
   useEffect(() => {
     void loadTheme();
+    // Settings used to load only when the agent panel or the settings modal mounted,
+    // so anything outside them (the SFTP panel's external-editor entry) read an empty
+    // map until the user happened to open one. They're app-wide state — load them once.
+    void useSettingsStore.getState().load();
   }, [loadTheme]);
 
   // Check GitHub for a newer signed release shortly after launch (silent — only
@@ -146,6 +156,7 @@ function UnlockedApp() {
       </div>
       <SettingsModal />
       <ChangesPanel />
+      <TransfersPanel />
       <UpdateNotice />
       <DialogHost />
       <TooltipHost />

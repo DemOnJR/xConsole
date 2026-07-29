@@ -17,7 +17,11 @@ export function UnlockScreen() {
   const error = useLockStore((s) => s.error);
   const busy = useLockStore((s) => s.busy);
   const [password, setPassword] = useState("");
-  const [remember, setRemember] = useState(true);
+  // Off by default, deliberately. "Remember" stores the raw data key in the OS
+  // keychain, where any process running as this user can read it — which would let
+  // that process decrypt the database and every saved credential without ever knowing
+  // the master password. Opting in is a real trade-off, so it should be a choice.
+  const [remember, setRemember] = useState(false);
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -47,13 +51,20 @@ export function UnlockScreen() {
           className="w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-gray-100 outline-none focus:border-[var(--accent)]"
         />
 
-        <label className="mt-3 flex items-center gap-2 text-xs text-gray-300">
+        <label className="mt-3 flex items-start gap-2 text-xs text-gray-300">
           <input
             type="checkbox"
             checked={remember}
             onChange={(e) => setRemember(e.target.checked)}
+            className="mt-0.5"
           />
-          Remember on this device (unlock automatically next time)
+          <span>
+            Remember on this device (unlock automatically next time)
+            <span className="mt-0.5 block text-[11px] text-amber-400/80">
+              Less secure — stores the decryption key on this PC, so anything running as
+              you can open your data without the password.
+            </span>
+          </span>
         </label>
 
         {error && (
