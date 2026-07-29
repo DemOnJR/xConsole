@@ -201,6 +201,18 @@ pub fn ssh_key_key(vps_id: &str) -> String {
     format!("sshkey:{vps_id}")
 }
 
+/// Settings key recording that the user chose to encrypt stored credentials.
+pub const ENCRYPT_SECRETS_SETTING: &str = "security.encrypt_secrets";
+
+/// Has the user opted into encrypting keychain secrets?
+///
+/// Defaults to **off**. Turning it on is forward-only: builds that predate the feature
+/// cannot read a wrapped secret and will fail every login with an authentication error,
+/// so this must never flip on by itself.
+pub fn encryption_opted_in(db: &crate::storage::Db) -> bool {
+    matches!(db.get_setting(ENCRYPT_SECRETS_SETTING), Ok(Some(v)) if v == "true")
+}
+
 /// Every keychain key that holds a secret for the rows currently in the database.
 ///
 /// The `keyring` crate offers no enumeration, so the set has to be reconstructed from

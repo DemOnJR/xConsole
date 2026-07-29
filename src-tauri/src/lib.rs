@@ -105,21 +105,29 @@ pub fn run() {
             // Record the version we successfully opened at, for the next launch's check.
             let _ = std::fs::write(&version_marker, &current_version);
 
-            // Encrypt any keychain secret still stored in the clear.
+            // Encrypt any keychain secret still stored in the clear — but ONLY if the
+            // user has explicitly opted in.
             //
-            // The other three migration points (enabling the lock, unlocking with the
-            // password, disabling it) all miss the most common configuration: a lock
-            // that is already on with the device remembered. That combination unlocks
-            // silently right here and never visits any of them, so without this the
-            // secrets of exactly the users who turned the lock on earliest would stay
-            // in plaintext forever.
+            // Wrapping is a one-way door for older builds: they don't know the `xcw1:`
+            // tag, so they hand the ciphertext to the SSH server as the password and
+            // every connection fails with "authentication failed". Doing that silently
+            // at startup means a single launch of a newer build — a dev build, a test,
+            // a rollback that got reverted — permanently breaks whatever build the user
+            // actually runs day to day, with no clue as to why.
             //
-            // Off the main thread: this is one keychain round-trip per saved server,
-            // provider and cloud account, and none of it should delay the window. It is
-            // idempotent — an already-wrapped value re-wraps to an equivalent one.
+            // So the conversion is a deliberate action (Settings → Security), and this
+            // only catches up a user who already opted in on a configuration that never
+            // passes through unlock: lock enabled plus device remembered unlocks
+            // silently right here.
+            //
+            // The wrapping key is installed unconditionally above regardless, because
+            // it is needed to READ secrets that are already wrapped.
             if let Some(key) = initial_data_key {
                 let db_for_migration = db.clone();
                 tauri::async_runtime::spawn(async move {
+                    if !crate::secrets::encryption_opted_in(&db_for_migration) {
+                        return;
+                    }
                     let keys = crate::secrets::all_secret_keys(&db_for_migration);
                     if !keys.is_empty() {
                         crate::secrets::rekey_all(&keys, Some(key));
@@ -346,6 +354,7 @@ pub fn run() {
             commands::lock::unlock_with_password,
             commands::lock::change_password,
             commands::lock::forget_device,
+            commands::lock::set_secret_encryption,
             commands::lock::disable_lock,
             commands::lock::export_unencrypted_backup,
         ])

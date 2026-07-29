@@ -682,6 +682,10 @@ export const api = {
     invoke<void>("change_password", { oldPassword, newPassword }),
   forgetDevice: () => invoke<void>("forget_device"),
   disableLock: (password: string) => invoke<void>("disable_lock", { password }),
+  /** Encrypt (or decrypt) saved credentials in the OS keychain. Returns how many
+   *  were converted. Forward-only for older builds — see the Rust doc comment. */
+  setSecretEncryption: (enabled: boolean) =>
+    invoke<number>("set_secret_encryption", { enabled }),
   /** Requires the master password whenever an app lock is configured. */
   exportUnencryptedBackup: (password: string) =>
     invoke<string>("export_unencrypted_backup", { password }),

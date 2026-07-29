@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type KnownHost, type LockStatus } from "../../../lib/tauri";
 import { dialog } from "../../../stores/dialogStore";
-import { Button, Card, SectionHeader } from "../ui";
+import { Button, Card, SectionHeader, Toggle } from "../ui";
 import { TrashIcon } from "../../icons";
 
 const inputCls =
@@ -70,8 +70,8 @@ function AppLockCard() {
           <div className="mb-3 rounded-md border border-red-500/40 bg-red-500/10 p-2.5 text-[11px] text-red-200">
             Your saved <b>SSH passwords, private keys and API tokens</b> are currently stored
             in the OS credential store <b>unencrypted</b> — anything running under your
-            Windows account can read them. Turning on the app lock encrypts them with your
-            master password, so copying the credential store gets an attacker nothing.
+            Windows account can read them. Set up the app lock, then switch on
+            <b> Encrypt saved credentials</b> to put them behind your master password.
           </div>
           <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5 text-[11px] text-amber-200">
             ⚠ There is <b>no password reset and no recovery</b>. If you forget this password and
@@ -107,20 +107,47 @@ function AppLockCard() {
             Your database is <b>encrypted at rest</b>.{" "}
             {status.remembered ? "This device is remembered (silent unlock)." : "This device is not remembered — you'll enter your password each launch."}
           </p>
-          <p className="mb-3 text-xs text-gray-400">
-            {status.secrets_encrypted ? (
-              <>
-                ✅ Saved <b>SSH passwords, private keys and API tokens</b> are encrypted with
-                your master password before they reach the OS credential store — copying it
-                yields ciphertext only.
-              </>
-            ) : (
-              <span className="text-amber-300">
-                Saved credentials are not encrypted right now. Unlock with your master
-                password to re-encrypt them.
-              </span>
-            )}
-          </p>
+          <div className="mb-3 rounded-md border border-[var(--border)] p-2.5">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-xs text-gray-200">Encrypt saved credentials</div>
+                <div className="mt-0.5 text-[11px] text-gray-500">
+                  {status.secrets_encrypted ? (
+                    <>
+                      Your <b>SSH passwords, private keys and API tokens</b> are encrypted
+                      with your master password before they reach the OS credential store,
+                      so copying it yields ciphertext only.
+                    </>
+                  ) : (
+                    <>
+                      They currently sit in the OS credential store in the clear — anything
+                      running under your Windows account can read them without your master
+                      password.
+                    </>
+                  )}
+                </div>
+                {!status.secrets_encrypted ? (
+                  <div className="mt-1.5 text-[11px] text-amber-400/90">
+                    ⚠ Turning this on is one-way for older versions: an xConsole build
+                    from before this feature can't read an encrypted credential and will
+                    fail every login with “authentication failed”. Turn it back off here
+                    before downgrading.
+                  </div>
+                ) : null}
+              </div>
+              <Toggle
+                checked={status.secrets_encrypted}
+                onChange={(v) =>
+                  void run(async () => {
+                    const n = await api.setSecretEncryption(v);
+                    return v
+                      ? `Encrypted ${n} saved credential${n === 1 ? "" : "s"}.`
+                      : `Decrypted ${n} saved credential${n === 1 ? "" : "s"} — older builds can read them again.`;
+                  }, v ? "Encrypting…" : "Decrypting…")
+                }
+              />
+            </div>
+          </div>
           {status.remembered ? (
             <div className="mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5 text-[11px] text-amber-200">
               This device is remembered, so the decryption key is stored on this PC. That

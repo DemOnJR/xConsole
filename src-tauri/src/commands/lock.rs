@@ -49,13 +49,17 @@ fn work_path(dir: &Path) -> PathBuf {
 }
 
 #[tauri::command]
-pub fn lock_status(app: AppHandle, datakey: State<DataKey>) -> Result<LockStatus, String> {
+pub fn lock_status(
+    app: AppHandle,
+    db: State<Db>,
+    datakey: State<DataKey>,
+) -> Result<LockStatus, String> {
     let dir = data_dir(&app)?;
     Ok(LockStatus {
         enabled: lock::is_lock_enabled(&dir),
         unlocked: datakey.0.lock().unwrap().is_some(),
         remembered: secrets::get_data_key().ok().flatten().is_some(),
-        secrets_encrypted: secrets::wrapping_active(),
+        secrets_encrypted: secrets::encryption_opted_in(&db) && secrets::wrapping_active(),
     })
 }
 
@@ -115,11 +119,13 @@ pub fn setup_lock(
     db.enable_encryption_in_place(&enc, &work, &dir, &data_key)
         .map_err(|e| e.to_string())?;
 
-    // 4b) Turning the lock on also puts every keychain secret behind it: from here on
-    //     SSH passwords, private keys and API tokens are stored encrypted with the data
-    //     key, so reading the OS credential store yields ciphertext instead of
-    //     credentials. Existing plaintext entries are converted in place.
-    secrets::rekey_all(&secrets::all_secret_keys(&db), Some(data_key));
+    // 4b) If the user has separately opted into credential encryption, convert their
+    //     keychain entries now that a data key exists. Enabling the lock does NOT turn
+    //     that on by itself: wrapped secrets are unreadable to older xConsole builds,
+    //     which would fail every login, so it stays a deliberate choice.
+    if secrets::encryption_opted_in(&db) {
+        secrets::rekey_all(&secrets::all_secret_keys(&db), Some(data_key));
+    }
 
     // 5) The encrypted DB is verified and live, so the plaintext rollback copy has done its
     //    job. Delete it now — otherwise a full unencrypted snapshot of all chats/workspaces/
@@ -156,7 +162,9 @@ pub fn unlock_with_password(
     // re-key also catches up anything still stored in the clear — secrets written by a
     // build from before wrapping existed, for instance.
     secrets::set_wrapping_key(Some(key));
-    secrets::rekey_all(&secrets::all_secret_keys(&db), Some(key));
+    if secrets::encryption_opted_in(&db) {
+        secrets::rekey_all(&secrets::all_secret_keys(&db), Some(key));
+    }
     *datakey.0.lock().unwrap() = Some(key);
     Ok(())
 }
@@ -182,6 +190,49 @@ pub fn change_password(
     let new_manifest = lock::build_manifest(&new_password, &key, manifest.generation)?;
     new_password.zeroize();
     lock::write(&dir, &new_manifest).map_err(|e| format!("write manifest: {e}"))
+}
+
+/// Turn credential encryption on or off, converting every stored secret to match.
+///
+/// Separate from the app lock on purpose. The lock protects the database; this protects
+/// the OS credential store, and unlike the lock it is **forward-only for older builds**:
+/// they don't recognise a wrapped value and will send the ciphertext as the password,
+/// failing every login. Making it an explicit, reversible switch means a user can roll
+/// back to an older xConsole without their credentials becoming unreadable — and means
+/// it can never happen as a silent side effect of launching a newer build once.
+#[tauri::command]
+pub fn set_secret_encryption(
+    db: State<Db>,
+    datakey: State<DataKey>,
+    enabled: bool,
+) -> Result<usize, String> {
+    let key = *datakey
+        .0
+        .lock()
+        .unwrap();
+    let Some(key) = key else {
+        return Err(
+            "Unlock xConsole with your master password first — the encryption key isn't loaded."
+                .into(),
+        );
+    };
+
+    // Install the key before converting: reading an already-wrapped secret needs it,
+    // whichever direction we're going.
+    secrets::set_wrapping_key(Some(key));
+    let changed = secrets::rekey_all(
+        &secrets::all_secret_keys(&db),
+        if enabled { Some(key) } else { None },
+    );
+    // Leave the key installed when on (so later writes wrap); clear it when off.
+    secrets::set_wrapping_key(if enabled { Some(key) } else { None });
+
+    db.set_setting(
+        secrets::ENCRYPT_SECRETS_SETTING,
+        if enabled { "true" } else { "false" },
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(changed)
 }
 
 /// Forget the key on this device — next launch will require the master password.
