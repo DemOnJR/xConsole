@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tauri::State;
 use uuid::Uuid;
 
-use crate::db::discover::{self, DbEndpoint};
+use crate::db::discover::{self, DbEndpoint, DbEngine};
 use crate::db::query::{self, DbTarget, ResultSet};
 use crate::ssh::SessionManager;
 
@@ -86,13 +86,29 @@ pub async fn db_connect(
     db_sessions: State<'_, DbSessions>,
     target: DbTarget,
 ) -> Result<DbConnectOutcome, String> {
-    let set = query::run_sql(&sessions, &target, "SELECT VERSION()").await?;
-    let version = set
-        .rows
-        .first()
-        .and_then(|r| r.first().cloned())
-        .flatten()
-        .unwrap_or_else(|| "unknown".to_string());
+    // Probe with something the engine actually understands — `SELECT VERSION()` is a
+    // syntax error to Redis, so connecting would have failed for it with a confusing
+    // message rather than a wrong password one.
+    let probe = if target.engine.is_sql() {
+        "SELECT VERSION()"
+    } else {
+        "INFO server"
+    };
+    let set = query::run_sql(&sessions, &target, probe).await?;
+    let version = if target.engine.is_sql() {
+        set.rows
+            .first()
+            .and_then(|r| r.first().cloned())
+            .flatten()
+            .unwrap_or_else(|| "unknown".to_string())
+    } else {
+        // `INFO server` is `key:value` lines; redis_version is the one worth showing.
+        set.rows
+            .iter()
+            .filter_map(|r| r.first().cloned().flatten())
+            .find_map(|l| l.strip_prefix("redis_version:").map(|v| format!("Redis {v}")))
+            .unwrap_or_else(|| "Redis".to_string())
+    };
 
     let session_id = Uuid::new_v4().to_string();
     db_sessions.map.insert(session_id.clone(), target);
@@ -126,7 +142,26 @@ pub async fn db_list_databases(
     session_id: String,
 ) -> Result<Vec<String>, String> {
     let target = db_sessions.get(&session_id)?;
-    let set = query::run_sql(&sessions, &target, &query::list_databases_sql()).await?;
+
+    // Redis numbers its databases rather than naming them, and only reports the ones
+    // holding keys. `INFO keyspace` lines look like `db0:keys=12,expires=0,avg_ttl=0`.
+    if target.engine == DbEngine::Redis {
+        let set = query::run_sql(&sessions, &target, "INFO keyspace").await?;
+        let mut dbs: Vec<String> = set
+            .rows
+            .into_iter()
+            .filter_map(|r| r.into_iter().next().flatten())
+            .filter_map(|line| line.split(':').next().map(str::to_string))
+            .filter(|name| name.starts_with("db"))
+            .collect();
+        // An empty instance reports nothing; still offer db0 so it can be opened.
+        if dbs.is_empty() {
+            dbs.push("db0".into());
+        }
+        return Ok(dbs);
+    }
+
+    let set = query::run_sql(&sessions, &target, &query::list_databases_sql(target.engine)?).await?;
     Ok(set
         .rows
         .into_iter()
@@ -142,7 +177,35 @@ pub async fn db_list_tables(
     schema: String,
 ) -> Result<Vec<DbTable>, String> {
     let target = db_sessions.get(&session_id)?;
-    let set = query::run_sql(&sessions, &target, &query::list_tables_sql(&schema)).await?;
+
+    // Redis has no tables. Keys are conventionally namespaced with `:` (`session:abc`,
+    // `cache:user:1`), so the first segment is the closest thing to a table and is what
+    // people actually reason about. Grouping by it turns a flat keyspace into a browsable
+    // tree instead of one undifferentiated list of thousands of keys.
+    if target.engine == DbEngine::Redis {
+        let mut scoped = target.clone();
+        scoped.database = Some(schema.clone());
+        // --scan uses SCAN under the hood, so it never blocks the server the way KEYS
+        // would on a large keyspace.
+        let set = query::run_sql(&sessions, &scoped, "--scan").await?;
+        let mut counts: std::collections::BTreeMap<String, u64> = Default::default();
+        for key in set.rows.into_iter().filter_map(|r| r.into_iter().next().flatten()) {
+            let ns = key.split(':').next().unwrap_or(&key).to_string();
+            *counts.entry(ns).or_insert(0) += 1;
+        }
+        return Ok(counts
+            .into_iter()
+            .map(|(name, rows)| DbTable {
+                name,
+                kind: "KEY PREFIX".into(),
+                rows,
+                bytes: 0,
+                engine: "redis".into(),
+            })
+            .collect());
+    }
+
+    let set = query::run_sql(&sessions, &target, &query::list_tables_sql(target.engine, &schema)?).await?;
     Ok(set
         .rows
         .into_iter()
@@ -166,7 +229,39 @@ pub async fn db_describe_table(
     table: String,
 ) -> Result<Vec<DbColumn>, String> {
     let target = db_sessions.get(&session_id)?;
-    let set = query::run_sql(&sessions, &target, &query::describe_table_sql(&schema, &table)).await?;
+
+    // A Redis "table" is a key prefix, so its shape is fixed rather than discovered.
+    if target.engine == DbEngine::Redis {
+        return Ok(vec![
+            DbColumn {
+                name: "key".into(),
+                data_type: "string".into(),
+                nullable: false,
+                // The key identifies the row, which is what lets the grid edit it.
+                primary: true,
+                default: String::new(),
+                extra: String::new(),
+            },
+            DbColumn {
+                name: "type".into(),
+                data_type: "string".into(),
+                nullable: false,
+                primary: false,
+                default: String::new(),
+                extra: String::new(),
+            },
+            DbColumn {
+                name: "ttl".into(),
+                data_type: "seconds (-1 = no expiry)".into(),
+                nullable: false,
+                primary: false,
+                default: String::new(),
+                extra: String::new(),
+            },
+        ]);
+    }
+
+    let set = query::run_sql(&sessions, &target, &query::describe_table_sql(target.engine, &schema, &table)?).await?;
     Ok(set
         .rows
         .into_iter()
@@ -194,7 +289,49 @@ pub async fn db_select_page(
     offset: u64,
 ) -> Result<ResultSet, String> {
     let target = db_sessions.get(&session_id)?;
-    let sql = query::select_page_sql(&schema, &table, limit, offset)?;
+
+    // Redis: list the keys under this prefix with their type and TTL. Done as one
+    // pipeline on the server so a prefix holding thousands of keys costs one round trip
+    // rather than three per key.
+    if target.engine == DbEngine::Redis {
+        let mut scoped = target.clone();
+        scoped.database = Some(schema.clone());
+        let pattern = format!("{table}:*");
+        let keys = query::run_sql(
+            &sessions,
+            &scoped,
+            &format!("--scan --pattern {}", crate::ssh::shell_quote(&pattern)),
+        )
+        .await?;
+
+        let mut rows = Vec::new();
+        for key in keys
+            .rows
+            .into_iter()
+            .filter_map(|r| r.into_iter().next().flatten())
+            .skip(offset as usize)
+            .take(limit.clamp(1, 5000) as usize)
+        {
+            let q = crate::ssh::shell_quote(&key);
+            // TYPE and TTL in one invocation; redis-cli takes several commands when they
+            // are newline-separated on stdin, but two tiny calls keep the parsing obvious.
+            let meta = query::run_sql(&sessions, &scoped, &format!("TYPE {q}")).await?;
+            let ttl = query::run_sql(&sessions, &scoped, &format!("TTL {q}")).await?;
+            let first = |s: query::ResultSet| {
+                s.rows.into_iter().next().and_then(|r| r.into_iter().next().flatten())
+            };
+            rows.push(vec![Some(key), first(meta), first(ttl)]);
+        }
+
+        return Ok(query::ResultSet {
+            columns: vec!["key".into(), "type".into(), "ttl".into()],
+            rows,
+            affected: None,
+            message: None,
+        });
+    }
+
+    let sql = query::select_page_sql(target.engine, &schema, &table, limit, offset)?;
     query::run_sql(&sessions, &target, &sql).await
 }
 
@@ -224,7 +361,7 @@ pub async fn db_update_cell(
     key: Vec<(String, Option<String>)>,
 ) -> Result<ResultSet, String> {
     let target = db_sessions.get(&session_id)?;
-    let sql = query::update_cell_sql(&schema, &table, &column, value.as_deref(), &key)?;
+    let sql = query::update_cell_sql(target.engine, &schema, &table, &column, value.as_deref(), &key)?;
     query::run_sql(&sessions, &target, &sql).await
 }
 
@@ -238,6 +375,6 @@ pub async fn db_delete_row(
     key: Vec<(String, Option<String>)>,
 ) -> Result<ResultSet, String> {
     let target = db_sessions.get(&session_id)?;
-    let sql = query::delete_row_sql(&schema, &table, &key)?;
+    let sql = query::delete_row_sql(target.engine, &schema, &table, &key)?;
     query::run_sql(&sessions, &target, &sql).await
 }

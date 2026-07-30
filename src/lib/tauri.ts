@@ -149,6 +149,34 @@ export interface SftpEntry {
 
 // ----- Database client -----
 
+/** An engine the client can actually drive. */
+export type DbEngine = "mysql" | "postgres" | "redis";
+
+/** Any database product discovery can recognise, browsable or not. */
+export type DbProduct =
+  | "mysql"
+  | "postgres"
+  | "mongodb"
+  | "redis"
+  | "mssql"
+  | "clickhouse"
+  | "cassandra"
+  | "couchdb"
+  | "elasticsearch";
+
+/** Human label for a product, for the tree. */
+export const DB_PRODUCT_LABEL: Record<DbProduct, string> = {
+  mysql: "MySQL / MariaDB",
+  postgres: "PostgreSQL",
+  mongodb: "MongoDB",
+  redis: "Redis / Valkey",
+  mssql: "SQL Server",
+  clickhouse: "ClickHouse",
+  cassandra: "Cassandra",
+  couchdb: "CouchDB",
+  elasticsearch: "Elasticsearch",
+};
+
 /** A database server found on a host (matches the Rust `DbEndpoint`). */
 export interface DbEndpoint {
   id: string;
@@ -158,6 +186,10 @@ export interface DbEndpoint {
   port: number;
   container: string | null;
   image: string | null;
+  /** What was found. */
+  product: DbProduct;
+  /** How to browse it — `null` when the client can't open this product yet. */
+  engine: DbEngine | null;
 }
 
 /** Credentials + location for a connection (matches the Rust `DbTarget`). */
@@ -169,6 +201,7 @@ export interface DbTargetInput {
   user: string;
   password: string;
   database: string | null;
+  engine: DbEngine;
 }
 
 export interface DbConnectOutcome {

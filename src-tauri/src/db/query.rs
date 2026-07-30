@@ -23,6 +23,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::discover::DbEngine;
 use crate::ssh::{shell_quote, SessionManager};
 
 /// Which database to talk to, and as whom.
@@ -36,8 +37,10 @@ pub struct DbTarget {
     pub port: u16,
     pub user: String,
     pub password: String,
-    /// Default schema, when one is selected.
+    /// Default schema/database, when one is selected.
     pub database: Option<String>,
+    /// Which client to drive and which dialect to speak.
+    pub engine: DbEngine,
 }
 
 /// A tabular result. Values are `None` for SQL NULL.
@@ -66,6 +69,80 @@ impl ResultSet {
 /// Everything interpolated is `shell_quote`d. The SQL goes to `-e` as one quoted
 /// argument, so shell metacharacters inside a query are inert.
 fn inner_script(target: &DbTarget, sql: &str) -> String {
+    match target.engine {
+        DbEngine::MySql => mysql_script(target, sql),
+        DbEngine::Postgres => psql_script(target, sql),
+        DbEngine::Redis => redis_script(target, sql),
+    }
+}
+
+/// Run a Redis command with `redis-cli`.
+///
+/// Redis has no SQL, so the `sql` argument here is a raw Redis command line (`SCAN 0
+/// MATCH x:*`, `TYPE key`, …). It is passed as ONE shell argument and split by redis-cli
+/// itself, so a key containing a space or a shell metacharacter stays inert.
+///
+/// The password goes in `REDISCLI_AUTH` rather than `-a`. `-a` puts it in the remote
+/// process list where any user on that box can read it; the env var is visible only via
+/// `/proc/<pid>/environ`, which is owner-readable. Redis has no equivalent of `.pgpass` or
+/// a `[client]` section, so this is the best the CLI offers — weaker than the file-based
+/// handling the SQL engines get, and worth knowing.
+fn redis_script(target: &DbTarget, command: &str) -> String {
+    // `database` carries the numeric Redis DB index (db0, db1, …) from the tree.
+    let db = target
+        .database
+        .as_deref()
+        .and_then(|d| d.trim_start_matches("db").parse::<u8>().ok())
+        .unwrap_or(0);
+
+    format!(
+        "REDISCLI_AUTH={} redis-cli --no-auth-warning -h {} -p {} -n {} {}",
+        shell_quote(&target.password),
+        shell_quote(&target.host),
+        target.port,
+        db,
+        command,
+    )
+}
+
+/// `psql` equivalent of [`mysql_script`].
+///
+/// Same password discipline — a `0600` temp file rather than an argument or an env var,
+/// here a `PGPASSFILE` line rather than a `[client]` section.
+///
+/// Output is `--csv`, not the tab-separated form used for MySQL. psql's unaligned mode
+/// does not escape a tab or newline inside a value, so a single multi-line column would
+/// silently shift every following field into the wrong column. CSV quotes them properly.
+fn psql_script(target: &DbTarget, sql: &str) -> String {
+    let db = target
+        .database
+        .as_deref()
+        .filter(|d| !d.is_empty())
+        .unwrap_or("postgres");
+
+    // host:port:database:user:password — `*` for database so the same file works
+    // whichever database the statement touches.
+    let pgpass = format!(
+        "{}:{}:*:{}:{}",
+        target.host, target.port, target.user, target.password
+    );
+
+    format!(
+        "umask 077; f=$(mktemp) || exit 1; \
+         printf '%s\\n' {} > \"$f\"; \
+         PGPASSFILE=\"$f\" psql --csv --no-psqlrc -v ON_ERROR_STOP=1 \
+           -h {} -p {} -U {} -d {} -c {}; \
+         rc=$?; rm -f \"$f\"; exit $rc",
+        shell_quote(&pgpass),
+        shell_quote(&target.host),
+        target.port,
+        shell_quote(&target.user),
+        shell_quote(db),
+        shell_quote(sql),
+    )
+}
+
+fn mysql_script(target: &DbTarget, sql: &str) -> String {
     let mut args = format!(
         "--protocol=TCP -h {} -P {} -u {}",
         shell_quote(&target.host),
@@ -125,7 +202,11 @@ pub async fn run_sql(
         });
     }
 
-    let mut set = parse_batch(&out.stdout);
+    let mut set = match target.engine {
+        DbEngine::MySql => parse_batch(&out.stdout),
+        DbEngine::Postgres => parse_csv(&out.stdout),
+        DbEngine::Redis => parse_lines(&out.stdout, "value"),
+    };
     // A warning on stderr with a zero exit is worth surfacing, not swallowing.
     let warn = out.stderr.trim();
     if !warn.is_empty() {
@@ -183,6 +264,98 @@ pub fn parse_batch(stdout: &str) -> ResultSet {
     ResultSet { columns, rows, affected: None, message: None }
 }
 
+/// Parse `psql --csv` output: a header row, then one row per record.
+///
+/// RFC 4180 rules, which is what psql emits: fields separated by commas, a field
+/// containing a comma/quote/newline is wrapped in double quotes, and a literal quote
+/// inside is doubled. A newline *inside* quotes is part of the value, not a row break —
+/// which is exactly why CSV is used here instead of psql's unaligned mode.
+///
+/// psql prints SQL NULL as an empty unquoted field and an empty string as `""`, so the two
+/// are distinguishable — better than the MySQL batch format, where both look like `NULL`.
+pub fn parse_csv(stdout: &str) -> ResultSet {
+    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+    let mut field = String::new();
+    let mut record: Vec<Option<String>> = Vec::new();
+    let mut quoted = false;
+    // Distinguishes a bare empty field (NULL) from an explicit `""` (empty string).
+    let mut was_quoted = false;
+    let mut chars = stdout.chars().peekable();
+
+    let push_field = |record: &mut Vec<Option<String>>, field: &mut String, was_quoted: &mut bool| {
+        record.push(if *was_quoted || !field.is_empty() {
+            Some(std::mem::take(field))
+        } else {
+            field.clear();
+            None
+        });
+        *was_quoted = false;
+    };
+
+    while let Some(c) = chars.next() {
+        if quoted {
+            if c == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    quoted = false;
+                }
+            } else {
+                field.push(c);
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                quoted = true;
+                was_quoted = true;
+            }
+            ',' => push_field(&mut record, &mut field, &mut was_quoted),
+            '\r' => {}
+            '\n' => {
+                push_field(&mut record, &mut field, &mut was_quoted);
+                rows.push(std::mem::take(&mut record));
+            }
+            _ => field.push(c),
+        }
+    }
+    // A final row with no trailing newline.
+    if !field.is_empty() || was_quoted || !record.is_empty() {
+        push_field(&mut record, &mut field, &mut was_quoted);
+        rows.push(record);
+    }
+
+    let mut rows = rows.into_iter().filter(|r| !r.is_empty());
+    let Some(header) = rows.next() else {
+        return ResultSet::empty();
+    };
+    let columns: Vec<String> = header.into_iter().map(|c| c.unwrap_or_default()).collect();
+    let rows: Vec<Vec<Option<String>>> = rows.filter(|r| r.len() == columns.len()).collect();
+
+    ResultSet { columns, rows, affected: None, message: None }
+}
+
+/// Parse plain line-per-record output (redis-cli) into a one-column result.
+///
+/// redis-cli emits one value per line with no header and no quoting, so there is nothing
+/// to unescape — but equally nothing to disambiguate an empty value from a blank line,
+/// hence blank lines are dropped rather than becoming empty rows.
+pub fn parse_lines(stdout: &str, column: &str) -> ResultSet {
+    let rows: Vec<Vec<Option<String>>> = stdout
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .map(|l| vec![Some(l.to_string())])
+        .collect();
+    ResultSet {
+        columns: vec![column.to_string()],
+        rows,
+        affected: None,
+        message: None,
+    }
+}
+
 /// Reverse batch-mode escaping. Returns `None` for the NULL token.
 fn unescape(field: &str) -> Option<String> {
     if field == "NULL" {
@@ -222,33 +395,42 @@ fn unescape(field: &str) -> Option<String> {
 // tested, because getting them wrong is a SQL-injection hole into the user's own data.
 // ---------------------------------------------------------------------------
 
-/// Quote an identifier (schema, table, column) with backticks.
+/// Quote an identifier (schema, table, column) for `engine`.
 ///
-/// MySQL escapes a literal backtick by doubling it. Anything containing a NUL is
-/// rejected outright — it cannot appear in a valid identifier and is a sign of a crafted
-/// name.
-pub fn quote_ident(name: &str) -> Result<String, String> {
+/// MySQL uses backticks and doubles a literal backtick; Postgres uses double quotes and
+/// doubles a literal double quote. Anything containing a NUL is rejected outright — it
+/// cannot appear in a valid identifier and is a sign of a crafted name.
+pub fn quote_ident_for(engine: DbEngine, name: &str) -> Result<String, String> {
     if name.contains('\0') {
         return Err("invalid identifier".into());
     }
-    Ok(format!("`{}`", name.replace('`', "``")))
+    Ok(match engine {
+        DbEngine::MySql => format!("`{}`", name.replace('`', "``")),
+        DbEngine::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
+        DbEngine::Redis => return Err(not_sql(engine)),
+    })
 }
 
 /// Quote a value as a SQL string literal, or `NULL`.
-pub fn quote_value(value: Option<&str>) -> String {
+///
+/// Backslash is doubled because MySQL treats it as an escape inside string literals
+/// unless `NO_BACKSLASH_ESCAPES` is set, and the server's mode isn't knowable from here.
+/// Postgres treats backslash literally in standard strings, so doubling it there would
+/// corrupt the value — hence the engine parameter.
+pub fn quote_value_for(engine: DbEngine, value: Option<&str>) -> String {
     let Some(v) = value else {
         return "NULL".to_string();
     };
     let mut out = String::with_capacity(v.len() + 2);
     out.push('\'');
     for c in v.chars() {
-        match c {
-            '\'' => out.push_str("''"),
-            // Escape the escape character too: MySQL treats backslash as an escape
-            // inside string literals unless NO_BACKSLASH_ESCAPES is set, and we cannot
-            // assume the server's mode.
-            '\\' => out.push_str("\\\\"),
-            '\0' => out.push_str("\\0"),
+        match (c, engine) {
+            ('\'', _) => out.push_str("''"),
+            ('\\', DbEngine::MySql) => out.push_str("\\\\"),
+            ('\0', DbEngine::MySql) => out.push_str("\\0"),
+            // A NUL cannot be stored in a Postgres text value at all; dropping it beats
+            // emitting a literal that the server will reject halfway through a statement.
+            ('\0', DbEngine::Postgres) => {}
             _ => out.push(c),
         }
     }
@@ -256,38 +438,97 @@ pub fn quote_value(value: Option<&str>) -> String {
     out
 }
 
-/// `SHOW DATABASES`, minus the server's own internal schemas.
-pub fn list_databases_sql() -> String {
-    "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA \
-     WHERE SCHEMA_NAME NOT IN ('information_schema','performance_schema','mysql','sys') \
-     ORDER BY SCHEMA_NAME"
-        .to_string()
+/// Error for asking a non-SQL engine for SQL.
+fn not_sql(engine: DbEngine) -> String {
+    format!("{} does not speak SQL — use the Redis command path instead", engine.label())
+}
+
+/// The databases/schemas a user can browse, minus the server's own internals.
+///
+/// The two engines mean different things by "database". MySQL's schemas are the things a
+/// user picks between, so `information_schema.SCHEMATA` is right. In Postgres a
+/// *connection* is bound to one database and schemas live inside it, so listing schemas of
+/// the connected database is what maps onto the same tree level.
+pub fn list_databases_sql(engine: DbEngine) -> Result<String, String> {
+    Ok(match engine {
+        DbEngine::MySql => "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA \
+             WHERE SCHEMA_NAME NOT IN ('information_schema','performance_schema','mysql','sys') \
+             ORDER BY SCHEMA_NAME"
+            .to_string(),
+        DbEngine::Postgres => "SELECT nspname FROM pg_catalog.pg_namespace \
+             WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema' \
+             ORDER BY nspname"
+            .to_string(),
+        DbEngine::Redis => return Err(not_sql(engine)),
+    })
 }
 
 /// Tables in a schema, with row estimates and size.
-pub fn list_tables_sql(schema: &str) -> String {
-    format!(
-        "SELECT TABLE_NAME, TABLE_TYPE, IFNULL(TABLE_ROWS,0), \
-         IFNULL(DATA_LENGTH,0)+IFNULL(INDEX_LENGTH,0), IFNULL(ENGINE,'') \
-         FROM information_schema.TABLES WHERE TABLE_SCHEMA = {} ORDER BY TABLE_NAME",
-        quote_value(Some(schema))
-    )
+pub fn list_tables_sql(engine: DbEngine, schema: &str) -> Result<String, String> {
+    Ok(match engine {
+        DbEngine::MySql => format!(
+            "SELECT TABLE_NAME, TABLE_TYPE, IFNULL(TABLE_ROWS,0), \
+             IFNULL(DATA_LENGTH,0)+IFNULL(INDEX_LENGTH,0), IFNULL(ENGINE,'') \
+             FROM information_schema.TABLES WHERE TABLE_SCHEMA = {} ORDER BY TABLE_NAME",
+            quote_value_for(engine, Some(schema))
+        ),
+        // reltuples is the planner's estimate, matching MySQL's TABLE_ROWS (also an
+        // estimate) rather than paying for a count(*) on every table in the tree.
+        DbEngine::Postgres => format!(
+            "SELECT c.relname, \
+                CASE c.relkind WHEN 'r' THEN 'BASE TABLE' WHEN 'v' THEN 'VIEW' \
+                     WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'p' THEN 'PARTITIONED TABLE' \
+                     ELSE c.relkind::text END, \
+                GREATEST(c.reltuples, 0)::bigint, \
+                pg_total_relation_size(c.oid), \
+                'postgres' \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = {} AND c.relkind IN ('r','v','m','p') \
+             ORDER BY c.relname",
+            quote_value_for(engine, Some(schema))
+        ),
+        DbEngine::Redis => return Err(not_sql(engine)),
+    })
 }
 
 /// Column definitions for a table, including which columns form the primary key.
-pub fn describe_table_sql(schema: &str, table: &str) -> String {
-    format!(
-        "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, \
-         IFNULL(COLUMN_DEFAULT,''), EXTRA \
-         FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
-         ORDER BY ORDINAL_POSITION",
-        quote_value(Some(schema)),
-        quote_value(Some(table))
-    )
+pub fn describe_table_sql(engine: DbEngine, schema: &str, table: &str) -> Result<String, String> {
+    Ok(match engine {
+        DbEngine::MySql => format!(
+            "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, \
+             IFNULL(COLUMN_DEFAULT,''), EXTRA \
+             FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
+             ORDER BY ORDINAL_POSITION",
+            quote_value_for(engine, Some(schema)),
+            quote_value_for(engine, Some(table))
+        ),
+        // COLUMN_KEY has no Postgres equivalent, so the primary key is derived from
+        // pg_index and reported as 'PRI' to keep one shape for the UI.
+        DbEngine::Postgres => format!(
+            "SELECT c.column_name, c.data_type, c.is_nullable, \
+                CASE WHEN pk.attname IS NOT NULL THEN 'PRI' ELSE '' END, \
+                COALESCE(c.column_default,''), '' \
+             FROM information_schema.columns c \
+             LEFT JOIN ( \
+               SELECT a.attname FROM pg_index i \
+               JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
+               WHERE i.indrelid = ({}||'.'||{})::regclass AND i.indisprimary \
+             ) pk ON pk.attname = c.column_name \
+             WHERE c.table_schema = {} AND c.table_name = {} \
+             ORDER BY c.ordinal_position",
+            quote_value_for(engine, Some(&quote_ident_for(engine, schema).unwrap_or_default())),
+            quote_value_for(engine, Some(&quote_ident_for(engine, table).unwrap_or_default())),
+            quote_value_for(engine, Some(schema)),
+            quote_value_for(engine, Some(table))
+        ),
+        DbEngine::Redis => return Err(not_sql(engine)),
+    })
 }
 
 /// A page of rows from a table.
 pub fn select_page_sql(
+    engine: DbEngine,
     schema: &str,
     table: &str,
     limit: u32,
@@ -296,11 +537,41 @@ pub fn select_page_sql(
     // limit/offset are numbers, never interpolated text, so they can't carry SQL.
     Ok(format!(
         "SELECT * FROM {}.{} LIMIT {} OFFSET {}",
-        quote_ident(schema)?,
-        quote_ident(table)?,
+        quote_ident_for(engine, schema)?,
+        quote_ident_for(engine, table)?,
         limit.clamp(1, 5000),
         offset
     ))
+}
+
+/// Build the `WHERE` clause identifying exactly one row by primary key.
+fn key_predicate(
+    engine: DbEngine,
+    key: &[(String, Option<String>)],
+) -> Result<String, String> {
+    let mut parts = Vec::with_capacity(key.len());
+    for (col, val) in key {
+        parts.push(match val {
+            // `= NULL` is never true; a NULL key part has to use IS NULL.
+            None => format!("{} IS NULL", quote_ident_for(engine, col)?),
+            Some(v) => format!(
+                "{} = {}",
+                quote_ident_for(engine, col)?,
+                quote_value_for(engine, Some(v))
+            ),
+        });
+    }
+    Ok(parts.join(" AND "))
+}
+
+/// MySQL accepts `LIMIT 1` on UPDATE/DELETE as a second guard; Postgres rejects it as a
+/// syntax error. The primary-key predicate already restricts the statement to one row, so
+/// the clause is simply omitted there rather than emulated with a `ctid` subquery.
+fn row_limit(engine: DbEngine) -> &'static str {
+    match engine {
+        DbEngine::MySql => " LIMIT 1",
+        DbEngine::Postgres | DbEngine::Redis => "",
+    }
 }
 
 /// Update one column of one row, identified by its primary-key values.
@@ -308,6 +579,7 @@ pub fn select_page_sql(
 /// Requires a non-empty key so an edit can never become an unqualified `UPDATE` that
 /// rewrites the whole table.
 pub fn update_cell_sql(
+    engine: DbEngine,
     schema: &str,
     table: &str,
     column: &str,
@@ -320,26 +592,20 @@ pub fn update_cell_sql(
                 .into(),
         );
     }
-    let mut where_parts = Vec::with_capacity(key.len());
-    for (col, val) in key {
-        where_parts.push(match val {
-            // `= NULL` is never true; a NULL key part has to use IS NULL.
-            None => format!("{} IS NULL", quote_ident(col)?),
-            Some(v) => format!("{} = {}", quote_ident(col)?, quote_value(Some(v))),
-        });
-    }
     Ok(format!(
-        "UPDATE {}.{} SET {} = {} WHERE {} LIMIT 1",
-        quote_ident(schema)?,
-        quote_ident(table)?,
-        quote_ident(column)?,
-        quote_value(value),
-        where_parts.join(" AND ")
+        "UPDATE {}.{} SET {} = {} WHERE {}{}",
+        quote_ident_for(engine, schema)?,
+        quote_ident_for(engine, table)?,
+        quote_ident_for(engine, column)?,
+        quote_value_for(engine, value),
+        key_predicate(engine, key)?,
+        row_limit(engine)
     ))
 }
 
 /// Delete one row by primary key.
 pub fn delete_row_sql(
+    engine: DbEngine,
     schema: &str,
     table: &str,
     key: &[(String, Option<String>)],
@@ -347,18 +613,12 @@ pub fn delete_row_sql(
     if key.is_empty() {
         return Err("this table has no primary key, so a single row can't be deleted safely".into());
     }
-    let mut where_parts = Vec::with_capacity(key.len());
-    for (col, val) in key {
-        where_parts.push(match val {
-            None => format!("{} IS NULL", quote_ident(col)?),
-            Some(v) => format!("{} = {}", quote_ident(col)?, quote_value(Some(v))),
-        });
-    }
     Ok(format!(
-        "DELETE FROM {}.{} WHERE {} LIMIT 1",
-        quote_ident(schema)?,
-        quote_ident(table)?,
-        where_parts.join(" AND ")
+        "DELETE FROM {}.{} WHERE {}{}",
+        quote_ident_for(engine, schema)?,
+        quote_ident_for(engine, table)?,
+        key_predicate(engine, key)?,
+        row_limit(engine)
     ))
 }
 
@@ -375,7 +635,29 @@ mod tests {
             user: "root".into(),
             password: "pw".into(),
             database: None,
+            engine: DbEngine::MySql,
         }
+    }
+
+    fn pg_target() -> DbTarget {
+        DbTarget {
+            vps_id: "v1".into(),
+            container: None,
+            host: "127.0.0.1".into(),
+            port: 5432,
+            user: "postgres".into(),
+            password: "pw".into(),
+            database: Some("studio".into()),
+            engine: DbEngine::Postgres,
+        }
+    }
+
+    // Shorthands so the MySQL tests below read as they did before the engine parameter.
+    fn quote_ident(name: &str) -> Result<String, String> {
+        quote_ident_for(DbEngine::MySql, name)
+    }
+    fn quote_value(value: Option<&str>) -> String {
+        quote_value_for(DbEngine::MySql, value)
     }
 
     #[test]
@@ -421,6 +703,93 @@ mod tests {
         t.container = Some("db; rm -rf /".into());
         let cmd = build_command(&t, "SELECT 1");
         assert!(cmd.starts_with("docker exec -i 'db; rm -rf /'"), "{cmd}");
+    }
+
+    #[test]
+    fn postgres_uses_psql_and_keeps_the_password_off_the_command_line() {
+        let script = inner_script(&pg_target(), "SELECT 1");
+        assert!(script.contains("psql --csv"), "{script}");
+        assert!(script.contains("PGPASSFILE="), "{script}");
+        assert!(!script.contains("PGPASSWORD"), "env var would show in /proc: {script}");
+        assert!(script.contains("umask 077"), "{script}");
+        assert!(script.contains("rm -f"), "{script}");
+        // The pgpass line, and the selected database.
+        assert!(script.contains("'127.0.0.1:5432:*:postgres:pw'"), "{script}");
+        assert!(script.contains("-d 'studio'"), "{script}");
+    }
+
+    #[test]
+    fn postgres_identifiers_and_literals_use_the_right_quoting() {
+        // Double quotes for identifiers, doubled to escape.
+        assert_eq!(quote_ident_for(DbEngine::Postgres, "users").unwrap(), "\"users\"");
+        assert_eq!(quote_ident_for(DbEngine::Postgres, "we\"ird").unwrap(), "\"we\"\"ird\"");
+        // Backslash is NOT doubled: Postgres standard strings take it literally, so
+        // doubling would corrupt the value.
+        assert_eq!(quote_value_for(DbEngine::Postgres, Some(r"a\b")), r"'a\b'");
+        assert_eq!(quote_value_for(DbEngine::MySql, Some(r"a\b")), r"'a\\b'");
+        assert_eq!(quote_value_for(DbEngine::Postgres, Some("O'Brien")), "'O''Brien'");
+    }
+
+    #[test]
+    fn postgres_edits_omit_the_limit_clause() {
+        // `UPDATE ... LIMIT 1` is a syntax error in Postgres; the primary-key predicate
+        // already restricts it to one row.
+        let sql = update_cell_sql(
+            DbEngine::Postgres,
+            "public",
+            "orders",
+            "status",
+            Some("paid"),
+            &[("id".into(), Some("42".into()))],
+        )
+        .unwrap();
+        assert_eq!(
+            sql,
+            "UPDATE \"public\".\"orders\" SET \"status\" = 'paid' WHERE \"id\" = '42'"
+        );
+        assert!(!sql.contains("LIMIT"), "{sql}");
+        // MySQL keeps it as a second guard.
+        let my = update_cell_sql(
+            DbEngine::MySql,
+            "shop",
+            "orders",
+            "status",
+            Some("paid"),
+            &[("id".into(), Some("42".into()))],
+        )
+        .unwrap();
+        assert!(my.ends_with(" LIMIT 1"), "{my}");
+    }
+
+    #[test]
+    fn parses_psql_csv_output() {
+        let out = "id,name,note\n1,Ada,\"line1\nline2\"\n2,Grace,\n3,\"say \"\"hi\"\"\",\"\"\n";
+        let set = parse_csv(out);
+        assert_eq!(set.columns, vec!["id", "name", "note"]);
+        assert_eq!(set.rows.len(), 3, "{:?}", set.rows);
+        // A newline inside quotes is part of the value, not a row break.
+        assert_eq!(set.rows[0][2].as_deref(), Some("line1\nline2"));
+        // Bare empty field is NULL; `""` is an empty string. psql distinguishes them,
+        // unlike the MySQL batch format.
+        assert_eq!(set.rows[1][2], None);
+        assert_eq!(set.rows[2][2].as_deref(), Some(""));
+        // Doubled quotes unescape to one.
+        assert_eq!(set.rows[2][1].as_deref(), Some(r#"say "hi""#));
+    }
+
+    #[test]
+    fn csv_edge_cases() {
+        assert_eq!(parse_csv(""), ResultSet::empty());
+        let header_only = parse_csv("a,b\n");
+        assert_eq!(header_only.columns.len(), 2);
+        assert!(header_only.rows.is_empty());
+        // A value containing a comma must stay one field.
+        let set = parse_csv("a,b\n\"x,y\",z\n");
+        assert_eq!(set.rows[0][0].as_deref(), Some("x,y"));
+        // No trailing newline on the last row.
+        let set = parse_csv("a\n1");
+        assert_eq!(set.rows.len(), 1);
+        assert_eq!(set.rows[0][0].as_deref(), Some("1"));
     }
 
     #[test]
@@ -486,14 +855,15 @@ mod tests {
 
     #[test]
     fn an_edit_without_a_key_is_refused() {
-        let err = update_cell_sql("s", "t", "c", Some("v"), &[]).unwrap_err();
+        let err = update_cell_sql(DbEngine::MySql, "s", "t", "c", Some("v"), &[]).unwrap_err();
         assert!(err.contains("primary key"), "{err}");
-        assert!(delete_row_sql("s", "t", &[]).is_err());
+        assert!(delete_row_sql(DbEngine::MySql, "s", "t", &[]).is_err());
     }
 
     #[test]
     fn an_edit_is_qualified_and_limited() {
         let sql = update_cell_sql(
+            DbEngine::MySql,
             "shop",
             "orders",
             "status",
@@ -509,15 +879,15 @@ mod tests {
 
     #[test]
     fn a_null_key_part_uses_is_null() {
-        let sql = delete_row_sql("s", "t", &[("a".into(), None), ("b".into(), Some("1".into()))])
+        let sql = delete_row_sql(DbEngine::MySql, "s", "t", &[("a".into(), None), ("b".into(), Some("1".into()))])
             .unwrap();
         assert!(sql.contains("`a` IS NULL AND `b` = '1'"), "{sql}");
     }
 
     #[test]
     fn page_size_is_clamped() {
-        assert!(select_page_sql("s", "t", 0, 0).unwrap().contains("LIMIT 1 "));
-        assert!(select_page_sql("s", "t", 99_999, 0).unwrap().contains("LIMIT 5000 "));
+        assert!(select_page_sql(DbEngine::MySql, "s", "t", 0, 0).unwrap().contains("LIMIT 1 "));
+        assert!(select_page_sql(DbEngine::MySql, "s", "t", 99_999, 0).unwrap().contains("LIMIT 5000 "));
     }
 
     #[test]

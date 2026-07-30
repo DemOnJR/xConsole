@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, type DbEndpoint, type DbTable } from "../lib/tauri";
+import { api, DB_PRODUCT_LABEL, type DbEndpoint, type DbTable } from "../lib/tauri";
 import { DatabaseIcon } from "./icons";
 
 /**
@@ -64,7 +64,7 @@ function SignIn({
   onConnected: (sessionId: string, version: string, schemas: string[]) => void;
   onError: (message: string) => void;
 }) {
-  const [user, setUser] = useState("root");
+  const [user, setUser] = useState(instance.endpoint.engine === "redis" ? "default" : "root");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -74,6 +74,7 @@ function SignIn({
     setBusy(true);
     try {
       const { endpoint } = instance;
+      if (!endpoint.engine) return; // guarded by the caller; keeps the type honest
       const res = await api.dbConnect({
         vps_id: vpsId,
         container: endpoint.container,
@@ -82,6 +83,7 @@ function SignIn({
         user,
         password,
         database: null,
+        engine: endpoint.engine,
       });
       // Drop it from component state immediately — the backend holds it for the session.
       setPassword("");
@@ -123,9 +125,13 @@ function SignIn({
 }
 
 /**
- * The whole server's databases in one tree: every MySQL/MariaDB instance found on the
- * host — native installs and Docker containers alike, named — and under each, its
- * schemas and tables.
+ * The whole server's databases in one tree: every database instance found on the host —
+ * native installs and Docker containers alike, named and labelled with what they are —
+ * and under each, its schemas/databases and tables.
+ *
+ * Products the client can't drive yet are still listed, marked as such. Dropping them
+ * would recreate the original bug, where a running Postgres container simply didn't
+ * appear and there was no way to tell whether it had been missed or wasn't there.
  */
 export function DatabaseTree({
   instances,
@@ -195,8 +201,8 @@ export function DatabaseTree({
 
         {!scanning && instances.length === 0 ? (
           <p className="px-2 py-2 text-[11px] text-gray-500">
-            No MySQL or MariaDB found — neither installed on the host nor in a running
-            container.
+            No databases found — nothing listening on a known port, and no matching
+            container running.
           </p>
         ) : null}
 
@@ -219,6 +225,9 @@ export function DatabaseTree({
                 <span className="truncate">
                   {docker && ep.container ? ep.container : "host"}
                 </span>
+                <span className="shrink-0 rounded bg-[var(--border)] px-1 text-[9px] text-gray-400">
+                  {DB_PRODUCT_LABEL[ep.product] ?? ep.product}
+                </span>
                 <span className="ml-auto shrink-0 font-mono text-[10px] text-gray-600">
                   :{ep.port}
                 </span>
@@ -233,7 +242,15 @@ export function DatabaseTree({
                     <p className="px-2 py-0.5 pl-5 text-[10px] text-red-400">{inst.error}</p>
                   ) : null}
 
-                  {!inst.sessionId ? (
+                  {!ep.engine ? (
+                    // Discovered but not yet openable. Saying so beats a sign-in form
+                    // that would fail, and beats hiding the instance entirely — knowing
+                    // it is there is most of the value.
+                    <p className="px-2 py-1 pl-5 text-[10px] text-gray-500">
+                      Found, but browsing {DB_PRODUCT_LABEL[ep.product] ?? ep.product} isn't
+                      supported yet. Use a terminal on this server to reach it.
+                    </p>
+                  ) : !inst.sessionId ? (
                     <SignIn
                       instance={inst}
                       vpsId={vpsId}

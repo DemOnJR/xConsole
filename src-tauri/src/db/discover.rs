@@ -15,12 +15,130 @@
 //! Everything is parsed into typed records rather than fed to a model as text, so the UI
 //! can list candidates and the user just picks one.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ssh::SessionManager;
 
-/// Ports worth treating as "probably a database" when scanning listeners.
-const MYSQL_PORTS: &[u16] = &[3306, 3307, 3308, 33060];
+/// Which server we're talking to. Decides the client binary, the output format, and the
+/// identifier quoting — see [`super::query`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DbEngine {
+    MySql,
+    Postgres,
+    Redis,
+}
+
+impl DbEngine {
+    pub fn label(self) -> &'static str {
+        match self {
+            DbEngine::MySql => "MySQL / MariaDB",
+            DbEngine::Postgres => "PostgreSQL",
+            DbEngine::Redis => "Redis / Valkey",
+        }
+    }
+
+    /// Whether this engine speaks SQL. Redis does not, so the SQL-shaped helpers
+    /// (identifier quoting, `information_schema` queries) don't apply to it.
+    pub fn is_sql(self) -> bool {
+        !matches!(self, DbEngine::Redis)
+    }
+}
+
+/// A database product we can recognise, whether or not we can browse it yet.
+///
+/// Kept separate from [`DbEngine`]: this is "what did we find", while `DbEngine` is "what
+/// can the client actually drive". Recognising a product without pretending to support it
+/// is the point — a Redis instance should appear in the list with an honest label rather
+/// than being silently dropped, which is what happened to Postgres before this existed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DbProduct {
+    MySql,
+    Postgres,
+    MongoDb,
+    Redis,
+    MsSql,
+    ClickHouse,
+    Cassandra,
+    CouchDb,
+    Elasticsearch,
+}
+
+impl DbProduct {
+    pub fn label(self) -> &'static str {
+        match self {
+            DbProduct::MySql => "MySQL / MariaDB",
+            DbProduct::Postgres => "PostgreSQL",
+            DbProduct::MongoDb => "MongoDB",
+            DbProduct::Redis => "Redis / Valkey",
+            DbProduct::MsSql => "SQL Server",
+            DbProduct::ClickHouse => "ClickHouse",
+            DbProduct::Cassandra => "Cassandra",
+            DbProduct::CouchDb => "CouchDB",
+            DbProduct::Elasticsearch => "Elasticsearch",
+        }
+    }
+
+    /// The engine that can browse this, if any. `None` means "found and listed, but the
+    /// client can't open it yet" — the UI says so rather than offering a dead sign-in.
+    pub fn engine(self) -> Option<DbEngine> {
+        match self {
+            DbProduct::MySql => Some(DbEngine::MySql),
+            DbProduct::Postgres => Some(DbEngine::Postgres),
+            DbProduct::Redis => Some(DbEngine::Redis),
+            _ => None,
+        }
+    }
+}
+
+/// Ports that usually mean a database, and which product each implies.
+///
+/// Port alone is a hint, not proof — a container's image name is the better signal and is
+/// preferred when available. Neighbouring ports are included because running a second
+/// instance one port up is common.
+const DB_PORTS: &[(u16, DbProduct)] = &[
+    (3306, DbProduct::MySql),
+    (3307, DbProduct::MySql),
+    (3308, DbProduct::MySql),
+    (33060, DbProduct::MySql),
+    (5432, DbProduct::Postgres),
+    (5433, DbProduct::Postgres),
+    (27017, DbProduct::MongoDb),
+    (27018, DbProduct::MongoDb),
+    (6379, DbProduct::Redis),
+    (6380, DbProduct::Redis),
+    (1433, DbProduct::MsSql),
+    (8123, DbProduct::ClickHouse),
+    (9000, DbProduct::ClickHouse),
+    (9042, DbProduct::Cassandra),
+    (5984, DbProduct::CouchDb),
+    (9200, DbProduct::Elasticsearch),
+];
+
+/// Image-name fragments, most specific first. Order matters: `timescale/timescaledb`
+/// must be seen as Postgres before any looser match.
+const IMAGE_HINTS: &[(&str, DbProduct)] = &[
+    ("mariadb", DbProduct::MySql),
+    ("percona", DbProduct::MySql),
+    ("mysql", DbProduct::MySql),
+    ("pgvector", DbProduct::Postgres),
+    ("timescale", DbProduct::Postgres),
+    ("citus", DbProduct::Postgres),
+    ("postgis", DbProduct::Postgres),
+    ("postgres", DbProduct::Postgres),
+    ("mongo", DbProduct::MongoDb),
+    ("valkey", DbProduct::Redis),
+    ("redis", DbProduct::Redis),
+    ("mssql", DbProduct::MsSql),
+    ("sqlserver", DbProduct::MsSql),
+    ("clickhouse", DbProduct::ClickHouse),
+    ("cassandra", DbProduct::Cassandra),
+    ("scylla", DbProduct::Cassandra),
+    ("couchdb", DbProduct::CouchDb),
+    ("elasticsearch", DbProduct::Elasticsearch),
+    ("opensearch", DbProduct::Elasticsearch),
+];
 
 /// Where a discovered database lives, and how to reach it.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -36,8 +154,12 @@ pub struct DbEndpoint {
     pub port: u16,
     /// Container name, when it came from Docker.
     pub container: Option<String>,
-    /// Container image, when known — a good hint at MySQL vs MariaDB.
+    /// Container image, when known — the most reliable engine hint.
     pub image: Option<String>,
+    /// What was found.
+    pub product: DbProduct,
+    /// How to browse it, or `None` when the client can't open this product yet.
+    pub engine: Option<DbEngine>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -112,19 +234,28 @@ fn parse(stdout: &str) -> Vec<DbEndpoint> {
     // and the container record is the more informative of the two.
     let mut published: Vec<u16> = Vec::new();
     for c in parse_docker(&docker) {
-        let is_db = looks_like_db(&c.image) || c.published.iter().any(|p| is_db_port(*p));
-        if !is_db {
+        // Image first — `postgres:16-alpine` is unambiguous, whereas a host port can be
+        // remapped to anything. Fall back to the port when the image is unfamiliar.
+        let product = product_for_image(&c.image).or_else(|| {
+            c.published
+                .iter()
+                .chain(c.container_port.iter())
+                .find_map(|p| product_for_port(*p))
+        });
+        let Some(product) = product else {
             continue;
-        }
+        };
         // Prefer a published host port (no bridge routing needed); fall back to the
-        // container's own address on the Docker network.
-        let (host, port) = match c.published.iter().copied().find(|p| is_db_port(*p)) {
+        // container's own address on the Docker network. Take the first published port
+        // regardless of whether it looks like a database port — the image already told us
+        // what this is, and a remapped host port (say 15432->5432) is normal.
+        let (host, port) = match c.published.first().copied() {
             Some(p) => {
                 published.push(p);
                 ("127.0.0.1".to_string(), p)
             }
             None => match ips.iter().find(|(name, _)| *name == c.name) {
-                Some((_, ip)) => (ip.clone(), c.container_port.unwrap_or(3306)),
+                Some((_, ip)) => (ip.clone(), c.container_port.unwrap_or(default_port(product))),
                 // No published port and no address we can see — not reachable.
                 None => continue,
             },
@@ -137,6 +268,8 @@ fn parse(stdout: &str) -> Vec<DbEndpoint> {
             port,
             container: Some(c.name),
             image: Some(c.image),
+            product,
+            engine: product.engine(),
         });
     }
 
@@ -145,31 +278,48 @@ fn parse(stdout: &str) -> Vec<DbEndpoint> {
         if published.contains(&port) || found.iter().any(|e| e.port == port) {
             continue;
         }
+        let Some(product) = product_for_port(port) else {
+            continue;
+        };
         found.push(DbEndpoint {
             id: format!("native:{port}"),
-            label: if port == 3306 {
-                "MySQL / MariaDB (installed on the host)".to_string()
-            } else {
-                format!("Database on port {port} (installed on the host)")
-            },
+            label: format!("{} on the host (port {port})", product.label()),
             kind: DbKind::Native,
             host: "127.0.0.1".to_string(),
             port,
             container: None,
             image: None,
+            product,
+            engine: product.engine(),
         });
     }
 
     found
 }
 
-fn is_db_port(port: u16) -> bool {
-    MYSQL_PORTS.contains(&port)
+fn product_for_port(port: u16) -> Option<DbProduct> {
+    DB_PORTS.iter().find(|(p, _)| *p == port).map(|(_, e)| *e)
 }
 
-fn looks_like_db(image: &str) -> bool {
+/// Guess the product from a container image, e.g. `postgres:16-alpine`.
+///
+/// Covers forks and distributions, not just base images: pgvector, timescale, citus and
+/// postgis are Postgres; percona is MySQL; valkey is Redis; scylla speaks Cassandra.
+fn product_for_image(image: &str) -> Option<DbProduct> {
     let i = image.to_ascii_lowercase();
-    i.contains("mysql") || i.contains("mariadb") || i.contains("percona")
+    IMAGE_HINTS
+        .iter()
+        .find(|(fragment, _)| i.contains(fragment))
+        .map(|(_, p)| *p)
+}
+
+/// Default listening port, for a container that publishes nothing recognisable.
+fn default_port(product: DbProduct) -> u16 {
+    DB_PORTS
+        .iter()
+        .find(|(_, p)| *p == product)
+        .map(|(port, _)| *port)
+        .unwrap_or(0)
 }
 
 /// Listening TCP ports that look like a database, from `ss -ltnp` / `netstat -ltnp`.
@@ -182,7 +332,7 @@ fn parse_listeners(text: &str) -> Vec<u16> {
         for token in line.split_whitespace() {
             if let Some((_, tail)) = token.rsplit_once(':') {
                 if let Ok(port) = tail.parse::<u16>() {
-                    if is_db_port(port) && !ports.contains(&port) {
+                    if product_for_port(port).is_some() && !ports.contains(&port) {
                         ports.push(port);
                     }
                 }
@@ -339,6 +489,107 @@ hidden-db\tmysql:8\t3306/tcp\n\
     fn skips_an_unpublished_container_with_no_known_address() {
         let out = "@@LISTEN\n@@DOCKER\nghost\tmysql:8\t3306/tcp\n@@DOCKERIP\n";
         assert!(parse(out).is_empty(), "not reachable — must not be offered");
+    }
+
+    #[test]
+    fn finds_a_postgres_container_bound_to_loopback() {
+        // The exact `docker ps` shape that was being missed: a Postgres container
+        // published on 127.0.0.1 rather than 0.0.0.0. Discovery originally only knew
+        // MySQL ports and images, so this was filtered out entirely.
+        let out = "@@LISTEN\n\
+LISTEN 0 4096 127.0.0.1:5432 0.0.0.0:*\n\
+@@DOCKER\n\
+olds_studio-postgres-1\tpostgres:16-alpine\t127.0.0.1:5432->5432/tcp\n\
+@@DOCKERIP\n/olds_studio-postgres-1\t172.19.0.2 \n";
+        let found = parse(out);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].engine, Some(DbEngine::Postgres));
+        assert_eq!(found[0].kind, DbKind::Docker);
+        assert_eq!(found[0].port, 5432);
+        assert_eq!(found[0].host, "127.0.0.1");
+        assert_eq!(found[0].container.as_deref(), Some("olds_studio-postgres-1"));
+    }
+
+    #[test]
+    fn recognises_postgres_forks_and_a_remapped_port() {
+        // pgvector/timescale are Postgres under another name, and a host port remapped
+        // away from 5432 must still work — the image is the authority, not the port.
+        let out = "@@LISTEN\n@@DOCKER\n\
+vec\tpgvector/pgvector:pg16\t0.0.0.0:15432->5432/tcp\n\
+@@DOCKERIP\n/vec\t172.20.0.3 \n";
+        let found = parse(out);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].engine, Some(DbEngine::Postgres));
+        assert_eq!(found[0].port, 15432, "should use the published host port");
+    }
+
+    #[test]
+    fn finds_a_native_postgres_listener() {
+        let out = "@@LISTEN\nLISTEN 0 244 127.0.0.1:5432 0.0.0.0:*\n@@DOCKER\n@@DOCKERIP\n";
+        let found = parse(out);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].engine, Some(DbEngine::Postgres));
+        assert_eq!(found[0].kind, DbKind::Native);
+    }
+
+    #[test]
+    fn mysql_and_postgres_on_one_host_are_both_listed() {
+        let out = "@@LISTEN\n\
+LISTEN 0 151 127.0.0.1:3306 0.0.0.0:*\n\
+LISTEN 0 244 127.0.0.1:5432 0.0.0.0:*\n\
+@@DOCKER\n@@DOCKERIP\n";
+        let found = parse(out);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found.iter().any(|e| e.engine == Some(DbEngine::MySql)));
+        assert!(found.iter().any(|e| e.engine == Some(DbEngine::Postgres)));
+    }
+
+    #[test]
+    fn finds_every_common_database_product() {
+        let out = "@@LISTEN\n@@DOCKER\n\
+redis-cache\tredis:7-alpine\t0.0.0.0:6379->6379/tcp\n\
+mongo-main\tmongo:7\t0.0.0.0:27017->27017/tcp\n\
+mssql\tmcr.microsoft.com/mssql/server:2022-latest\t0.0.0.0:1433->1433/tcp\n\
+ch\tclickhouse/clickhouse-server\t0.0.0.0:8123->8123/tcp\n\
+es\telasticsearch:8.13.0\t0.0.0.0:9200->9200/tcp\n\
+@@DOCKERIP\n";
+        let found = parse(out);
+        let products: Vec<DbProduct> = found.iter().map(|e| e.product).collect();
+        for want in [
+            DbProduct::Redis,
+            DbProduct::MongoDb,
+            DbProduct::MsSql,
+            DbProduct::ClickHouse,
+            DbProduct::Elasticsearch,
+        ] {
+            assert!(products.contains(&want), "missing {want:?} in {products:?}");
+        }
+    }
+
+    #[test]
+    fn browsable_products_carry_an_engine_and_the_rest_are_listed_without_one() {
+        let out = "@@LISTEN\n@@DOCKER\n\
+r\tredis:7\t0.0.0.0:6379->6379/tcp\n\
+m\tmongo:7\t0.0.0.0:27017->27017/tcp\n\
+@@DOCKERIP\n";
+        let found = parse(out);
+        let redis = found.iter().find(|e| e.product == DbProduct::Redis).unwrap();
+        let mongo = found.iter().find(|e| e.product == DbProduct::MongoDb).unwrap();
+        // Redis can be opened; Mongo is discovered but not yet browsable, and says so
+        // rather than offering a sign-in that would fail.
+        assert_eq!(redis.engine, Some(DbEngine::Redis));
+        assert_eq!(mongo.engine, None);
+    }
+
+    #[test]
+    fn valkey_and_scylla_are_recognised_as_their_originals() {
+        let out = "@@LISTEN\n@@DOCKER\n\
+v\tvalkey/valkey:8\t0.0.0.0:6379->6379/tcp\n\
+s\tscylladb/scylla\t0.0.0.0:9042->9042/tcp\n\
+@@DOCKERIP\n";
+        let found = parse(out);
+        assert!(found.iter().any(|e| e.product == DbProduct::Redis));
+        assert!(found.iter().any(|e| e.product == DbProduct::Cassandra));
     }
 
     #[test]
