@@ -85,6 +85,16 @@ function SignIn({
   const [remember, setRemember] = useState(Boolean(saved));
   const [busy, setBusy] = useState(false);
 
+  // Detection is a good guess, not gospel — a database can listen somewhere the scan
+  // can't see, or be attributed to the wrong container. These start from what was
+  // detected (or last saved) and can be corrected without leaving the panel.
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [host, setHost] = useState(saved?.host ?? instance.endpoint.host);
+  const [port, setPort] = useState(String(saved?.port ?? instance.endpoint.port));
+  const [container, setContainer] = useState(
+    saved?.container ?? instance.endpoint.container ?? "",
+  );
+
   const finish = async (sessionId: string, version: string) => {
     setPassword("");
     const schemas = await api.dbListDatabases(sessionId);
@@ -112,11 +122,17 @@ function SignIn({
     try {
       const { endpoint } = instance;
       if (!endpoint.engine) return; // guarded by the caller; keeps the type honest
+      const parsedPort = Number(port);
+      if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+        onError("Port must be a number between 1 and 65535.");
+        return;
+      }
       const target = {
         vps_id: vpsId,
-        container: endpoint.container,
-        host: endpoint.host,
-        port: endpoint.port,
+        // Empty means "run on the host", not "run in a container called ''".
+        container: container.trim() === "" ? null : container.trim(),
+        host: host.trim() || endpoint.host,
+        port: parsedPort,
         user,
         password,
         database: null,
@@ -175,6 +191,51 @@ function SignIn({
           className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 text-[11px] text-gray-100 outline-none focus:border-violet-500"
         />
       </div>
+
+      <button
+        type="button"
+        onClick={() => setShowAdvanced((v) => !v)}
+        className="text-left text-[10px] text-gray-500 hover:text-gray-300"
+      >
+        {showAdvanced ? "▾" : "▸"} Connection details
+        {!showAdvanced ? (
+          <span className="ml-1 font-mono text-gray-600">
+            {container ? `${container}:` : ""}
+            {host}:{port}
+          </span>
+        ) : null}
+      </button>
+
+      {showAdvanced ? (
+        <div className="space-y-1 rounded border border-[var(--border)] p-1">
+          <div className="flex gap-1">
+            <input
+              value={host}
+              onChange={(e) => setHost(e.target.value)}
+              placeholder="host"
+              className="min-w-0 flex-[2] rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 text-[11px] text-gray-100 outline-none focus:border-violet-500"
+            />
+            <input
+              value={port}
+              onChange={(e) => setPort(e.target.value)}
+              placeholder="port"
+              inputMode="numeric"
+              className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 text-[11px] text-gray-100 outline-none focus:border-violet-500"
+            />
+          </div>
+          <input
+            value={container}
+            onChange={(e) => setContainer(e.target.value)}
+            placeholder="container (blank = run on the host)"
+            className="w-full rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 text-[11px] text-gray-100 outline-none focus:border-violet-500"
+          />
+          <p className="text-[10px] leading-snug text-gray-600">
+            The host and port are as seen <em>from the server</em>, not from this PC —
+            everything runs over SSH. Set a container to run the client inside it, which
+            is what you need when the database's client isn't installed on the host.
+          </p>
+        </div>
+      ) : null}
 
       <label className="flex items-center gap-1.5 text-[10px] text-gray-500">
         <input

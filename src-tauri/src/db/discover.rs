@@ -175,9 +175,11 @@ pub enum DbKind {
 /// without `ss`, still returns usable output for the parts that do exist.
 const DISCOVER_CMD: &str = "\
 echo '@@LISTEN'; (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) || true; \
-echo '@@DOCKER'; (docker ps --format '{{.Names}}\t{{.Image}}\t{{.Ports}}' 2>/dev/null) || true; \
+echo '@@DOCKER'; (docker ps --no-trunc --format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Ports}}' 2>/dev/null) || true; \
 echo '@@DOCKERIP'; (docker ps -q 2>/dev/null | xargs -r docker inspect \
- -f '{{.Name}}\t{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' 2>/dev/null) || true";
+ -f '{{.Name}}\t{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' 2>/dev/null) || true; \
+echo '@@PIDCG'; (ss -ltnpH 2>/dev/null | sed -n 's/.*pid=\\([0-9]*\\).*/\\1/p' | sort -u \
+ | while read p; do printf '%s\t' \"$p\"; tr '\\n' ' ' < /proc/$p/cgroup 2>/dev/null; echo; done) || true";
 
 /// Discover database endpoints reachable on `vps_id`.
 pub async fn discover(
@@ -194,6 +196,7 @@ enum Section {
     Listen,
     Docker,
     DockerIp,
+    PidCgroup,
 }
 
 /// Split the combined output into its sections and parse each.
@@ -202,7 +205,7 @@ enum Section {
 /// juggling `&mut` references to three separate locals — same result, but nothing for a
 /// reader (or the borrow checker) to puzzle over.
 fn parse(stdout: &str) -> Vec<DbEndpoint> {
-    let mut sections: [String; 3] = [String::new(), String::new(), String::new()];
+    let mut sections: [String; 4] = Default::default();
     let mut current = Section::Listen;
 
     for line in stdout.lines() {
@@ -219,6 +222,10 @@ fn parse(stdout: &str) -> Vec<DbEndpoint> {
                 current = Section::DockerIp;
                 continue;
             }
+            "@@PIDCG" => {
+                current = Section::PidCgroup;
+                continue;
+            }
             _ => {}
         }
         let slot = &mut sections[current as usize];
@@ -226,8 +233,9 @@ fn parse(stdout: &str) -> Vec<DbEndpoint> {
         slot.push('\n');
     }
 
-    let [listen, docker, docker_ip] = sections;
+    let [listen, docker, docker_ip, pid_cgroup] = sections;
     let ips = parse_container_ips(&docker_ip);
+    let pid_to_container = parse_pid_cgroups(&pid_cgroup);
     let mut found: Vec<DbEndpoint> = Vec::new();
 
     // Docker first: a container that publishes 3306 also shows up as a host listener,
@@ -274,27 +282,103 @@ fn parse(stdout: &str) -> Vec<DbEndpoint> {
     }
 
     // Then host listeners that no container already accounted for.
-    for port in parse_listeners(&listen) {
-        if published.contains(&port) || found.iter().any(|e| e.port == port) {
+    let containers = parse_docker(&docker);
+    for l in parse_listeners(&listen) {
+        if published.contains(&l.port) || found.iter().any(|e| e.port == l.port) {
             continue;
         }
-        let Some(product) = product_for_port(port) else {
+        let Some(product) = product_for_port(l.port) else {
             continue;
         };
-        found.push(DbEndpoint {
-            id: format!("native:{port}"),
-            label: format!("{} on the host (port {port})", product.label()),
-            kind: DbKind::Native,
-            host: "127.0.0.1".to_string(),
-            port,
-            container: None,
-            image: None,
-            product,
-            engine: product.engine(),
-        });
+
+        // A listener on the host is not necessarily a host *install*. A container run
+        // with `network_mode: host` puts its process straight onto the host's network
+        // stack, so it shows up here with no `docker ps` port mapping at all — and the
+        // client binary lives inside the container, not on the host. Attributing the
+        // listening PID to its container via /proc/<pid>/cgroup is what lets the query
+        // layer reach it with `docker exec`; without this it tried to run `mysql` on a
+        // host that has no `mysql` installed, and simply failed.
+        let owner = l
+            .pid
+            .and_then(|pid| pid_to_container.get(&pid))
+            .and_then(|cid| {
+                containers
+                    .iter()
+                    .find(|c| c.id.starts_with(cid.as_str()) || cid.starts_with(&c.id))
+            });
+
+        match owner {
+            Some(c) => found.push(DbEndpoint {
+                id: format!("docker:{}", c.name),
+                label: format!("{} ({})", c.name, c.image),
+                kind: DbKind::Docker,
+                // Host-networked, so the container's own loopback IS the host's.
+                host: "127.0.0.1".to_string(),
+                port: l.port,
+                container: Some(c.name.clone()),
+                image: Some(c.image.clone()),
+                product,
+                engine: product.engine(),
+            }),
+            None => found.push(DbEndpoint {
+                id: format!("native:{}", l.port),
+                label: format!("{} on the host (port {})", product.label(), l.port),
+                kind: DbKind::Native,
+                host: "127.0.0.1".to_string(),
+                port: l.port,
+                container: None,
+                image: None,
+                product,
+                engine: product.engine(),
+            }),
+        }
     }
 
     found
+}
+
+/// Map a listening PID to the container id that owns it, from `/proc/<pid>/cgroup`.
+///
+/// Two layouts in the wild — cgroup v2 `…/docker-<id>.scope` and v1 `…/docker/<id>` —
+/// so the id is found by scanning for a long hex run rather than by matching a path shape.
+fn parse_pid_cgroups(text: &str) -> std::collections::HashMap<u32, String> {
+    let mut out = std::collections::HashMap::new();
+    for line in text.lines() {
+        let mut cols = line.split('\t');
+        let (Some(pid), Some(cgroup)) = (cols.next(), cols.next()) else {
+            continue;
+        };
+        let Ok(pid) = pid.trim().parse::<u32>() else {
+            continue;
+        };
+        if let Some(id) = longest_hex_run(cgroup) {
+            out.insert(pid, id);
+        }
+    }
+    out
+}
+
+/// The longest run of hex characters in `s`, if it is long enough to be a container id.
+fn longest_hex_run(s: &str) -> Option<String> {
+    let mut best = "";
+    let mut start = None;
+    let bytes = s.as_bytes();
+    for i in 0..=bytes.len() {
+        let is_hex = i < bytes.len() && (bytes[i] as char).is_ascii_hexdigit();
+        match (is_hex, start) {
+            (true, None) => start = Some(i),
+            (false, Some(st)) => {
+                if i - st > best.len() {
+                    best = &s[st..i];
+                }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    // Docker ids are 64 hex chars; 12 is the conventional short form. Anything shorter is
+    // a cgroup path component, not an id.
+    (best.len() >= 12).then(|| best.to_string())
 }
 
 fn product_for_port(port: u16) -> Option<DbProduct> {
@@ -322,28 +406,50 @@ fn default_port(product: DbProduct) -> u16 {
         .unwrap_or(0)
 }
 
+/// A listening socket that might be a database, and the process behind it.
+struct Listener {
+    port: u16,
+    /// From `users:(("mariadbd",pid=1133344,fd=29))`, when the tool reported it.
+    pid: Option<u32>,
+}
+
 /// Listening TCP ports that look like a database, from `ss -ltnp` / `netstat -ltnp`.
-fn parse_listeners(text: &str) -> Vec<u16> {
-    let mut ports = Vec::new();
+fn parse_listeners(text: &str) -> Vec<Listener> {
+    let mut found: Vec<Listener> = Vec::new();
     for line in text.lines() {
-        // The local address is the 4th column for `ss`, 4th for `netstat` too; rather
-        // than depend on column counts (which differ between the two and across
-        // versions), scan every token for a `host:port` ending in a port we care about.
+        // Rather than depend on column positions (which differ between ss and netstat and
+        // across versions), scan every token for a `host:port` whose port we care about.
+        let mut port = None;
         for token in line.split_whitespace() {
             if let Some((_, tail)) = token.rsplit_once(':') {
-                if let Ok(port) = tail.parse::<u16>() {
-                    if product_for_port(port).is_some() && !ports.contains(&port) {
-                        ports.push(port);
+                if let Ok(p) = tail.parse::<u16>() {
+                    if product_for_port(p).is_some() {
+                        port = Some(p);
+                        break;
                     }
                 }
             }
         }
+        let Some(port) = port else { continue };
+        if found.iter().any(|l| l.port == port) {
+            continue;
+        }
+        let pid = line
+            .split("pid=")
+            .nth(1)
+            .and_then(|rest| {
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                digits.parse::<u32>().ok()
+            });
+        found.push(Listener { port, pid });
     }
-    ports.sort_unstable();
-    ports
+    found.sort_by_key(|l| l.port);
+    found
 }
 
 struct DockerContainer {
+    /// Full (untruncated) id, for matching against a cgroup path.
+    id: String,
     name: String,
     image: String,
     /// Host-side ports this container publishes.
@@ -352,7 +458,7 @@ struct DockerContainer {
     container_port: Option<u16>,
 }
 
-/// Parse `docker ps --format '{{.Names}}\t{{.Image}}\t{{.Ports}}'`.
+/// Parse `docker ps --no-trunc --format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Ports}}'`.
 fn parse_docker(text: &str) -> Vec<DockerContainer> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -361,12 +467,13 @@ fn parse_docker(text: &str) -> Vec<DockerContainer> {
             continue;
         }
         let mut cols = line.split('\t');
-        let (Some(name), Some(image)) = (cols.next(), cols.next()) else {
+        let (Some(id), Some(name), Some(image)) = (cols.next(), cols.next(), cols.next()) else {
             continue;
         };
         let ports = cols.next().unwrap_or("");
         let (published, container_port) = parse_port_map(ports);
         out.push(DockerContainer {
+            id: id.trim().to_string(),
             name: name.trim().to_string(),
             image: image.trim().to_string(),
             published,
@@ -462,7 +569,7 @@ LISTEN 0 4096 0.0.0.0:22 0.0.0.0:*\n\
         let out = "@@LISTEN\n\
 LISTEN 0 4096 0.0.0.0:3306 0.0.0.0:*\n\
 @@DOCKER\n\
-db-main\tmariadb:11\t0.0.0.0:3306->3306/tcp, :::3306->3306/tcp\n\
+cid-db-main\tdb-main\tmariadb:11\t0.0.0.0:3306->3306/tcp, :::3306->3306/tcp\n\
 @@DOCKERIP\n/db-main\t172.17.0.4 \n";
         let found = parse(out);
         // The host listener is the container's published port — one entry, not two.
@@ -476,7 +583,7 @@ db-main\tmariadb:11\t0.0.0.0:3306->3306/tcp, :::3306->3306/tcp\n\
     #[test]
     fn reaches_an_unpublished_container_over_the_bridge() {
         let out = "@@LISTEN\n@@DOCKER\n\
-hidden-db\tmysql:8\t3306/tcp\n\
+cid-hidden-db\thidden-db\tmysql:8\t3306/tcp\n\
 @@DOCKERIP\n/hidden-db\t172.18.0.7 \n";
         let found = parse(out);
         assert_eq!(found.len(), 1, "{found:?}");
@@ -499,7 +606,7 @@ hidden-db\tmysql:8\t3306/tcp\n\
         let out = "@@LISTEN\n\
 LISTEN 0 4096 127.0.0.1:5432 0.0.0.0:*\n\
 @@DOCKER\n\
-olds_studio-postgres-1\tpostgres:16-alpine\t127.0.0.1:5432->5432/tcp\n\
+cid-olds_studio-postgres-1\tolds_studio-postgres-1\tpostgres:16-alpine\t127.0.0.1:5432->5432/tcp\n\
 @@DOCKERIP\n/olds_studio-postgres-1\t172.19.0.2 \n";
         let found = parse(out);
         assert_eq!(found.len(), 1, "{found:?}");
@@ -515,7 +622,7 @@ olds_studio-postgres-1\tpostgres:16-alpine\t127.0.0.1:5432->5432/tcp\n\
         // pgvector/timescale are Postgres under another name, and a host port remapped
         // away from 5432 must still work — the image is the authority, not the port.
         let out = "@@LISTEN\n@@DOCKER\n\
-vec\tpgvector/pgvector:pg16\t0.0.0.0:15432->5432/tcp\n\
+cid-vec\tvec\tpgvector/pgvector:pg16\t0.0.0.0:15432->5432/tcp\n\
 @@DOCKERIP\n/vec\t172.20.0.3 \n";
         let found = parse(out);
         assert_eq!(found.len(), 1, "{found:?}");
@@ -545,13 +652,62 @@ LISTEN 0 244 127.0.0.1:5432 0.0.0.0:*\n\
     }
 
     #[test]
+    fn a_host_networked_container_is_attributed_to_its_container() {
+        // Taken verbatim from a real server: MariaDB runs in a container started with
+        // host networking, so `mariadbd` listens on the HOST's 127.0.0.1:3306 and
+        // `docker ps` shows no port mapping for it at all. Treating that as a host
+        // install made the query layer run `mysql` on the host — which has no mysql
+        // client installed — and every connection failed.
+        let out = "@@LISTEN\n\
+LISTEN 0 80 127.0.0.1:3306 0.0.0.0:* users:((\"mariadbd\",pid=1133344,fd=29))\n\
+@@DOCKER\n\
+475abd3d79ab712e10c7f2e3e84dac4b660cea48998c37fd5e8084d9ac4d6c99\tm2boot\tmetin2-run:phaseB\t\n\
+@@DOCKERIP\n\
+@@PIDCG\n\
+1133344\t0::/system.slice/docker-475abd3d79ab712e10c7f2e3e84dac4b660cea48998c37fd5e8084d9ac4d6c99.scope \n";
+        let found = parse(out);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].kind, DbKind::Docker, "must be reachable via docker exec");
+        assert_eq!(found[0].container.as_deref(), Some("m2boot"));
+        // Host-networked, so the container's loopback is the host's.
+        assert_eq!(found[0].host, "127.0.0.1");
+        assert_eq!(found[0].port, 3306);
+        assert_eq!(found[0].engine, Some(DbEngine::MySql));
+    }
+
+    #[test]
+    fn a_listener_with_no_owning_container_is_still_native() {
+        // A genuine host install has no container cgroup, and must not be mislabelled.
+        let out = "@@LISTEN\n\
+LISTEN 0 80 127.0.0.1:3306 0.0.0.0:* users:((\"mariadbd\",pid=999,fd=29))\n\
+@@DOCKER\n@@DOCKERIP\n@@PIDCG\n\
+999\t0::/system.slice/mariadb.service \n";
+        let found = parse(out);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].kind, DbKind::Native);
+        assert_eq!(found[0].container, None);
+    }
+
+    #[test]
+    fn cgroup_v1_layout_is_also_understood() {
+        let out = "@@LISTEN\n\
+LISTEN 0 80 127.0.0.1:5432 0.0.0.0:* users:((\"postgres\",pid=42,fd=7))\n\
+@@DOCKER\n\
+abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\tpg\tpostgres:16\t\n\
+@@DOCKERIP\n@@PIDCG\n\
+42\t9:cpu:/docker/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 \n";
+        let found = parse(out);
+        assert_eq!(found[0].container.as_deref(), Some("pg"), "{found:?}");
+    }
+
+    #[test]
     fn finds_every_common_database_product() {
         let out = "@@LISTEN\n@@DOCKER\n\
-redis-cache\tredis:7-alpine\t0.0.0.0:6379->6379/tcp\n\
-mongo-main\tmongo:7\t0.0.0.0:27017->27017/tcp\n\
-mssql\tmcr.microsoft.com/mssql/server:2022-latest\t0.0.0.0:1433->1433/tcp\n\
-ch\tclickhouse/clickhouse-server\t0.0.0.0:8123->8123/tcp\n\
-es\telasticsearch:8.13.0\t0.0.0.0:9200->9200/tcp\n\
+cid-redis-cache\tredis-cache\tredis:7-alpine\t0.0.0.0:6379->6379/tcp\n\
+cid-mongo-main\tmongo-main\tmongo:7\t0.0.0.0:27017->27017/tcp\n\
+cid-mssql\tmssql\tmcr.microsoft.com/mssql/server:2022-latest\t0.0.0.0:1433->1433/tcp\n\
+cid-ch\tch\tclickhouse/clickhouse-server\t0.0.0.0:8123->8123/tcp\n\
+cid-es\tes\telasticsearch:8.13.0\t0.0.0.0:9200->9200/tcp\n\
 @@DOCKERIP\n";
         let found = parse(out);
         let products: Vec<DbProduct> = found.iter().map(|e| e.product).collect();
@@ -569,8 +725,8 @@ es\telasticsearch:8.13.0\t0.0.0.0:9200->9200/tcp\n\
     #[test]
     fn browsable_products_carry_an_engine_and_the_rest_are_listed_without_one() {
         let out = "@@LISTEN\n@@DOCKER\n\
-r\tredis:7\t0.0.0.0:6379->6379/tcp\n\
-m\tmongo:7\t0.0.0.0:27017->27017/tcp\n\
+cid-r\tr\tredis:7\t0.0.0.0:6379->6379/tcp\n\
+cid-m\tm\tmongo:7\t0.0.0.0:27017->27017/tcp\n\
 @@DOCKERIP\n";
         let found = parse(out);
         let redis = found.iter().find(|e| e.product == DbProduct::Redis).unwrap();
@@ -584,8 +740,8 @@ m\tmongo:7\t0.0.0.0:27017->27017/tcp\n\
     #[test]
     fn valkey_and_scylla_are_recognised_as_their_originals() {
         let out = "@@LISTEN\n@@DOCKER\n\
-v\tvalkey/valkey:8\t0.0.0.0:6379->6379/tcp\n\
-s\tscylladb/scylla\t0.0.0.0:9042->9042/tcp\n\
+cid-v\tv\tvalkey/valkey:8\t0.0.0.0:6379->6379/tcp\n\
+cid-s\ts\tscylladb/scylla\t0.0.0.0:9042->9042/tcp\n\
 @@DOCKERIP\n";
         let found = parse(out);
         assert!(found.iter().any(|e| e.product == DbProduct::Redis));

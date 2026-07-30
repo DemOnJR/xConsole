@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { NodeResizer, useStore, type NodeProps } from "@xyflow/react";
 import { api, type DbColumn, type DbResultSet, type DbRowKey } from "../lib/tauri";
 import { useCanvasStore, type DbNode as DbNodeType } from "../stores/canvasStore";
+import { useMouseNavButtons, useNavHistory } from "../hooks/useNavHistory";
 import { CodeEditArea } from "./CodeEditArea";
 import { DatabaseTree, newInstance, type DbInstance } from "./DatabaseTree";
 import { DatabaseIcon } from "./icons";
@@ -149,6 +150,8 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
   // Every session opened by this node, so unmount can close all of them. A ref because
   // the cleanup must see the latest set without re-running on every change.
   const sessionsRef = useRef<Set<string>>(new Set());
+  /** Scopes the mouse back/forward buttons to this panel. */
+  const panelRef = useRef<HTMLDivElement | null>(null);
 
   const scan = useCallback(async () => {
     setScanning(true);
@@ -220,7 +223,8 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     );
   }, []);
 
-  const openTable = useCallback(
+  /** Load a table without touching history — used when replaying back/forward. */
+  const showTable = useCallback(
     async (next: Selection, atPage = 0) => {
       setSel(next);
       setPage(atPage);
@@ -241,6 +245,25 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
       }
     },
     [],
+  );
+
+  // Back/forward across tables, like the SFTP panel. Paging and post-edit refreshes call
+  // showTable directly so they don't pile up history entries for the same table.
+  const history = useNavHistory<Selection>({
+    current: sel,
+    go: useCallback((entry: Selection) => void showTable(entry), [showTable]),
+    isSame: (a, b) =>
+      a.endpointId === b.endpointId && a.schema === b.schema && a.table === b.table,
+  });
+  useMouseNavButtons(panelRef, history);
+
+  /** Open a table and record it in history. */
+  const openTable = useCallback(
+    (next: Selection) => {
+      history.visit(next);
+      void showTable(next);
+    },
+    [history, showTable],
   );
 
   /** Identify a row by its primary key, so an edit can never touch more than one. */
@@ -265,7 +288,7 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     }
     try {
       await api.dbUpdateCell(sel.sessionId, sel.schema, sel.table, column, next, key);
-      await openTable(sel, page);
+      await showTable(sel, page);
     } catch (e) {
       setError(String(e));
     }
@@ -292,6 +315,7 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
 
   return (
     <div
+      ref={panelRef}
       className={`flex h-full w-full flex-col overflow-hidden border bg-[var(--bg)] ${
         tiled ? "rounded-none" : "rounded-lg"
       } ${selected ? "border-violet-500" : "border-[var(--border)]"}`}
@@ -346,7 +370,7 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
             onPatch={patch}
             onSelectTable={(inst, schema, table) => {
               if (!inst.sessionId) return;
-              void openTable({
+              openTable({
                 endpointId: inst.endpoint.id,
                 sessionId: inst.sessionId,
                 schema,
@@ -360,6 +384,22 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
 
           <div className="flex min-w-0 flex-1 flex-col">
             <div className="flex shrink-0 items-center gap-1 border-b border-[var(--border)] px-2 py-1">
+              <button
+                onClick={history.back}
+                disabled={!history.canBack}
+                className="rounded px-1 py-0.5 text-[11px] text-gray-400 hover:bg-[var(--border)] disabled:opacity-30"
+                data-tooltip="Back (mouse button 4)"
+              >
+                ‹
+              </button>
+              <button
+                onClick={history.forward}
+                disabled={!history.canForward}
+                className="mr-1 rounded px-1 py-0.5 text-[11px] text-gray-400 hover:bg-[var(--border)] disabled:opacity-30"
+                data-tooltip="Forward (mouse button 5)"
+              >
+                ›
+              </button>
               {(["data", "structure", "sql"] as Tab[]).map((t) => (
                 <button
                   key={t}
@@ -375,7 +415,7 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                 <div className="ml-auto flex items-center gap-1 text-[10px] text-gray-500">
                   <button
                     disabled={page === 0}
-                    onClick={() => void openTable(sel, page - 1)}
+                    onClick={() => void showTable(sel, page - 1)}
                     className="rounded px-1 hover:bg-[var(--border)] disabled:opacity-30"
                   >
                     ‹
@@ -385,7 +425,7 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                   </span>
                   <button
                     disabled={(rows?.rows.length ?? 0) < PAGE_SIZE}
-                    onClick={() => void openTable(sel, page + 1)}
+                    onClick={() => void showTable(sel, page + 1)}
                     className="rounded px-1 hover:bg-[var(--border)] disabled:opacity-30"
                   >
                     ›

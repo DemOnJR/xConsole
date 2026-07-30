@@ -14,6 +14,7 @@ import {
   type SftpEntry,
 } from "../lib/tauri";
 import { useSettingsStore } from "../stores/settingsStore";
+import { useMouseNavButtons, useNavHistory } from "../hooks/useNavHistory";
 import { useCanvasStore, type SftpNode as SftpNodeType } from "../stores/canvasStore";
 import { useSessionStore } from "../stores/sessionStore";
 import { useTransferStore } from "../stores/transferStore";
@@ -136,6 +137,8 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
 
   const sessionRef = useRef<string | null>(null);
   const lastSyncedCwd = useRef<string | null>(null);
+  /** Scopes the mouse back/forward buttons to this panel. */
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const [status, setStatus] = useState<ConnState>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [path, setPath] = useState("/");
@@ -195,6 +198,21 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     void fetchTreeDir(sid, path);
     void fetchTreeDir(sid, "/");
   }, [path, loadDir, fetchTreeDir]);
+
+  // Back/forward through visited directories, driven by the mouse's side buttons as well
+  // as the toolbar arrows. `go` deliberately calls loadDir directly rather than
+  // navigateTo, so replaying history doesn't push new entries onto it.
+  const history = useNavHistory<string>({
+    current: path,
+    go: useCallback(
+      (dir: string) => {
+        const sid = sessionRef.current;
+        if (sid) void loadDir(sid, dir);
+      },
+      [loadDir],
+    ),
+  });
+  useMouseNavButtons(panelRef, history);
 
   // The configured external editor, shown by name in the context menu. Derived from
   // the command so "code --new-window" still reads as "VS Code".
@@ -282,17 +300,25 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     removeNode(id);
   };
 
+  /** Navigate somewhere new, recording it so the mouse's back button can undo it. */
+  const navigateTo = useCallback(
+    (next: string) => {
+      const sid = sessionRef.current;
+      if (!sid) return;
+      history.visit(next);
+      void loadDir(sid, next);
+    },
+    // `history` is stable enough (its callbacks are memoised) that including it here
+    // doesn't churn; loadDir changes only with the session.
+    [history, loadDir],
+  );
+
   const openEntry = (entry: SftpEntry) => {
-    const sid = sessionRef.current;
-    if (!sid || !entry.is_dir) return;
-    void loadDir(sid, entry.path);
+    if (!entry.is_dir) return;
+    navigateTo(entry.path);
   };
 
-  const goUp = () => {
-    const sid = sessionRef.current;
-    if (!sid) return;
-    void loadDir(sid, parentPath(path));
-  };
+  const goUp = () => navigateTo(parentPath(path));
 
   const refresh = () => refreshListing();
 
@@ -392,9 +418,8 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   };
 
   const navigateToPath = () => {
-    const sid = sessionRef.current;
-    if (!sid || !pathInput.trim()) return;
-    void loadDir(sid, pathInput.trim());
+    if (!pathInput.trim()) return;
+    navigateTo(pathInput.trim());
   };
 
   const toggleTreeDir = async (dir: string) => {
@@ -414,11 +439,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     }
   };
 
-  const selectTreeDir = (dir: string) => {
-    const sid = sessionRef.current;
-    if (!sid) return;
-    void loadDir(sid, dir);
-  };
+  const selectTreeDir = (dir: string) => navigateTo(dir);
 
   /**
    * Download a file or a whole directory.
@@ -520,6 +541,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
 
   return (
     <div
+      ref={panelRef}
       className={`group flex h-full w-full flex-col overflow-hidden border bg-[var(--bg)] shadow-lg ${
         tiled ? "rounded-none" : "rounded-lg"
       } ${selected ? "border-cyan-500" : "border-[var(--border)]"}`}
@@ -596,6 +618,25 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
 
       <div className="nodrag nowheel flex min-h-0 flex-1 flex-col">
         <div className="flex items-center gap-1 border-b border-[var(--border)]/80 px-2 py-1">
+          {/* Also bound to the mouse's side buttons while the pointer is over this panel. */}
+          <button
+            type="button"
+            className="rounded px-1 py-0.5 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 disabled:opacity-30"
+            data-tooltip="Back (mouse button 4)"
+            disabled={!history.canBack || loading}
+            onClick={history.back}
+          >
+            ‹
+          </button>
+          <button
+            type="button"
+            className="rounded px-1 py-0.5 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 disabled:opacity-30"
+            data-tooltip="Forward (mouse button 5)"
+            disabled={!history.canForward || loading}
+            onClick={history.forward}
+          >
+            ›
+          </button>
           <button
             type="button"
             className="rounded p-0.5 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 disabled:opacity-40"
