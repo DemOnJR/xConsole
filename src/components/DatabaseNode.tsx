@@ -3,6 +3,7 @@ import { NodeResizer, useStore, type NodeProps } from "@xyflow/react";
 import { api, type DbColumn, type DbResultSet, type DbRowKey } from "../lib/tauri";
 import { useCanvasStore, type DbNode as DbNodeType } from "../stores/canvasStore";
 import { useMouseNavButtons, useNavHistory } from "../hooks/useNavHistory";
+import { dialog } from "../stores/dialogStore";
 import { CodeEditArea } from "./CodeEditArea";
 import { DatabaseTree, newInstance, type DbInstance } from "./DatabaseTree";
 import { DatabaseIcon } from "./icons";
@@ -24,16 +25,65 @@ function Grid({
   set,
   columns,
   onEdit,
+  onDeleteRows,
 }: {
   set: DbResultSet;
   columns?: DbColumn[];
   onEdit?: (rowIndex: number, column: string, next: string | null) => void;
+  /** Delete the given row indices. Absent for result sets that aren't a real table. */
+  onDeleteRows?: (rowIndices: number[]) => void;
 }) {
   const [editing, setEditing] = useState<{ row: number; col: number } | null>(null);
   const [draft, setDraft] = useState("");
+  const [selected, setSelected] = useState<Set<number>>(() => new Set());
+  const lastClicked = useRef<number | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const hasKey = (columns ?? []).some((c) => c.primary);
   const editable = Boolean(onEdit) && hasKey;
+  const selectable = Boolean(onDeleteRows) && hasKey;
+
+  // A new result set invalidates the old indices — keeping them would delete whatever
+  // now happens to sit at those positions.
+  useEffect(() => {
+    setSelected(new Set());
+    lastClicked.current = null;
+  }, [set]);
+
+  /** Click, ctrl-click to toggle, shift-click for a range — as a file list behaves. */
+  const toggleRow = (index: number, e: React.MouseEvent) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (e.shiftKey && lastClicked.current !== null) {
+        const [from, to] = [lastClicked.current, index].sort((a, b) => a - b);
+        for (let i = from; i <= to; i += 1) next.add(i);
+      } else if (next.has(index)) {
+        next.delete(index);
+      } else {
+        next.add(index);
+      }
+      return next;
+    });
+    lastClicked.current = index;
+  };
+
+  const allSelected = set.rows.length > 0 && selected.size === set.rows.length;
+
+  // Ctrl+wheel scrolls sideways. A wide table is the normal case here and reaching for
+  // the horizontal scrollbar is tedious; the browser would otherwise treat ctrl+wheel as
+  // page zoom, hence preventDefault. Registered non-passively because a passive listener
+  // is not allowed to preventDefault.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      el.scrollLeft += e.deltaY !== 0 ? e.deltaY : e.deltaX;
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
 
   if (set.columns.length === 0) {
     return (
@@ -46,10 +96,48 @@ function Grid({
   }
 
   return (
-    <div className="h-full overflow-auto">
-      <table className="w-full border-collapse text-left font-mono text-[11px]">
-        <thead className="sticky top-0 bg-[var(--surface)]">
+    <div className="flex h-full min-h-0 flex-col">
+      {selectable && selected.size > 0 ? (
+        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)] bg-violet-950/30 px-2 py-1 text-[11px]">
+          <span className="text-violet-200">
+            {selected.size} row{selected.size === 1 ? "" : "s"} selected
+          </span>
+          <button
+            onClick={() => setSelected(new Set())}
+            className="text-gray-400 hover:text-gray-200"
+          >
+            Clear
+          </button>
+          <button
+            onClick={() => onDeleteRows?.([...selected].sort((a, b) => a - b))}
+            className="ml-auto rounded bg-red-700 px-2 py-0.5 text-white hover:bg-red-600"
+          >
+            Delete selected
+          </button>
+        </div>
+      ) : null}
+
+      {/* The scroll container. `overflow-auto` with a bounded height is what makes
+          vertical scrolling work; the table below is sized to its content (not w-full)
+          so it can exceed this box and scroll horizontally too. */}
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
+        <table className="w-max min-w-full border-collapse text-left font-mono text-[11px]">
+        <thead className="sticky top-0 z-10 bg-[var(--surface)]">
           <tr>
+            {selectable ? (
+              <th className="sticky left-0 z-20 w-6 border-b border-r border-[var(--border)] bg-[var(--surface)] px-1 py-1">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  onChange={() =>
+                    setSelected(
+                      allSelected ? new Set() : new Set(set.rows.map((_, i) => i)),
+                    )
+                  }
+                  data-tooltip="Select all on this page"
+                />
+              </th>
+            ) : null}
             {set.columns.map((c) => {
               const meta = columns?.find((m) => m.name === c);
               return (
@@ -66,49 +154,68 @@ function Grid({
           </tr>
         </thead>
         <tbody>
-          {set.rows.map((row, ri) => (
-            <tr key={ri} className="hover:bg-[var(--border)]/40">
-              {row.map((cell, ci) => {
-                const isEditing = editing?.row === ri && editing?.col === ci;
-                return (
+          {set.rows.map((row, ri) => {
+            const isSelected = selected.has(ri);
+            return (
+              <tr
+                key={ri}
+                className={isSelected ? "bg-violet-600/25" : "hover:bg-[var(--border)]/40"}
+              >
+                {selectable ? (
                   <td
-                    key={ci}
-                    className="max-w-[320px] truncate border-b border-r border-[var(--border)] px-2 py-0.5 text-gray-300 last:border-r-0"
-                    title={cell ?? "NULL"}
-                    onDoubleClick={() => {
-                      if (!editable) return;
-                      setEditing({ row: ri, col: ci });
-                      setDraft(cell ?? "");
-                    }}
+                    className={`sticky left-0 z-10 border-b border-r border-[var(--border)] px-1 ${
+                      isSelected ? "bg-violet-900/60" : "bg-[var(--bg)]"
+                    }`}
+                    onClick={(e) => toggleRow(ri, e)}
                   >
-                    {isEditing ? (
-                      <input
-                        autoFocus
-                        value={draft}
-                        onChange={(e) => setDraft(e.target.value)}
-                        onBlur={() => setEditing(null)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Escape") setEditing(null);
-                          if (e.key === "Enter") {
-                            onEdit?.(ri, set.columns[ci], draft);
-                            setEditing(null);
-                          }
-                        }}
-                        className="w-full bg-[var(--bg)] px-1 text-[11px] text-gray-100 outline-none"
-                      />
-                    ) : cell === null ? (
-                      <span className="italic text-gray-600">NULL</span>
-                    ) : (
-                      cell
-                    )}
+                    <input type="checkbox" checked={isSelected} readOnly tabIndex={-1} />
                   </td>
-                );
-              })}
-            </tr>
-          ))}
+                ) : null}
+                {row.map((cell, ci) => {
+                  const isEditing = editing?.row === ri && editing?.col === ci;
+                  return (
+                    <td
+                      key={ci}
+                      className="max-w-[320px] truncate border-b border-r border-[var(--border)] px-2 py-0.5 text-gray-300 last:border-r-0"
+                      title={cell ?? "NULL"}
+                      onDoubleClick={() => {
+                        if (!editable) return;
+                        setEditing({ row: ri, col: ci });
+                        setDraft(cell ?? "");
+                      }}
+                    >
+                      {isEditing ? (
+                        <input
+                          autoFocus
+                          value={draft}
+                          onChange={(e) => setDraft(e.target.value)}
+                          onBlur={() => setEditing(null)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Escape") setEditing(null);
+                            if (e.key === "Enter") {
+                              onEdit?.(ri, set.columns[ci], draft);
+                              setEditing(null);
+                            }
+                          }}
+                          className="w-full bg-[var(--bg)] px-1 text-[11px] text-gray-100 outline-none"
+                        />
+                      ) : cell === null ? (
+                        <span className="italic text-gray-600">NULL</span>
+                      ) : (
+                        cell
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
         </tbody>
-      </table>
-      {set.rows.length === 0 ? <p className="p-3 text-[11px] text-gray-500">No rows.</p> : null}
+        </table>
+        {set.rows.length === 0 ? (
+          <p className="p-3 text-[11px] text-gray-500">No rows.</p>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -294,6 +401,34 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     }
   };
 
+  /** Delete the selected rows, after confirming — this cannot be undone. */
+  const deleteRows = async (rowIndices: number[]) => {
+    if (!sel || !rows || rowIndices.length === 0) return;
+    const keys = rowIndices.map(rowKey);
+    if (keys.some((k) => k === null)) {
+      setError("This table has no primary key, so rows can't be deleted individually.");
+      return;
+    }
+    const ok = await dialog.confirm({
+      title: `Delete ${rowIndices.length} row${rowIndices.length === 1 ? "" : "s"}?`,
+      message: `This permanently deletes ${rowIndices.length} row${
+        rowIndices.length === 1 ? "" : "s"
+      } from ${sel.schema}.${sel.table}. It can't be undone.`,
+      danger: true,
+      confirmText: "Delete",
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await api.dbDeleteRows(sel.sessionId, sel.schema, sel.table, keys as DbRowKey[]);
+      await showTable(sel, page);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const runSql = async () => {
     if (!sel?.sessionId || !sql.trim()) {
       setError("Open a table first, so the query knows which server to run against.");
@@ -437,7 +572,12 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
             <div className="min-h-0 flex-1 overflow-hidden">
               {tab === "data" ? (
                 rows ? (
-                  <Grid set={rows} columns={columns} onEdit={(r, c, v) => void editCell(r, c, v)} />
+                  <Grid
+                    set={rows}
+                    columns={columns}
+                    onEdit={(r, c, v) => void editCell(r, c, v)}
+                    onDeleteRows={(idx) => void deleteRows(idx)}
+                  />
                 ) : (
                   <p className="p-3 text-[11px] text-gray-500">
                     {busy

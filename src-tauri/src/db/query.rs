@@ -622,6 +622,55 @@ pub fn delete_row_sql(
     ))
 }
 
+/// Most rows one bulk delete may touch. A guard against a runaway selection turning into
+/// a statement thousands of predicates long — well past what any server will parse
+/// happily, and past what a user can have meaningfully reviewed.
+pub const MAX_BULK_DELETE: usize = 500;
+
+/// Delete several rows in ONE statement, each identified by its primary key.
+///
+/// One statement rather than a loop: every query here is an SSH round trip plus a client
+/// process on the server, so deleting 200 rows one at a time would take minutes and leave
+/// the table half-changed if it failed midway. As a single `DELETE … WHERE (…) OR (…)` it
+/// is one round trip and one transaction, so it either all applies or none of it does.
+///
+/// No `LIMIT`: the point is to delete exactly the selected rows, and each disjunct is a
+/// full primary-key match, so the statement can only touch rows that were selected.
+pub fn delete_rows_sql(
+    engine: DbEngine,
+    schema: &str,
+    table: &str,
+    keys: &[Vec<(String, Option<String>)>],
+) -> Result<String, String> {
+    if keys.is_empty() {
+        return Err("nothing selected".into());
+    }
+    if keys.len() > MAX_BULK_DELETE {
+        return Err(format!(
+            "that is {} rows; delete at most {MAX_BULK_DELETE} at a time",
+            keys.len()
+        ));
+    }
+    if keys.iter().any(|k| k.is_empty()) {
+        return Err(
+            "this table has no primary key, so rows can't be identified individually — \
+             delete them with a SQL statement instead"
+                .into(),
+        );
+    }
+
+    let mut parts = Vec::with_capacity(keys.len());
+    for key in keys {
+        parts.push(format!("({})", key_predicate(engine, key)?));
+    }
+    Ok(format!(
+        "DELETE FROM {}.{} WHERE {}",
+        quote_ident_for(engine, schema)?,
+        quote_ident_for(engine, table)?,
+        parts.join(" OR ")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -875,6 +924,60 @@ mod tests {
             sql,
             "UPDATE `shop`.`orders` SET `status` = 'paid' WHERE `id` = '42' LIMIT 1"
         );
+    }
+
+    #[test]
+    fn bulk_delete_is_one_statement_per_selection() {
+        let keys = vec![
+            vec![("id".to_string(), Some("1".to_string()))],
+            vec![("id".to_string(), Some("2".to_string()))],
+        ];
+        let sql = delete_rows_sql(DbEngine::MySql, "shop", "orders", &keys).unwrap();
+        assert_eq!(
+            sql,
+            "DELETE FROM `shop`.`orders` WHERE (`id` = '1') OR (`id` = '2')"
+        );
+        // No LIMIT: it must delete exactly the selected rows, not the first N of them.
+        assert!(!sql.contains("LIMIT"), "{sql}");
+    }
+
+    #[test]
+    fn bulk_delete_handles_composite_keys_and_postgres_quoting() {
+        let keys = vec![vec![
+            ("tenant".to_string(), Some("a".to_string())),
+            ("id".to_string(), None),
+        ]];
+        let sql = delete_rows_sql(DbEngine::Postgres, "public", "Item", &keys).unwrap();
+        assert_eq!(
+            sql,
+            "DELETE FROM \"public\".\"Item\" WHERE (\"tenant\" = 'a' AND \"id\" IS NULL)"
+        );
+    }
+
+    #[test]
+    fn bulk_delete_refuses_the_dangerous_cases() {
+        // Nothing selected must never become an unqualified DELETE.
+        assert!(delete_rows_sql(DbEngine::MySql, "s", "t", &[]).is_err());
+        // A keyless table can't identify rows, so it must refuse rather than guess.
+        let keyless = vec![vec![]];
+        assert!(delete_rows_sql(DbEngine::MySql, "s", "t", &keyless).is_err());
+        // And an absurd selection is capped rather than building a giant statement.
+        let many: Vec<Vec<(String, Option<String>)>> = (0..MAX_BULK_DELETE + 1)
+            .map(|i| vec![("id".to_string(), Some(i.to_string()))])
+            .collect();
+        let err = delete_rows_sql(DbEngine::MySql, "s", "t", &many).unwrap_err();
+        assert!(err.contains("at a time"), "{err}");
+    }
+
+    #[test]
+    fn bulk_delete_escapes_values_in_every_disjunct() {
+        let keys = vec![
+            vec![("id".to_string(), Some("' OR 1=1 --".to_string()))],
+            vec![("id".to_string(), Some("2".to_string()))],
+        ];
+        let sql = delete_rows_sql(DbEngine::MySql, "s", "t", &keys).unwrap();
+        // The payload stays inside the literal; it cannot widen the WHERE clause.
+        assert!(sql.contains("`id` = ''' OR 1=1 --'"), "{sql}");
     }
 
     #[test]

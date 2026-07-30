@@ -475,6 +475,35 @@ pub async fn db_update_cell(
     query::run_sql(&sessions, &target, &sql).await
 }
 
+/// Delete several selected rows in one statement.
+#[tauri::command]
+pub async fn db_delete_rows(
+    sessions: State<'_, SessionManager>,
+    db_sessions: State<'_, DbSessions>,
+    session_id: String,
+    schema: String,
+    table: String,
+    keys: Vec<Vec<(String, Option<String>)>>,
+) -> Result<ResultSet, String> {
+    let target = db_sessions.get(&session_id)?;
+    if target.engine == DbEngine::Redis {
+        // Redis rows are keys; DEL takes them directly and accepts many at once.
+        let mut scoped = target.clone();
+        scoped.database = Some(schema.clone());
+        let names: Vec<String> = keys
+            .iter()
+            .filter_map(|k| k.first().and_then(|(_, v)| v.clone()))
+            .map(|k| crate::ssh::shell_quote(&k))
+            .collect();
+        if names.is_empty() {
+            return Err("nothing selected".into());
+        }
+        return query::run_sql(&sessions, &scoped, &format!("DEL {}", names.join(" "))).await;
+    }
+    let sql = query::delete_rows_sql(target.engine, &schema, &table, &keys)?;
+    query::run_sql(&sessions, &target, &sql).await
+}
+
 #[tauri::command]
 pub async fn db_delete_row(
     sessions: State<'_, SessionManager>,

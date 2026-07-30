@@ -682,6 +682,9 @@ export const api = {
     }),
   dbDeleteRow: (sessionId: string, schema: string, table: string, key: DbRowKey) =>
     invoke<DbResultSet>("db_delete_row", { sessionId, schema, table, key }),
+  /** Delete several rows in one statement — see the Rust `delete_rows_sql`. */
+  dbDeleteRows: (sessionId: string, schema: string, table: string, keys: DbRowKey[]) =>
+    invoke<DbResultSet>("db_delete_rows", { sessionId, schema, table, keys }),
 
   sftpEditExternal: (sessionId: string, path: string) =>
     invoke<{ id: string; local_path: string }>("sftp_edit_external", { sessionId, path }),

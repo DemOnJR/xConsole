@@ -367,6 +367,7 @@ pub fn run() {
             commands::db::db_run_sql,
             commands::db::db_update_cell,
             commands::db::db_delete_row,
+            commands::db::db_delete_rows,
             commands::lock::lock_status,
             commands::lock::setup_lock,
             commands::lock::unlock_with_password,
