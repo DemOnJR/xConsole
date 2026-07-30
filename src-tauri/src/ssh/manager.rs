@@ -202,6 +202,22 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Tear down every live session. Used when the app re-locks: an unlocked app is what
+    /// authorises a shell, so the shells must not outlive the unlock. Returns how many were
+    /// closed, and clears the map — a locked app holds no session handles, and therefore no
+    /// scrollback, in RAM.
+    ///
+    /// Scrollback is snapshotted by the caller *before* this, if it is being persisted; there
+    /// is nothing left to read afterwards.
+    pub fn disconnect_all(&self) -> usize {
+        let ids: Vec<String> = self.map.iter().map(|e| e.key().clone()).collect();
+        for id in &ids {
+            let _ = self.disconnect(id);
+        }
+        self.map.clear();
+        ids.len()
+    }
+
     /// Base64 of the session's recent output, for replay on re-focus / reconnect.
     pub fn replay(&self, session_id: &str) -> Option<String> {
         self.map

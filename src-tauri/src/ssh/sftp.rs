@@ -238,6 +238,17 @@ impl SftpManager {
         Ok(())
     }
 
+    /// Drop every SFTP session. Used when the app re-locks — a file browser sitting on a
+    /// server is the same standing access as a shell, and leaving it open would mean a
+    /// "locked" app that can still read and write remote files. Returns how many closed.
+    pub fn disconnect_all(&self) -> usize {
+        let ids: Vec<String> = self.map.iter().map(|e| e.key().clone()).collect();
+        for id in &ids {
+            let _ = self.disconnect(id);
+        }
+        ids.len()
+    }
+
     /// The database handle, for helpers that need to run a remote command.
     pub fn db_ref(&self) -> &Db {
         &self.db

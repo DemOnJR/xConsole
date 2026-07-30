@@ -31,6 +31,15 @@ impl DbSessions {
         Self::default()
     }
 
+    /// Forget every open database connection. Called when the app re-locks: these are
+    /// reached over an SSH tunnel with saved credentials, so an open one is standing
+    /// access to the server's data and must not outlive the unlock. Returns how many.
+    pub fn disconnect_all(&self) -> usize {
+        let n = self.map.len();
+        self.map.clear();
+        n
+    }
+
     fn get(&self, id: &str) -> Result<DbTarget, String> {
         self.map
             .get(id)

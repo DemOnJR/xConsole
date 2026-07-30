@@ -22,6 +22,7 @@ import { useSettingsStore } from "./stores/settingsStore";
 import { useAgentStatusStore } from "./stores/agentStatusStore";
 import { onAgentWorkspaceStatus, onFileChange, onFileChangeReverted } from "./lib/tauri";
 import { useLockStore } from "./stores/lockStore";
+import { useAutoLock } from "./hooks/useAutoLock";
 import { SplashScreen, UnlockScreen } from "./components/lock/UnlockScreen";
 import { useTileShortcuts } from "./hooks/useTileShortcuts";
 
@@ -167,6 +168,10 @@ function UnlockedApp() {
 // Gate: hold the whole app behind the unlock screen while the DB is locked.
 export default function App() {
   const status = useLockStore((s) => s.status);
+  // Mounted on the gate, not inside UnlockedApp, so the `app://locked` listener is alive
+  // in every state — including while the unlock screen is up, so a second window or the
+  // idle timer can't leave this one showing a stale unlocked UI.
+  useAutoLock();
   useEffect(() => {
     void useLockStore.getState().check();
   }, []);

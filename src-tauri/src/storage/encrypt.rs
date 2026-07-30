@@ -38,6 +38,15 @@ pub struct PersistCtx {
     pub stopped: Arc<AtomicBool>,
 }
 
+impl Drop for PersistCtx {
+    /// The data key is the one secret that makes every other secret readable. Wipe it as
+    /// soon as the last holder goes away, so re-locking actually removes it from RAM
+    /// instead of leaving a copy in a freed allocation for a memory dump to find.
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
+}
+
 /// Verify a SQLite file is structurally sound (used before trusting a recovered plaintext).
 pub fn integrity_ok(path: &Path) -> bool {
     let Ok(conn) = Connection::open(path) else {

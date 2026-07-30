@@ -265,6 +265,50 @@ impl Db {
         conn.commit_hook::<fn() -> bool>(None);
     }
 
+    /// Re-lock a running, unlocked encrypted DB **without quitting**: flush to the encrypted
+    /// blob, stop the persister, swap the live connection back to an empty in-memory
+    /// placeholder, and delete the plaintext working file.
+    ///
+    /// This is the only path that removes the decrypted database from disk while the app is
+    /// still running. Ordering is the whole point:
+    ///
+    /// 1. persist **first** — anything not yet flushed would otherwise be lost, and a lock
+    ///    that silently discards the last few seconds of work would teach users to avoid it;
+    /// 2. swap the connection, which drops the old one and closes the file — Windows refuses
+    ///    to delete a file that is still open, so cleanup before this point is a silent no-op;
+    /// 3. only then delete the plaintext.
+    ///
+    /// Returns `Ok` and does nothing for a DB that is not encrypted — there is no plaintext
+    /// to remove and no key to forget.
+    pub fn relock(&self) -> Result<()> {
+        let ctx = self.persist.lock().unwrap().clone();
+        let Some(ctx) = ctx else { return Ok(()) };
+
+        // 1. Flush. Do this before anything is torn down, and propagate failure: locking
+        //    is not worth losing data over, and the caller can surface it.
+        super::encrypt::persist_now(&self.conn, &ctx)?;
+
+        ctx.stopped.store(true, std::sync::atomic::Ordering::Release);
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.commit_hook::<fn() -> bool>(None);
+        }
+
+        // 2. Swap. Assigning drops the previous Connection, closing the plaintext file.
+        {
+            let mut guard = self.conn.lock().unwrap();
+            *guard = Connection::open_in_memory()?;
+        }
+        *self.persist.lock().unwrap() = None;
+        // The placeholder needs the schema, or every query answers "no such table" instead
+        // of the empty result the locked UI expects.
+        self.migrate()?;
+
+        // 3. Delete the plaintext, now that nothing holds it open.
+        super::encrypt::cleanup_work_files(&ctx.work);
+        Ok(())
+    }
+
     pub fn persist_now_blocking(&self) -> Result<()> {
         let ctx = self.persist.lock().unwrap().clone();
         if let Some(ctx) = ctx {
@@ -287,6 +331,11 @@ impl Db {
             let _ = super::encrypt::persist_now(&self.conn, &ctx);
             let _ = std::fs::write(ctx.enc.with_extension("clean"), b"1");
         }
+    }
+
+    #[cfg(test)]
+    fn is_placeholder(&self) -> bool {
+        !self.is_encrypted()
     }
 
     fn migrate(&self) -> Result<()> {
@@ -1314,5 +1363,66 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM agent_conversation WHERE id = ?1", params![id])?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod relock_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("xc-lock-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The point of `relock`: after it, the decrypted database is gone from disk and the
+    /// data written before it is still recoverable from the encrypted blob. A lock that
+    /// left the plaintext behind would be pure theatre.
+    #[test]
+    fn relock_removes_the_plaintext_and_keeps_the_data() {
+        let dir = scratch("relock");
+        let enc = dir.join("xconsole.db.enc");
+        let work = dir.join("xconsole.db");
+        let key = crate::crypto::new_data_key();
+
+        let db = Db::open_encrypted(&enc, &work, &dir, &key).unwrap();
+        db.set_setting("canary", "still-here").unwrap();
+        assert!(work.exists(), "the working file is plaintext while unlocked");
+
+        db.relock().unwrap();
+
+        assert!(!work.exists(), "relock must delete the plaintext working file");
+        assert!(enc.exists(), "the encrypted blob must remain");
+        assert!(db.is_placeholder(), "the live connection must no longer be the real DB");
+        // A locked DB answers empty rather than erroring, so the UI can render.
+        assert_eq!(db.get_setting("canary").unwrap(), None);
+
+        // Re-open with the same key: the setting written before locking survived.
+        let again = Db::open_encrypted(&enc, &work, &dir, &key).unwrap();
+        assert_eq!(
+            again.get_setting("canary").unwrap().as_deref(),
+            Some("still-here")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Re-locking twice, or locking a DB that was never encrypted, must not error — the
+    /// idle timer and the Lock button can both fire against an already-locked app.
+    #[test]
+    fn relock_is_idempotent_and_safe_on_a_plain_db() {
+        let dir = scratch("idem");
+        let enc = dir.join("xconsole.db.enc");
+        let work = dir.join("xconsole.db");
+        let key = crate::crypto::new_data_key();
+
+        let db = Db::open_encrypted(&enc, &work, &dir, &key).unwrap();
+        db.relock().unwrap();
+        db.relock().unwrap();
+
+        assert!(Db::open_locked().unwrap().relock().is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

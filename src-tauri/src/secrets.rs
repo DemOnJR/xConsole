@@ -209,13 +209,27 @@ pub fn db_connection_key(id: &str) -> String {
 /// Settings key recording that the user chose to encrypt stored credentials.
 pub const ENCRYPT_SECRETS_SETTING: &str = "security.encrypt_secrets";
 
-/// Has the user opted into encrypting keychain secrets?
+/// Are keychain secrets encrypted with the data key?
 ///
-/// Defaults to **off**. Turning it on is forward-only: builds that predate the feature
-/// cannot read a wrapped secret and will fail every login with an authentication error,
-/// so this must never flip on by itself.
+/// **Defaults to on.** Without it the keychain holds directly usable credentials: any
+/// process running as this user can `CredRead` the service name and walk away with every
+/// SSH password and API token. That is the exact outcome at-rest encryption exists to
+/// prevent, so it cannot be something a user has to find and switch on.
+///
+/// It only has an effect once a master password is configured — with no lock there is no
+/// data key, and [`crate::crypto::wrap_secret`] passes values through unchanged.
+///
+/// Turning it *off* stays supported and converts everything back ([`rekey_all`] with
+/// `None`), because wrapped values are unreadable to xConsole builds older than the
+/// feature: they would send the ciphertext as the password and fail every login. Rolling
+/// back to such a build means switching this off **first**, while a key still exists to
+/// decrypt with.
 pub fn encryption_opted_in(db: &crate::storage::Db) -> bool {
-    matches!(db.get_setting(ENCRYPT_SECRETS_SETTING), Ok(Some(v)) if v == "true")
+    match db.get_setting(ENCRYPT_SECRETS_SETTING) {
+        // Only an explicit opt-out disables it.
+        Ok(Some(v)) => v != "false",
+        _ => true,
+    }
 }
 
 /// Every keychain key that holds a secret for the rows currently in the database.

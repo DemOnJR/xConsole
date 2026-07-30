@@ -845,6 +845,14 @@ export const api = {
   /** Requires the master password whenever an app lock is configured. */
   exportUnencryptedBackup: (password: string) =>
     invoke<string>("export_unencrypted_backup", { password }),
+  /** Lock without quitting: closes every shell, re-encrypts the DB, deletes the
+   *  plaintext working file, forgets the key. Resolves with how many shells closed. */
+  lockNow: () => invoke<number>("lock_now"),
+  /** Reset the idle timer. The timeout itself is enforced in the backend. */
+  noteActivity: () => invoke<void>("note_activity"),
+  getAutoLockMinutes: () => invoke<number>("get_auto_lock_minutes"),
+  setAutoLockMinutes: (minutes: number) =>
+    invoke<void>("set_auto_lock_minutes", { minutes }),
 
   listFileChanges: (sessionId: string) =>
     invoke<FileChange[]>("list_file_changes", { sessionId }),

@@ -21,9 +21,12 @@ function AppLockCard() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
 
+  const [autoLock, setAutoLock] = useState<number | null>(null);
+
   const refresh = () => api.lockStatus().then(setStatus).catch(() => {});
   useEffect(() => {
     refresh();
+    api.getAutoLockMinutes().then(setAutoLock).catch(() => {});
   }, []);
   if (!status) return null;
 
@@ -146,6 +149,54 @@ function AppLockCard() {
                   }, v ? "Encrypting…" : "Decrypting…")
                 }
               />
+            </div>
+          </div>
+          <div className="mb-3 rounded-md border border-[var(--border)] p-2.5">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-xs text-gray-200">Lock when idle</div>
+                <div className="mt-0.5 text-[11px] text-gray-500">
+                  Closes every open shell, re-encrypts the database and deletes the
+                  decrypted copy from disk. Typing, clicking and scrolling reset the
+                  timer; terminal output on its own does not — a busy server is not a
+                  person at the keyboard.
+                </div>
+              </div>
+              <select
+                value={autoLock ?? 15}
+                onChange={(e) => {
+                  const m = Number(e.target.value);
+                  setAutoLock(m);
+                  void api.setAutoLockMinutes(m).catch((err) => setMsg(String(err)));
+                }}
+                className="shrink-0 rounded-md border border-[var(--border)] bg-[var(--bg)] px-2 py-1 text-xs text-gray-100 outline-none focus:border-[var(--accent)]"
+              >
+                <option value={1}>1 minute</option>
+                <option value={5}>5 minutes</option>
+                <option value={15}>15 minutes</option>
+                <option value={30}>30 minutes</option>
+                <option value={60}>1 hour</option>
+                <option value={0}>Never</option>
+              </select>
+            </div>
+            {autoLock === 0 ? (
+              <div className="mt-1.5 text-[11px] text-amber-400/90">
+                ⚠ With auto-lock off, an unattended unlocked xConsole keeps your servers
+                reachable and your database decrypted on disk until you quit it.
+              </div>
+            ) : null}
+            <div className="mt-2 border-t border-[var(--border)] pt-2">
+              <Button
+                onClick={() =>
+                  void run(async () => {
+                    const n = await api.lockNow();
+                    return `Locked. Closed ${n} session${n === 1 ? "" : "s"}.`;
+                  }, "Locking…")
+                }
+                disabled={busy}
+              >
+                Lock now
+              </Button>
             </div>
           </div>
           {status.remembered ? (

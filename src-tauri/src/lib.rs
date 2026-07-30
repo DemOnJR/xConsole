@@ -162,6 +162,7 @@ pub fn run() {
             });
 
             app.manage(commands::lock::DataKey(std::sync::Mutex::new(initial_data_key)));
+            app.manage(commands::lock::AutoLock::default());
             app.manage(db);
             app.manage(sessions);
             app.manage(sftp);
@@ -180,6 +181,45 @@ pub fn run() {
             app.manage(llama_server);
             app.manage(cron_running);
             app.manage(ai::edits::EditJournal::new());
+
+            // Idle auto-lock. The timer lives in the backend on purpose: a JS timer stops
+            // with a hung or crashed webview, and "the lock quietly stopped working" is the
+            // failure mode you never notice. The frontend only reports activity.
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                        let db = app_handle.state::<storage::Db>();
+                        // Nothing to lock unless a lock is configured AND we are unlocked.
+                        if !db.is_encrypted() {
+                            continue;
+                        }
+                        let Some(timeout) = commands::lock::auto_lock_timeout(&db) else {
+                            continue;
+                        };
+                        if app_handle.state::<commands::lock::AutoLock>().idle_for() < timeout {
+                            continue;
+                        }
+                        let datakey = app_handle.state::<commands::lock::DataKey>();
+                        let closed = commands::lock::close_everything(
+                            &app_handle.state::<SessionManager>(),
+                            &app_handle.state::<SftpManager>(),
+                            &app_handle.state::<commands::db::DbSessions>(),
+                        );
+                        let saved = db.relock();
+                        crate::secrets::set_wrapping_key(None);
+                        if let Some(mut k) = datakey.0.lock().unwrap().take() {
+                            use zeroize::Zeroize;
+                            k.zeroize();
+                        }
+                        if let Err(e) = saved {
+                            eprintln!("xconsole: auto-lock saved nothing: {e}");
+                        }
+                        let _ = app_handle.emit("app://locked", closed as u64);
+                    }
+                });
+            }
 
             // The Cursor MCP runs as a SEPARATE process (Cursor spawns it) and can't
             // emit Tauri events, so its canvas tools drop request files in this shared
@@ -376,6 +416,10 @@ pub fn run() {
             commands::lock::set_secret_encryption,
             commands::lock::disable_lock,
             commands::lock::export_unencrypted_backup,
+            commands::lock::lock_now,
+            commands::lock::note_activity,
+            commands::lock::get_auto_lock_minutes,
+            commands::lock::set_auto_lock_minutes,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -15,6 +15,12 @@ interface LockState {
   busy: boolean;
   check: () => Promise<void>;
   unlock: (password: string, remember: boolean) => Promise<boolean>;
+  /** Drop back to the unlock screen. Called when the backend locks (idle timeout, or
+   *  the user pressing Lock) — the backend has already closed the shells and thrown the
+   *  key away, so this only catches the UI up. */
+  setLocked: () => void;
+  /** Lock on demand. */
+  lockNow: () => Promise<void>;
 }
 
 export const useLockStore = create<LockState>((set) => ({
@@ -47,5 +53,18 @@ export const useLockStore = create<LockState>((set) => ({
       set({ error: String(e), busy: false });
       return false;
     }
+  },
+
+  setLocked: () => set({ status: "locked", error: null, busy: false }),
+
+  lockNow: async () => {
+    try {
+      await api.lockNow();
+    } catch (e) {
+      // Report it, but still show the lock screen: `lock_now` throws only when the save
+      // failed *after* the key was already dropped, so the app really is locked.
+      set({ error: String(e) });
+    }
+    set({ status: "locked", busy: false });
   },
 }));
