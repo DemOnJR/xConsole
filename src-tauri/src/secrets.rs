@@ -201,6 +201,11 @@ pub fn ssh_key_key(vps_id: &str) -> String {
     format!("sshkey:{vps_id}")
 }
 
+/// Keychain key for a remembered database login's password.
+pub fn db_connection_key(id: &str) -> String {
+    format!("db:{id}:password")
+}
+
 /// Settings key recording that the user chose to encrypt stored credentials.
 pub const ENCRYPT_SECRETS_SETTING: &str = "security.encrypt_secrets";
 
@@ -234,6 +239,14 @@ pub fn all_secret_keys(db: &crate::storage::Db) -> Vec<String> {
     if let Ok(list) = db.list_cloud_accounts() {
         for a in list {
             keys.push(cloud_account_key(&a.id));
+        }
+    }
+    // Remembered database logins. Easy to forget here, and the cost of forgetting is
+    // silent: toggling credential encryption would leave these behind in the old form and
+    // every saved database login would fail to decrypt.
+    if let Ok(ids) = db.all_db_connection_ids() {
+        for id in ids {
+            keys.push(db_connection_key(&id));
         }
     }
     keys

@@ -395,6 +395,25 @@ impl Db {
                 created_at   TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            -- A remembered database login. The password is NOT here: it lives in the OS
+            -- keychain under `db:<id>:password`, so it inherits the "Encrypt saved
+            -- credentials" setting like every other secret.
+            CREATE TABLE IF NOT EXISTS db_connection (
+                id          TEXT PRIMARY KEY,
+                vps_id      TEXT NOT NULL,
+                -- Discovery's endpoint id (`docker:<name>` / `native:<port>`), so a saved
+                -- login can be matched back to an instance on the next scan.
+                endpoint_id TEXT NOT NULL,
+                engine      TEXT NOT NULL,
+                host        TEXT NOT NULL,
+                port        INTEGER NOT NULL,
+                container   TEXT,
+                username    TEXT NOT NULL,
+                database    TEXT,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (vps_id, endpoint_id, username)
+            );
+
             CREATE TABLE IF NOT EXISTS agent_conversation (
                 id            TEXT PRIMARY KEY,
                 title         TEXT NOT NULL,
@@ -1045,6 +1064,89 @@ impl Db {
             has_secret: false,
             created_at: r.get(6)?,
         })
+    }
+
+    /// Remembered database logins for one server.
+    pub fn list_db_connections(&self, vps_id: &str) -> Result<Vec<crate::storage::models::DbConnection>> {
+        let mut list = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT id, vps_id, endpoint_id, engine, host, port, container, username, database
+                 FROM db_connection WHERE vps_id = ?1 ORDER BY endpoint_id, username",
+            )?;
+            let rows = stmt.query_map([vps_id], |r| {
+                Ok(crate::storage::models::DbConnection {
+                    id: r.get(0)?,
+                    vps_id: r.get(1)?,
+                    endpoint_id: r.get(2)?,
+                    engine: r.get(3)?,
+                    host: r.get(4)?,
+                    port: r.get::<_, i64>(5)? as u16,
+                    container: r.get(6)?,
+                    username: r.get(7)?,
+                    database: r.get(8)?,
+                    has_secret: false,
+                })
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        // Checked outside the DB lock: each probe is an OS keychain round trip.
+        for c in &mut list {
+            c.has_secret = secrets::has_secret(&secrets::db_connection_key(&c.id));
+        }
+        Ok(list)
+    }
+
+    /// Insert or update a remembered login. Returns the row id.
+    ///
+    /// Keyed on (vps_id, endpoint_id, username) so re-saving the same login updates it
+    /// rather than accumulating duplicates every time the user ticks "remember".
+    pub fn upsert_db_connection(
+        &self,
+        c: &crate::storage::models::DbConnection,
+    ) -> Result<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO db_connection
+                (id, vps_id, endpoint_id, engine, host, port, container, username, database)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT (vps_id, endpoint_id, username) DO UPDATE SET
+                engine = excluded.engine, host = excluded.host, port = excluded.port,
+                container = excluded.container, database = excluded.database",
+            params![
+                c.id,
+                c.vps_id,
+                c.endpoint_id,
+                c.engine,
+                c.host,
+                c.port as i64,
+                c.container,
+                c.username,
+                c.database
+            ],
+        )?;
+        // The conflict path keeps the pre-existing id, so read back whichever won —
+        // otherwise the caller would store the password under an id that isn't in the row.
+        let id: String = conn.query_row(
+            "SELECT id FROM db_connection WHERE vps_id = ?1 AND endpoint_id = ?2 AND username = ?3",
+            params![c.vps_id, c.endpoint_id, c.username],
+            |r| r.get(0),
+        )?;
+        Ok(id)
+    }
+
+    pub fn delete_db_connection(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM db_connection WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Every remembered login, for the secret re-key sweep.
+    pub fn all_db_connection_ids(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id FROM db_connection")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn list_cloud_accounts(&self) -> Result<Vec<CloudAccount>> {

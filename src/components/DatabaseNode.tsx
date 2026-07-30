@@ -154,13 +154,20 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     setScanning(true);
     setError(null);
     try {
-      const found = await api.dbDiscover(data.vpsId);
+      // Discovery and remembered logins together, so an instance appears with its saved
+      // credential already attached rather than briefly offering an empty form.
+      const [found, saved] = await Promise.all([
+        api.dbDiscover(data.vpsId),
+        api.dbListConnections(data.vpsId).catch(() => []),
+      ]);
+      const savedByEndpoint = new Map(saved.map((s) => [s.endpoint_id, s]));
       setInstances((prev) => {
         // Keep live sessions across a rescan rather than making the user sign in again.
         const byId = new Map(prev.map((i) => [i.endpoint.id, i]));
         return found.map((ep) => {
           const existing = byId.get(ep.id);
-          return existing ? { ...existing, endpoint: ep } : newInstance(ep);
+          const base = existing ? { ...existing, endpoint: ep } : newInstance(ep);
+          return { ...base, saved: savedByEndpoint.get(ep.id) };
         });
       });
     } catch (e) {
@@ -169,6 +176,31 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
       setScanning(false);
     }
   }, [data.vpsId]);
+
+  /** Re-read just the saved logins, after one is added or forgotten. */
+  const refreshSaved = useCallback(async () => {
+    try {
+      const saved = await api.dbListConnections(data.vpsId);
+      const byEndpoint = new Map(saved.map((s) => [s.endpoint_id, s]));
+      setInstances((prev) =>
+        prev.map((i) => ({ ...i, saved: byEndpoint.get(i.endpoint.id) })),
+      );
+    } catch {
+      // Non-fatal: the tree still works, it just won't show the saved login yet.
+    }
+  }, [data.vpsId]);
+
+  const forgetSaved = useCallback(
+    async (id: string) => {
+      try {
+        await api.dbForgetConnection(id);
+        await refreshSaved();
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [refreshSaved],
+  );
 
   useEffect(() => {
     void scan();
@@ -322,6 +354,8 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
               });
             }}
             onRescan={() => void scan()}
+            onSavedChanged={() => void refreshSaved()}
+            onForget={(id) => void forgetSaved(id)}
           />
 
           <div className="flex min-w-0 flex-1 flex-col">

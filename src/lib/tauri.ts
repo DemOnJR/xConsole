@@ -209,6 +209,21 @@ export interface DbConnectOutcome {
   version: string;
 }
 
+/** A remembered database login (matches the Rust `DbConnection`). The password is not
+ *  here — it's in the OS keychain and never travels to the webview. */
+export interface DbSavedConnection {
+  id: string;
+  vps_id: string;
+  endpoint_id: string;
+  engine: DbEngine;
+  host: string;
+  port: number;
+  container: string | null;
+  username: string;
+  database: string | null;
+  has_secret: boolean;
+}
+
 export interface DbTable {
   name: string;
   kind: string;
@@ -622,6 +637,13 @@ export const api = {
   sftpTransferClearFinished: () => invoke<void>("sftp_transfer_clear_finished"),
   // --- database client ---
   dbDiscover: (vpsId: string) => invoke<DbEndpoint[]>("db_discover", { vpsId }),
+  dbSaveConnection: (endpointId: string, target: DbTargetInput) =>
+    invoke<string>("db_save_connection", { endpointId, target }),
+  dbListConnections: (vpsId: string) =>
+    invoke<DbSavedConnection[]>("db_list_connections", { vpsId }),
+  dbForgetConnection: (id: string) => invoke<void>("db_forget_connection", { id }),
+  dbConnectSaved: (id: string, vpsId: string) =>
+    invoke<DbConnectOutcome>("db_connect_saved", { id, vpsId }),
   dbConnect: (target: DbTargetInput) =>
     invoke<DbConnectOutcome>("db_connect", { target }),
   dbDisconnect: (sessionId: string) => invoke<void>("db_disconnect", { sessionId }),

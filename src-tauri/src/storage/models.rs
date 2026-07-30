@@ -313,6 +313,27 @@ pub struct InfraProjectInput {
     pub description: Option<String>,
 }
 
+/// A remembered database login. The password lives in the OS keychain, never here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbConnection {
+    pub id: String,
+    pub vps_id: String,
+    /// Discovery's endpoint id, so this can be matched to an instance after a rescan.
+    pub endpoint_id: String,
+    /// "mysql" | "postgres" | "redis".
+    pub engine: String,
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub container: Option<String>,
+    pub username: String,
+    #[serde(default)]
+    pub database: Option<String>,
+    /// Whether a password is actually present in the keychain for this row.
+    #[serde(default)]
+    pub has_secret: bool,
+}
+
 /// Cloud provider connection. Credentials live in the OS keychain only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloudAccount {

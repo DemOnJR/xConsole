@@ -86,6 +86,16 @@ pub async fn db_connect(
     db_sessions: State<'_, DbSessions>,
     target: DbTarget,
 ) -> Result<DbConnectOutcome, String> {
+    connect_with(&sessions, &db_sessions, target).await
+}
+
+/// Shared by the interactive and remembered-login paths, so both verify the credentials
+/// the same way before a session id is handed out.
+async fn connect_with(
+    sessions: &SessionManager,
+    db_sessions: &DbSessions,
+    target: DbTarget,
+) -> Result<DbConnectOutcome, String> {
     // Probe with something the engine actually understands — `SELECT VERSION()` is a
     // syntax error to Redis, so connecting would have failed for it with a confusing
     // message rather than a wrong password one.
@@ -118,6 +128,106 @@ pub async fn db_connect(
 #[tauri::command]
 pub fn db_disconnect(db_sessions: State<'_, DbSessions>, session_id: String) {
     db_sessions.map.remove(&session_id);
+}
+
+// ----- Remembered logins -----
+
+/// Save a login so the password isn't retyped every launch.
+///
+/// Non-secret fields go to SQLite; the password goes to the OS keychain, which means it
+/// inherits the "Encrypt saved credentials" setting exactly like an SSH password does —
+/// with that on, the credential store holds ciphertext rather than the password.
+#[tauri::command]
+pub fn db_save_connection(
+    db: State<'_, crate::storage::Db>,
+    endpoint_id: String,
+    target: DbTarget,
+) -> Result<String, String> {
+    let record = crate::storage::models::DbConnection {
+        id: Uuid::new_v4().to_string(),
+        vps_id: target.vps_id.clone(),
+        endpoint_id,
+        engine: match target.engine {
+            DbEngine::MySql => "mysql",
+            DbEngine::Postgres => "postgres",
+            DbEngine::Redis => "redis",
+        }
+        .to_string(),
+        host: target.host.clone(),
+        port: target.port,
+        container: target.container.clone(),
+        username: target.user.clone(),
+        database: target.database.clone(),
+        has_secret: false,
+    };
+    let id = db.upsert_db_connection(&record).map_err(|e| e.to_string())?;
+
+    let key = crate::secrets::db_connection_key(&id);
+    if target.password.is_empty() {
+        // An empty password means "no password", not "keep the old one" — leaving a
+        // stale secret behind would silently keep logging in with it.
+        let _ = crate::secrets::delete_secret(&key);
+    } else {
+        crate::secrets::set_secret(&key, &target.password).map_err(|e| e.to_string())?;
+    }
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn db_list_connections(
+    db: State<'_, crate::storage::Db>,
+    vps_id: String,
+) -> Result<Vec<crate::storage::models::DbConnection>, String> {
+    db.list_db_connections(&vps_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_forget_connection(
+    db: State<'_, crate::storage::Db>,
+    id: String,
+) -> Result<(), String> {
+    let _ = crate::secrets::delete_secret(&crate::secrets::db_connection_key(&id));
+    db.delete_db_connection(&id).map_err(|e| e.to_string())
+}
+
+/// Open a remembered login without asking for the password again.
+#[tauri::command]
+pub async fn db_connect_saved(
+    sessions: State<'_, SessionManager>,
+    db: State<'_, crate::storage::Db>,
+    db_sessions: State<'_, DbSessions>,
+    id: String,
+    vps_id: String,
+) -> Result<DbConnectOutcome, String> {
+    let saved = db
+        .list_db_connections(&vps_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|c| c.id == id)
+        .ok_or_else(|| "that saved login no longer exists".to_string())?;
+
+    let password = crate::secrets::get_secret(&crate::secrets::db_connection_key(&id))
+        .map_err(|e| e.to_string())?
+        .map(|p| p.to_string())
+        .unwrap_or_default();
+
+    let engine = match saved.engine.as_str() {
+        "postgres" => DbEngine::Postgres,
+        "redis" => DbEngine::Redis,
+        _ => DbEngine::MySql,
+    };
+
+    let target = DbTarget {
+        vps_id: saved.vps_id,
+        container: saved.container,
+        host: saved.host,
+        port: saved.port,
+        user: saved.username,
+        password,
+        database: saved.database,
+        engine,
+    };
+    connect_with(&sessions, &db_sessions, target).await
 }
 
 /// Switch the default schema for a connection.

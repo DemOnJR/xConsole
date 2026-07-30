@@ -1,5 +1,11 @@
 import { useState } from "react";
-import { api, DB_PRODUCT_LABEL, type DbEndpoint, type DbTable } from "../lib/tauri";
+import {
+  api,
+  DB_PRODUCT_LABEL,
+  type DbEndpoint,
+  type DbSavedConnection,
+  type DbTable,
+} from "../lib/tauri";
 import { DatabaseIcon } from "./icons";
 
 /**
@@ -12,6 +18,8 @@ import { DatabaseIcon } from "./icons";
  */
 export interface DbInstance {
   endpoint: DbEndpoint;
+  /** A remembered login for this endpoint, if one was saved. */
+  saved?: DbSavedConnection;
   /** Backend session id once signed in. */
   sessionId: string | null;
   version: string;
@@ -57,16 +65,45 @@ function SignIn({
   vpsId,
   onConnected,
   onError,
+  onSaved,
+  onForget,
 }: {
   instance: DbInstance;
   /** Which server to tunnel through — the endpoint itself doesn't carry it. */
   vpsId: string;
   onConnected: (sessionId: string, version: string, schemas: string[]) => void;
   onError: (message: string) => void;
+  /** Re-read the saved list after one is added. */
+  onSaved: () => void;
+  onForget: (id: string) => void;
 }) {
-  const [user, setUser] = useState(instance.endpoint.engine === "redis" ? "default" : "root");
+  const saved = instance.saved;
+  const [user, setUser] = useState(
+    saved?.username ?? (instance.endpoint.engine === "redis" ? "default" : "root"),
+  );
   const [password, setPassword] = useState("");
+  const [remember, setRemember] = useState(Boolean(saved));
   const [busy, setBusy] = useState(false);
+
+  const finish = async (sessionId: string, version: string) => {
+    setPassword("");
+    const schemas = await api.dbListDatabases(sessionId);
+    onConnected(sessionId, version, schemas);
+  };
+
+  /** Open a remembered login without retyping anything. */
+  const useSaved = async () => {
+    if (!saved || busy) return;
+    setBusy(true);
+    try {
+      const res = await api.dbConnectSaved(saved.id, vpsId);
+      await finish(res.session_id, res.version);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -75,7 +112,7 @@ function SignIn({
     try {
       const { endpoint } = instance;
       if (!endpoint.engine) return; // guarded by the caller; keeps the type honest
-      const res = await api.dbConnect({
+      const target = {
         vps_id: vpsId,
         container: endpoint.container,
         host: endpoint.host,
@@ -84,11 +121,15 @@ function SignIn({
         password,
         database: null,
         engine: endpoint.engine,
-      });
+      };
+      const res = await api.dbConnect(target);
+      // Save only after the credentials are known good, so a typo isn't remembered.
+      if (remember) {
+        await api.dbSaveConnection(endpoint.id, target);
+        onSaved();
+      }
       // Drop it from component state immediately — the backend holds it for the session.
-      setPassword("");
-      const schemas = await api.dbListDatabases(res.session_id);
-      onConnected(res.session_id, res.version, schemas);
+      await finish(res.session_id, res.version);
     } catch (err) {
       onError(String(err));
     } finally {
@@ -98,6 +139,27 @@ function SignIn({
 
   return (
     <form className="space-y-1 py-1 pl-5 pr-2" onSubmit={submit}>
+      {saved?.has_secret ? (
+        <div className="flex gap-1">
+          <button
+            type="button"
+            onClick={() => void useSaved()}
+            disabled={busy}
+            className="min-w-0 flex-1 truncate rounded bg-violet-600 px-2 py-0.5 text-[11px] text-white hover:bg-violet-500 disabled:opacity-50"
+          >
+            {busy ? "Connecting…" : `Connect as ${saved.username}`}
+          </button>
+          <button
+            type="button"
+            onClick={() => void onForget(saved.id)}
+            className="shrink-0 rounded border border-[var(--border)] px-1.5 text-[11px] text-gray-400 hover:text-red-300"
+            data-tooltip="Forget this saved password"
+          >
+            ✕
+          </button>
+        </div>
+      ) : null}
+
       <div className="flex gap-1">
         <input
           value={user}
@@ -113,6 +175,16 @@ function SignIn({
           className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 text-[11px] text-gray-100 outline-none focus:border-violet-500"
         />
       </div>
+
+      <label className="flex items-center gap-1.5 text-[10px] text-gray-500">
+        <input
+          type="checkbox"
+          checked={remember}
+          onChange={(e) => setRemember(e.target.checked)}
+        />
+        Remember this password
+      </label>
+
       <button
         type="submit"
         disabled={busy}
@@ -141,6 +213,8 @@ export function DatabaseTree({
   onPatch,
   onSelectTable,
   onRescan,
+  onSavedChanged,
+  onForget,
 }: {
   instances: DbInstance[];
   vpsId: string;
@@ -149,6 +223,8 @@ export function DatabaseTree({
   onPatch: (endpointId: string, patch: Partial<DbInstance>) => void;
   onSelectTable: (instance: DbInstance, schema: string, table: string) => void;
   onRescan: () => void;
+  onSavedChanged: () => void;
+  onForget: (id: string) => void;
 }) {
   const toggleInstance = (inst: DbInstance) =>
     onPatch(inst.endpoint.id, { expanded: !inst.expanded });
@@ -258,6 +334,8 @@ export function DatabaseTree({
                         onPatch(ep.id, { sessionId, version, schemas, error: null })
                       }
                       onError={(message) => onPatch(ep.id, { error: message })}
+                      onSaved={onSavedChanged}
+                      onForget={onForget}
                     />
                   ) : (
                     <>
