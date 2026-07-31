@@ -86,7 +86,7 @@ function AppLockCard() {
             <input type="password" value={pw2} onChange={(e) => setPw2(e.target.value)} placeholder="Confirm master password" className={inputCls} />
             <label className="flex items-center gap-2 text-xs text-gray-300">
               <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
-              Remember on this device (unlock automatically; otherwise you'll type it each launch)
+              Remember on this device (skip the unlock screen at launch; an idle lock still asks)
             </label>
             <label className="flex items-center gap-2 text-xs text-gray-300">
               <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
@@ -163,7 +163,7 @@ function AppLockCard() {
                 </div>
               </div>
               <select
-                value={autoLock ?? 15}
+                value={autoLock ?? 60}
                 onChange={(e) => {
                   const m = Number(e.target.value);
                   setAutoLock(m);

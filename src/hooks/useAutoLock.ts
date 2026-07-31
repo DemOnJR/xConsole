@@ -27,9 +27,11 @@ export function useAutoLock() {
       const now = Date.now();
       if (now - last < REPORT_EVERY_MS) return;
       last = now;
-      void api.noteActivity().catch(() => {
-        // A failed heartbeat must never surface as an error: the safe consequence is
-        // simply that the app locks sooner.
+      void api.noteActivity().catch((e) => {
+        // Never surfaced as an error dialog, but never silent either: if this stops
+        // working the backend cannot measure idleness, and it deliberately stops
+        // auto-locking rather than firing blindly. That needs to be diagnosable.
+        console.warn("xconsole: idle heartbeat failed", e);
       });
     };
 

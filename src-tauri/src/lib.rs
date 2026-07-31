@@ -198,7 +198,10 @@ pub fn run() {
                         let Some(timeout) = commands::lock::auto_lock_timeout(&db) else {
                             continue;
                         };
-                        if app_handle.state::<commands::lock::AutoLock>().idle_for() < timeout {
+                        let idle = app_handle.state::<commands::lock::AutoLock>();
+                        // No heartbeat yet => we cannot tell idle from busy. Wait rather
+                        // than lock on a blind schedule.
+                        if !idle.can_measure_idleness() || idle.idle_for() < timeout {
                             continue;
                         }
                         let datakey = app_handle.state::<commands::lock::DataKey>();

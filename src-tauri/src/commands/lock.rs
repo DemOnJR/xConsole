@@ -144,9 +144,15 @@ pub fn unlock_with_password(
     app: AppHandle,
     db: State<Db>,
     datakey: State<DataKey>,
+    idle: State<AutoLock>,
     mut password: String,
     remember: bool,
 ) -> Result<(), String> {
+    // Unlocking IS activity, and the idle clock has been running the whole time the app sat
+    // locked. Without this the very next watcher tick sees hours of idleness and locks again
+    // within 20 seconds — and it would keep doing that forever if the frontend heartbeat ever
+    // failed, since nothing else resets the clock. The timeout must be measured from here.
+    idle.touch();
     let dir = data_dir(&app)?;
     let manifest = lock::read(&dir).ok_or("App lock isn't configured.")?;
     let key = lock::unlock(&manifest, &password)
@@ -238,7 +244,11 @@ pub fn set_secret_encryption(
 /// Settings key for the idle auto-lock timeout, in minutes. `0` disables it.
 pub const AUTO_LOCK_SETTING: &str = "security.auto_lock_minutes";
 /// Auto-lock timeout used when the user has never chosen one.
-pub const AUTO_LOCK_DEFAULT_MINUTES: u64 = 15;
+///
+/// An hour, not the 15 minutes this shipped with. Reading logs, watching a build or working
+/// in another window are all "idle" by the input-only definition, so a short default locks
+/// people out mid-task — and a security feature that interrupts you is one you turn off.
+pub const AUTO_LOCK_DEFAULT_MINUTES: u64 = 60;
 /// Upper bound we will honour. A timeout measured in days is indistinguishable from "off"
 /// but *looks* like protection, which is worse than being told it is off.
 const AUTO_LOCK_MAX_MINUTES: u64 = 8 * 60;
@@ -246,22 +256,46 @@ const AUTO_LOCK_MAX_MINUTES: u64 = 8 * 60;
 /// How long the app has been idle. Fed by [`note_activity`] from real user input.
 pub struct AutoLock {
     last_activity: Mutex<std::time::Instant>,
+    /// Has the UI ever reported input? Only [`note_activity`] sets this.
+    heartbeat_seen: std::sync::atomic::AtomicBool,
 }
 
 impl Default for AutoLock {
     fn default() -> Self {
         Self {
             last_activity: Mutex::new(std::time::Instant::now()),
+            heartbeat_seen: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
 
 impl AutoLock {
+    /// Reset the idle clock. Called on unlock as well as on input, so the timeout is
+    /// always measured from the last thing that was definitely the user.
     pub fn touch(&self) {
         *self.last_activity.lock().unwrap() = std::time::Instant::now();
     }
+
+    /// Reset the clock *and* confirm the UI's heartbeat is working.
+    fn beat(&self) {
+        self.touch();
+        self.heartbeat_seen
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
     pub fn idle_for(&self) -> std::time::Duration {
         self.last_activity.lock().unwrap().elapsed()
+    }
+
+    /// Whether idleness can be measured at all.
+    ///
+    /// If the UI has never reported input, we are not seeing an idle user — we are blind.
+    /// Auto-locking on that would fire on a fixed schedule *while the app is in use*, which
+    /// is indistinguishable from the app being broken and is exactly how a security feature
+    /// gets switched off for good. So this fails open, and [`lock_now`] still works.
+    pub fn can_measure_idleness(&self) -> bool {
+        self.heartbeat_seen
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -284,7 +318,7 @@ pub fn auto_lock_timeout(db: &Db) -> Option<std::time::Duration> {
 /// Record user activity, resetting the idle timer. Called from the UI on real input.
 #[tauri::command]
 pub fn note_activity(idle: State<AutoLock>) {
-    idle.touch();
+    idle.beat();
 }
 
 #[tauri::command]
@@ -489,5 +523,22 @@ mod tests {
         let before = a.idle_for();
         a.touch();
         assert!(a.idle_for() < before, "touch() must reset the idle clock");
+    }
+
+    /// Without a heartbeat we are blind, not idle. Auto-locking anyway fires on a fixed
+    /// schedule while the app is being used — which is what "it locks again and again"
+    /// looks like from the outside.
+    #[test]
+    fn auto_lock_holds_off_until_the_ui_heartbeat_arrives() {
+        let a = AutoLock::default();
+        assert!(
+            !a.can_measure_idleness(),
+            "a fresh app has heard nothing from the UI yet"
+        );
+        // Unlocking resets the clock but is NOT proof the heartbeat works.
+        a.touch();
+        assert!(!a.can_measure_idleness());
+        a.beat();
+        assert!(a.can_measure_idleness(), "note_activity proves it works");
     }
 }

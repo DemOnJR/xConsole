@@ -59,7 +59,11 @@ export function UnlockScreen() {
             className="mt-0.5"
           />
           <span>
-            Remember on this device (unlock automatically next time)
+            Remember on this device (skip this screen when xConsole starts)
+            <span className="mt-0.5 block text-[11px] text-gray-500">
+              Applies when the app launches. An idle lock always asks for the password
+              again — otherwise it would protect nothing from someone at your desk.
+            </span>
             <span className="mt-0.5 block text-[11px] text-amber-400/80">
               Less secure — stores the decryption key on this PC, so anything running as
               you can open your data without the password.
