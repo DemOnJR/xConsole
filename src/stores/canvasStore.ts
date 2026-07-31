@@ -209,9 +209,13 @@ export const useCanvasStore = create<CanvasState>()(
           // dimensions straight onto the node does nothing lasting — the next reflow
           // overwrites them. Dragging an edge has to become a change to the *layout*.
           if (s.layoutMode === "tile" && s.tileLayout && s.paneSize) {
+            // `resizing` marks a live NodeResizer drag. React Flow reports its own
+            // measurements as dimension changes too, and those must not be read as user
+            // intent: on the first one a node has no width yet, so the "delta" would be
+            // the node's entire width and the layout would be thrown across the pane.
             const resizes = changes.filter(
               (c): c is Extract<NodeChange<CanvasNode>, { type: "dimensions" }> =>
-                c.type === "dimensions" && !!c.dimensions,
+                c.type === "dimensions" && !!c.dimensions && c.resizing === true,
             );
             if (resizes.length > 0) {
               let layout = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
@@ -233,7 +237,10 @@ export const useCanvasStore = create<CanvasState>()(
                   layout = resizeRow(layout, c.id, (dh / s.paneSize.height) * total);
                 }
               }
-              return applyTiles({ ...s, tileLayout: layout });
+              // Pass the pane size. Without it applyTiles falls back to flowing rows at
+              // their current sizes with a GAP between them, instead of filling the pane
+              // edge to edge — which is what put a large gap between every window.
+              return applyTiles({ ...s, tileLayout: layout }, s.paneSize);
             }
           }
           return { ...s, nodes: applyNodeChanges(changes, s.nodes) };
@@ -477,18 +484,18 @@ export const useCanvasStore = create<CanvasState>()(
       setTileRows: (counts) =>
         set((s) => {
           const base = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
-          return applyTiles({ ...s, tileLayout: applyRowCounts(base, counts) });
+          return applyTiles({ ...s, tileLayout: applyRowCounts(base, counts) }, s.paneSize ?? undefined);
         }),
 
       resetTileLayout: () =>
-        set((s) => applyTiles({ ...s, tileLayout: autoLayout(s.nodes.map((n) => n.id)) })),
+        set((s) => applyTiles({ ...s, tileLayout: autoLayout(s.nodes.map((n) => n.id)) }, s.paneSize ?? undefined)),
 
       moveTile: (id, dir, axis) =>
         set((s) => {
           const base = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
           const next =
             axis === "horizontal" ? moveWithinRow(base, id, dir) : moveToRow(base, id, dir);
-          return applyTiles({ ...s, tileLayout: next });
+          return applyTiles({ ...s, tileLayout: next }, s.paneSize ?? undefined);
         }),
 
       growTile: (id, delta, axis) =>
@@ -496,13 +503,13 @@ export const useCanvasStore = create<CanvasState>()(
           const base = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
           const next =
             axis === "horizontal" ? resizeTile(base, id, delta) : resizeRow(base, id, delta);
-          return applyTiles({ ...s, tileLayout: next });
+          return applyTiles({ ...s, tileLayout: next }, s.paneSize ?? undefined);
         }),
 
       toggleTileFullWidth: (id) =>
         set((s) => {
           const base = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
-          return applyTiles({ ...s, tileLayout: toggleFullWidth(base, id) });
+          return applyTiles({ ...s, tileLayout: toggleFullWidth(base, id) }, s.paneSize ?? undefined);
         }),
 
       clear: () =>
