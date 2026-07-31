@@ -1,20 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { useVpsStore } from "../stores/vpsStore";
+import { startInternalDrag, useDragStore } from "../stores/dragStore";
 import { useCanvasStore } from "../stores/canvasStore";
 import type { Vps } from "../lib/tauri";
 import { VpsForm } from "./VpsForm";
 import { dialog } from "../stores/dialogStore";
 import { PlusIcon, TrashIcon, FolderIcon, DatabaseIcon } from "./icons";
 
-export const VPS_DND_MIME = "application/x-vps-id";
-
 export function ServerPanel() {
   const { vpsList, load, remove, reorder } = useVpsStore();
   const addVps = useCanvasStore((s) => s.addVps);
   const addSftp = useCanvasStore((s) => s.addSftp);
   const addDb = useCanvasStore((s) => s.addDb);
-  const [dragId, setDragId] = useState<string | null>(null);
-  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  // Highlight comes from the shared drag state now that the drag is pointer-based.
+  const dragOver = useDragStore((s) => s.over);
 
   const [query, setQuery] = useState("");
   const [showForm, setShowForm] = useState(false);
@@ -72,38 +71,26 @@ export function ServerPanel() {
         {filtered.map((v) => (
           <div
             key={v.id}
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData(VPS_DND_MIME, v.id);
-              // copy → drop on canvas adds a node; move → drop on a row reorders.
-              e.dataTransfer.effectAllowed = "copyMove";
-              setDragId(v.id);
-            }}
-            onDragEnd={() => {
-              setDragId(null);
-              setDropTargetId(null);
-            }}
-            onDragOver={(e) => {
-              // Only a list-internal drag reorders; a drag from elsewhere is ignored here.
-              if (!dragId || dragId === v.id) return;
-              e.preventDefault();
-              e.dataTransfer.dropEffect = "move";
-              if (dropTargetId !== v.id) setDropTargetId(v.id);
-            }}
-            onDragLeave={() => {
-              if (dropTargetId === v.id) setDropTargetId(null);
-            }}
-            onDrop={(e) => {
-              const src = e.dataTransfer.getData(VPS_DND_MIME);
-              if (!src || src === v.id) return;
-              e.preventDefault();
-              e.stopPropagation(); // don't let the canvas treat this as an add
-              void reorder(src, v.id);
-              setDragId(null);
-              setDropTargetId(null);
+            // Pointer-event drag, not HTML5: the webview stops delivering drag events
+            // once Tauri intercepts native drags so the app can receive dropped files.
+            data-drop={`server-row:${v.id}`}
+            onPointerDown={(e) => {
+              if (e.button !== 0) return;
+              startInternalDrag(
+                e,
+                { kind: "vps", vpsId: v.id, label: v.name },
+                (target, payload) => {
+                  const row = target.startsWith("server-row:")
+                    ? target.slice("server-row:".length)
+                    : null;
+                  // Dropped on another server → reorder. Dropped on the canvas →
+                  // CanvasFlow's own target handles adding the terminal.
+                  if (row && row !== payload.vpsId) void reorder(payload.vpsId, row);
+                },
+              );
             }}
             className={`group mb-1 cursor-grab rounded-md border px-2 py-2 hover:border-[var(--border)] hover:bg-[var(--surface)] active:cursor-grabbing ${
-              dropTargetId === v.id ? "border-blue-500" : "border-transparent"
+              dragOver === `server-row:${v.id}` ? "border-blue-500" : "border-transparent"
             }`}
             data-tooltip="Drag onto another server to reorder, or onto the canvas for an SSH terminal"
           >

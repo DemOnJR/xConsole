@@ -15,7 +15,7 @@
         "title": "xConsole",
         "width": 1400,
         "height": 900,
-        "dragDropEnabled": false,
+        "dragDropEnabled": true,
         "decorations": false
       }
     ],

@@ -8,5 +8,6 @@ pub mod session;
 pub mod sftp;
 pub mod settings;
 pub mod update;
+pub mod upload;
 pub mod vps;
 pub mod workspace;

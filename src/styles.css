@@ -232,3 +232,48 @@ body,
 .context-hourglass-grain-3 {
   animation-delay: 0.7s;
 }
+
+/* ---------- Node resizing ----------
+   React Flow draws the resize border as a 1px line and an 8px corner dot, and by default
+   they only exist while a node is selected. That combination is what made resizing feel
+   like a game of pixel-hunting: select first, then find the line.
+
+   The handles are now always mounted (isVisible on every NodeResizer), and these rules
+   give them a hit area much larger than what they draw. The visuals stay hidden until the
+   pointer is near, so an unselected canvas still looks clean. */
+.react-flow__resize-control.line {
+  border-color: transparent;
+  transition: border-color 120ms ease;
+}
+/* The grab zone. Ten pixels either side of the border, which is roughly the smallest
+   target that does not require aiming. */
+.react-flow__resize-control.line.top,
+.react-flow__resize-control.line.bottom {
+  height: 10px;
+  border-width: 0;
+}
+.react-flow__resize-control.line.left,
+.react-flow__resize-control.line.right {
+  width: 10px;
+  border-width: 0;
+}
+/* Corners: a 16px square rather than an 8px dot. */
+.react-flow__resize-control.handle {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  background: transparent;
+  border: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.react-flow__node:hover .react-flow__resize-control.handle,
+.react-flow__node.selected .react-flow__resize-control.handle {
+  opacity: 0.9;
+  background: var(--accent, #3b82f6);
+}
+.react-flow__node:hover .react-flow__resize-control.line,
+.react-flow__node.selected .react-flow__resize-control.line {
+  border-color: var(--accent, #3b82f6);
+  border-width: 1px;
+}

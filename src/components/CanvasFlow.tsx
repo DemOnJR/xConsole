@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -20,7 +20,7 @@ import { SftpNode } from "./SftpNode";
 import { DatabaseNode } from "./DatabaseNode";
 import { FloatingEdge } from "./FloatingEdge";
 import { LockIcon, LockOpenIcon, RadarIcon } from "./icons";
-import { VPS_DND_MIME } from "./ServerPanel";
+import { onInternalDrop } from "../stores/dragStore";
 
 const nodeTypes: NodeTypes = {
   terminal: TerminalNode,
@@ -142,35 +142,28 @@ export function CanvasFlow() {
   const onConnect = useCanvasStore((s) => s.onConnect);
   const addVps = useCanvasStore((s) => s.addVps);
   const layoutMode = useCanvasStore((s) => s.layoutMode);
-  const snapGrid = useCanvasStore((s) => s.snapGrid);
   const [showMiniMap, setShowMiniMap] = useState(true);
   const { screenToFlowPosition } = useReactFlow();
 
   // Tile mode is a fixed full-canvas grid: lock zoom/pan and free the corners.
   const tiled = layoutMode === "tile";
 
-  const onDragOver = useCallback((e: React.DragEvent) => {
-    if (e.dataTransfer.types.includes(VPS_DND_MIME)) {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "copy";
-    }
-  }, []);
-
-  const onDrop = useCallback(
-    (e: React.DragEvent) => {
-      const vpsId = e.dataTransfer.getData(VPS_DND_MIME);
-      if (!vpsId) return;
-      e.preventDefault();
-      const vps = useVpsStore.getState().vpsList.find((v) => v.id === vpsId);
+  // A server dropped on the canvas becomes a terminal. The drag is delivered by the
+  // pointer-event system (see dragStore) rather than HTML5 DnD, which the webview stops
+  // firing once Tauri intercepts native drags to receive files.
+  useEffect(() => {
+    const un = onInternalDrop("canvas", (payload, x, y) => {
+      if (payload.kind !== "vps") return;
+      const vps = useVpsStore.getState().vpsList.find((v) => v.id === payload.vpsId);
       if (!vps) return;
-      // Drop the terminal centered on the cursor.
-      const p = screenToFlowPosition({ x: e.clientX, y: e.clientY });
+      const p = screenToFlowPosition({ x, y });
       addVps(vps, { x: p.x - NODE_W / 2, y: p.y - 24 });
-    },
-    [addVps, screenToFlowPosition],
-  );
+    });
+    return un;
+  }, [addVps, screenToFlowPosition]);
 
   return (
+    <div className="h-full w-full" data-drop="canvas">
     <ReactFlow
       nodes={nodes}
       edges={edges}
@@ -179,10 +172,6 @@ export function CanvasFlow() {
       onConnect={onConnect}
       nodeTypes={nodeTypes}
       edgeTypes={edgeTypes}
-      onDrop={onDrop}
-      onDragOver={onDragOver}
-      snapToGrid={layoutMode === "snap"}
-      snapGrid={snapGrid}
       minZoom={0.05}
       maxZoom={2}
       zoomOnScroll={!tiled}
@@ -193,8 +182,9 @@ export function CanvasFlow() {
       onlyRenderVisibleElements={false}
       deleteKeyCode={null}
       proOptions={{ hideAttribution: true }}
-      fitView
-      fitViewOptions={{ padding: 0.2 }}
+      // No fitView. The saved viewport is restored verbatim on launch, and fitting
+      // would silently overrule it — which is the "everything got rearranged when I
+      // reopened the app" complaint.
     >
       <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="#1a2233" />
       {!tiled && showMiniMap && (
@@ -212,5 +202,6 @@ export function CanvasFlow() {
       )}
       <CanvasCommandBridge />
     </ReactFlow>
+    </div>
   );
 }

@@ -30,6 +30,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        // Terminal copy/paste. Needs a real clipboard, not navigator.clipboard: the
+        // webview denies programmatic reads (Ctrl+right-click paste) and cannot see
+        // image data at all, which is how screenshots reach a terminal.
+        .plugin(tauri_plugin_clipboard_manager::init())
         // Restore the window to where it was last left (position/size/maximized),
         // on whichever monitor it was on. Minimized isn't restored — see the guard
         // in setup() that centers an off-screen window instead.
@@ -419,6 +423,7 @@ pub fn run() {
             commands::lock::set_secret_encryption,
             commands::lock::disable_lock,
             commands::lock::export_unencrypted_backup,
+            commands::upload::terminal_upload,
             commands::lock::lock_now,
             commands::lock::note_activity,
             commands::lock::get_auto_lock_minutes,

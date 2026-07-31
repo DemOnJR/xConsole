@@ -328,21 +328,66 @@ export function moveToRow(layout: TileLayout, id: string, dir: -1 | 1): TileLayo
 }
 
 /** Grow/shrink a tile's width share within its row. */
+/**
+ * Grow or shrink a tile, taking the space from **one neighbour**.
+ *
+ * Weights are normalised across the row when they are turned into pixels, so simply
+ * raising one tile's weight shrinks every other tile in the row a little. With five
+ * terminals open, widening the third visibly nudged the first, second, fourth and fifth —
+ * which is not what dragging an edge means. An edge sits between exactly two tiles, and
+ * moving it should trade width between exactly those two.
+ *
+ * The neighbour is the one on the side the space is coming from: growing takes from the
+ * right, shrinking gives back to the right. A tile at the end of the row trades with the
+ * tile on its left instead, and a tile alone in its row has nothing to trade with.
+ */
 export function resizeTile(layout: TileLayout, id: string, delta: number): TileLayout {
   const at = findTile(layout, id);
   if (!at) return layout;
   const rows = cloneRows(layout);
-  const item = rows[at.row].items[at.col];
+  const items = rows[at.row].items;
+  if (items.length < 2) return layout;
+
+  const neighbourCol = at.col + 1 < items.length ? at.col + 1 : at.col - 1;
+  const item = items[at.col];
+  const neighbour = items[neighbourCol];
+
+  // Clamp to what the neighbour can actually give, so the pair's total is unchanged and
+  // the rest of the row never moves.
+  const before = item.weight;
   item.weight = clampWeight(item.weight + delta);
+  const applied = item.weight - before;
+  const neighbourAfter = clampWeight(neighbour.weight - applied);
+  // The neighbour hit its own floor: give back whatever it could not absorb.
+  const absorbed = neighbour.weight - neighbourAfter;
+  item.weight = before + absorbed;
+  neighbour.weight = neighbourAfter;
   return { rows };
 }
 
-/** Grow/shrink the height share of the row a tile sits in. */
+/**
+ * Grow/shrink the height share of a tile's row, taking it from the adjacent row.
+ *
+ * Same rule as [`resizeTile`], one axis over: a horizontal edge is between two rows, so
+ * only those two change height.
+ */
 export function resizeRow(layout: TileLayout, id: string, delta: number): TileLayout {
   const at = findTile(layout, id);
   if (!at) return layout;
   const rows = cloneRows(layout);
-  rows[at.row].weight = clampWeight(rows[at.row].weight + delta);
+  if (rows.length < 2) return layout;
+
+  const neighbourRow = at.row + 1 < rows.length ? at.row + 1 : at.row - 1;
+  const row = rows[at.row];
+  const neighbour = rows[neighbourRow];
+
+  const before = row.weight;
+  row.weight = clampWeight(row.weight + delta);
+  const applied = row.weight - before;
+  const neighbourAfter = clampWeight(neighbour.weight - applied);
+  const absorbed = neighbour.weight - neighbourAfter;
+  row.weight = before + absorbed;
+  neighbour.weight = neighbourAfter;
   return { rows };
 }
 

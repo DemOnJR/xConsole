@@ -238,6 +238,38 @@ impl SftpManager {
         Ok(())
     }
 
+    /// Is there nothing at `path`? Used to pick a non-colliding upload name.
+    ///
+    /// A stat that fails for any reason is reported as "missing", which is the safe answer
+    /// here only because the write that follows is atomic and will fail loudly rather than
+    /// half-replace an existing file.
+    pub async fn stat_missing(&self, session_id: &str, path: &str) -> bool {
+        let Some(entry) = self.map.get(session_id) else {
+            return true;
+        };
+        let sftp = entry.sftp.clone();
+        drop(entry);
+        let guard = sftp.lock().await;
+        guard.metadata(path.to_string()).await.is_err()
+    }
+
+    /// A live SFTP session for this VPS, opening one only if none exists.
+    ///
+    /// Dropping files onto a terminal needs SFTP, but a terminal has only a shell
+    /// session. Reusing whatever the file browser already has open keeps a drag-and-drop
+    /// from silently opening a second authenticated connection per file.
+    pub async fn session_for_vps(&self, vps_id: &str) -> Result<String, String> {
+        if let Some(existing) = self
+            .map
+            .iter()
+            .find(|e| e.value().vps_id == vps_id)
+            .map(|e| e.key().clone())
+        {
+            return Ok(existing);
+        }
+        Ok(self.connect(vps_id).await?.session_id)
+    }
+
     /// Drop every SFTP session. Used when the app re-locks — a file browser sitting on a
     /// server is the same standing access as a shell, and leaving it open would mean a
     /// "locked" app that can still read and write remote files. Returns how many closed.

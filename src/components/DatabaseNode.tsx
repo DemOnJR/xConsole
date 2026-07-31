@@ -316,12 +316,13 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     void scan();
   }, [scan]);
 
-  useEffect(
-    () => () => {
-      for (const sid of sessionsRef.current) void api.dbDisconnect(sid).catch(() => {});
-    },
-    [],
-  );
+  // No teardown on unmount, by design.
+  //
+  // A node unmounts whenever something re-renders it out of the tree — the agent panel
+  // expanding, a workspace switch — none of which mean the user is finished with their
+  // database. Disconnecting there closed every open connection and threw away the
+  // browsing state behind it. Terminals and the SFTP browser already keep their sessions;
+  // this matches them. `closeNode` is what actually disconnects.
 
   const patch = useCallback((endpointId: string, p: Partial<DbInstance>) => {
     if (p.sessionId) sessionsRef.current.add(p.sessionId);
@@ -460,7 +461,11 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
       <NodeResizer
         minWidth={520}
         minHeight={280}
-        isVisible={selected}
+        // Always mounted, not just when selected: needing to click a node before you
+        // could resize it was the whole reason edges were "hard to grab". The handles
+        // stay invisible until hover — see .xc-resize-* in styles.css, which also gives
+        // them a hit area far wider than the 1px line they draw.
+        isVisible
         lineClassName="border-violet-500"
         handleClassName="h-2 w-2 rounded bg-violet-500"
       />
@@ -482,7 +487,12 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
         ) : null}
         <button
           className="ml-auto shrink-0 rounded px-1 text-gray-500 hover:bg-[var(--border)] hover:text-white"
-          onClick={() => removeNode(id)}
+          onClick={() => {
+            // The one place a database connection is really finished with.
+            for (const sid of sessionsRef.current) void api.dbDisconnect(sid).catch(() => {});
+            sessionsRef.current.clear();
+            removeNode(id);
+          }}
           data-tooltip="Close"
         >
           ✕

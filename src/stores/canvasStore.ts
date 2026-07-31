@@ -25,7 +25,9 @@ import {
   type TileLayout,
 } from "../lib/tileLayout";
 
-export type LayoutMode = "freeform" | "snap" | "tile";
+// "snap" was removed: it snapped node positions to a grid while dragging, which was
+// neither freeform nor a real tiling, and nobody used it.
+export type LayoutMode = "freeform" | "tile";
 
 /** Which way a tile move goes: within its row, or to the row above/below. */
 export type TileMoveAxis = "horizontal" | "vertical";
@@ -67,7 +69,6 @@ export type CanvasNode = TermNode | SftpNode | DbNode;
 export const NODE_W = 460;
 export const NODE_H = 320;
 const GAP = 24;
-const SNAP_GRID: [number, number] = [20, 20];
 /** Max terminals using the WebGL renderer at once (webview context limit ~16). */
 const MAX_WEBGL = 4;
 
@@ -89,7 +90,6 @@ interface CanvasState {
   /** Last known canvas pane size, so layout edits can re-tile without the caller. */
   paneSize: { width: number; height: number } | null;
 
-  snapGrid: [number, number];
   setNodes: (nodes: CanvasNode[]) => void;
   setEdges: (edges: CanvasEdge[]) => void;
   onNodesChange: (changes: NodeChange<CanvasNode>[]) => void;
@@ -199,13 +199,45 @@ export const useCanvasStore = create<CanvasState>()(
       webglIds: [],
       tileLayout: null,
       paneSize: null,
-      snapGrid: SNAP_GRID,
 
       setNodes: (nodes) => set({ nodes }),
       setEdges: (edges) => set({ edges }),
 
       onNodesChange: (changes) =>
-        set((s) => ({ nodes: applyNodeChanges(changes, s.nodes) })),
+        set((s) => {
+          // In tile mode a node's size is derived from the layout, so writing pixel
+          // dimensions straight onto the node does nothing lasting — the next reflow
+          // overwrites them. Dragging an edge has to become a change to the *layout*.
+          if (s.layoutMode === "tile" && s.tileLayout && s.paneSize) {
+            const resizes = changes.filter(
+              (c): c is Extract<NodeChange<CanvasNode>, { type: "dimensions" }> =>
+                c.type === "dimensions" && !!c.dimensions,
+            );
+            if (resizes.length > 0) {
+              let layout = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
+              for (const c of resizes) {
+                const node = s.nodes.find((n) => n.id === c.id);
+                if (!node) continue;
+                const dw = c.dimensions!.width - ((node.width as number) ?? 0);
+                const dh = c.dimensions!.height - ((node.height as number) ?? 0);
+                // Weights are relative within a row, so a pixel delta becomes a weight
+                // delta scaled by how much of the pane that row/column spans.
+                const row = layout.rows.find((r) => r.items.some((i) => i.id === c.id));
+                if (!row) continue;
+                if (Math.abs(dw) >= 1) {
+                  const total = row.items.reduce((a, i) => a + i.weight, 0);
+                  layout = resizeTile(layout, c.id, (dw / s.paneSize.width) * total);
+                }
+                if (Math.abs(dh) >= 1) {
+                  const total = layout.rows.reduce((a, r) => a + r.weight, 0);
+                  layout = resizeRow(layout, c.id, (dh / s.paneSize.height) * total);
+                }
+              }
+              return applyTiles({ ...s, tileLayout: layout });
+            }
+          }
+          return { ...s, nodes: applyNodeChanges(changes, s.nodes) };
+        }),
 
       onEdgesChange: (changes) => {
         const removedIds = changes

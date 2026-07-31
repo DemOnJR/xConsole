@@ -15,7 +15,6 @@ import { TileLayoutMenu } from "./TileLayoutMenu";
 
 const MODES: { id: LayoutMode; label: string; title: string }[] = [
   { id: "freeform", label: "Freeform", title: "Drag terminals anywhere" },
-  { id: "snap", label: "Snap", title: "Snap to grid while dragging" },
   {
     id: "tile",
     label: "Tile",

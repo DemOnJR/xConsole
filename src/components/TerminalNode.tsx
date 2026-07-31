@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Handle, NodeResizer, Position, useReactFlow, useStore, type NodeProps } from "@xyflow/react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -16,6 +16,26 @@ import { useXtermScaleFix } from "../hooks/useXtermScaleFix";
 import { useCanvasStore, type TermNode } from "../stores/canvasStore";
 import { useSessionStore, type ConnState } from "../stores/sessionStore";
 import { useThemeStore } from "../stores/themeStore";
+import { useTerminalClipboard } from "../hooks/useTerminalClipboard";
+import { shellQuote } from "../lib/terminalClipboard";
+import { onOsDropHover, onOsFilesDropped } from "../hooks/useOsFileDrop";
+import { onInternalDrop, useDragStore } from "../stores/dragStore";
+import { bytesToB64 } from "../lib/tauri";
+
+/** A file that was just put on the server, shown as a dismissible chip. */
+interface DroppedChip {
+  name: string;
+  path: string;
+  size: number;
+  preview?: string;
+  isImage: boolean;
+}
+
+function humanSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 const STATUS_COLOR: Record<ConnState, string> = {
   connecting: "#e0af68",
@@ -290,6 +310,92 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
   const mismatch = info?.hostKey === "mismatch";
   const canReconnect = status === "disconnected" || status === "error";
 
+  // ----- Sending text to the shell -----
+  const sendText = useCallback((text: string) => {
+    const sid = sessionIdRef.current;
+    if (sid) api.sshWrite(sid, strToB64(text)).catch(() => {});
+  }, []);
+
+  /** Type a path at the prompt, quoted and with a trailing space so it reads naturally. */
+  const insertPath = useCallback(
+    (remotePath: string) => {
+      sendText(`${shellQuote(remotePath)} `);
+      termRef.current?.focus();
+    },
+    [sendText],
+  );
+
+  // ----- Files arriving from outside -----
+  const dropId = `terminal:${id}`;
+  const [chips, setChips] = useState<DroppedChip[]>([]);
+  const [uploading, setUploading] = useState<string | null>(null);
+  const [dropActive, setDropActive] = useState(false);
+
+  const upload = useCallback(
+    async (localPaths: string[], inline: { name: string; content_b64: string }[]) => {
+      const count = localPaths.length + inline.length;
+      setUploading(`Uploading ${count} file${count === 1 ? "" : "s"}…`);
+      try {
+        // Land next to whatever the shell is looking at, so the path just typed is the
+        // one a relative command would find. Falls back to the home directory.
+        const dir = useSessionStore.getState().sessions[id]?.cwd || ".";
+        const done = await api.terminalUpload(data.vpsId, dir, localPaths, inline);
+        setChips((c) => [
+          ...done.map((u) => ({
+            name: u.name,
+            path: u.path,
+            size: u.size,
+            preview: u.preview_b64 ?? undefined,
+            isImage: u.is_image,
+          })),
+          ...c,
+        ].slice(0, 6));
+        // One file: type it straight away, which is the whole point of the gesture.
+        // Several: leave it to the chips, since typing six paths is rarely what was meant.
+        if (done.length === 1) insertPath(done[0].path);
+        setUploading(null);
+      } catch (e) {
+        setUploading(`Upload failed: ${String(e)}`);
+        window.setTimeout(() => setUploading(null), 4000);
+      }
+    },
+    [data.vpsId, id, insertPath],
+  );
+
+  // Files dragged in from Explorer land as a window event, so each node filters by target.
+  useEffect(() => {
+    const offDrop = onOsFilesDropped((target, paths) => {
+      if (target !== dropId) return;
+      void upload(paths, []);
+    });
+    const offHover = onOsDropHover((t) => setDropActive(t === dropId));
+    return () => {
+      offDrop();
+      offHover();
+    };
+  }, [dropId, upload]);
+
+  // A remote file dragged from an SFTP panel: nothing to transfer, just type its path.
+  const internalOver = useDragStore((s) => (s.over === dropId ? s.drag : null));
+  useEffect(() => {
+    return onInternalDrop(dropId, (payload) => {
+      if (payload.kind !== "remote-file" || !payload.path) return;
+      insertPath(payload.path);
+    });
+  }, [dropId, insertPath]);
+
+  const hint = useTerminalClipboard({
+    term: termRef,
+    host: containerRef,
+    send: sendText,
+    onImage: (png) => {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      void upload([], [{ name: `screenshot-${stamp}.png`, content_b64: bytesToB64(png) }]);
+    },
+  });
+
+  const showDropOverlay = dropActive || !!internalOver;
+
   return (
     <div
       className={`group flex h-full w-full flex-col overflow-hidden border bg-[var(--bg)] shadow-lg ${
@@ -301,7 +407,11 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
       <NodeResizer
         minWidth={280}
         minHeight={180}
-        isVisible={selected}
+        // Always mounted, not just when selected: needing to click a node before you
+        // could resize it was the whole reason edges were "hard to grab". The handles
+        // stay invisible until hover — see .xc-resize-* in styles.css, which also gives
+        // them a hit area far wider than the 1px line they draw.
+        isVisible
         lineClassName="!border-blue-500"
         handleClassName="!bg-blue-500"
       />
@@ -368,12 +478,73 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
         </div>
       </div>
 
-      {/* Terminal body: nodrag/nowheel so typing & scrolling don't move the canvas */}
-      <div
-        ref={containerRef}
-        className="xterm-host nodrag nowheel min-h-0 flex-1"
-        onClick={() => termRef.current?.focus()}
-      />
+      {/* Terminal body: nodrag/nowheel so typing & scrolling don't move the canvas.
+          data-drop makes it a target for both Explorer files and internal drags. */}
+      <div className="relative min-h-0 flex-1" data-drop={dropId}>
+        <div
+          ref={containerRef}
+          className="xterm-host nodrag nowheel h-full w-full"
+          onClick={() => termRef.current?.focus()}
+        />
+
+        {showDropOverlay && (
+          <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center border-2 border-dashed border-[var(--accent)] bg-[var(--accent)]/10">
+            <span className="rounded bg-[var(--surface)] px-2 py-1 text-xs text-gray-100">
+              {internalOver
+                ? `Insert path — ${internalOver.label}`
+                : "Upload here and insert the path"}
+            </span>
+          </div>
+        )}
+
+        {(hint || uploading) && (
+          <div className="pointer-events-none absolute bottom-2 left-1/2 z-20 -translate-x-1/2 whitespace-nowrap rounded bg-black/80 px-2 py-1 text-[11px] text-gray-200">
+            {uploading ?? hint}
+          </div>
+        )}
+      </div>
+
+      {chips.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-[var(--border)] bg-[var(--surface)] px-2 py-1.5">
+          {chips.map((c) => (
+            <button
+              key={c.path}
+              className="flex max-w-[190px] items-center gap-1.5 rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-1 text-left text-[10px] text-gray-300 hover:border-[var(--accent)]"
+              data-tooltip={`${c.path} — click to insert the path again`}
+              onClick={(e) => {
+                e.stopPropagation();
+                insertPath(c.path);
+              }}
+            >
+              {c.preview ? (
+                <img
+                  src={`data:image/*;base64,${c.preview}`}
+                  alt=""
+                  className="h-7 w-7 shrink-0 rounded object-cover"
+                />
+              ) : (
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded bg-[var(--surface)] text-gray-500">
+                  {c.isImage ? "▣" : "≡"}
+                </span>
+              )}
+              <span className="min-w-0">
+                <span className="block truncate text-gray-200">{c.name}</span>
+                <span className="block text-gray-500">{humanSize(c.size)}</span>
+              </span>
+            </button>
+          ))}
+          <button
+            className="ml-auto rounded px-1.5 py-1 text-[10px] text-gray-500 hover:text-gray-300"
+            data-tooltip="Clear this list (the files stay on the server)"
+            onClick={(e) => {
+              e.stopPropagation();
+              setChips([]);
+            }}
+          >
+            clear
+          </button>
+        </div>
+      )}
 
       <Handle
         type="target"

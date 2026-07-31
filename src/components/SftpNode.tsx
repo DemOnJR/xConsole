@@ -1,4 +1,16 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { startInternalDrag } from "../stores/dragStore";
+
+/**
+ * SFTP sessions that outlive their component, keyed by canvas node id.
+ *
+ * A node unmounts for reasons that are not "the user closed it" — the agent panel
+ * expanding to full width, a workspace switch, any parent that re-renders it out of the
+ * tree. Tearing the connection down there is what made the file browser and its current
+ * directory vanish whenever something unrelated happened. Terminals already worked this
+ * way; this brings SFTP in line. Only `closeNode` really disconnects.
+ */
+const keptSftpSessions = new Map<string, { sessionId: string; path: string }>();
 import {
   Handle,
   NodeResizer,
@@ -142,6 +154,9 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   const [status, setStatus] = useState<ConnState>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [path, setPath] = useState("/");
+  // Mirror of `path` readable from the unmount cleanup, which closes over stale state.
+  const pathRef = useRef(path);
+  pathRef.current = path;
   const [pathInput, setPathInput] = useState("/");
   const [entries, setEntries] = useState<SftpEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -250,6 +265,18 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
 
     (async () => {
       try {
+        // Reattach to the session this node had before it was unmounted. Nodes unmount
+        // for reasons that have nothing to do with the user closing the panel — the
+        // agent panel expanding, a workspace switch — and reconnecting there dropped
+        // the browser back to the home directory every time.
+        const previous = keptSftpSessions.get(id);
+        if (previous) {
+          sessionRef.current = previous.sessionId;
+          setStatus("connected");
+          await loadDir(previous.sessionId, previous.path);
+          void fetchTreeDir(previous.sessionId, "/");
+          return;
+        }
         setStatus("connecting");
         const out = await api.sftpConnect(data.vpsId);
         if (!mounted) {
@@ -261,6 +288,12 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
         void fetchTreeDir(out.session_id, "/");
       } catch (e) {
         if (mounted) {
+          // A remembered session that the backend has since dropped (app re-locked,
+          // server rebooted): forget it and connect fresh rather than showing an error.
+          if (keptSftpSessions.delete(id)) {
+            setStatus("disconnected");
+            return;
+          }
           setError(String(e));
           setStatus("error");
         }
@@ -269,11 +302,12 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
 
     return () => {
       mounted = false;
+      // Deliberately NOT disconnecting: the session outlives the component, exactly as
+      // a terminal's does. `closePanel` is what actually ends it.
       const sid = sessionRef.current;
-      if (sid) api.sftpDisconnect(sid).catch(() => {});
-      sessionRef.current = null;
+      if (sid) keptSftpSessions.set(id, { sessionId: sid, path: pathRef.current });
     };
-  }, [data.vpsId, loadDir, fetchTreeDir]);
+  }, [id, data.vpsId, loadDir, fetchTreeDir]);
 
   useEffect(() => {
     if (!followTerminal || !linkedTerminalId || !terminalCwd) return;
@@ -297,6 +331,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     const sid = sessionRef.current;
     if (sid) api.sftpDisconnect(sid).catch(() => {});
     sessionRef.current = null;
+    keptSftpSessions.delete(id); // an explicit close is the one case that really ends it
     removeNode(id);
   };
 
@@ -561,7 +596,11 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       <NodeResizer
         minWidth={320}
         minHeight={220}
-        isVisible={selected}
+        // Always mounted, not just when selected: needing to click a node before you
+        // could resize it was the whole reason edges were "hard to grab". The handles
+        // stay invisible until hover — see .xc-resize-* in styles.css, which also gives
+        // them a hit area far wider than the 1px line they draw.
+        isVisible
         lineClassName="!border-cyan-500"
         handleClassName="!bg-cyan-500"
       />
@@ -750,6 +789,19 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                       className="flex min-w-0 flex-1 items-center gap-2 text-left"
                       onClick={() => openEntry(entry)}
                       onDoubleClick={() => openEntry(entry)}
+                      // Drag onto a terminal to type this path there. Pointer-based,
+                      // and only arms after a few pixels of movement, so the click
+                      // above still opens the entry.
+                      onPointerDown={(e) => {
+                        if (e.button !== 0) return;
+                        startInternalDrag(e, {
+                          kind: "remote-file",
+                          vpsId: data.vpsId,
+                          path: entry.path,
+                          label: entry.name,
+                          isDir: entry.is_dir,
+                        });
+                      }}
                     >
                       <span className={entry.is_dir ? "text-cyan-400" : "text-gray-500"}>
                         {entry.is_dir ? "📁" : "📄"}

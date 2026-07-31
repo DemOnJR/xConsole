@@ -84,3 +84,4 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 jsonwebtoken = { version = "9", features = ["use_pem"] }
+tauri-plugin-clipboard-manager = "2"

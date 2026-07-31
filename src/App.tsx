@@ -23,6 +23,17 @@ import { useAgentStatusStore } from "./stores/agentStatusStore";
 import { onAgentWorkspaceStatus, onFileChange, onFileChangeReverted } from "./lib/tauri";
 import { useLockStore } from "./stores/lockStore";
 import { useAutoLock } from "./hooks/useAutoLock";
+import { useOsFileDrop } from "./hooks/useOsFileDrop";
+import { useWorkspaceAutosave } from "./hooks/useWorkspaceAutosave";
+
+/** Restores the workspace as it was left and keeps saving it. A component rather than a
+ *  hook call in UnlockedApp because it needs React Flow's viewport, and UnlockedApp's own
+ *  body sits outside the <ReactFlowProvider> it renders. */
+function WorkspaceAutosave() {
+  useWorkspaceAutosave();
+  return null;
+}
+import { DragGhost } from "./components/DragGhost";
 import { SplashScreen, UnlockScreen } from "./components/lock/UnlockScreen";
 import { useTileShortcuts } from "./hooks/useTileShortcuts";
 
@@ -31,6 +42,9 @@ import { useTileShortcuts } from "./hooks/useTileShortcuts";
 function UnlockedApp() {
   const nodes = useCanvasStore((s) => s.nodes);
   const focus = useCanvasStore((s) => s.focus);
+  // One window-level listener for files dragged in from Explorer; each drop target
+  // filters by its own id.
+  useOsFileDrop();
 
   const leftOpen = useUiStore((s) => s.leftOpen);
   const rightOpen = useUiStore((s) => s.rightOpen);
@@ -161,6 +175,8 @@ function UnlockedApp() {
       <UpdateNotice />
       <DialogHost />
       <TooltipHost />
+      <DragGhost />
+      <WorkspaceAutosave />
     </ReactFlowProvider>
   );
 }

@@ -845,6 +845,15 @@ export const api = {
   /** Requires the master password whenever an app lock is configured. */
   exportUnencryptedBackup: (password: string) =>
     invoke<string>("export_unencrypted_backup", { password }),
+  /** Upload dropped/pasted files to `dir` on a VPS and report where they landed.
+   *  `localPaths` are paths the OS gave us; `inline` carries bytes with no path
+   *  (a pasted screenshot). */
+  terminalUpload: (
+    vpsId: string,
+    dir: string,
+    localPaths: string[],
+    inline: { name: string; content_b64: string }[],
+  ) => invoke<Uploaded[]>("terminal_upload", { vpsId, dir, localPaths, inline }),
   /** Lock without quitting: closes every shell, re-encrypts the DB, deletes the
    *  plaintext working file, forgets the key. Resolves with how many shells closed. */
   lockNow: () => invoke<number>("lock_now"),
@@ -1017,6 +1026,15 @@ export function onCanvasCommand(
 
 /** One file the agent edited this session (before/after captured for the diff panel). */
 /** App-lock status (matches the Rust `LockStatus`). */
+/** A file that was uploaded to a server by dropping or pasting it on a terminal. */
+export interface Uploaded {
+  name: string;
+  path: string;
+  size: number;
+  preview_b64: string | null;
+  is_image: boolean;
+}
+
 export interface LockStatus {
   enabled: boolean;
   unlocked: boolean;
