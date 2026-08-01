@@ -9,6 +9,8 @@ import { useWorkspaceStore } from "../stores/workspaceStore";
 const ACTIVE_KEY = "ui.active_workspace";
 /** Quiet period after a change before writing. Dragging a node fires continuously. */
 const DEBOUNCE_MS = 800;
+/** Hard cap on the save-before-close. A wedged backend must never trap the window. */
+const SAVE_ON_CLOSE_TIMEOUT_MS = 2500;
 
 /**
  * Keep the open workspace saved, and put it back exactly as it was on the next launch.
@@ -85,18 +87,48 @@ export function useWorkspaceAutosave() {
     });
 
     // Closing the window is the one moment a debounce would lose work, so save first and
-    // only then let it close. `destroy` rather than `close` avoids re-entering this
-    // handler with the same request.
+    // only then let it close.
+    //
+    // Every branch here exists because getting this wrong makes the app **impossible to
+    // close except from Task Manager**: once `preventDefault` has run, anything that
+    // throws or hangs before the window is actually closed traps the user. So:
+    //
+    //   * the save is raced against a timeout — a wedged backend must not hold the window
+    //     open, and losing the last few seconds of layout is the lesser evil;
+    //   * every await is guarded, and the close happens in `finally`;
+    //   * the close is a plain `close()`, which re-enters this handler and is waved
+    //     through by the guard. `destroy()` also works but tears the webview down
+    //     without running the normal shutdown, which showed up as the process exiting
+    //     with a non-zero code on alternate runs. `destroy` stays as the last resort
+    //     for the case where `close` itself fails.
     let unlistenClose: (() => void) | undefined;
+    let closeHandled = false;
     const win = getCurrentWindow();
     void win
       .onCloseRequested(async (event) => {
+        // Second request — we have already saved. Let it close.
+        if (closeHandled) return;
+        closeHandled = true;
         event.preventDefault();
         if (timer.current != null) clearTimeout(timer.current);
-        await flush();
-        const { activeId } = useWorkspaceStore.getState();
-        await api.setSetting(ACTIVE_KEY, activeId ?? "").catch(() => {});
-        await win.destroy();
+        try {
+          await Promise.race([
+            (async () => {
+              await flush();
+              const { activeId } = useWorkspaceStore.getState();
+              await api.setSetting(ACTIVE_KEY, activeId ?? "").catch(() => {});
+            })(),
+            new Promise((r) => setTimeout(r, SAVE_ON_CLOSE_TIMEOUT_MS)),
+          ]);
+        } catch {
+          // Saving failed; closing must still happen.
+        } finally {
+          try {
+            await win.close();
+          } catch {
+            await win.destroy().catch(() => {});
+          }
+        }
       })
       .then((f) => (unlistenClose = f));
 
