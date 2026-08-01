@@ -24,8 +24,46 @@ use ssh::{SessionManager, SftpManager};
 use storage::Db;
 use tauri::{Emitter, Manager};
 
+/// Append a line to `xconsole.log` in the app data dir.
+///
+/// A release build sets `windows_subsystem = "windows"`, so it has no console and every
+/// `eprintln!` goes nowhere — which is why an app that exited on its own left no trace at
+/// all, in the event log or on stderr. Diagnosing anything about startup or shutdown needs
+/// a file.
+fn diag(msg: &str) {
+    let Some(dir) = dirs_next_app_data() else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("xconsole.log");
+    // Keep it from growing without bound; this is a rolling breadcrumb trail, not an audit
+    // log, and it must never be the reason the disk fills up.
+    if std::fs::metadata(&path).map(|m| m.len() > 512 * 1024).unwrap_or(false) {
+        let _ = std::fs::remove_file(&path);
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "[{}] {msg}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"));
+    }
+}
+
+/// The app data dir, resolved without an AppHandle so the panic hook can use it.
+fn dirs_next_app_data() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPDATA").map(|p| std::path::PathBuf::from(p).join("com.xconsole.app"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Record panics before anything else can swallow them. A panic on a background thread
+    // does not necessarily kill the process, so these would otherwise vanish silently.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        diag(&format!(
+            "PANIC: {info}\nbacktrace:\n{}",
+            std::backtrace::Backtrace::force_capture()
+        ));
+        previous(info);
+    }));
+    diag(&format!("--- start (pid {}) ---", std::process::id()));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
@@ -434,6 +472,24 @@ pub fn run() {
         .run(|app, event| {
             // On exit: final encrypted persist so a crash/last-second write can't be lost, then
             // the next launch removes the plaintext working file (see Db::open_encrypted).
+            // Log every shutdown-shaped event with its cause. "The app closes randomly"
+            // is unanswerable without knowing whether a window asked to close, the
+            // runtime decided to exit, or the process simply vanished.
+            match &event {
+                tauri::RunEvent::WindowEvent { label, event: we, .. } => {
+                    if matches!(we, tauri::WindowEvent::CloseRequested { .. }) {
+                        diag(&format!("WindowEvent::CloseRequested on '{label}'"));
+                    }
+                    if matches!(we, tauri::WindowEvent::Destroyed) {
+                        diag(&format!("WindowEvent::Destroyed on '{label}'"));
+                    }
+                }
+                tauri::RunEvent::ExitRequested { code, .. } => {
+                    diag(&format!("ExitRequested code={code:?}"));
+                }
+                tauri::RunEvent::Exit => diag("Exit"),
+                _ => {}
+            }
             if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
                 if let Some(db) = app.try_state::<Db>() {
                     db.finalize_on_exit();
