@@ -30,7 +30,7 @@ use tauri::{Emitter, Manager};
 /// `eprintln!` goes nowhere — which is why an app that exited on its own left no trace at
 /// all, in the event log or on stderr. Diagnosing anything about startup or shutdown needs
 /// a file.
-fn diag(msg: &str) {
+pub(crate) fn diag(msg: &str) {
     let Some(dir) = dirs_next_app_data() else { return };
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("xconsole.log");
@@ -462,6 +462,7 @@ pub fn run() {
             commands::lock::disable_lock,
             commands::lock::export_unencrypted_backup,
             commands::upload::terminal_upload,
+            commands::settings::log_diag,
             commands::lock::lock_now,
             commands::lock::note_activity,
             commands::lock::get_auto_lock_minutes,

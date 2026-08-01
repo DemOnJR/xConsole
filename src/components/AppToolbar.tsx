@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { api } from "../lib/tauri";
 import {
   BotIcon,
   PanelBottomIcon,
@@ -98,7 +99,13 @@ function WindowControls() {
         className="flex h-9 w-11 items-center justify-center text-gray-400 transition hover:bg-red-600 hover:text-white"
         data-tooltip="Close"
         data-tooltip-side="bottom"
-        onClick={() => appWindow.close()}
+        onClick={() => {
+          // Recorded so the log can distinguish a deliberate close from a WM_CLOSE
+          // arriving from outside the app -- they are indistinguishable in the Rust
+          // event loop, and that ambiguity is the whole question here.
+          void api.logDiag("title-bar close button clicked");
+          void appWindow.close();
+        }}
       >
         <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden>
           <path d="M1 1 L10 10 M10 1 L1 10" stroke="currentColor" strokeWidth="1.1" />

@@ -67,3 +67,16 @@ pub fn delete_provider(db: State<'_, Db>, id: String) -> Result<(), String> {
     let _ = secrets::delete_secret(&secrets::provider_key(&id));
     db.delete_provider(&id).map_err(|e| e.to_string())
 }
+
+/// Write a line into `xconsole.log` from the frontend.
+///
+/// Exists to answer one question that the Rust-side events cannot: when the window gets a
+/// `CloseRequested`, was it the app's own title-bar button, or did the OS send WM_CLOSE
+/// from outside? Both look identical from inside the event loop.
+#[tauri::command]
+pub fn log_diag(message: String) {
+    // Cap it: this is reachable from the webview, and an unbounded string would let a
+    // runaway caller fill the log.
+    let msg: String = message.chars().take(300).collect();
+    crate::diag(&format!("ui: {msg}"));
+}

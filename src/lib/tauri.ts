@@ -856,6 +856,8 @@ export const api = {
   ) => invoke<Uploaded[]>("terminal_upload", { vpsId, dir, localPaths, inline }),
   /** Lock without quitting: closes every shell, re-encrypts the DB, deletes the
    *  plaintext working file, forgets the key. Resolves with how many shells closed. */
+  /** Append a line to xconsole.log, for telling apart in-app and external closes. */
+  logDiag: (message: string) => invoke<void>("log_diag", { message }),
   lockNow: () => invoke<number>("lock_now"),
   /** Reset the idle timer. The timeout itself is enforced in the backend. */
   noteActivity: () => invoke<void>("note_activity"),
