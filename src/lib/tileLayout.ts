@@ -30,6 +30,17 @@ export interface TileRow {
 
 export interface TileLayout {
   rows: TileRow[];
+  /**
+   * What fraction of the pane the whole grid occupies, 0.2–1.
+   *
+   * Resizing normally trades space between two neighbours, so the grid always fills the
+   * pane and these stay 1. A *lone* window has no neighbour to trade with, which made it
+   * the one window in the app that could not be resized at all: every drag was clamped
+   * away and the reflow snapped it straight back to full screen. For that case the drag
+   * shrinks the grid itself instead.
+   */
+  fillW?: number;
+  fillH?: number;
 }
 
 /** A computed pixel box for one node. */
@@ -47,6 +58,43 @@ export const MAX_WEIGHT = 8;
 
 const clampWeight = (w: number) =>
   Math.min(MAX_WEIGHT, Math.max(MIN_WEIGHT, Number.isFinite(w) ? w : 1));
+
+/** A lone window can be shrunk to a fifth of the pane, no further. */
+export const MIN_FILL = 0.2;
+
+const clampFill = (f: number) =>
+  Math.min(1, Math.max(MIN_FILL, Number.isFinite(f) ? f : 1));
+
+/** The grid's share of the pane, defaulting to all of it. */
+export const fillOf = (layout: TileLayout) => ({
+  w: clampFill(layout.fillW ?? 1),
+  h: clampFill(layout.fillH ?? 1),
+});
+
+/** True when the layout holds exactly one window, i.e. nothing to trade space with. */
+export function isSolo(layout: TileLayout): boolean {
+  return layout.rows.length === 1 && layout.rows[0].items.length === 1;
+}
+
+/**
+ * Resize the lone window by a fraction of the pane on each axis.
+ *
+ * A no-op for anything but a single-window layout, so the caller can apply it
+ * unconditionally alongside [`resizeTile`] / [`resizeRow`].
+ */
+export function resizeSolo(
+  layout: TileLayout,
+  dwFraction: number,
+  dhFraction: number,
+): TileLayout {
+  if (!isSolo(layout)) return layout;
+  const fill = fillOf(layout);
+  return {
+    ...layout,
+    fillW: clampFill(fill.w + dwFraction),
+    fillH: clampFill(fill.h + dhFraction),
+  };
+}
 
 /**
  * How many tiles each row gets, by default, for `n` nodes.
@@ -191,6 +239,7 @@ export function findTile(
 /** Drop empty rows and normalise weights that drifted out of range. */
 export function normalize(layout: TileLayout): TileLayout {
   return {
+    ...layout,
     rows: layout.rows
       .filter((r) => r.items.length > 0)
       .map((r) => ({
@@ -228,7 +277,7 @@ export function reconcile(layout: TileLayout | null, ids: string[]): TileLayout 
     kept[target].items.push({ id, weight: 1 });
     placed.add(id);
   }
-  return normalize({ rows: kept });
+  return normalize({ ...layout, rows: kept });
 }
 
 /**
@@ -240,11 +289,18 @@ export function reconcile(layout: TileLayout | null, ids: string[]): TileLayout 
  */
 export function computeBoxes(
   layout: TileLayout,
-  width: number,
-  height: number,
+  paneWidth: number,
+  paneHeight: number,
 ): TileBox[] {
   const rows = layout.rows.filter((r) => r.items.length > 0);
-  if (rows.length === 0 || width <= 0 || height <= 0) return [];
+  if (rows.length === 0 || paneWidth <= 0 || paneHeight <= 0) return [];
+
+  // A lone window may occupy less than the whole pane; everything else fills it. The
+  // stored fraction is kept rather than reset, so closing back down to one window
+  // returns it to the size it was left at.
+  const fill = isSolo(layout) ? fillOf(layout) : { w: 1, h: 1 };
+  const width = Math.max(1, Math.round(paneWidth * fill.w));
+  const height = Math.max(1, Math.round(paneHeight * fill.h));
 
   const boxes: TileBox[] = [];
   const totalRowWeight = rows.reduce((sum, r) => sum + clampWeight(r.weight), 0);
@@ -295,7 +351,7 @@ export function moveWithinRow(
   const to = at.col + dir;
   if (to < 0 || to >= items.length) return layout;
   [items[at.col], items[to]] = [items[to], items[at.col]];
-  return { rows };
+  return { ...layout, rows };
 }
 
 /**
@@ -324,7 +380,7 @@ export function moveToRow(layout: TileLayout, id: string, dir: -1 | 1): TileLayo
     const col = Math.min(at.col, dest.items.length);
     dest.items.splice(col, 0, tile);
   }
-  return normalize({ rows });
+  return normalize({ ...layout, rows });
 }
 
 /** Grow/shrink a tile's width share within its row. */
@@ -362,7 +418,7 @@ export function resizeTile(layout: TileLayout, id: string, delta: number): TileL
   const absorbed = neighbour.weight - neighbourAfter;
   item.weight = before + absorbed;
   neighbour.weight = neighbourAfter;
-  return { rows };
+  return { ...layout, rows };
 }
 
 /**
@@ -388,7 +444,7 @@ export function resizeRow(layout: TileLayout, id: string, delta: number): TileLa
   const absorbed = neighbour.weight - neighbourAfter;
   row.weight = before + absorbed;
   neighbour.weight = neighbourAfter;
-  return { rows };
+  return { ...layout, rows };
 }
 
 /**
@@ -409,12 +465,12 @@ export function toggleFullWidth(layout: TileLayout, id: string): TileLayout {
     const [tile] = rows[at.row].items.splice(0, 1);
     const into = at.row > 0 ? at.row - 1 : 1;
     rows[into].items.push(tile);
-    return normalize({ rows });
+    return normalize({ ...layout, rows });
   }
 
   const [tile] = rows[at.row].items.splice(at.col, 1);
   rows.splice(at.row + 1, 0, { weight: 1, items: [tile] });
-  return normalize({ rows });
+  return normalize({ ...layout, rows });
 }
 
 /** Re-flow the whole layout into rows of the given sizes, keeping the current order. */

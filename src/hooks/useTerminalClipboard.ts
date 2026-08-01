@@ -88,14 +88,24 @@ export function useTerminalClipboard({
 
       const key = e.key.toLowerCase();
 
+      // Returning false only tells xterm to keep its hands off the key — the browser
+      // still runs its own default, and for paste that means the hidden textarea gets a
+      // native `paste` event which xterm dutifully writes to the shell. Together with our
+      // own clipboard read that pasted everything twice. preventDefault is what actually
+      // stops the second copy.
+      const claim = () => {
+        e.preventDefault();
+        return false;
+      };
+
       // Unambiguous forms: always copy / always paste.
       if (e.shiftKey && key === "c") {
         copySelection();
-        return false;
+        return claim();
       }
       if (e.shiftKey && key === "v") {
         void doPaste();
-        return false;
+        return claim();
       }
       if (e.shiftKey) return true;
 
@@ -106,19 +116,19 @@ export function useTerminalClipboard({
           lastCtrlC.current = 0;
           t.clearSelection();
           sendRef.current("\x03");
-          return false;
+          return claim();
         }
         lastCtrlC.current = now;
-        if (copySelection()) return false;
+        if (copySelection()) return claim();
         // Nothing to copy, so the user almost certainly meant to interrupt. Do not
         // send it yet — that would make the double-tap rule a lie — but say so.
         flash("Press Ctrl+C again to interrupt");
-        return false;
+        return claim();
       }
 
       if (key === "v") {
         void doPaste();
-        return false;
+        return claim();
       }
       return true;
     });

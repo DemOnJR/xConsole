@@ -15,10 +15,12 @@ import {
   applyRowCounts,
   autoLayout,
   computeBoxes,
+  isSolo,
   moveToRow,
   moveWithinRow,
   reconcile,
   resizeRow,
+  resizeSolo,
   rowsFromPositions,
   resizeTile,
   toggleFullWidth,
@@ -228,6 +230,16 @@ export const useCanvasStore = create<CanvasState>()(
                 // delta scaled by how much of the pane that row/column spans.
                 const row = layout.rows.find((r) => r.items.some((i) => i.id === c.id));
                 if (!row) continue;
+                if (isSolo(layout)) {
+                  // Nothing to trade with: the drag resizes the grid itself, which is the
+                  // only way a single open window can be made smaller than the pane.
+                  layout = resizeSolo(
+                    layout,
+                    Math.abs(dw) >= 1 ? dw / s.paneSize.width : 0,
+                    Math.abs(dh) >= 1 ? dh / s.paneSize.height : 0,
+                  );
+                  continue;
+                }
                 if (Math.abs(dw) >= 1) {
                   const total = row.items.reduce((a, i) => a + i.weight, 0);
                   layout = resizeTile(layout, c.id, (dw / s.paneSize.width) * total);

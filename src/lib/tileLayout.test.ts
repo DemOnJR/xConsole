@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   autoLayout,
   computeBoxes,
+  MIN_FILL,
+  reconcile,
   resizeRow,
+  resizeSolo,
   resizeTile,
   type TileLayout,
 } from "./tileLayout";
@@ -136,5 +139,52 @@ describe("resizing trades space with one neighbour", () => {
       expect(all[i].x).toBe(all[i - 1].x + all[i - 1].width);
     }
     expect(all[all.length - 1].x + all[all.length - 1].width).toBe(PANE.width);
+  });
+});
+
+describe("the lone window", () => {
+  const one: TileLayout = { rows: [{ weight: 1, items: [{ id: "a", weight: 1 }] }] };
+
+  it("fills the pane until it is resized", () => {
+    const [box] = computeBoxes(one, PANE.width, PANE.height);
+    expect(box.width).toBe(PANE.width);
+    expect(box.height).toBe(PANE.height);
+  });
+
+  it("can be made smaller, which neighbour-trading could never do", () => {
+    // The regression: resizeTile/resizeRow both bail out with nothing to trade against,
+    // so every drag on a single open window was silently discarded.
+    expect(computeBoxes(resizeTile(one, "a", -0.5), PANE.width, PANE.height)[0].width)
+      .toBe(PANE.width);
+
+    const smaller = resizeSolo(one, -0.4, -0.25);
+    const [box] = computeBoxes(smaller, PANE.width, PANE.height);
+    expect(box.width).toBe(Math.round(PANE.width * 0.6));
+    expect(box.height).toBe(Math.round(PANE.height * 0.75));
+  });
+
+  it("cannot be shrunk to nothing or grown past the pane", () => {
+    expect(computeBoxes(resizeSolo(one, -5, -5), PANE.width, PANE.height)[0].width)
+      .toBe(Math.round(PANE.width * MIN_FILL));
+    expect(computeBoxes(resizeSolo(one, 5, 5), PANE.width, PANE.height)[0].width)
+      .toBe(PANE.width);
+  });
+
+  it("keeps its size for when it is alone again, but fills the pane meanwhile", () => {
+    const small = resizeSolo(one, -0.5, -0.5);
+    const two = reconcile(small, ["a", "b"]);
+    const boxes2 = computeBoxes(two, PANE.width, PANE.height);
+    expect(boxes2.reduce((w, b) => w + b.width, 0)).toBe(PANE.width);
+
+    const back = reconcile(two, ["a"]);
+    expect(computeBoxes(back, PANE.width, PANE.height)[0].width)
+      .toBe(Math.round(PANE.width * 0.5));
+  });
+
+  it("is a no-op once there is a neighbour to trade with", () => {
+    const two: TileLayout = {
+      rows: [{ weight: 1, items: [{ id: "a", weight: 1 }, { id: "b", weight: 1 }] }],
+    };
+    expect(resizeSolo(two, -0.5, -0.5)).toBe(two);
   });
 });
