@@ -149,7 +149,12 @@ impl Reporter {
         }
     }
     fn log(&self, line: impl Into<String>) {
-        let line = line.into();
+        // Everything logged here can come from a child process — vite, cargo, git — and
+        // those colour their output when they think a terminal is attached. The installer
+        // window is HTML and the log file is plain text, so the escapes render as literal
+        // "[32m" noise with the ESC shown as a box glyph. Stripped once, here, because
+        // this is the single point every line passes through.
+        let line = strip_ansi(&line.into());
         if let Some(a) = &self.app {
             let _ = a.emit("install://log", line.clone());
         }
@@ -364,6 +369,14 @@ fn stream_once(rep: &Reporter, mut cmd: Command, what: &str, idle: Duration) -> 
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Ask the child not to colour its output at all. `strip_ansi` in the reporter is
+        // the safety net; this is the fix, and it also keeps the escapes out of anything
+        // that measures line length or matches on the text. Each variable covers a
+        // different family: NO_COLOR is the cross-tool convention, FORCE_COLOR=0 is what
+        // Node tooling (vite, pnpm) reads, and cargo has its own.
+        .env("NO_COLOR", "1")
+        .env("FORCE_COLOR", "0")
+        .env("CARGO_TERM_COLOR", "never")
         .creation_flags(CREATE_NO_WINDOW);
     let mut child = cmd
         .spawn()
@@ -1232,4 +1245,98 @@ pub fn run_uninstall() {
         ])
         .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
         .spawn();
+}
+
+/// Remove ANSI escape sequences from a line of child-process output.
+///
+/// Handles the two forms that actually turn up here: CSI (`ESC [ … final`) for colour and
+/// cursor moves, which is what vite and cargo emit, and OSC (`ESC ] … BEL` or `ESC \`),
+/// which some tools use to set the window title. A bare `ESC` with nothing recognisable
+/// after it is dropped on its own rather than swallowing the rest of the line — a
+/// truncated escape must not eat the message it was attached to.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            // Carriage returns come from progress bars redrawing a line; keeping them
+            // makes the log file look empty in editors that honour them.
+            if c != '\r' {
+                out.push(c);
+            }
+            continue;
+        }
+        match chars.peek() {
+            Some('[') => {
+                chars.next();
+                // Parameter and intermediate bytes, then one final byte in @..~.
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                chars.next();
+                // Runs to BEL, or to the ST pair ESC \.
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            // Two-character escape (e.g. ESC c): drop both.
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod ansi_tests {
+    use super::strip_ansi;
+
+    #[test]
+    fn strips_the_colour_codes_vite_and_cargo_emit() {
+        // Exactly the shape seen in the installer window.
+        assert_eq!(
+            strip_ansi("\u{1b}[32m✓\u{1b}[39m built in 3.39s"),
+            "✓ built in 3.39s"
+        );
+        assert_eq!(
+            strip_ansi("\u{1b}[2mdist/\u{1b}[22m\u{1b}[32mindex.html\u{1b}[39m"),
+            "dist/index.html"
+        );
+        assert_eq!(
+            strip_ansi("    \u{1b}[1m\u{1b}[32mFinished\u{1b}[0m release"),
+            "    Finished release"
+        );
+    }
+
+    #[test]
+    fn leaves_ordinary_text_alone() {
+        assert_eq!(strip_ansi("Installed xconsole.exe"), "Installed xconsole.exe");
+        assert_eq!(strip_ansi("Done — press Launch"), "Done — press Launch");
+    }
+
+    #[test]
+    fn handles_osc_titles_and_progress_returns() {
+        assert_eq!(strip_ansi("\u{1b}]0;building\u{7}done"), "done");
+        assert_eq!(strip_ansi("\u{1b}]0;t\u{1b}\\after"), "after");
+        assert_eq!(strip_ansi("50%\r100%"), "50%100%");
+    }
+
+    /// A cut-off escape at the end of a chunk must not swallow the text before it.
+    #[test]
+    fn a_truncated_escape_does_not_eat_the_line() {
+        assert_eq!(strip_ansi("text\u{1b}"), "text");
+        assert_eq!(strip_ansi("text\u{1b}["), "text");
+    }
 }
