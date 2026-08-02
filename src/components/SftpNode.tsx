@@ -25,6 +25,7 @@ import {
   type ArchiveFormat,
   type SftpEntry,
 } from "../lib/tauri";
+import { looksLikeDeadSession } from "../lib/sessionHealth";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useMouseNavButtons, useNavHistory } from "../hooks/useNavHistory";
 import { useCanvasStore, type SftpNode as SftpNodeType } from "../stores/canvasStore";
@@ -155,6 +156,8 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   const [error, setError] = useState<string | null>(null);
   const [path, setPath] = useState("/");
   // Mirror of `path` readable from the unmount cleanup, which closes over stale state.
+  /// The last failure text, so a caller can tell a dead link from a refusal.
+  const lastErrorRef = useRef<string | null>(null);
   const pathRef = useRef(path);
   pathRef.current = path;
   const [pathInput, setPathInput] = useState("/");
@@ -181,6 +184,9 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       setStatus("connected");
       return out;
     } catch (e) {
+      // Kept for the caller: whether this was a dead link or a refusal decides between
+      // reconnecting and showing the message, and the distinction is in the text.
+      lastErrorRef.current = String(e);
       setError(String(e));
       setStatus("error");
       return null;
@@ -188,6 +194,54 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       setLoading(false);
     }
   }, []);
+
+  /// Throw away the current session and open a new one, landing back where the user was.
+  ///
+  /// The panel used to hold one session id for its whole life. When the link dropped, that
+  /// id stayed in place and every call after it failed the same way — the only way out was
+  /// to close the panel and open another, because closing is the one path that clears the
+  /// remembered session.
+  const reconnect = useCallback(async (): Promise<string | null> => {
+    const dead = sessionRef.current;
+    sessionRef.current = null;
+    keptSftpSessions.delete(id);
+    // Best effort: if the link is already gone this is a no-op, but if only the SFTP
+    // channel died the backend still holds an SSH session worth releasing.
+    if (dead) api.sftpDisconnect(dead).catch(() => {});
+    setStatus("connecting");
+    setError(null);
+    try {
+      const out = await api.sftpConnect(data.vpsId);
+      sessionRef.current = out.session_id;
+      keptSftpSessions.set(id, { sessionId: out.session_id, path: pathRef.current });
+      setStatus("connected");
+      return out.session_id;
+    } catch (e) {
+      lastErrorRef.current = String(e);
+      setError(String(e));
+      setStatus("error");
+      return null;
+    }
+  }, [id, data.vpsId]);
+
+  /// List a directory, reconnecting once if the session turns out to be dead.
+  ///
+  /// This is what every navigation goes through, so a drop is recovered from wherever the
+  /// user happens to be rather than only on a manual refresh.
+  const openDir = useCallback(
+    async (dir: string) => {
+      const sid = sessionRef.current;
+      if (sid) {
+        const out = await loadDir(sid, dir);
+        if (out) return out;
+        if (!looksLikeDeadSession(lastErrorRef.current)) return null;
+      }
+      const fresh = await reconnect();
+      if (!fresh) return null;
+      return loadDir(fresh, dir);
+    },
+    [loadDir, reconnect],
+  );
 
   const fetchTreeDir = useCallback(async (sessionId: string, dir: string) => {
     setLoadingPaths((s) => new Set(s).add(dir));
@@ -207,12 +261,15 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   }, []);
 
   const refreshListing = useCallback(() => {
-    const sid = sessionRef.current;
-    if (!sid) return;
-    void loadDir(sid, path);
-    void fetchTreeDir(sid, path);
-    void fetchTreeDir(sid, "/");
-  }, [path, loadDir, fetchTreeDir]);
+    // Through openDir, so Refresh doubles as the manual recovery: pressing it on a panel
+    // whose link has dropped reconnects instead of failing the same way again.
+    void openDir(path).then((out) => {
+      const sid = sessionRef.current;
+      if (!out || !sid) return;
+      void fetchTreeDir(sid, path);
+      void fetchTreeDir(sid, "/");
+    });
+  }, [path, openDir, fetchTreeDir]);
 
   // Back/forward through visited directories, driven by the mouse's side buttons as well
   // as the toolbar arrows. `go` deliberately calls loadDir directly rather than
@@ -221,10 +278,9 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     current: path,
     go: useCallback(
       (dir: string) => {
-        const sid = sessionRef.current;
-        if (sid) void loadDir(sid, dir);
+        void openDir(dir);
       },
-      [loadDir],
+      [openDir],
     ),
   });
   useMouseNavButtons(panelRef, history);
@@ -273,8 +329,12 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
         if (previous) {
           sessionRef.current = previous.sessionId;
           setStatus("connected");
-          await loadDir(previous.sessionId, previous.path);
-          void fetchTreeDir(previous.sessionId, "/");
+          // Through openDir: if that remembered session died while the node was
+          // unmounted, this reconnects and lands on the same directory instead of
+          // presenting a panel that is dead on arrival.
+          const out = await openDir(previous.path);
+          const sid = sessionRef.current;
+          if (out && sid) void fetchTreeDir(sid, "/");
           return;
         }
         setStatus("connecting");
@@ -288,12 +348,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
         void fetchTreeDir(out.session_id, "/");
       } catch (e) {
         if (mounted) {
-          // A remembered session that the backend has since dropped (app re-locked,
-          // server rebooted): forget it and connect fresh rather than showing an error.
-          if (keptSftpSessions.delete(id)) {
-            setStatus("disconnected");
-            return;
-          }
+          lastErrorRef.current = String(e);
           setError(String(e));
           setStatus("error");
         }
@@ -311,10 +366,9 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
 
   useEffect(() => {
     if (!followTerminal || !linkedTerminalId || !terminalCwd) return;
-    const sid = sessionRef.current;
-    if (!sid || terminalCwd === lastSyncedCwd.current) return;
+    if (terminalCwd === lastSyncedCwd.current) return;
     lastSyncedCwd.current = terminalCwd;
-    void loadDir(sid, terminalCwd);
+    void openDir(terminalCwd);
     setExpanded((prev) => {
       const next = new Set(prev);
       next.add("/");
@@ -325,7 +379,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       }
       return next;
     });
-  }, [followTerminal, linkedTerminalId, terminalCwd, loadDir]);
+  }, [followTerminal, linkedTerminalId, terminalCwd, openDir]);
 
   const closeNode = () => {
     const sid = sessionRef.current;
@@ -338,14 +392,12 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   /** Navigate somewhere new, recording it so the mouse's back button can undo it. */
   const navigateTo = useCallback(
     (next: string) => {
-      const sid = sessionRef.current;
-      if (!sid) return;
       history.visit(next);
-      void loadDir(sid, next);
+      void openDir(next);
     },
     // `history` is stable enough (its callbacks are memoised) that including it here
-    // doesn't churn; loadDir changes only with the session.
-    [history, loadDir],
+    // doesn't churn; openDir changes only with the session.
+    [history, openDir],
   );
 
   const openEntry = (entry: SftpEntry) => {
@@ -520,9 +572,9 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   const toggleFollow = () => {
     const next = !followTerminal;
     updateNodeData(id, { followTerminal: next });
-    if (next && terminalCwd && sessionRef.current) {
+    if (next && terminalCwd) {
       lastSyncedCwd.current = null;
-      void loadDir(sessionRef.current, terminalCwd);
+      void openDir(terminalCwd);
     }
   };
 
@@ -724,8 +776,22 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
         )}
 
         {error && (
-          <div className="border-b border-red-900/40 bg-red-950/30 px-2 py-1 text-[10px] text-red-300">
-            {error}
+          <div className="flex items-center gap-2 border-b border-red-900/40 bg-red-950/30 px-2 py-1 text-[10px] text-red-300">
+            <span className="min-w-0 flex-1 break-words">{error}</span>
+            {/* Always offered, even for errors we do not reconnect on automatically:
+                whatever the panel got stuck on, the user needs one visible way out that
+                is not "close this window and open another". */}
+            <button
+              type="button"
+              className="shrink-0 rounded border border-red-800/60 px-1.5 py-0.5 text-red-200 hover:bg-red-900/40"
+              onClick={() =>
+                void reconnect().then((sid) => {
+                  if (sid) void openDir(pathRef.current || "/");
+                })
+              }
+            >
+              Reconnect
+            </button>
           </div>
         )}
 
