@@ -798,6 +798,9 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
     step!(0, {
         std::fs::create_dir_all(base.join("tools")).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(app_dir()).map_err(|e| e.to_string())?;
+        // The previous updater, renamed aside so the new one could take its place. It is
+        // no longer running by now, so it can finally go.
+        let _ = std::fs::remove_file(base.join("uninstall.old.exe"));
         rep.log("xConsole setup — building from source (Hermes-style).");
         rep.log(format!("Install location: {}", base.display()));
         rep.log("First run downloads the toolchain + compiles; this can take 10-20 minutes.");
@@ -1077,6 +1080,20 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
                 if let Err(e) = std::fs::copy(&me, &dest) {
                     rep.log(format!("note: could not refresh uninstall.exe ({e})"));
                 }
+                // This exe was built from the source we just cloned, so stamp it as
+                // current — otherwise the first update would rebuild it for nothing.
+                let rev = current_env(&base).capture(&format!(
+                    "git -C \"{}\" rev-parse HEAD:installer",
+                    src_dir().display()
+                ));
+                if rev.len() >= 40 && rev.chars().all(|c| c.is_ascii_hexdigit()) {
+                    let _ = std::fs::write(base.join("updater.rev"), &rev);
+                }
+            } else {
+                // Same file: this is the in-app update flow, running as the very binary
+                // it would be copying. That is the one case where the updater can go
+                // stale forever, so rebuild it from the source we just pulled.
+                refresh_updater(rep, &base);
             }
         }
         register_uninstall(&base).map_err(|e| format!("registry: {e}"))?;
@@ -1086,6 +1103,92 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
     });
 
     Ok(())
+}
+
+/// Rebuild `uninstall.exe` from the source we just pulled, when the installer's own
+/// source changed.
+///
+/// `uninstall.exe` is a copy of the setup exe taken at install time, and it is what the
+/// in-app updater re-runs. Nothing ever replaced it, so a fix to the installer could
+/// never reach anyone who had already installed: the update rebuilt the *app* from new
+/// source and then handed control back to the same old updater binary. Colour codes
+/// showing up as `[32m` in this very window was the symptom that made it obvious.
+///
+/// Guarded by the git tree hash of `installer/`, so the usual update — which does not
+/// touch the installer — pays nothing. Non-fatal throughout: a failure here leaves the
+/// working updater in place, and the app is already installed by this point.
+fn refresh_updater(rep: &Reporter, base: &Path) {
+    let env = current_env(base);
+    let src = src_dir();
+    let installer_src = src.join("installer");
+    if !installer_src.exists() {
+        return;
+    }
+    // The tree hash changes only when something under installer/ changes.
+    let rev = env.capture(&format!(
+        "git -C \"{}\" rev-parse HEAD:installer",
+        src.display()
+    ));
+    if rev.len() < 40 || !rev.chars().all(|c| c.is_ascii_hexdigit()) {
+        return; // can't tell — don't spend 10 minutes guessing
+    }
+    let stamp = base.join("updater.rev");
+    if std::fs::read_to_string(&stamp).map(|s| s.trim() == rev).unwrap_or(false) {
+        return;
+    }
+
+    rep.log("The updater itself changed — rebuilding it so the next update runs the new one.");
+    if let Err(e) = run_tool_full(
+        rep,
+        &env,
+        Some(&installer_src),
+        "cargo",
+        &["build", "--release"],
+        "updater build",
+        1,
+        BUILD_IDLE_TIMEOUT,
+        false,
+    ) {
+        rep.log(format!("note: could not rebuild the updater ({e}) — keeping the current one."));
+        return;
+    }
+
+    let built = installer_src.join(r"target\release\xConsole-Setup.exe");
+    if !built.exists() {
+        rep.log("note: the updater build produced no exe — keeping the current one.");
+        return;
+    }
+
+    // We are running *as* base\uninstall.exe, so it cannot be overwritten — but Windows
+    // does allow a running image to be renamed. Move ourselves aside, drop the new binary
+    // in, and clean the leftover up on the next run. If the copy fails, move back: a
+    // missing updater would strand the install with no way to update or uninstall.
+    let dest = base.join("uninstall.exe");
+    let old = base.join("uninstall.old.exe");
+    let _ = std::fs::remove_file(&old);
+    let moved = dest.exists();
+    if moved {
+        if let Err(e) = std::fs::rename(&dest, &old) {
+            rep.log(format!("note: could not replace the updater ({e}) — keeping the current one."));
+            return;
+        }
+    }
+    if let Err(e) = std::fs::copy(&built, &dest) {
+        if moved {
+            let _ = std::fs::rename(&old, &dest);
+        }
+        rep.log(format!("note: could not install the new updater ({e}) — kept the current one."));
+        return;
+    }
+    // Under the GNU toolchain the WebView2 loader is linked dynamically, so it has to sit
+    // beside the exe. (The released setup exe embeds it in a self-extracting stub; here we
+    // own the folder, so a sibling file is simpler and does the same job.)
+    let dll = installer_src.join(r"target\release\WebView2Loader.dll");
+    if dll.exists() {
+        let _ = std::fs::copy(&dll, base.join("WebView2Loader.dll"));
+    }
+    let _ = std::fs::write(&stamp, &rev);
+    rep.log("Updater refreshed.");
 }
 
 // ---- WebView2 / shortcuts / registry / uninstall ---------------------------
