@@ -136,8 +136,8 @@ pub async fn connect(
             .success(),
         Auth::Key { source, passphrase } => {
             let key = match source {
-                KeySource::Pem(pem) => decode_secret_key(&pem, passphrase.as_deref())?,
-                KeySource::Path(path) => load_secret_key(&path, passphrase.as_deref())?,
+                KeySource::Pem(pem) => decode_private_key(&pem, passphrase.as_deref())?,
+                KeySource::Path(path) => load_private_key_file(&path, passphrase.as_deref())?,
             };
             let hash = handle.best_supported_rsa_hash().await?.flatten();
             handle
@@ -161,6 +161,48 @@ pub async fn connect(
         .unwrap_or(HostKeyVerdict::Match);
 
     Ok(Connected { handle, verdict })
+}
+
+/// True for a PuTTY `.ppk`, by content rather than by file extension — the extension is a
+/// convention and people rename things.
+pub fn is_ppk(text: &str) -> bool {
+    text.trim_start().starts_with("PuTTY-User-Key-File-")
+}
+
+/// Decode private key text in any format we accept, with an error worth reading.
+///
+/// PuTTY `.ppk` files work here and always have: russh routes anything starting with
+/// `PuTTY-User-Key-File-` to the PPK parser, and it enables that support unconditionally.
+/// What was missing was any acknowledgement of it — the field said `id_ed25519`, and a
+/// `.ppk` that failed for an ordinary reason (a passphrase typo) reported a generic key
+/// error that read like "this format is not supported". So a PPK failure now says it is a
+/// PPK and lists what actually goes wrong with them.
+pub fn decode_private_key(
+    text: &str,
+    passphrase: Option<&str>,
+) -> Result<PrivateKey, ConnectError> {
+    decode_secret_key(text, passphrase).map_err(|e| {
+        if !is_ppk(text) {
+            return ConnectError::Key(e);
+        }
+        ConnectError::Other(format!(
+            "this PuTTY key (.ppk) could not be read: {e}. \
+             If it is passphrase-protected, the passphrase goes in the key-passphrase \
+             field. Note that DSA keys and the obsolete PPK version 1 are not supported — \
+             convert those with PuTTYgen (Conversions > Export OpenSSH key)."
+        ))
+    })
+}
+
+/// Read a private key file from disk and decode it. Accepts OpenSSH, PEM and PuTTY `.ppk`.
+pub fn load_private_key_file(
+    path: &str,
+    passphrase: Option<&str>,
+) -> Result<PrivateKey, ConnectError> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        ConnectError::Other(format!("could not read the private key at {path}: {e}"))
+    })?;
+    decode_private_key(&text, passphrase)
 }
 
 /// Resolved authentication material for a single connection attempt.
@@ -218,5 +260,101 @@ pub fn resolve_auth(vps: &Vps) -> Result<Auth, ConnectError> {
                 passphrase,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod ppk_tests {
+    use super::{decode_private_key, is_ppk};
+
+    /// PuTTY writes its files with CRLF line endings; joining here keeps the fixtures
+    /// readable as plain line lists. Built from byte values so no escape survives a
+    /// round trip through a code generator.
+    fn ppk(lines: &[&str]) -> String {
+        let crlf = String::from_utf8(vec![13, 10]).unwrap();
+        lines.join(&crlf) + &crlf
+    }
+
+    // Real PuTTY-generated keys (test vectors from the ssh-key crate's own suite, which is
+    // where our PPK support comes from). Passphrase for the encrypted one is "123".
+    fn ed25519_plain() -> String {
+        ppk(&[
+            "PuTTY-User-Key-File-3: ssh-ed25519",
+            "Encryption: none",
+            "Comment: user@example.com",
+            "Public-Lines: 2",
+            "AAAAC3NzaC1lZDI1NTE5AAAAILM+rvN+ot98qgEN796jTiQfZfG1KaT0PtFDJ/XF",
+            "Sqti",
+            "Private-Lines: 1",
+            "AAAAILYGwiLRDBba4WxwpNRRc0cuxhfgXGVpINJuVsCPtZHt",
+            "Private-MAC: 94140d0344fad6aa1bf7b71e9c93db11ccac8a232f8a51e11c024869d608c82d",
+        ])
+    }
+
+    fn ed25519_encrypted() -> String {
+        ppk(&[
+            "PuTTY-User-Key-File-3: ssh-ed25519",
+            "Encryption: aes256-cbc",
+            "Comment: user@example.com",
+            "Public-Lines: 2",
+            "AAAAC3NzaC1lZDI1NTE5AAAAILM+rvN+ot98qgEN796jTiQfZfG1KaT0PtFDJ/XF",
+            "Sqti",
+            "Key-Derivation: Argon2id",
+            "Argon2-Memory: 8192",
+            "Argon2-Passes: 34",
+            "Argon2-Parallelism: 1",
+            "Argon2-Salt: 63d1d43f7bf7700720496646a2f5ec17",
+            "Private-Lines: 1",
+            "DyWtExZ3dxFutnb12tIwXBC6kWdozrvP+r6faHKBGDb4+qEar9XBiC0BmGySMHUi",
+            "Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66",
+        ])
+    }
+
+    #[test]
+    fn recognises_a_ppk_by_content_not_extension() {
+        assert!(is_ppk(&ed25519_plain()));
+        assert!(is_ppk("  PuTTY-User-Key-File-2: ssh-rsa"));
+        assert!(!is_ppk("-----BEGIN OPENSSH PRIVATE KEY-----"));
+        assert!(!is_ppk(""));
+    }
+
+    /// The whole point: a .ppk goes in "Private key path" and works.
+    #[test]
+    fn an_unencrypted_ppk_loads() {
+        let key = decode_private_key(&ed25519_plain(), None).expect("a PuTTY .ppk must load");
+        assert_eq!(key.algorithm().as_str(), "ssh-ed25519");
+    }
+
+    /// The key-passphrase field feeds PPK decryption, so protected keys work too.
+    #[test]
+    fn an_encrypted_ppk_loads_with_its_passphrase() {
+        let key = decode_private_key(&ed25519_encrypted(), Some("123"))
+            .expect("an encrypted .ppk must load with the right passphrase");
+        let plain = decode_private_key(&ed25519_plain(), None).unwrap();
+        // Same identity either way — the encryption wraps the key, it does not change it.
+        assert_eq!(
+            key.public_key().to_openssh().unwrap(),
+            plain.public_key().to_openssh().unwrap()
+        );
+    }
+
+    /// A mistyped passphrase must not read as "this format is unsupported" — that is what
+    /// made .ppk look unsupported when it was only mistyped.
+    #[test]
+    fn a_wrong_passphrase_names_the_format_and_the_passphrase() {
+        let err = decode_private_key(&ed25519_encrypted(), Some("wrong"))
+            .expect_err("a wrong passphrase must fail")
+            .to_string();
+        assert!(err.contains(".ppk"), "must name the format, got: {err}");
+        assert!(err.contains("passphrase"), "must point at the passphrase, got: {err}");
+    }
+
+    /// A non-PPK failure keeps its own error instead of blaming PuTTY.
+    #[test]
+    fn a_broken_openssh_key_is_not_reported_as_a_putty_problem() {
+        let err = decode_private_key("-----BEGIN OPENSSH PRIVATE KEY-----", None)
+            .expect_err("garbage must fail")
+            .to_string();
+        assert!(!err.contains("PuTTYgen"), "got: {err}");
     }
 }

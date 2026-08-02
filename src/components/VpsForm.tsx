@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useVpsStore } from "../stores/vpsStore";
-import type { AuthType, Vps, VpsInput } from "../lib/tauri";
+import { api, type AuthType, type Vps, type VpsInput } from "../lib/tauri";
 
 const FIELD =
   "w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-2.5 py-1.5 text-sm text-gray-200 outline-none focus:border-blue-500";
@@ -131,12 +131,32 @@ export function VpsForm({
             <>
               <div>
                 <label className={LABEL}>Private key path</label>
-                <input
-                  className={FIELD}
-                  value={form.key_path ?? ""}
-                  onChange={(e) => set("key_path", e.target.value)}
-                  placeholder="C:\\Users\\you\\.ssh\\id_ed25519"
-                />
+                <div className="flex gap-2">
+                  <input
+                    className={FIELD}
+                    value={form.key_path ?? ""}
+                    onChange={(e) => set("key_path", e.target.value)}
+                    placeholder="C:\\Users\\you\\.ssh\\id_ed25519"
+                  />
+                  <button
+                    type="button"
+                    className="shrink-0 rounded-md border border-[var(--border)] px-3 text-xs text-gray-300 hover:border-[var(--accent)]"
+                    onClick={() =>
+                      void api
+                        .pickFiles("Choose a private key")
+                        .then((paths) => paths[0] && set("key_path", paths[0]))
+                        .catch(() => {})
+                    }
+                  >
+                    Browse…
+                  </button>
+                </div>
+                {/* PuTTY keys have always worked — russh routes any file starting with
+                    PuTTY-User-Key-File- to its PPK parser — but nothing said so, and the
+                    placeholder showing an OpenSSH filename implied the opposite. */}
+                <p className="mt-1 text-[11px] text-gray-500">
+                  OpenSSH, PEM, or a PuTTY <code>.ppk</code> — no conversion needed.
+                </p>
               </div>
               <div>
                 <label className={LABEL}>
