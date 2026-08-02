@@ -56,10 +56,16 @@ const MINGIT_URL: &str =
 const MINGIT_SHA256: &str = "50b04b55425b5c465d076cdb184f63a0cd0f86f6ec8bb4d5860114a713d2c29a";
 
 // winlibs deletes superseded packaging revisions, and the old `-ucrt-r3` asset is now
-// a 404. `-ucrt-r2` is the same compiler (GCC 14.2.0 / LLVM 19.1.1 / mingw-w64 ucrt
-// 12.0.0); only the packaging revision differs.
-const MINGW_URL: &str = "https://github.com/brechtsanders/winlibs_mingw/releases/download/14.2.0posix-19.1.1-12.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-14.2.0-llvm-19.1.1-mingw-w64ucrt-12.0.0-r2.zip";
-const MINGW_SHA256: &str = "12fa72d2566e641c3bf0213a946d33d8bef2e0757af2fb3ed60a995e05d74606";
+// a 404. `-ucrt-r2` is the same compiler (GCC 14.2.0 / mingw-w64 ucrt 12.0.0); only the
+// packaging revision differs.
+//
+// This is the build WITHOUT the bundled LLVM. Rust's `x86_64-pc-windows-gnu` target links
+// through `gcc` and GNU `ld`; it never invokes clang or lld, so the ~130 MB of LLVM in the
+// other asset was downloaded, unpacked and then never touched. Same release, same GCC —
+// the LLVM asset is this one plus a compiler we do not use. 233 MB instead of 361, and
+// 852 MB on disk instead of roughly 1.6 GB.
+const MINGW_URL: &str = "https://github.com/brechtsanders/winlibs_mingw/releases/download/14.2.0posix-19.1.1-12.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-14.2.0-mingw-w64ucrt-12.0.0-r2.zip";
+const MINGW_SHA256: &str = "d41933cef13113018418d7b596319c2ed59a567395bbb87afe27a171e111d553";
 
 // pnpm installed before the repo exists. Only a bootstrap — once package.json is on disk
 // `ensure_pnpm` pins the exact version the repo asks for, so this drifting out of date
@@ -987,7 +993,20 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
             &env,
             None,
             "rustup",
-            &["toolchain", "install", GNU_TOOLCHAIN, "--no-self-update"],
+            // `--profile minimal` = rustc + cargo + rust-std, nothing else. rustup-init
+            // above already asks for minimal, but that only sets the default for a rustup
+            // *we* installed — on a machine that already had rustup, the default profile
+            // is whatever that user chose, and the usual one pulls rust-docs: several
+            // hundred megabytes of HTML that no build step reads. Saying it here makes the
+            // two paths install the same thing.
+            &[
+                "toolchain",
+                "install",
+                GNU_TOOLCHAIN,
+                "--profile",
+                "minimal",
+                "--no-self-update",
+            ],
             "rustup toolchain",
         )?;
         Ok(())
