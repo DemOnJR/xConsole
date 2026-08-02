@@ -2,9 +2,10 @@
 //!
 //! Two places they hide, and they need different treatment:
 //!
-//! - **Natively installed** — listening on the host's own network stack. `ss -ltnp`
-//!   reports those, and a tunnel to `127.0.0.1:<port>` reaches them even when the port
-//!   is firewalled off from the internet (which it should be).
+//! - **Natively installed** — listening on the host's own network stack, found with
+//!   whichever of five probes the host has (see [`DISCOVER_CMD`]); a tunnel to
+//!   `127.0.0.1:<port>` reaches them even when the port is firewalled off from the
+//!   internet (which it should be).
 //! - **Inside Docker** — a container may publish a port to the host, or may only be
 //!   reachable on the bridge network. `docker ps` gives the published mapping;
 //!   `docker inspect` gives the container IP for the ones that publish nothing. Because
@@ -14,6 +15,17 @@
 //!
 //! Everything is parsed into typed records rather than fed to a model as text, so the UI
 //! can list candidates and the user just picks one.
+//!
+//! # Portability
+//!
+//! Everything here runs through POSIX `sh` on the remote host, so it works on Linux, the
+//! BSDs, macOS, Solaris and AIX. Nothing is assumed to exist: each probe is guarded and
+//! the parsers accept every output shape the probes produce, including the BSD `addr.port`
+//! address form. Container attribution via `/proc/<pid>/cgroup` is Linux-only by nature
+//! and simply finds nothing elsewhere, which costs nothing — FreeBSD jails and Solaris
+//! zones are **not** attributed, so a database inside one is reported as a host install.
+//! That is correct as long as its client binary is reachable from the host; running the
+//! client inside a jail (`jexec`) is not implemented.
 
 use serde::{Deserialize, Serialize};
 
@@ -173,8 +185,26 @@ pub enum DbKind {
 ///
 /// Every part is guarded with `|| true` / `2>/dev/null` so a host without `docker`, or
 /// without `ss`, still returns usable output for the parts that do exist.
+///
+/// The listener probe tries five tools in order and takes the first that succeeds, because
+/// `ss` is Linux-only and the flags `netstat -ltnp` uses are Linux-only too. On FreeBSD
+/// both fail, the section comes back empty, and nothing is ever found — which is exactly
+/// what was reported. The chain covers, in order of how much they tell us:
+///
+/// | Tool | Where | Gives a PID |
+/// |---|---|---|
+/// | `ss -ltnp` | Linux (iproute2) | yes |
+/// | `netstat -ltnp` | Linux (net-tools) | yes |
+/// | `sockstat -46lP tcp` | FreeBSD, NetBSD | yes |
+/// | `lsof -nP -iTCP -sTCP:LISTEN` | macOS, and anywhere lsof is installed | yes |
+/// | `netstat -an` | every Unix, including OpenBSD, Solaris, AIX | no |
+///
+/// The last is the floor: no process attribution, but it finds the port everywhere.
 const DISCOVER_CMD: &str = "\
-echo '@@LISTEN'; (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) || true; \
+echo '@@OS'; (uname -s 2>/dev/null) || true; \
+echo '@@LISTEN'; (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null \
+ || sockstat -46lP tcp 2>/dev/null || lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null \
+ || netstat -an 2>/dev/null) || true; \
 echo '@@DOCKER'; (docker ps --no-trunc --format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Ports}}' 2>/dev/null) || true; \
 echo '@@DOCKERIP'; (docker ps -q 2>/dev/null | xargs -r docker inspect \
  -f '{{.Name}}\t{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' 2>/dev/null) || true; \
@@ -193,6 +223,7 @@ pub async fn discover(
 /// Which part of the combined output a line belongs to.
 #[derive(Clone, Copy)]
 enum Section {
+    Os,
     Listen,
     Docker,
     DockerIp,
@@ -205,11 +236,16 @@ enum Section {
 /// juggling `&mut` references to three separate locals — same result, but nothing for a
 /// reader (or the borrow checker) to puzzle over.
 fn parse(stdout: &str) -> Vec<DbEndpoint> {
-    let mut sections: [String; 4] = Default::default();
+    let mut sections: [String; 5] = Default::default();
+    // Output from a build that predates the @@OS marker still starts with listeners.
     let mut current = Section::Listen;
 
     for line in stdout.lines() {
         match line.trim() {
+            "@@OS" => {
+                current = Section::Os;
+                continue;
+            }
             "@@LISTEN" => {
                 current = Section::Listen;
                 continue;
@@ -233,7 +269,7 @@ fn parse(stdout: &str) -> Vec<DbEndpoint> {
         slot.push('\n');
     }
 
-    let [listen, docker, docker_ip, pid_cgroup] = sections;
+    let [_os, listen, docker, docker_ip, pid_cgroup] = sections;
     let ips = parse_container_ips(&docker_ip);
     let pid_to_container = parse_pid_cgroups(&pid_cgroup);
     let mut found: Vec<DbEndpoint> = Vec::new();
@@ -324,7 +360,10 @@ fn parse(stdout: &str) -> Vec<DbEndpoint> {
                 id: format!("native:{}", l.port),
                 label: format!("{} on the host (port {})", product.label(), l.port),
                 kind: DbKind::Native,
-                host: "127.0.0.1".to_string(),
+                // Loopback unless it is bound to one specific address that is not
+                // loopback — a FreeBSD jail's IP being the case that matters. Forwarding
+                // such a listener to 127.0.0.1 reaches nothing.
+                host: l.addr.clone().unwrap_or_else(|| "127.0.0.1".to_string()),
                 port: l.port,
                 container: None,
                 image: None,
@@ -411,37 +450,90 @@ struct Listener {
     port: u16,
     /// From `users:(("mariadbd",pid=1133344,fd=29))`, when the tool reported it.
     pid: Option<u32>,
+    /// The address it is bound to, when that is a specific one rather than a wildcard.
+    ///
+    /// Loopback is the right destination for almost everything, but not for a database
+    /// bound only to one address — a FreeBSD jail's IP being the common case. Forwarding
+    /// to 127.0.0.1 then connects to nothing.
+    addr: Option<String>,
 }
 
-/// Listening TCP ports that look like a database, from `ss -ltnp` / `netstat -ltnp`.
+/// Split an address token into host and port, accepting both conventions.
+///
+/// Linux tools write `127.0.0.1:3306`; the BSDs and Solaris write `127.0.0.1.3306`, and
+/// `netstat` on macOS and FreeBSD does the same. Only the colon form was understood, so
+/// every BSD listener was invisible even when the probe itself had worked.
+fn split_addr_port(token: &str) -> Option<(&str, u16)> {
+    // Colon first: an IPv6 address contains colons AND dots, and `[::1]:3306` or
+    // `::1.3306` must not be cut at a dot that belongs to the address.
+    if let Some((host, tail)) = token.rsplit_once(':') {
+        if let Ok(port) = tail.parse::<u16>() {
+            return Some((host, port));
+        }
+    }
+    if let Some((host, tail)) = token.rsplit_once('.') {
+        if let Ok(port) = tail.parse::<u16>() {
+            return Some((host, port));
+        }
+    }
+    None
+}
+
+/// A wildcard or loopback bind, i.e. one where forwarding to loopback is correct.
+fn is_wildcard_or_loopback(host: &str) -> bool {
+    let h = host.trim_start_matches('[').trim_end_matches(']');
+    matches!(h, "" | "*" | "0.0.0.0" | "::" | "::1" | "127.0.0.1") || h.starts_with("127.")
+}
+
+/// The PID owning a listening socket, whichever tool reported it.
+///
+/// Each tool puts it somewhere different, so this identifies the format from the shape of
+/// the line rather than assuming a column that only holds for `ss`.
+fn pid_from_line(line: &str) -> Option<u32> {
+    // ss / netstat -p: `users:(("mariadbd",pid=1133344,fd=29))`.
+    if let Some(rest) = line.split("pid=").nth(1) {
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(pid) = digits.parse::<u32>() {
+            return Some(pid);
+        }
+    }
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    // lsof: COMMAND PID USER FD TYPE ... NAME (LISTEN)
+    if line.contains("(LISTEN)") {
+        return cols.get(1).and_then(|c| c.parse().ok());
+    }
+    // sockstat: USER COMMAND PID FD PROTO LOCAL FOREIGN. Anchored on PROTO being in the
+    // fifth column, which `netstat -an` (where "tcp4" leads the line) never satisfies.
+    if cols.len() >= 6 && matches!(cols[4], "tcp" | "tcp4" | "tcp6" | "tcp46") {
+        return cols.get(2).and_then(|c| c.parse().ok());
+    }
+    None
+}
+
+/// Listening TCP ports that look like a database, from whichever probe succeeded.
 fn parse_listeners(text: &str) -> Vec<Listener> {
     let mut found: Vec<Listener> = Vec::new();
     for line in text.lines() {
-        // Rather than depend on column positions (which differ between ss and netstat and
-        // across versions), scan every token for a `host:port` whose port we care about.
-        let mut port = None;
+        // Rather than depend on column positions (which differ between every one of the
+        // five tools), scan every token for an address whose port we care about.
+        let mut hit = None;
         for token in line.split_whitespace() {
-            if let Some((_, tail)) = token.rsplit_once(':') {
-                if let Ok(p) = tail.parse::<u16>() {
-                    if product_for_port(p).is_some() {
-                        port = Some(p);
-                        break;
-                    }
+            if let Some((host, p)) = split_addr_port(token) {
+                if product_for_port(p).is_some() {
+                    hit = Some((host, p));
+                    break;
                 }
             }
         }
-        let Some(port) = port else { continue };
+        let Some((host, port)) = hit else { continue };
         if found.iter().any(|l| l.port == port) {
             continue;
         }
-        let pid = line
-            .split("pid=")
-            .nth(1)
-            .and_then(|rest| {
-                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                digits.parse::<u32>().ok()
-            });
-        found.push(Listener { port, pid });
+        found.push(Listener {
+            port,
+            pid: pid_from_line(line),
+            addr: (!is_wildcard_or_loopback(host)).then(|| host.to_string()),
+        });
     }
     found.sort_by_key(|l| l.port);
     found
@@ -758,6 +850,130 @@ cid-s\ts\tscylladb/scylla\t0.0.0.0:9042->9042/tcp\n\
     fn survives_a_host_without_docker_or_ss() {
         assert!(parse("@@LISTEN\n@@DOCKER\n@@DOCKERIP\n").is_empty());
         assert!(parse("").is_empty());
+    }
+
+    /// Build a discovery blob from lines, so no escape sequence has to survive being
+    /// written out by a tool.
+    fn out(lines: &[&str]) -> String {
+        let nl = String::from_utf8(vec![10]).unwrap();
+        lines.join(&nl) + &nl
+    }
+
+    /// FreeBSD has no `ss`, and its `netstat` rejects the Linux `-ltnp` flags, so the
+    /// listener section came back empty and nothing was ever found. `sockstat` is the
+    /// FreeBSD equivalent, and it reports a PID too.
+    #[test]
+    fn finds_a_freebsd_listener_from_sockstat() {
+        let found = parse(&out(&[
+            "@@OS", "FreeBSD", "@@LISTEN",
+            "USER     COMMAND    PID   FD PROTO  LOCAL ADDRESS     FOREIGN ADDRESS",
+            "mysql    mysqld     1234  30 tcp4   127.0.0.1:3306    *:*",
+            "root     sshd        901   4 tcp4   *:22              *:*",
+            "@@DOCKER", "@@DOCKERIP",
+        ]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].port, 3306);
+        assert_eq!(found[0].kind, DbKind::Native);
+        assert_eq!(found[0].engine, Some(DbEngine::MySql));
+    }
+
+    /// The other half of the FreeBSD problem: the BSDs and Solaris write `addr.port`, not
+    /// `addr:port`, so even a probe that worked produced no matches.
+    #[test]
+    fn understands_the_bsd_dotted_address_form() {
+        let found = parse(&out(&[
+            "@@OS", "FreeBSD", "@@LISTEN",
+            "tcp4       0      0 127.0.0.1.3306    *.*      LISTEN",
+            "tcp4       0      0 *.22              *.*      LISTEN",
+            "@@DOCKER", "@@DOCKERIP",
+        ]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].port, 3306);
+        assert_eq!(found[0].host, "127.0.0.1");
+    }
+
+    #[test]
+    fn finds_a_macos_listener_from_lsof() {
+        let found = parse(&out(&[
+            "@@OS", "Darwin", "@@LISTEN",
+            "postgres  742 you    7u  IPv4 0x1234  0t0  TCP 127.0.0.1:5432 (LISTEN)",
+            "@@DOCKER", "@@DOCKERIP",
+        ]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].engine, Some(DbEngine::Postgres));
+    }
+
+    /// A database bound to one specific address — a jail IP being the usual reason — has
+    /// to be reached at that address. Forwarding it to loopback connects to nothing.
+    #[test]
+    fn a_listener_bound_to_one_address_keeps_that_address() {
+        let found = parse(&out(&[
+            "@@OS", "FreeBSD", "@@LISTEN",
+            "tcp4       0      0 10.0.0.5.3306     *.*      LISTEN",
+            "@@DOCKER", "@@DOCKERIP",
+        ]));
+        assert_eq!(found[0].host, "10.0.0.5", "{found:?}");
+    }
+
+    /// Wildcard and loopback binds still go to loopback: it reaches them, and which of the
+    /// host addresses we pick does not matter.
+    #[test]
+    fn a_wildcard_bind_still_uses_loopback() {
+        for line in [
+            "tcp4       0      0 *.3306         *.*      LISTEN",
+            "tcp4       0      0 0.0.0.0.3306   *.*      LISTEN",
+            "LISTEN 0 151 0.0.0.0:3306 0.0.0.0:*",
+        ] {
+            let found = parse(&out(&["@@OS", "X", "@@LISTEN", line, "@@DOCKER", "@@DOCKERIP"]));
+            assert_eq!(found.len(), 1, "{line}");
+            assert_eq!(found[0].host, "127.0.0.1", "{line}");
+        }
+    }
+
+    /// The floor of the probe chain: plain `netstat -an` names no process, and that still
+    /// has to yield a usable endpoint rather than nothing.
+    #[test]
+    fn plain_netstat_with_no_process_column_still_works() {
+        let found = parse(&out(&[
+            "@@OS", "SunOS", "@@LISTEN",
+            "      *.5432               *.*                0      0 128000      0 LISTEN",
+            "@@DOCKER", "@@DOCKERIP",
+        ]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].engine, Some(DbEngine::Postgres));
+    }
+
+    /// `netstat -an` leads its lines with "tcp4", which must not be mistaken for
+    /// sockstat's PROTO column and read as a PID — that would attribute the socket to
+    /// whichever unrelated process happens to hold that id.
+    #[test]
+    fn a_netstat_line_is_not_misread_as_a_sockstat_pid() {
+        assert_eq!(
+            pid_from_line("tcp4       0      0 127.0.0.1.3306    *.*      LISTEN"),
+            None
+        );
+        assert_eq!(
+            pid_from_line("mysql    mysqld     1234  30 tcp4   127.0.0.1:3306   *:*"),
+            Some(1234)
+        );
+        assert_eq!(
+            pid_from_line("postgres  742 you 7u IPv4 0x1 0t0 TCP 127.0.0.1:5432 (LISTEN)"),
+            Some(742)
+        );
+        assert_eq!(
+            pid_from_line(r#"LISTEN 0 80 127.0.0.1:3306 0.0.0.0:* users:(("mariadbd",pid=1133344,fd=29))"#),
+            Some(1133344)
+        );
+    }
+
+    /// An IPv6 address is full of both colons and dots; splitting at the wrong one invents
+    /// a port out of part of the address.
+    #[test]
+    fn ipv6_addresses_split_at_the_right_separator() {
+        assert_eq!(split_addr_port("[::1]:5432"), Some(("[::1]", 5432)));
+        assert_eq!(split_addr_port("::1.5432"), Some(("::1", 5432)));
+        assert_eq!(split_addr_port("*:*"), None);
+        assert_eq!(split_addr_port("*.*"), None);
     }
 
     #[test]

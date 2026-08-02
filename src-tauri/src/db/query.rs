@@ -20,6 +20,11 @@
 //! `[client]` section and passed with `--defaults-extra-file`, then the file is removed
 //! whether the query succeeded or not. `umask 077` is set *before* `mktemp`, so the file
 //! is never briefly world-readable.
+//!
+//! `mktemp` is called as `mktemp 2>/dev/null || mktemp -t xconsole`: GNU coreutils takes a
+//! bare `mktemp`, but the BSD one — FreeBSD, macOS — requires a template or `-t` and exits
+//! with a usage error otherwise. That error hit `|| exit 1` and the query died before the
+//! client was ever run, so every SQL statement failed on those hosts.
 
 use serde::{Deserialize, Serialize};
 
@@ -128,7 +133,7 @@ fn psql_script(target: &DbTarget, sql: &str) -> String {
     );
 
     format!(
-        "umask 077; f=$(mktemp) || exit 1; \
+        "umask 077; f=$(mktemp 2>/dev/null || mktemp -t xconsole) || exit 1; \
          printf '%s\\n' {} > \"$f\"; \
          PGPASSFILE=\"$f\" psql --csv --no-psqlrc -v ON_ERROR_STOP=1 \
            -h {} -p {} -U {} -d {} -c {}; \
@@ -159,7 +164,7 @@ fn mysql_script(target: &DbTarget, sql: &str) -> String {
     // containing box-drawing characters. --skip-column-names is NOT used: the header
     // row is how the column list is discovered.
     format!(
-        "umask 077; f=$(mktemp) || exit 1; \
+        "umask 077; f=$(mktemp 2>/dev/null || mktemp -t xconsole) || exit 1; \
          printf '[client]\\npassword=%s\\n' {} > \"$f\"; \
          mysql --defaults-extra-file=\"$f\" {args} --batch --default-character-set=utf8mb4 -e {}; \
          rc=$?; rm -f \"$f\"; exit $rc",
