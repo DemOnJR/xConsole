@@ -24,6 +24,10 @@ interface Props {
   onCopyPath: (path: string) => void;
   onNewFolder: () => void;
   onNewFile: () => void;
+  /** Repoint an existing symlink. */
+  onEditLink: (entry: SftpEntry) => void;
+  /** Create a new symlink in the current directory. */
+  onNewLink: () => void;
   onRefresh: () => void;
   /** Name of the configured external editor, e.g. "VS Code"; null hides the item. */
   externalEditorName: string | null;
@@ -44,6 +48,8 @@ export function SftpContextMenu({
   onCopyPath,
   onNewFolder,
   onNewFile,
+  onEditLink,
+  onNewLink,
   onRefresh,
   externalEditorName,
 }: Props) {
@@ -124,6 +130,8 @@ export function SftpContextMenu({
           {item("Upload here…", onUpload)}
           <div className="my-1 border-t border-[var(--border)]" />
           {item("Properties…", () => onProperties(entry))}
+          {/* Only for links: for anything else there is no target to point anywhere. */}
+          {entry.is_symlink ? item("Edit link target…", () => onEditLink(entry)) : null}
           {item("Rename…", () => onRename(entry))}
           {item("Copy path", () => onCopyPath(entry.path))}
           <div className="my-1 border-t border-[var(--border)]" />
@@ -135,6 +143,7 @@ export function SftpContextMenu({
           <div className="my-1 border-t border-[var(--border)]" />
           {item("New directory…", onNewFolder)}
           {item("New file…", onNewFile)}
+          {item("New symlink…", onNewLink)}
           <div className="my-1 border-t border-[var(--border)]" />
           {item("Refresh", onRefresh)}
         </>

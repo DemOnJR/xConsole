@@ -496,6 +496,49 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     }
   };
 
+  /// Repoint an existing symlink. Pre-filled with the current target, because the usual
+  /// edit is a small change to it — a version number — not typing a path from scratch.
+  const handleEditLink = async (entry: SftpEntry) => {
+    const next = await dialog.prompt({
+      title: `Link target for ${entry.name}`,
+      label: "Points to (relative paths are kept relative)",
+      defaultValue: entry.link_target ?? "",
+      confirmText: "Save",
+    });
+    if (next === null || !next.trim()) return;
+    try {
+      await api.vpsFileSymlink(data.vpsId, entry.path, next.trim());
+      refreshListing();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  const handleNewLink = async () => {
+    const name = await dialog.prompt({
+      title: "New symlink",
+      label: "Link name",
+      confirmText: "Next",
+    });
+    if (!name?.trim()) return;
+    const target = await dialog.prompt({
+      title: `Link target for ${name.trim()}`,
+      label: "Points to (relative paths are kept relative)",
+      confirmText: "Create",
+    });
+    if (!target?.trim()) return;
+    try {
+      await api.vpsFileSymlink(
+        data.vpsId,
+        joinRemotePath(path, name.trim()),
+        target.trim(),
+      );
+      refreshListing();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
   const handleCopyPath = async (p: string) => {
     try {
       await navigator.clipboard.writeText(p);
@@ -869,11 +912,41 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                         });
                       }}
                     >
-                      <span className={entry.is_dir ? "text-cyan-400" : "text-gray-500"}>
-                        {entry.is_dir ? "📁" : "📄"}
+                      <span
+                        className={
+                          entry.link_broken
+                            ? "text-red-400"
+                            : entry.is_symlink
+                              ? "text-violet-400"
+                              : entry.is_dir
+                                ? "text-cyan-400"
+                                : "text-gray-500"
+                        }
+                        data-tooltip={
+                          entry.link_broken
+                            ? "Broken symlink — its target does not exist"
+                            : entry.is_symlink
+                              ? "Symlink"
+                              : undefined
+                        }
+                      >
+                        {entry.is_symlink ? "🔗" : entry.is_dir ? "📁" : "📄"}
                       </span>
-                      <span className="truncate text-xs text-gray-200">{entry.name}</span>
-                      {!entry.is_dir && (
+                      <span
+                        className={`truncate text-xs ${
+                          entry.link_broken ? "text-red-300/80" : "text-gray-200"
+                        }`}
+                      >
+                        {entry.name}
+                      </span>
+                      {/* The target inline: a link is only meaningful together with where
+                          it points, and opening a dialog to find out defeats the purpose. */}
+                      {entry.link_target && (
+                        <span className="truncate font-mono text-[10px] text-violet-300/70">
+                          → {entry.link_target}
+                        </span>
+                      )}
+                      {!entry.is_dir && !entry.is_symlink && (
                         <span className="ml-auto shrink-0 font-mono text-[10px] text-gray-600">
                           {formatSize(entry.size)}
                         </span>
@@ -912,6 +985,8 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           onCopyPath={(p) => void handleCopyPath(p)}
           onNewFolder={() => void handleNewFolder()}
           onNewFile={() => void handleNewFile()}
+          onEditLink={(e) => void handleEditLink(e)}
+          onNewLink={() => void handleNewLink()}
           onRefresh={refresh}
           externalEditorName={externalEditorName}
         />

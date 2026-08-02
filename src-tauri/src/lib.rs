@@ -357,6 +357,7 @@ pub fn run() {
             commands::remote_file::vps_file_chown,
             commands::remote_file::vps_file_delete,
             commands::remote_file::vps_file_rename,
+            commands::remote_file::vps_file_symlink,
             commands::remote_file::vps_file_mkdir,
             commands::remote_file::vps_file_touch,
             commands::workspace::list_workspaces,

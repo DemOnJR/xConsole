@@ -31,6 +31,13 @@ use crate::storage::Db;
 /// are not bounded by this — see [`super::transfer`].
 const MAX_DOWNLOAD: u64 = 10 * 1024 * 1024;
 
+/// How many symlinks in one listing get their target read and resolved.
+///
+/// Each costs a `readlink` plus a `stat`, so an unbounded loop turns a single directory
+/// listing into thousands of round trips over one SSH channel. Past this, links are still
+/// shown as links — only the target text and the follow-through are skipped.
+const MAX_RESOLVED_LINKS: usize = 300;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SftpConnectOutcome {
     pub session_id: String,
@@ -42,8 +49,23 @@ pub struct SftpConnectOutcome {
 pub struct SftpEntry {
     pub name: String,
     pub path: String,
+    /// Whether this behaves as a directory — **after** following a symlink.
+    ///
+    /// SFTP's `READDIR` reports `lstat` attributes, so a symlink to a directory arrives
+    /// as a zero-byte non-directory. Taking that at face value is why symlinks could not
+    /// be entered and showed as empty files: half the interesting paths on a Linux server
+    /// (`/var/www/html`, a `current` release link) are symlinks. This field answers "can
+    /// I open this", which is what navigation and sorting actually want.
     pub is_dir: bool,
     pub size: u64,
+    /// True when the entry itself is a symbolic link, whatever it points at.
+    pub is_symlink: bool,
+    /// The link's target exactly as stored — relative if it was written relative, which
+    /// is what has to be shown and edited. `None` unless this is a link.
+    pub link_target: Option<String>,
+    /// A link whose target does not resolve. Worth showing: a broken link looks identical
+    /// to a working one in a plain listing, and that is usually the bug being hunted.
+    pub link_broken: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -148,20 +170,45 @@ impl SftpManager {
             .map_err(|e| format!("list failed: {e}"))?;
 
         let mut entries = Vec::new();
+        let mut resolved = 0usize;
         for item in dir {
             let name = item.file_name();
             if name == "." || name == ".." {
                 continue;
             }
             let meta = item.metadata();
-            let is_dir = meta.is_dir();
+            let mut is_dir = meta.is_dir();
             let size = meta.size.unwrap_or(0);
             let child = join_path(&path, &name);
+            let is_symlink = meta.file_type().is_symlink();
+
+            // Resolving a link costs two extra round trips (readlink + stat), so a
+            // directory of thousands of them would turn one listing into thousands of
+            // requests. Past the budget they are still shown and still marked as links —
+            // only the target text and the follow-through are skipped.
+            let (link_target, link_broken) = if is_symlink && resolved < MAX_RESOLVED_LINKS {
+                resolved += 1;
+                let target = sftp.read_link(child.clone()).await.ok();
+                // `metadata` follows the link, unlike the READDIR attributes.
+                match sftp.metadata(child.clone()).await {
+                    Ok(m) => {
+                        is_dir = m.is_dir();
+                        (target, false)
+                    }
+                    Err(_) => (target, true),
+                }
+            } else {
+                (None, false)
+            };
+
             entries.push(SftpEntry {
                 name,
                 path: child,
                 is_dir,
                 size,
+                is_symlink,
+                link_target,
+                link_broken,
             });
         }
         entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));

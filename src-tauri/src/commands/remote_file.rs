@@ -65,6 +65,23 @@ pub async fn vps_file_rename(
         .map(|_| ())
 }
 
+/// Create a symlink at `path` pointing at `target`, or repoint an existing one.
+///
+/// One command for both because `ln -sfn` is one command for both, and because "change
+/// where this link points" is the operation people actually want — the alternative is
+/// delete-then-create, which loses the link if the second step fails.
+#[tauri::command]
+pub async fn vps_file_symlink(
+    sessions: State<'_, SessionManager>,
+    vps_id: String,
+    path: String,
+    target: String,
+) -> Result<(), String> {
+    remote_ops::symlink(&sessions, &vps_id, &path, &target)
+        .await
+        .map(|_| ())
+}
+
 #[tauri::command]
 pub async fn vps_file_mkdir(
     sessions: State<'_, SessionManager>,

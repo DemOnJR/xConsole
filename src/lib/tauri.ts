@@ -143,8 +143,15 @@ export interface SftpConnectOutcome {
 export interface SftpEntry {
   name: string;
   path: string;
+  /** True if this opens as a directory — already resolved through any symlink. */
   is_dir: boolean;
   size: number;
+  /** The entry itself is a symbolic link, whatever it points at. */
+  is_symlink: boolean;
+  /** The target as stored, relative if it was written relative. Null unless a link. */
+  link_target: string | null;
+  /** A link whose target does not resolve. */
+  link_broken: boolean;
 }
 
 // ----- Database client -----
@@ -708,6 +715,9 @@ export const api = {
     invoke<void>("vps_file_mkdir", { vpsId, path }),
   vpsFileTouch: (vpsId: string, path: string) =>
     invoke<void>("vps_file_touch", { vpsId, path }),
+  /** Create a symlink at `path` pointing at `target`, or repoint an existing one. */
+  vpsFileSymlink: (vpsId: string, path: string, target: string) =>
+    invoke<void>("vps_file_symlink", { vpsId, path, target }),
 
   listWorkspaces: () => invoke<Workspace[]>("list_workspaces"),
   saveWorkspace: (input: WorkspaceInput) =>
