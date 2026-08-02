@@ -1186,17 +1186,45 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
         // retry_on_exit=false: a compile/link failure is deterministic, so fail fast
         // rather than re-run a 15-minute build 3×. A genuine HANG (idle-timeout) is still
         // retried, and cargo's own CARGO_NET_RETRY handles transient crate-fetch flakiness.
-        run_tool_full(
-            rep,
-            &env,
-            Some(&src),
-            "pnpm",
-            &["exec", "tauri", "build", "--no-bundle", "-c", ".xconsole-build.json"],
-            "tauri build",
-            MAX_ATTEMPTS,
-            BUILD_IDLE_TIMEOUT,
-            false,
-        )?;
+        let build = || {
+            run_tool_full(
+                rep,
+                &env,
+                Some(&src),
+                "pnpm",
+                &["exec", "tauri", "build", "--no-bundle", "-c", ".xconsole-build.json"],
+                "tauri build",
+                MAX_ATTEMPTS,
+                BUILD_IDLE_TIMEOUT,
+                false,
+            )
+        };
+        if let Err(e) = build() {
+            // "Deterministic" was doing too much work in that comment: a damaged build
+            // tree fails identically every time *and* re-running fixes nothing, so the
+            // install was permanently stuck with no way out but deleting a folder the
+            // user has no reason to know about.
+            if !looks_like_a_damaged_build_tree(&e) {
+                return Err(e);
+            }
+            let target = src.join(r"src-tauri\target");
+            rep.log("The compiler crashed reading its own build artifacts.");
+            rep.log(
+                "That means a file under target\\ was left half-written — usually an \
+                 interrupted build, a full disk, or antivirus. It is not a problem with \
+                 the code, and re-running cannot fix it while the file is still there.",
+            );
+            rep.log(format!("Deleting {} and building once more...", target.display()));
+            remove_dir_robust(&target);
+            build().map_err(|second| {
+                format!(
+                    "{second} (this was a clean rebuild after deleting target\\, so the \
+                     build tree was not the problem — check free disk space on this drive \
+                     and whether antivirus is scanning {})",
+                    base.display()
+                )
+            })?;
+        }
         Ok(())
     });
 
@@ -1283,6 +1311,31 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
     Ok(())
 }
 
+/// Does this failure say the *build tree* is damaged, rather than the code being wrong?
+///
+/// rustc writes each dependency's type information into `target\...\deps\*.rmeta` and
+/// reads it back to compile the next crate. If one of those files is truncated or
+/// scribbled on, the read lands mid-structure and rustc panics on a byte that is not a
+/// valid tag — `invalid enum variant tag while decoding BoundTyKind, expected 0..2, actual
+/// 23`, reported as an internal compiler error against whichever crate happened to be
+/// reading it. It looks like a compiler bug and it is not: the same compiler, target,
+/// crate versions and metadata hashes build the same artifacts elsewhere.
+///
+/// A build gets interrupted here for reasons that have nothing to do with the code — the
+/// idle watchdog kills the tree, the disk fills, antivirus takes a file mid-write, the
+/// machine sleeps. Any of those can leave a half-written `.rmeta` that cargo considers
+/// fresh, and nothing recovers on its own: every later run reads the same broken file and
+/// fails identically, forever.
+fn looks_like_a_damaged_build_tree(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("compiler unexpectedly panicked")
+        || m.contains("invalid enum variant tag")
+        || m.contains("while decoding")
+        || m.contains("failed to decode")
+        || m.contains("unexpected end of file")
+        || m.contains("is corrupt")
+}
+
 /// Does this line look like the reason something failed, rather than noise around it?
 fn looks_like_a_diagnosis(line: &str) -> bool {
     let l = line.to_ascii_lowercase();
@@ -1293,6 +1346,7 @@ fn looks_like_a_diagnosis(line: &str) -> bool {
         return false;
     }
     l.starts_with("error")
+        || l.contains("panicked at")
         || l.contains("undefined reference")
         || l.contains("no space left")
         || l.contains("not enough space")
@@ -1322,12 +1376,25 @@ fn failure_reason<'a>(lines: impl Iterator<Item = &'a String>) -> String {
         return String::new();
     }
 
-    let mut picked: Vec<&str> = cleaned
-        .iter()
-        .copied()
-        .filter(|l| looks_like_a_diagnosis(l))
-        .take(3)
-        .collect();
+    let mut picked: Vec<&str> = Vec::new();
+    for (i, line) in cleaned.iter().enumerate() {
+        if picked.len() >= 3 {
+            break;
+        }
+        if !looks_like_a_diagnosis(line) {
+            continue;
+        }
+        picked.push(line);
+        // A panic header carries no information — "thread 'rustc' panicked at
+        // binder.rs:1073" is a location, and the sentence that says what went wrong is
+        // the line after it. Reporting the first without the second is what turned a
+        // corrupt-metadata crash into an unreadable one.
+        if line.to_ascii_lowercase().contains("panicked at") {
+            if let Some(next) = cleaned.get(i + 1) {
+                picked.push(next);
+            }
+        }
+    }
 
     let last = *cleaned.last().unwrap();
     if picked.is_empty() {
@@ -1847,6 +1914,59 @@ mod failure_reason_tests {
         assert!(!out.contains("fourth"));
         // ...and the closing summary is kept, because it says how bad it was.
         assert!(out.contains("could not compile"));
+    }
+}
+
+#[cfg(test)]
+mod damaged_build_tree_tests {
+    use super::{failure_reason, looks_like_a_damaged_build_tree};
+
+    /// The real failure, verbatim from a user's install.log.
+    const REAL: &[&str] = &[
+        "   Compiling time v0.3.51",
+        r"thread 'rustc' (12108) panicked at /rustc-dev/8bab26f/compiler\rustc_type_ir\src\binder.rs:1073:33:",
+        "invalid enum variant tag while decoding `BoundTyKind`, expected 0..2, actual 23",
+        "stack backtrace:",
+        "   0:     0x7ff8fd067dad - std::backtrace_rs::backtrace::win64::trace",
+        "error: the compiler unexpectedly panicked. This is a bug",
+        "note: rustc 1.97.1 (8bab26f4f 2026-07-14) running on x86_64-pc-windows-gnu",
+        "error: could not compile `time` (lib)",
+        "warning: build failed, waiting for other jobs to finish...",
+        "failed to build app: failed to build app",
+    ];
+
+    fn reason(lines: &[&str]) -> String {
+        let owned: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+        failure_reason(owned.iter())
+    }
+
+    /// The panic location is useless without the sentence after it, which is the one that
+    /// says the metadata was garbage.
+    #[test]
+    fn the_report_names_the_actual_corruption() {
+        let out = reason(REAL);
+        assert!(
+            out.contains("invalid enum variant tag"),
+            "the line after the panic header is the reason, got: {out}"
+        );
+    }
+
+    #[test]
+    fn that_failure_is_recognised_as_a_damaged_tree() {
+        assert!(looks_like_a_damaged_build_tree(&reason(REAL)));
+    }
+
+    /// A real compile error must NOT trigger a 20-minute clean rebuild — it would fail
+    /// again identically and cost the user twice.
+    #[test]
+    fn an_ordinary_compile_error_is_not_a_damaged_tree() {
+        let out = reason(&[
+            "error[E0432]: unresolved import `crate::nope`",
+            "error: could not compile `xconsole` (lib) due to 1 previous error",
+        ]);
+        assert!(!looks_like_a_damaged_build_tree(&out));
+        assert!(!looks_like_a_damaged_build_tree("error: linker `cc` not found"));
+        assert!(!looks_like_a_damaged_build_tree("No space left on device"));
     }
 }
 
