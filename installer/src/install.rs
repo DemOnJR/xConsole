@@ -186,19 +186,12 @@ impl Reporter {
         }
     }
 
-    /// The last few meaningful output lines, one line, for an error message.
+    /// The most useful few output lines, as one line, for an error message.
     fn tail(&self) -> String {
         let Ok(t) = self.tail.lock() else {
             return String::new();
         };
-        let lines: Vec<&str> = t
-            .iter()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty() && !s.starts_with("[step "))
-            .collect();
-        // The last line is usually the exception; the couple before it give it context.
-        let take = lines.len().saturating_sub(3);
-        lines[take..].join(" / ")
+        failure_reason(t.iter())
     }
     fn log(&self, line: impl Into<String>) {
         // Everything logged here can come from a child process — vite, cargo, git — and
@@ -209,7 +202,10 @@ impl Reporter {
         let line = strip_ansi(&line.into());
         if let Ok(mut t) = self.tail.lock() {
             t.push_back(line.clone());
-            while t.len() > 12 {
+            // Deep enough to still be holding the error itself. A rustc diagnostic is a
+            // dozen lines of code excerpt, and cargo prints more after it before giving
+            // up, so a short buffer keeps only the epilogue.
+            while t.len() > 200 {
                 t.pop_front();
             }
         }
@@ -474,11 +470,14 @@ fn stream_once(rep: &Reporter, mut cmd: Command, what: &str, idle: Duration) -> 
             // Report the child's own last words, not just its exit code. "exit 1" tells
             // nobody anything; "Unable to connect to the remote server" tells them
             // everything, and it is already right there in the output we just streamed.
+            // No `what` prefix: every caller already puts it in front of this, and the
+            // doubled-up "tauri build failed — tauri build failed (exit 1)" spent the
+            // width that the reason itself needed.
             let why = rep.tail();
             Err(StepErr::Failed(if why.is_empty() {
-                format!("{what} failed (exit {})", s.code().unwrap_or(-1))
+                format!("exit {}", s.code().unwrap_or(-1))
             } else {
-                format!("{what} failed (exit {}): {why}", s.code().unwrap_or(-1))
+                format!("exit {}: {why}", s.code().unwrap_or(-1))
             }))
         }
         Err(e) => Err(e),
@@ -1284,6 +1283,65 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
     Ok(())
 }
 
+/// Does this line look like the reason something failed, rather than noise around it?
+fn looks_like_a_diagnosis(line: &str) -> bool {
+    let l = line.to_ascii_lowercase();
+    // "warning: build failed, waiting for other jobs to finish" is cargo saying it is
+    // shutting down, not what went wrong — the actual error is further up. Excluding it
+    // is the whole point: it is what a naive "last few lines" reported instead.
+    if l.starts_with("warning:") {
+        return false;
+    }
+    l.starts_with("error")
+        || l.contains("undefined reference")
+        || l.contains("no space left")
+        || l.contains("not enough space")
+        || l.contains("os error")
+        || l.contains("permission denied")
+        || l.contains("access is denied")
+        || l.contains("cannot find")
+        || l.contains("could not find")
+        || l.contains("is not recognized")
+        || l.contains("fatal:")
+}
+
+/// Squeeze a child's output down to the sentence that explains the failure.
+///
+/// A plain "last three lines" is wrong for exactly the tool that matters most. cargo ends
+/// a failed build with `warning: build failed, waiting for other jobs to finish...`, so
+/// the tail reported that and dropped the `error[E0432]` twenty lines above it — a failure
+/// report that names no failure. The *first* diagnosis is the cause and the ones after it
+/// are usually consequences, so the earliest few win, and the final line is kept as well
+/// because for non-cargo tools that is where the reason lives.
+fn failure_reason<'a>(lines: impl Iterator<Item = &'a String>) -> String {
+    let cleaned: Vec<&str> = lines
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && !s.starts_with("[step "))
+        .collect();
+    if cleaned.is_empty() {
+        return String::new();
+    }
+
+    let mut picked: Vec<&str> = cleaned
+        .iter()
+        .copied()
+        .filter(|l| looks_like_a_diagnosis(l))
+        .take(3)
+        .collect();
+
+    let last = *cleaned.last().unwrap();
+    if picked.is_empty() {
+        // Nothing announced itself as an error: fall back to the closing lines, which is
+        // where a PowerShell exception or a git message ends up.
+        let take = cleaned.len().saturating_sub(3);
+        return cleaned[take..].join(" / ");
+    }
+    if !picked.contains(&last) {
+        picked.push(last);
+    }
+    picked.join(" / ")
+}
+
 /// Is `reported` (as `node --version` prints it, e.g. `v22.23.2`) at least `min`?
 ///
 /// Unparseable or empty means no, so "we could not tell" installs a known-good Node rather
@@ -1718,6 +1776,78 @@ fn strip_ansi(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod failure_reason_tests {
+    use super::failure_reason;
+
+    fn reason(lines: &[&str]) -> String {
+        let owned: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+        failure_reason(owned.iter())
+    }
+
+    /// The report that prompted this: every line the user was shown came from cargo
+    /// shutting down, and the actual error was never mentioned.
+    #[test]
+    fn finds_the_error_cargo_buried_under_its_epilogue() {
+        let out = reason(&[
+            "   Compiling xconsole v0.1.0",
+            "error[E0432]: unresolved import `crate::commands::nope`",
+            "  --> src/lib.rs:12:5",
+            "   |",
+            "12 |     use crate::commands::nope;",
+            "   |         ^^^^^^^^^^^^^^^^^^^^^ no `nope` in `commands`",
+            "warning: build failed, waiting for other jobs to finish...",
+            "failed to build app: failed to build app",
+            "Error failed to build app: failed to build app",
+        ]);
+        assert!(
+            out.contains("E0432"),
+            "the real error must survive, got: {out}"
+        );
+        assert!(
+            !out.starts_with("warning:"),
+            "cargo's shutdown notice is not the reason, got: {out}"
+        );
+    }
+
+    /// Disk and permission failures do not say "error", and they are the two most likely
+    /// ways a long build dies on someone else's machine.
+    #[test]
+    fn catches_failures_that_never_say_error() {
+        assert!(reason(&["writing x", "No space left on device", "done"])
+            .contains("No space left"));
+        assert!(reason(&["link step", "undefined reference to `foo'", "collect2 returned 1"])
+            .contains("undefined reference"));
+        assert!(reason(&["copying", "Access is denied. (os error 5)"]).contains("os error 5"));
+    }
+
+    /// With nothing self-identifying, the closing lines are still the best guess — that is
+    /// where a PowerShell exception or a git message ends up.
+    #[test]
+    fn falls_back_to_the_closing_lines() {
+        let out = reason(&["a", "b", "c", "d", "e"]);
+        assert_eq!(out, "c / d / e");
+        assert_eq!(reason(&[]), "");
+        assert_eq!(reason(&["", "  ", "[step 3 running]"]), "");
+    }
+
+    /// The first diagnosis is the cause; the ones after it are usually consequences.
+    #[test]
+    fn keeps_the_earliest_errors_not_the_latest() {
+        let out = reason(&[
+            "error: first thing that broke",
+            "error: second",
+            "error: third",
+            "error: fourth",
+            "error: could not compile due to 4 previous errors",
+        ]);
+        assert!(out.contains("first thing that broke"));
+        assert!(!out.contains("fourth"));
+        // ...and the closing summary is kept, because it says how bad it was.
+        assert!(out.contains("could not compile"));
+    }
 }
 
 #[cfg(test)]
