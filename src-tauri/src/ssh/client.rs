@@ -125,15 +125,35 @@ pub async fn connect(
                     key_type,
                 });
             }
-            return Err(ConnectError::Ssh(e));
+            // Name what we failed to reach. "ssh error: connection refused" leaves the
+            // reader guessing which address and port were actually tried, which is the
+            // whole question when the same command works in a terminal.
+            return Err(ConnectError::Other(format!(
+                "could not reach {host}:{port} — {e}"
+            )));
         }
     };
 
     let authed = match auth {
-        Auth::Password(password) => handle
-            .authenticate_password(username, password)
-            .await?
-            .success(),
+        Auth::Password(password) => {
+            // `password` first, then `keyboard-interactive` with the same secret.
+            //
+            // Only `password` was ever sent, and that is a smaller set of servers than
+            // `ssh` reaches. A server with `PasswordAuthentication no` and
+            // `KbdInteractiveAuthentication yes` — the default on several distributions
+            // and most container images once PAM is in play — refuses the first and
+            // accepts the second, so `ssh user@host` succeeds at a password prompt while
+            // this returned "authentication failed" for the same credentials.
+            if handle
+                .authenticate_password(username, password.clone())
+                .await?
+                .success()
+            {
+                true
+            } else {
+                keyboard_interactive(&mut handle, username, &password).await?
+            }
+        }
         Auth::Key { source, passphrase } => {
             let key = match source {
                 KeySource::Pem(pem) => decode_private_key(&pem, passphrase.as_deref())?,
@@ -161,6 +181,58 @@ pub async fn connect(
         .unwrap_or(HostKeyVerdict::Match);
 
     Ok(Connected { handle, verdict })
+}
+
+/// How many info-request rounds a keyboard-interactive exchange may take.
+///
+/// The protocol lets a server send any number, including empty ones, so an unbounded loop
+/// here is a hang waiting for a server that never says yes or no.
+const MAX_KBD_ROUNDS: usize = 8;
+
+/// Answers for one round of keyboard-interactive prompts.
+///
+/// A hidden prompt is a password prompt — that is what `echo: false` means, and it is what
+/// PAM sends for "Password:". A prompt the server wants *echoed* is asking for something
+/// visible: a one-time code, a second username, an acknowledgement. Sending the stored
+/// password in reply to one of those would hand it to a field that is not a password
+/// field, and it would be wrong anyway, so those get an empty answer.
+fn kbd_answers(prompts: &[client::Prompt], password: &str) -> Vec<String> {
+    prompts
+        .iter()
+        .map(|p| {
+            if p.echo {
+                String::new()
+            } else {
+                password.to_string()
+            }
+        })
+        .collect()
+}
+
+/// Authenticate with `keyboard-interactive`, answering password prompts with `password`.
+async fn keyboard_interactive(
+    handle: &mut Handle<Handler>,
+    username: &str,
+    password: &str,
+) -> Result<bool, ConnectError> {
+    use client::KeyboardInteractiveAuthResponse as Resp;
+
+    let mut resp = handle
+        .authenticate_keyboard_interactive_start(username, None)
+        .await?;
+    for _ in 0..MAX_KBD_ROUNDS {
+        match resp {
+            Resp::Success => return Ok(true),
+            Resp::Failure { .. } => return Ok(false),
+            Resp::InfoRequest { ref prompts, .. } => {
+                let answers = kbd_answers(prompts, password);
+                resp = handle
+                    .authenticate_keyboard_interactive_respond(answers)
+                    .await?;
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// True for a PuTTY `.ppk`, by content rather than by file extension — the extension is a
@@ -260,6 +332,50 @@ pub fn resolve_auth(vps: &Vps) -> Result<Auth, ConnectError> {
                 passphrase,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod keyboard_interactive_tests {
+    use super::kbd_answers;
+    use russh::client::Prompt;
+
+    fn p(prompt: &str, echo: bool) -> Prompt {
+        Prompt { prompt: prompt.to_string(), echo }
+    }
+
+    /// The case that makes this worth having: PAM asks "Password:" with echo off.
+    #[test]
+    fn a_hidden_prompt_gets_the_password() {
+        assert_eq!(kbd_answers(&[p("Password: ", false)], "hunter2"), vec!["hunter2"]);
+    }
+
+    /// An echoed prompt is asking for something visible — a one-time code, a second
+    /// username. Answering it with the stored password would hand the password to a field
+    /// that is not a password field, and would be the wrong answer besides.
+    #[test]
+    fn an_echoed_prompt_never_receives_the_password() {
+        let answers = kbd_answers(&[p("Verification code: ", true)], "hunter2");
+        assert_eq!(answers, vec![""]);
+        assert!(!answers.iter().any(|a| a.contains("hunter2")));
+    }
+
+    /// Two-factor setups send both in one round, and the count of answers must match the
+    /// count of prompts or the server rejects the response outright.
+    #[test]
+    fn a_mixed_round_answers_every_prompt_in_order() {
+        let answers = kbd_answers(
+            &[p("Password: ", false), p("One-time code: ", true)],
+            "hunter2",
+        );
+        assert_eq!(answers, vec!["hunter2".to_string(), String::new()]);
+    }
+
+    /// A server may send an info request with no prompts at all — a banner. That is a
+    /// valid round and needs an empty response, not a skipped one.
+    #[test]
+    fn a_prompt_less_round_produces_an_empty_response() {
+        assert!(kbd_answers(&[], "hunter2").is_empty());
     }
 }
 
