@@ -135,6 +135,13 @@ fn src_dir() -> PathBuf {
 struct Reporter {
     app: Option<AppHandle>,
     log_path: Arc<PathBuf>,
+    /// The last few lines logged, so a failing step can say *why* it failed.
+    ///
+    /// A child's real error — PowerShell's exception, git's message — arrives here as
+    /// output and then the step reports a bare "exit 1", which is useless to anyone
+    /// without the log file in front of them. This keeps the tail so the message the user
+    /// actually sees carries the reason.
+    tail: Arc<Mutex<std::collections::VecDeque<String>>>,
 }
 
 impl Reporter {
@@ -146,7 +153,30 @@ impl Reporter {
         Reporter {
             app,
             log_path: Arc::new(log_path),
+            tail: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         }
+    }
+
+    /// Forget the tail — called before each attempt so the reason belongs to *this* run.
+    fn clear_tail(&self) {
+        if let Ok(mut t) = self.tail.lock() {
+            t.clear();
+        }
+    }
+
+    /// The last few meaningful output lines, one line, for an error message.
+    fn tail(&self) -> String {
+        let Ok(t) = self.tail.lock() else {
+            return String::new();
+        };
+        let lines: Vec<&str> = t
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty() && !s.starts_with("[step "))
+            .collect();
+        // The last line is usually the exception; the couple before it give it context.
+        let take = lines.len().saturating_sub(3);
+        lines[take..].join(" / ")
     }
     fn log(&self, line: impl Into<String>) {
         // Everything logged here can come from a child process — vite, cargo, git — and
@@ -155,6 +185,12 @@ impl Reporter {
         // "[32m" noise with the ESC shown as a box glyph. Stripped once, here, because
         // this is the single point every line passes through.
         let line = strip_ansi(&line.into());
+        if let Ok(mut t) = self.tail.lock() {
+            t.push_back(line.clone());
+            while t.len() > 12 {
+                t.pop_front();
+            }
+        }
         if let Some(a) = &self.app {
             let _ = a.emit("install://log", line.clone());
         }
@@ -412,10 +448,17 @@ fn stream_once(rep: &Reporter, mut cmd: Command, what: &str, idle: Duration) -> 
     finish_readers(pid, t1, t2);
     match outcome {
         Ok(s) if s.success() => Ok(()),
-        Ok(s) => Err(StepErr::Failed(format!(
-            "{what} failed (exit {})",
-            s.code().unwrap_or(-1)
-        ))),
+        Ok(s) => {
+            // Report the child's own last words, not just its exit code. "exit 1" tells
+            // nobody anything; "Unable to connect to the remote server" tells them
+            // everything, and it is already right there in the output we just streamed.
+            let why = rep.tail();
+            Err(StepErr::Failed(if why.is_empty() {
+                format!("{what} failed (exit {})", s.code().unwrap_or(-1))
+            } else {
+                format!("{what} failed (exit {}): {why}", s.code().unwrap_or(-1))
+            }))
+        }
         Err(e) => Err(e),
     }
 }
@@ -436,6 +479,7 @@ fn run_with_retry(
 ) -> Result<(), String> {
     let mut last = String::new();
     for attempt in 1..=attempts {
+        rep.clear_tail();
         match stream_once(rep, make(), what, idle) {
             Ok(()) => return Ok(()),
             Err(StepErr::Timeout(e)) => last = e, // a hang — always worth a retry
@@ -534,6 +578,16 @@ fn run_tool_full(
     })
 }
 
+/// A tool from `%SystemRoot%\System32`, if this Windows has it.
+///
+/// Looked up by absolute path rather than through `PATH`, so a shim, an App Execution
+/// Alias or a user-installed namesake can't be picked up instead.
+fn system32(name: &str) -> Option<PathBuf> {
+    let root = std::env::var_os("SystemRoot")?;
+    let p = PathBuf::from(root).join("System32").join(name);
+    p.exists().then_some(p)
+}
+
 fn download(rep: &Reporter, url: &str, dest: &Path) -> Result<(), String> {
     // Stream the body in 1 MB chunks and print a progress line every second. This
     // replaces `Invoke-WebRequest -OutFile`, which was silent until completion — so a
@@ -563,11 +617,45 @@ try { \
       $sw.Restart() } } \
   Write-Output ('  done (' + [math]::Round($read/1MB,1) + ' MB)') \
 } finally { $out.Close(); $in.Close() }";
-    run_with_retry(rep, "download", MAX_ATTEMPTS, IDLE_TIMEOUT, true, || {
+    let ps = run_with_retry(rep, "download", MAX_ATTEMPTS, IDLE_TIMEOUT, true, || {
         let mut c = Command::new("powershell");
         c.args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
             .env("XCV_URL", url)
             .env("XCV_DEST", dest);
+        c
+    });
+    let Err(e) = ps else { return Ok(()) };
+
+    // Fall back to the curl that ships in System32 (Windows 10 1803 and later).
+    //
+    // This whole script is one long `-Command` string, which is exactly what a machine
+    // running PowerShell in Constrained Language Mode, or with an execution policy set by
+    // group policy, will refuse — common on managed Windows 10 boxes and invisible from
+    // here except as a failing first step. curl also handles proxies and TLS through
+    // WinHTTP rather than .NET, so it survives a different set of network setups.
+    let Some(curl) = system32("curl.exe") else {
+        return Err(e);
+    };
+    rep.log(format!("PowerShell could not download it ({e})."));
+    rep.log("Retrying with curl...");
+    run_with_retry(rep, "download (curl)", MAX_ATTEMPTS, IDLE_TIMEOUT, true, || {
+        let mut c = Command::new(&curl);
+        c.args([
+            "-fL", // fail on an HTTP error instead of saving the error page
+            "--connect-timeout",
+            "30",
+            // Give up on a connection that stalls below 1 byte/s for a minute, so a dead
+            // socket fails fast enough for the retry to be worth something.
+            "--speed-limit",
+            "1",
+            "--speed-time",
+            "60",
+            "-A",
+            "xConsole-Installer",
+            "--output",
+        ])
+        .arg(dest)
+        .arg(url);
         c
     })
 }
@@ -600,11 +688,30 @@ try { \
     if($i % 200 -eq 0){ Write-Output ('  extracted ' + $i + ' / ' + $tot + ' files') } } \
   Write-Output ('  done (' + $tot + ' files)') \
 } finally { $zip.Dispose() }";
-    run_with_retry(rep, "extract", MAX_ATTEMPTS, IDLE_TIMEOUT, true, || {
+    let ps = run_with_retry(rep, "extract", MAX_ATTEMPTS, IDLE_TIMEOUT, true, || {
         let mut c = Command::new("powershell");
         c.args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
             .env("XCV_ZIP", zip)
             .env("XCV_DEST", dest);
+        c
+    });
+    let Err(e) = ps else { return Ok(()) };
+
+    // Same fallback reasoning as `download`: bsdtar in System32 reads zip files and needs
+    // no PowerShell at all. It also copes with paths past MAX_PATH, which the .NET
+    // extractor above does not — MinGit's deepest entries plus a long user name can cross
+    // 260 characters on a machine without long paths enabled.
+    let Some(tar) = system32("tar.exe") else {
+        return Err(e);
+    };
+    rep.log(format!("PowerShell could not extract it ({e})."));
+    rep.log("Retrying with tar...");
+    std::fs::create_dir_all(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+    // tar is quiet, and listing every one of MinGW's ~30k files would flood the log to no
+    // purpose — so it gets the long silence budget instead of the usual one.
+    run_with_retry(rep, "extract (tar)", MAX_ATTEMPTS, BUILD_IDLE_TIMEOUT, true, || {
+        let mut c = Command::new(&tar);
+        c.arg("-xf").arg(zip).arg("-C").arg(dest);
         c
     })
 }
@@ -820,7 +927,7 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
             unzip(rep, &zip, &base.join(r"tools\git"))?;
             let _ = std::fs::remove_file(&zip);
             if !current_env(&base).check("git --version") {
-                return Err("Git did not install correctly.".into());
+                return Err(diagnose_git(rep, &base));
             }
         }
         Ok(())
@@ -1103,6 +1210,73 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
     });
 
     Ok(())
+}
+
+/// Work out *why* the freshly-extracted Git will not run, and say so.
+///
+/// "Git did not install correctly" is true and useless: the download succeeded, the
+/// archive passed its SHA-256, the extraction reported done, and then nothing works. The
+/// three real causes look completely different on disk, and only one of them is something
+/// the user can act on — so name which one it is.
+fn diagnose_git(rep: &Reporter, base: &Path) -> String {
+    let git_dir = base.join(r"tools\git");
+    let exe = git_dir.join(r"cmd\git.exe");
+
+    if !git_dir.exists() {
+        return format!(
+            "Git did not install: nothing was extracted to {}. \
+             Check that the disk is not full and that the folder is writable.",
+            git_dir.display()
+        );
+    }
+    if !exe.exists() {
+        // The archive was verified before extraction, so a missing git.exe means it was
+        // removed *after* it was written — which on Windows means antivirus took it.
+        let count = std::fs::read_dir(&git_dir).map(|d| d.count()).unwrap_or(0);
+        return format!(
+            "Git was extracted ({count} entries under {}) but {} is missing. \
+             The archive passed its SHA-256 check before extraction, so something removed \
+             the file afterwards — almost always antivirus quarantining an unsigned \
+             executable. Add an exclusion for {} and run setup again.",
+            git_dir.display(),
+            exe.display(),
+            base.display()
+        );
+    }
+
+    // It is on disk. Run it directly, bypassing PATH, and report what Windows says —
+    // "Access is denied" (blocked by policy or AV), a missing DLL, and a broken PATH are
+    // all different problems with the same symptom until you look.
+    let direct = Command::new(&exe)
+        .arg("--version")
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .output();
+    match direct {
+        Ok(o) if o.status.success() => {
+            let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            rep.log(format!("{} runs directly ({v}) but not via PATH.", exe.display()));
+            format!(
+                "Git installed and runs ({v}), but not through PATH. \
+                 This usually means the PATH the installer builds is too long for this \
+                 machine. Installing Git for Windows normally and re-running setup will \
+                 skip this step entirely."
+            )
+        }
+        Ok(o) => format!(
+            "Git installed but will not run: {} exited with {}. {}",
+            exe.display(),
+            o.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => format!(
+            "Git installed but could not be started: {} ({e}). \
+             On Windows this is normally antivirus or a policy blocking an unsigned \
+             executable — add an exclusion for {} and run setup again.",
+            exe.display(),
+            base.display()
+        ),
+    }
 }
 
 /// Rebuild `uninstall.exe` from the source we just pulled, when the installer's own
