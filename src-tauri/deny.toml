@@ -74,5 +74,11 @@ allow = [
   # Mozilla CA root bundle (webpki-roots / webpki-root-certs) — a permissive data
   # license for the trust-anchor list pulled in via the rustls TLS stack.
   "CDLA-Permissive-2.0",
+  # Boost Software License 1.0 — clipboard-win and error-code, which arrive via
+  # arboard <- tauri-plugin-clipboard-manager (the terminal copy/paste support).
+  # OSI-approved, FSF Free/Libre and GPL-compatible, and *more* permissive than MIT
+  # for what we ship: it explicitly waives the attribution requirement for binaries,
+  # so it imposes nothing on a compiled desktop app.
+  "BSL-1.0",
 ]
 confidence-threshold = 0.9
