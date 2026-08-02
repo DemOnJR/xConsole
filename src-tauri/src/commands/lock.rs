@@ -299,12 +299,36 @@ impl AutoLock {
     }
 }
 
+/// Is this device remembered — i.e. is the data key sitting in the OS keychain?
+pub fn device_remembered() -> bool {
+    secrets::get_data_key().ok().flatten().is_some()
+}
+
 /// Configured idle timeout, clamped. `None` means auto-lock is off.
 pub fn auto_lock_timeout(db: &Db) -> Option<std::time::Duration> {
+    auto_lock_timeout_for(db, device_remembered())
+}
+
+/// The timeout decision, with the keychain lookup passed in so it can be tested.
+///
+/// **A remembered device does not idle-lock unless the user asks it to.** "Remember on
+/// this device" puts the data key in the OS keychain and the app unlocks itself silently
+/// at launch — so anyone sitting at the unattended machine defeats an idle lock by closing
+/// the window and opening it again. It buys close to nothing there, and it costs every
+/// live SSH, SFTP and database session, because locking closes them all. Being thrown out
+/// of a long-running remote job by a lock that a relaunch would have walked straight
+/// through is the wrong trade.
+///
+/// It stays on by default when the device is *not* remembered, which is the case where
+/// locking genuinely means something: the key is not on the machine, so the lock screen is
+/// a real barrier. Either way an explicit choice always wins — including choosing a
+/// timeout while remembered.
+pub fn auto_lock_timeout_for(db: &Db, remembered: bool) -> Option<std::time::Duration> {
     let minutes = match db.get_setting(AUTO_LOCK_SETTING) {
         Ok(Some(v)) => v.parse::<u64>().unwrap_or(AUTO_LOCK_DEFAULT_MINUTES),
-        // Unset: default ON. An idle unlocked app is the realistic way credentials get
-        // used by someone who is not the user, so this must not be opt-in.
+        _ if remembered => return None,
+        // Unset and not remembered: default ON. An idle unlocked app is the realistic way
+        // credentials get used by someone who is not the user.
         _ => AUTO_LOCK_DEFAULT_MINUTES,
     };
     if minutes == 0 {
@@ -323,10 +347,11 @@ pub fn note_activity(idle: State<AutoLock>) {
 
 #[tauri::command]
 pub fn get_auto_lock_minutes(db: State<Db>) -> u64 {
-    match db.get_setting(AUTO_LOCK_SETTING) {
-        Ok(Some(v)) => v.parse().unwrap_or(AUTO_LOCK_DEFAULT_MINUTES),
-        _ => AUTO_LOCK_DEFAULT_MINUTES,
-    }
+    // Report what will actually happen, not the raw setting: with no explicit choice on a
+    // remembered device the answer is "never", and the dropdown has to say so.
+    auto_lock_timeout(&db)
+        .map(|d| d.as_secs() / 60)
+        .unwrap_or(0)
 }
 
 #[tauri::command]
@@ -468,34 +493,59 @@ mod tests {
         Db::open_locked().unwrap()
     }
 
-    /// The default has to be ON. An idle unlocked app is how credentials get used by
-    /// someone who is not the user, and a protection nobody finds in Settings is not one.
+    /// The default has to be ON when the device is NOT remembered. An idle unlocked app
+    /// is how credentials get used by someone who is not the user, and a protection
+    /// nobody finds in Settings is not one.
     #[test]
-    fn auto_lock_is_on_by_default() {
+    fn auto_lock_is_on_by_default_on_an_unremembered_device() {
         let d = db();
         assert_eq!(
-            auto_lock_timeout(&d),
+            auto_lock_timeout_for(&d, false),
             Some(std::time::Duration::from_secs(AUTO_LOCK_DEFAULT_MINUTES * 60))
         );
+    }
+
+    /// ...and OFF by default when it is. The key is already in the keychain and the app
+    /// unlocks itself at launch, so an idle lock is defeated by relaunching the app —
+    /// while costing every live SSH, SFTP and database session. Reported as "it
+    /// disconnects me when I leave it in the background even though I ticked remember".
+    #[test]
+    fn a_remembered_device_does_not_idle_lock_by_default() {
+        let d = db();
+        assert_eq!(auto_lock_timeout_for(&d, true), None);
+    }
+
+    /// But an explicit choice wins, in both directions. Someone who sets 15 minutes on a
+    /// remembered device means it, and the remembered case must not quietly ignore them.
+    #[test]
+    fn an_explicit_timeout_beats_the_remembered_default() {
+        let d = db();
+        d.set_setting(AUTO_LOCK_SETTING, "15").unwrap();
+        assert_eq!(
+            auto_lock_timeout_for(&d, true),
+            Some(std::time::Duration::from_secs(15 * 60))
+        );
+        d.set_setting(AUTO_LOCK_SETTING, "0").unwrap();
+        assert_eq!(auto_lock_timeout_for(&d, false), None);
     }
 
     #[test]
     fn zero_means_off_and_absurd_values_are_clamped() {
         let d = db();
         d.set_setting(AUTO_LOCK_SETTING, "0").unwrap();
-        assert_eq!(auto_lock_timeout(&d), None, "0 must disable it outright");
+        assert_eq!(auto_lock_timeout_for(&d, false), None, "0 must disable it outright");
 
         // A 30-day timeout is "off" wearing a costume; clamp it to something honest.
         d.set_setting(AUTO_LOCK_SETTING, "43200").unwrap();
         assert_eq!(
-            auto_lock_timeout(&d),
+            auto_lock_timeout_for(&d, false),
             Some(std::time::Duration::from_secs(AUTO_LOCK_MAX_MINUTES * 60))
         );
 
         // Garbage in the setting must not silently disable the lock.
         d.set_setting(AUTO_LOCK_SETTING, "not-a-number").unwrap();
         assert_eq!(
-            auto_lock_timeout(&d),
+            auto_lock_timeout_for(&d, false),
             Some(std::time::Duration::from_secs(AUTO_LOCK_DEFAULT_MINUTES * 60))
         );
     }

@@ -180,10 +180,20 @@ function AppLockCard() {
               </select>
             </div>
             {autoLock === 0 ? (
-              <div className="mt-1.5 text-[11px] text-amber-400/90">
-                ⚠ With auto-lock off, an unattended unlocked xConsole keeps your servers
-                reachable and your database decrypted on disk until you quit it.
-              </div>
+              status.remembered ? (
+                <div className="mt-1.5 text-[11px] text-gray-500">
+                  Off by default because this device is remembered: the key is in the
+                  Windows keychain and xConsole unlocks itself at launch, so anyone at this
+                  machine gets past a lock screen by reopening the app — while you lose
+                  every open shell to it. Pick a timeout above to turn it on anyway, or
+                  Forget this device to make the lock mean something.
+                </div>
+              ) : (
+                <div className="mt-1.5 text-[11px] text-amber-400/90">
+                  ⚠ With auto-lock off, an unattended unlocked xConsole keeps your servers
+                  reachable and your database decrypted on disk until you quit it.
+                </div>
+              )
             ) : null}
             <div className="mt-2 border-t border-[var(--border)] pt-2">
               <Button
