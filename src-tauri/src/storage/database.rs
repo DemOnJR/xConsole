@@ -22,7 +22,16 @@ pub enum HostKeyVerdict {
     /// Fingerprint matches the previously pinned key.
     Match,
     /// Fingerprint does NOT match the pinned key (possible MITM) - connection rejected.
-    Mismatch { expected: String },
+    ///
+    /// Carries what was offered as well as what was pinned. Without both there is no way
+    /// to tell a rebuilt server from an actual attack: the check the user has to make is
+    /// "does `offered` equal what the server really presents", and they cannot make it if
+    /// the app only tells them the value that is now wrong.
+    Mismatch {
+        expected: String,
+        offered: String,
+        key_type: String,
+    },
 }
 
 /// Thread-safe handle to the local SQLite database.
@@ -372,7 +381,11 @@ impl Db {
                 key_type    TEXT NOT NULL,
                 fingerprint TEXT NOT NULL,
                 added_at    TEXT NOT NULL DEFAULT (datetime('now')),
-                PRIMARY KEY (host, port)
+                -- Per key type, like OpenSSH's known_hosts: a server publishes an
+                -- ed25519, an RSA and an ECDSA key, and which one it presents depends on
+                -- algorithm negotiation. Pinning only one of them per host turns a change
+                -- of negotiated algorithm into a MITM accusation.
+                PRIMARY KEY (host, port, key_type)
             );
 
             -- Generic key/value settings. Every settings category reads/writes
@@ -484,6 +497,45 @@ impl Db {
         let _ = conn.execute("ALTER TABLE infra_project ADD COLUMN backend TEXT DEFAULT 'vps'", []);
         let _ = conn.execute("ALTER TABLE infra_project ADD COLUMN cloud_account_id TEXT", []);
         let _ = conn.execute("ALTER TABLE infra_project ADD COLUMN config_json TEXT", []);
+
+        // known_host used to be keyed on (host, port) alone, so a host could hold exactly
+        // one pinned key. An SSH server publishes several — ed25519, RSA, ECDSA — and
+        // which one it presents is decided by algorithm negotiation, i.e. by the client's
+        // preference order. Change that order (a russh update is enough) and the server
+        // offers a different one of its own keys, whose fingerprint cannot match the
+        // pinned one: a permanent "host key mismatch (possible MITM)" for a server that
+        // never changed. OpenSSH keys known_hosts by key type for exactly this reason.
+        //
+        // SQLite cannot alter a primary key, so rebuild the table. Existing pins are kept
+        // — they are still true for the key type they were recorded against.
+        let needs_rekey = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_index_list('known_host') l
+                   JOIN pragma_index_info(l.name) i
+                  WHERE l.origin = 'pk' AND i.name = 'key_type'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            == 0;
+        if needs_rekey {
+            let _ = conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS known_host_v2 (
+                     host        TEXT NOT NULL,
+                     port        INTEGER NOT NULL,
+                     key_type    TEXT NOT NULL,
+                     fingerprint TEXT NOT NULL,
+                     added_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                     PRIMARY KEY (host, port, key_type)
+                 );
+                 INSERT OR IGNORE INTO known_host_v2 (host, port, key_type, fingerprint, added_at)
+                     SELECT host, port, key_type, fingerprint, added_at FROM known_host;
+                 DROP TABLE known_host;
+                 ALTER TABLE known_host_v2 RENAME TO known_host;
+                 COMMIT;",
+            );
+        }
         Ok(())
     }
 
@@ -969,16 +1021,23 @@ impl Db {
         fingerprint: &str,
     ) -> Result<HostKeyVerdict> {
         let conn = self.conn.lock().unwrap();
+        // Compared against the pin for THIS key type. Matching across types would compare
+        // an ed25519 fingerprint with an RSA one and always disagree.
         let existing: Option<String> = conn
             .query_row(
-                "SELECT fingerprint FROM known_host WHERE host = ?1 AND port = ?2",
-                params![host, port as i64],
+                "SELECT fingerprint FROM known_host
+                  WHERE host = ?1 AND port = ?2 AND key_type = ?3",
+                params![host, port as i64, key_type],
                 |r| r.get(0),
             )
             .ok();
         match existing {
             Some(expected) if expected == fingerprint => Ok(HostKeyVerdict::Match),
-            Some(expected) => Ok(HostKeyVerdict::Mismatch { expected }),
+            Some(expected) => Ok(HostKeyVerdict::Mismatch {
+                expected,
+                offered: fingerprint.to_string(),
+                key_type: key_type.to_string(),
+            }),
             None => {
                 conn.execute(
                     "INSERT INTO known_host (host, port, key_type, fingerprint)
@@ -1424,5 +1483,86 @@ mod relock_tests {
 
         assert!(Db::open_locked().unwrap().relock().is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod known_host_tests {
+    use super::*;
+
+    fn db() -> Db {
+        Db::open(std::path::Path::new(":memory:")).unwrap()
+    }
+
+    /// The bug: `known_host` was keyed on (host, port) alone, so a server got exactly one
+    /// pinned key. Servers publish several, and which one is presented is decided by
+    /// algorithm negotiation — so a change in the client's preference order made a healthy
+    /// server look like an impostor, permanently.
+    #[test]
+    fn each_key_type_is_pinned_separately() {
+        let d = db();
+        assert!(matches!(
+            d.verify_host_key("h", 22, "ssh-ed25519", "SHA256:aaa").unwrap(),
+            HostKeyVerdict::PinnedOnFirstUse
+        ));
+        // Same server, a different one of ITS OWN keys — a first sighting, not an attack.
+        assert!(matches!(
+            d.verify_host_key("h", 22, "rsa-sha2-512", "SHA256:bbb").unwrap(),
+            HostKeyVerdict::PinnedOnFirstUse
+        ));
+        // ...and both are remembered.
+        assert!(matches!(
+            d.verify_host_key("h", 22, "ssh-ed25519", "SHA256:aaa").unwrap(),
+            HostKeyVerdict::Match
+        ));
+        assert!(matches!(
+            d.verify_host_key("h", 22, "rsa-sha2-512", "SHA256:bbb").unwrap(),
+            HostKeyVerdict::Match
+        ));
+    }
+
+    /// A genuinely different key of the SAME type still has to be refused, and the verdict
+    /// has to carry both fingerprints — "pinned X" alone cannot tell a rebuilt server from
+    /// an attack, which is the judgement the user is being asked to make.
+    #[test]
+    fn a_changed_key_is_refused_and_reports_both_fingerprints() {
+        let d = db();
+        d.verify_host_key("h", 22, "ssh-ed25519", "SHA256:aaa").unwrap();
+        match d.verify_host_key("h", 22, "ssh-ed25519", "SHA256:zzz").unwrap() {
+            HostKeyVerdict::Mismatch { expected, offered, key_type } => {
+                assert_eq!(expected, "SHA256:aaa");
+                assert_eq!(offered, "SHA256:zzz");
+                assert_eq!(key_type, "ssh-ed25519");
+            }
+            other => panic!("a changed host key must be refused, got {other:?}"),
+        }
+    }
+
+    /// Ports are part of the identity: two servers behind one address are two servers.
+    #[test]
+    fn a_different_port_is_a_different_host() {
+        let d = db();
+        d.verify_host_key("h", 22, "ssh-ed25519", "SHA256:aaa").unwrap();
+        assert!(matches!(
+            d.verify_host_key("h", 2222, "ssh-ed25519", "SHA256:ccc").unwrap(),
+            HostKeyVerdict::PinnedOnFirstUse
+        ));
+    }
+
+    /// Forgetting is what makes a legitimate rebuild recoverable.
+    #[test]
+    fn forgetting_clears_every_key_type_for_that_host() {
+        let d = db();
+        d.verify_host_key("h", 22, "ssh-ed25519", "SHA256:aaa").unwrap();
+        d.verify_host_key("h", 22, "rsa-sha2-512", "SHA256:bbb").unwrap();
+        d.forget_host_key("h", 22).unwrap();
+        assert!(matches!(
+            d.verify_host_key("h", 22, "ssh-ed25519", "SHA256:new").unwrap(),
+            HostKeyVerdict::PinnedOnFirstUse
+        ));
+        assert!(matches!(
+            d.verify_host_key("h", 22, "rsa-sha2-512", "SHA256:new2").unwrap(),
+            HostKeyVerdict::PinnedOnFirstUse
+        ));
     }
 }

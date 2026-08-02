@@ -11,8 +11,26 @@ use crate::storage::{Db, HostKeyVerdict};
 /// Errors that can occur while establishing an SSH session.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
-    #[error("host key mismatch (possible MITM); pinned fingerprint: {expected}")]
-    HostKeyMismatch { expected: String },
+    /// Deliberately spells out both fingerprints and what to do. The old message gave
+    /// only the pinned one, which is the single value that cannot help: to decide whether
+    /// the server was rebuilt or is being impersonated you have to compare what it is
+    /// offering *now* against what you can see from somewhere else.
+    #[error(
+        "host key mismatch for this server's {key_type} key.\r\n\
+         \x20 pinned  : {expected}\r\n\
+         \x20 offered : {offered}\r\n\
+         If you rebuilt or reinstalled this server, this is expected — its keys changed. \
+         Check the new fingerprint on the server itself with `ssh-keygen -lf \
+         /etc/ssh/ssh_host_{key_type}_key.pub` (or your provider's console), and if it \
+         matches the offered value, forget the old key in Settings > Security > Pinned \
+         host keys and connect again. If it does not match, do not connect: something is \
+         answering for this address that is not your server."
+    )]
+    HostKeyMismatch {
+        expected: String,
+        offered: String,
+        key_type: String,
+    },
     #[error("authentication failed")]
     AuthFailed,
     #[error("ssh-agent authentication is not supported in this build yet")]
@@ -95,10 +113,17 @@ pub async fn connect(
         Ok(h) => h,
         Err(e) => {
             // If the failure was a host-key mismatch, surface that specifically.
-            if let Some(HostKeyVerdict::Mismatch { expected }) =
-                verdict_slot.lock().unwrap().clone()
+            if let Some(HostKeyVerdict::Mismatch {
+                expected,
+                offered,
+                key_type,
+            }) = verdict_slot.lock().unwrap().clone()
             {
-                return Err(ConnectError::HostKeyMismatch { expected });
+                return Err(ConnectError::HostKeyMismatch {
+                    expected,
+                    offered,
+                    key_type,
+                });
             }
             return Err(ConnectError::Ssh(e));
         }

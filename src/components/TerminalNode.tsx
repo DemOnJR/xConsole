@@ -210,8 +210,18 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
         reconnectAttemptsRef.current = 0;
       } catch (e) {
         if (!mounted || disposed) return;
+        const msg = String(e);
+        // A refused host key is a decision, not a blip. Retrying it five times only
+        // repeated the alarm and buried the fingerprints in a wall of identical
+        // messages — and the answer is never "wait": either the server's keys really
+        // changed and the old pin has to go, or something is impersonating it.
+        if (msg.includes("host key mismatch")) {
+          term.writeln(`\r\n\x1b[31m${msg.replace(/\n/g, "\r\n")}\x1b[0m`);
+          setInfo(id, { status: "error", error: "Host key mismatch — not reconnecting." });
+          return;
+        }
         // The server may still be booting — keep retrying with backoff.
-        term.writeln(`\r\n\x1b[33m… connection failed: ${String(e)} — retrying\x1b[0m`);
+        term.writeln(`\r\n\x1b[33m… connection failed: ${msg} — retrying\x1b[0m`);
         scheduleReconnect();
       }
     };
