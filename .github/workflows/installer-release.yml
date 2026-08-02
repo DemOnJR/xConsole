@@ -33,7 +33,7 @@ jobs:
   build-and-release:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # windows-latest ships rustup + the MSVC toolchain + the Windows SDK preinstalled,
       # so the installer .exe builds with the default stable-msvc target right away.
@@ -43,7 +43,7 @@ jobs:
         run: rustup show
 
       - name: Cache cargo build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
