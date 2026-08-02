@@ -61,6 +61,11 @@ const MINGIT_SHA256: &str = "50b04b55425b5c465d076cdb184f63a0cd0f86f6ec8bb4d5860
 const MINGW_URL: &str = "https://github.com/brechtsanders/winlibs_mingw/releases/download/14.2.0posix-19.1.1-12.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-14.2.0-llvm-19.1.1-mingw-w64ucrt-12.0.0-r2.zip";
 const MINGW_SHA256: &str = "12fa72d2566e641c3bf0213a946d33d8bef2e0757af2fb3ed60a995e05d74606";
 
+// pnpm installed before the repo exists. Only a bootstrap — once package.json is on disk
+// `ensure_pnpm` pins the exact version the repo asks for, so this drifting out of date
+// costs one extra install and nothing else.
+const PNPM_BOOTSTRAP_VER: &str = "11.7.0";
+
 const NODE_VER: &str = "v20.18.1";
 const NODE_SHA256: &str = "56e5aacdeee7168871721b75819ccacf2367de8761b78eaceacdecd41e04ca03";
 
@@ -1016,11 +1021,20 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
         }
         let env = current_env(&base);
         if env.check("pnpm --version") {
-            rep.log("pnpm is already available.");
+            rep.log(format!(
+                "pnpm is already available ({}).",
+                env.capture("pnpm --version")
+            ));
         } else {
-            rep.log("Enabling pnpm via corepack...");
-            if run_tool(rep, &env, None, "corepack", &["enable", "pnpm"], "corepack").is_err() {
-                run_tool(rep, &env, None, "npm", &["install", "-g", "pnpm"], "npm i -g pnpm")?;
+            // npm, not corepack — see `ensure_pnpm` for why corepack cannot be relied on
+            // here. This is only a bootstrap; step 7 pins whatever version the repo asks
+            // for once its package.json exists.
+            rep.log("Installing pnpm...");
+            let spec = format!("pnpm@{PNPM_BOOTSTRAP_VER}");
+            if run_tool(rep, &env, None, "npm", &["install", "-g", &spec], "npm i -g pnpm").is_err()
+            {
+                rep.log("npm could not install pnpm — falling back to corepack.");
+                run_tool(rep, &env, None, "corepack", &["enable", "pnpm"], "corepack")?;
             }
         }
         Ok(())
@@ -1063,6 +1077,10 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
     step!(7, {
         let env = current_env(&base);
         let src = src_dir();
+        // The repo is on disk now, so its package.json can say which pnpm it wants. Doing
+        // this here rather than in step 4 means the version is never guessed.
+        ensure_pnpm(rep, &env, &src);
+        let env = current_env(&base);
         rep.log("Installing frontend dependencies (pnpm install)...");
         // --frozen-lockfile installs exactly what pnpm-lock.yaml pins, skipping the
         // resolution pass — faster and bit-for-bit identical to what CI ships.
@@ -1210,6 +1228,64 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
     });
 
     Ok(())
+}
+
+/// The version in `package.json`'s `packageManager` field, e.g. `11.7.0`.
+///
+/// Parsed by hand rather than with serde_json's full DOM because the field is a single
+/// flat string and this must not fail the install if the file grows something unexpected.
+fn package_manager_pnpm_version(package_json: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(package_json).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let spec = v.get("packageManager")?.as_str()?;
+    let rest = spec.strip_prefix("pnpm@")?;
+    // Drop any `+sha512...` integrity suffix; npm wants the bare version.
+    let ver = rest.split('+').next()?.trim();
+    (!ver.is_empty()).then(|| ver.to_string())
+}
+
+/// Make sure the pnpm on PATH is the version this checkout asks for, installing it with
+/// npm if not.
+///
+/// **This deliberately routes around corepack.** corepack ships *inside* the Node release
+/// the installer pins, and it verifies the pnpm tarball against npm registry signing keys
+/// that are hardcoded in that copy. Those keys have been rotated since, so the corepack
+/// bundled with Node 20.18.1 cannot verify any current pnpm and dies inside
+/// `Engine.executePackageManagerRequest` — reported here as `pnpm install failed after 3
+/// attempts` with a corepack stack and nothing else. The same copy also predates pnpm 11
+/// and cannot resolve it. Both faults come from pinning Node, which we do on purpose, and
+/// neither is fixable from this side.
+///
+/// npm checks the same tarball against the integrity hash the registry serves for it, so
+/// the supply-chain guarantee is kept; it just does not carry a key set that expires with
+/// the Node pin. Non-fatal: if this cannot work out or install the right version, the
+/// install proceeds with whatever pnpm is there, which may well be fine.
+fn ensure_pnpm(rep: &Reporter, env: &BuildEnv, src: &Path) {
+    let Some(want) = package_manager_pnpm_version(&src.join("package.json")) else {
+        return;
+    };
+    let have = env.capture("pnpm --version");
+    if have == want {
+        rep.log(format!("pnpm {have} matches the version this build expects."));
+        return;
+    }
+    rep.log(format!(
+        "This build expects pnpm {want}{} — installing it.",
+        if have.is_empty() {
+            String::new()
+        } else {
+            format!(" (found {have})")
+        }
+    ));
+    // Remove corepack's shims first. A previous run of this installer enabled them, and
+    // they occupy the exact filenames npm is about to write — npm refuses to clobber a
+    // shim it did not create, so without this the install fails with EEXIST on a machine
+    // that has already tried once. Best effort: absent shims make this a no-op.
+    env.check("corepack disable pnpm");
+    let spec = format!("pnpm@{want}");
+    if let Err(e) = run_tool(rep, env, None, "npm", &["install", "-g", &spec], "npm i -g pnpm") {
+        rep.log(format!("note: could not install pnpm {want} ({e}) — continuing with what is here."));
+    }
 }
 
 /// Work out *why* the freshly-extracted Git will not run, and say so.
@@ -1574,6 +1650,44 @@ fn strip_ansi(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod pnpm_version_tests {
+    use super::package_manager_pnpm_version;
+
+    fn parse(json: &str) -> Option<String> {
+        let dir = std::env::temp_dir().join(format!("xc-pm-{}", json.len()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("package.json");
+        std::fs::write(&p, json).unwrap();
+        let r = package_manager_pnpm_version(&p);
+        let _ = std::fs::remove_file(&p);
+        r
+    }
+
+    #[test]
+    fn reads_the_version_this_repo_pins() {
+        assert_eq!(parse(r#"{"packageManager":"pnpm@11.7.0"}"#).as_deref(), Some("11.7.0"));
+    }
+
+    /// corepack writes an integrity suffix when it pins; npm wants the bare version.
+    #[test]
+    fn drops_the_integrity_suffix() {
+        assert_eq!(
+            parse(r#"{"packageManager":"pnpm@10.4.1+sha512.abcdef"}"#).as_deref(),
+            Some("10.4.1")
+        );
+    }
+
+    /// Anything it cannot make sense of means "leave pnpm alone", never a failed install.
+    #[test]
+    fn anything_else_is_no_opinion() {
+        assert_eq!(parse(r#"{"packageManager":"yarn@4.0.0"}"#), None);
+        assert_eq!(parse(r#"{"name":"x"}"#), None);
+        assert_eq!(parse("not json at all"), None);
+        assert_eq!(parse(r#"{"packageManager":"pnpm@"}"#), None);
+    }
 }
 
 #[cfg(test)]
