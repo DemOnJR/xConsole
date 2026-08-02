@@ -66,8 +66,19 @@ const MINGW_SHA256: &str = "12fa72d2566e641c3bf0213a946d33d8bef2e0757af2fb3ed60a
 // costs one extra install and nothing else.
 const PNPM_BOOTSTRAP_VER: &str = "11.7.0";
 
-const NODE_VER: &str = "v20.18.1";
-const NODE_SHA256: &str = "56e5aacdeee7168871721b75819ccacf2367de8761b78eaceacdecd41e04ca03";
+// Node 22, not 20: pnpm 11 declares `engines.node: ">=22.13"`, and on an older Node it
+// reaches for a builtin module that is not there and dies with ERR_UNKNOWN_BUILTIN_MODULE
+// part-way through `pnpm install`. CI builds this repo on Node 22 as well, so the
+// installer was the only place still on 20. Digest taken from
+// https://nodejs.org/dist/v22.23.2/SHASUMS256.txt and confirmed against the artifact.
+const NODE_VER: &str = "v22.23.2";
+const NODE_SHA256: &str = "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97";
+/// Oldest Node the toolchain can build with, as (major, minor).
+///
+/// Bumping [`NODE_VER`] alone is not enough: a machine that has already run the installer
+/// has a portable Node under `tools\node` and `node --version` succeeds, so the step
+/// short-circuits and keeps the old one forever. This is what that check compares against.
+const NODE_MIN: (u32, u32) = (22, 13);
 
 // WebView2 evergreen bootstrapper: rolling URL, but Authenticode-signed by Microsoft.
 const WEBVIEW2_URL: &str = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
@@ -1004,8 +1015,19 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
     // 4. Node + pnpm
     step!(4, {
         let env = current_env(&base);
-        if !env.check("node --version") {
-            rep.log("Installing a portable Node.js...");
+        let found = env.capture("node --version");
+        if !node_at_least(&found, NODE_MIN) {
+            if found.is_empty() {
+                rep.log("Installing a portable Node.js...");
+            } else {
+                // Covers both "no Node here" and "the Node here is too old" — including
+                // the portable one this installer put there on an earlier run, which is
+                // otherwise never replaced.
+                rep.log(format!(
+                    "Node {found} is older than {}.{} — installing a newer portable Node.js alongside it...",
+                    NODE_MIN.0, NODE_MIN.1
+                ));
+            }
             let zip = base.join("tools").join("node.zip");
             let url = format!("https://nodejs.org/dist/{NODE_VER}/node-{NODE_VER}-win-x64.zip");
             download(rep, &url, &zip)?;
@@ -1016,8 +1038,21 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
             let target = base.join(r"tools\node");
             remove_dir_robust(&target);
             std::fs::rename(&extracted, &target).map_err(|e| format!("node layout: {e}"))?;
+            let now = current_env(&base).capture("node --version");
+            if !node_at_least(&now, NODE_MIN) {
+                return Err(format!(
+                    "Node.js {NODE_VER} was installed to {} but `node --version` still reports {}. \
+                     Another Node earlier on PATH is winning; uninstall it or update it to \
+                     {}.{} or newer.",
+                    target.display(),
+                    if now.is_empty() { "nothing" } else { &now },
+                    NODE_MIN.0,
+                    NODE_MIN.1
+                ));
+            }
+            rep.log(format!("Node.js {now} ready."));
         } else {
-            rep.log("Node.js is already available.");
+            rep.log(format!("Node.js is already available ({found})."));
         }
         let env = current_env(&base);
         if env.check("pnpm --version") {
@@ -1228,6 +1263,20 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
     });
 
     Ok(())
+}
+
+/// Is `reported` (as `node --version` prints it, e.g. `v22.23.2`) at least `min`?
+///
+/// Unparseable or empty means no, so "we could not tell" installs a known-good Node rather
+/// than pressing on with one that may be too old — the failure that costs is finding out
+/// twenty minutes later, in the middle of `pnpm install`.
+fn node_at_least(reported: &str, min: (u32, u32)) -> bool {
+    let v = reported.trim().trim_start_matches('v');
+    let mut parts = v.split('.').map(|p| p.parse::<u32>());
+    let (Some(Ok(major)), Some(Ok(minor))) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    (major, minor) >= min
 }
 
 /// The version in `package.json`'s `packageManager` field, e.g. `11.7.0`.
@@ -1650,6 +1699,40 @@ fn strip_ansi(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod node_version_tests {
+    use super::{node_at_least, NODE_MIN, NODE_VER};
+
+    /// The bug this exists for: the installer pinned Node 20.18.1 while pnpm 11 declares
+    /// `engines.node: ">=22.13"`, and the mismatch only surfaced as
+    /// ERR_UNKNOWN_BUILTIN_MODULE part-way through `pnpm install`.
+    #[test]
+    fn the_node_that_shipped_this_bug_is_rejected() {
+        assert!(!node_at_least("v20.18.1", NODE_MIN));
+        assert!(!node_at_least("v22.12.0", NODE_MIN), "22.12 is below the 22.13 floor");
+    }
+
+    #[test]
+    fn the_version_we_pin_satisfies_the_floor() {
+        assert!(node_at_least(NODE_VER, NODE_MIN));
+    }
+
+    #[test]
+    fn newer_majors_and_minors_pass() {
+        assert!(node_at_least("v22.13.0", NODE_MIN));
+        assert!(node_at_least("v24.0.0", NODE_MIN));
+        assert!(node_at_least("22.23.2", NODE_MIN), "the leading v is optional");
+    }
+
+    /// "Could not tell" must mean "install a known-good Node", never "carry on and hope".
+    #[test]
+    fn unreadable_output_is_not_good_enough() {
+        assert!(!node_at_least("", NODE_MIN));
+        assert!(!node_at_least("not a version", NODE_MIN));
+        assert!(!node_at_least("v22", NODE_MIN), "no minor means unknown");
+    }
 }
 
 #[cfg(test)]
