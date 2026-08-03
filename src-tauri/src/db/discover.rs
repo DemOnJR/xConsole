@@ -3,7 +3,7 @@
 //! Two places they hide, and they need different treatment:
 //!
 //! - **Natively installed** — listening on the host's own network stack, found with
-//!   whichever of five probes the host has (see [`DISCOVER_CMD`]); a tunnel to
+//!   whichever of five probes the host has (see [`DISCOVER_INNER`]); a tunnel to
 //!   `127.0.0.1:<port>` reaches them even when the port is firewalled off from the
 //!   internet (which it should be).
 //! - **Inside Docker** — a container may publish a port to the host, or may only be
@@ -18,8 +18,10 @@
 //!
 //! # Portability
 //!
-//! Everything here runs through POSIX `sh` on the remote host, so it works on Linux, the
-//! BSDs, macOS, Solaris and AIX. Nothing is assumed to exist: each probe is guarded and
+//! Everything here runs through POSIX `sh` on the remote host — explicitly, via `sh -c`,
+//! because a command sent over `exec` runs with the account's *login shell*, and for root
+//! on FreeBSD that is `csh`, which cannot parse `2>/dev/null`. It therefore works on
+//! Linux, the BSDs, macOS, Solaris and AIX. Nothing is assumed to exist: each probe is guarded and
 //! the parsers accept every output shape the probes produce, including the BSD `addr.port`
 //! address form. Container attribution via `/proc/<pid>/cgroup` is Linux-only by nature
 //! and simply finds nothing elsewhere, which costs nothing — FreeBSD jails and Solaris
