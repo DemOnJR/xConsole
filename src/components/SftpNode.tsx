@@ -33,6 +33,7 @@ import { useSessionStore } from "../stores/sessionStore";
 import { useTransferStore } from "../stores/transferStore";
 import { dialog } from "../stores/dialogStore";
 import { ChevronUpIcon, FolderIcon } from "./icons";
+import { fileKindFor } from "./fileIcons";
 import { SftpContextMenu, type SftpMenuState } from "./SftpContextMenu";
 import { SftpPermissionsDialog } from "./SftpPermissionsDialog";
 import { SftpCodeEditor } from "./SftpCodeEditor";
@@ -125,7 +126,9 @@ function TreeNode({
           onClick={() => onSelect(path)}
           onDoubleClick={() => onToggle(path)}
         >
-          <span className="text-cyan-500/80">📁</span>
+          <span className="shrink-0 text-cyan-500/80">
+            <FolderIcon size={12} />
+          </span>
           <span className="truncate">{name}</span>
         </button>
       </div>
@@ -912,26 +915,23 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                         });
                       }}
                     >
-                      <span
-                        className={
-                          entry.link_broken
-                            ? "text-red-400"
-                            : entry.is_symlink
-                              ? "text-violet-400"
-                              : entry.is_dir
-                                ? "text-cyan-400"
-                                : "text-gray-500"
-                        }
-                        data-tooltip={
-                          entry.link_broken
-                            ? "Broken symlink — its target does not exist"
-                            : entry.is_symlink
-                              ? "Symlink"
-                              : undefined
-                        }
-                      >
-                        {entry.is_symlink ? "🔗" : entry.is_dir ? "📁" : "📄"}
-                      </span>
+                      {(() => {
+                        // Shape says what family it belongs to, colour says which member —
+                        // see fileIcons.tsx for why both are needed at this size.
+                        const kind = fileKindFor(entry);
+                        return (
+                          <span
+                            className={`shrink-0 ${kind.className}`}
+                            data-tooltip={
+                              entry.link_broken
+                                ? "Broken symlink — its target does not exist"
+                                : kind.label
+                            }
+                          >
+                            <kind.Icon size={14} />
+                          </span>
+                        );
+                      })()}
                       <span
                         className={`truncate text-xs ${
                           entry.link_broken ? "text-red-300/80" : "text-gray-200"
