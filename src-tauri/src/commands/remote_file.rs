@@ -65,6 +65,43 @@ pub async fn vps_file_rename(
         .map(|_| ())
 }
 
+/// Delete a selection. One command for the whole selection.
+#[tauri::command]
+pub async fn vps_file_delete_many(
+    sessions: State<'_, SessionManager>,
+    vps_id: String,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    remote_ops::delete_many(&sessions, &vps_id, &paths).await.map(|_| ())
+}
+
+/// Copy or move a selection into a directory. One command for the whole selection.
+#[tauri::command]
+pub async fn vps_file_copy(
+    sessions: State<'_, SessionManager>,
+    vps_id: String,
+    sources: Vec<String>,
+    dest_dir: String,
+    move_them: bool,
+) -> Result<(), String> {
+    remote_ops::copy_into(&sessions, &vps_id, &sources, &dest_dir, move_them)
+        .await
+        .map(|_| ())
+}
+
+/// Search under `root` by name and/or extension, optionally through subdirectories.
+#[tauri::command]
+pub async fn vps_file_search(
+    sessions: State<'_, SessionManager>,
+    vps_id: String,
+    root: String,
+    pattern: String,
+    extensions: Vec<String>,
+    recursive: bool,
+) -> Result<Vec<String>, String> {
+    remote_ops::search(&sessions, &vps_id, &root, &pattern, &extensions, recursive).await
+}
+
 /// Create a symlink at `path` pointing at `target`, or repoint an existing one.
 ///
 /// One command for both because `ln -sfn` is one command for both, and because "change

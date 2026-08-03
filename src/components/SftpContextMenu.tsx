@@ -24,6 +24,15 @@ interface Props {
   onCopyPath: (path: string) => void;
   onNewFolder: () => void;
   onNewFile: () => void;
+  /** How many rows are selected — decides whether the menu talks about one or many. */
+  selectionCount: number;
+  onDownloadSelection: (entry: SftpEntry | null) => void;
+  onDeleteSelection: (entry: SftpEntry | null) => void;
+  onCopy: (entry: SftpEntry | null) => void;
+  onCut: (entry: SftpEntry | null) => void;
+  onPaste: () => void;
+  /** Something is on the clipboard, so Paste is worth offering. */
+  canPaste: boolean;
   /** Repoint an existing symlink. */
   onEditLink: (entry: SftpEntry) => void;
   /** Create a new symlink in the current directory. */
@@ -48,12 +57,22 @@ export function SftpContextMenu({
   onCopyPath,
   onNewFolder,
   onNewFile,
+  selectionCount,
+  onDownloadSelection,
+  onDeleteSelection,
+  onCopy,
+  onCut,
+  onPaste,
+  canPaste,
   onEditLink,
   onNewLink,
   onRefresh,
   externalEditorName,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
+  /** The clicked row is part of a multi-row selection, so actions apply to all. */
+  const many = selectionCount > 1;
+
 
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
@@ -129,6 +148,29 @@ export function SftpContextMenu({
           <div className="my-1 border-t border-[var(--border)]" />
           {item("Upload here…", onUpload)}
           <div className="my-1 border-t border-[var(--border)]" />
+          {/* With several rows highlighted the menu acts on all of them, and says so —
+              a menu that silently applies to one of six is how the wrong file gets
+              deleted. `many` is only true when the clicked row is part of that set;
+              clicking outside it selects that row first. */}
+          {many && (
+            <>
+              {item(`Download ${selectionCount} items`, () => onDownloadSelection(entry))}
+              {item(`Copy ${selectionCount} items`, () => onCopy(entry))}
+              {item(`Cut ${selectionCount} items`, () => onCut(entry))}
+              {item(`Delete ${selectionCount} items`, () => onDeleteSelection(entry), {
+                danger: true,
+              })}
+              <div className="my-1 border-t border-[var(--border)]" />
+            </>
+          )}
+          {!many && (
+            <>
+              {item("Copy", () => onCopy(entry))}
+              {item("Cut", () => onCut(entry))}
+            </>
+          )}
+          {canPaste ? item("Paste here", onPaste) : null}
+          <div className="my-1 border-t border-[var(--border)]" />
           {item("Properties…", () => onProperties(entry))}
           {/* Only for links: for anything else there is no target to point anywhere. */}
           {entry.is_symlink ? item("Edit link target…", () => onEditLink(entry)) : null}
@@ -140,6 +182,7 @@ export function SftpContextMenu({
       ) : (
         <>
           {item("Upload here…", onUpload)}
+          {canPaste ? item("Paste here", onPaste) : null}
           <div className="my-1 border-t border-[var(--border)]" />
           {item("New directory…", onNewFolder)}
           {item("New file…", onNewFile)}

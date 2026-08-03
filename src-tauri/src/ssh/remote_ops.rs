@@ -168,6 +168,155 @@ pub async fn rename_path(
     Ok(out)
 }
 
+/// Delete several entries in one command.
+///
+/// `rm -rf` takes a list, so a selection is one round trip rather than one per file. The
+/// paths are validated individually first: a single bad one must not be quietly skipped
+/// while the rest are removed.
+pub async fn delete_many(
+    sessions: &SessionManager,
+    vps_id: &str,
+    paths: &[String],
+) -> Result<CommandOutput, String> {
+    if paths.is_empty() {
+        return Err("nothing selected".into());
+    }
+    let mut args = String::new();
+    for path in paths {
+        let path = validate_remote_path(path)?;
+        if path == "/" {
+            return Err("refusing to delete /".into());
+        }
+        args.push(' ');
+        args.push_str(&shell_quote(&path));
+    }
+    let out = sessions.run_command(vps_id, &format!("rm -rf --{args}")).await?;
+    if out.exit_code != 0 {
+        return Err(command_err(out));
+    }
+    Ok(out)
+}
+
+/// Copy or move several entries into a directory, in one command.
+///
+/// One `cp`/`mv` invocation rather than one per file: a selection of two hundred files
+/// would otherwise be two hundred SSH round trips, and the shell already accepts a list
+/// followed by a destination directory. `-R` so directories come along; POSIX spells it
+/// with a capital, and GNU accepts that too.
+pub async fn copy_into(
+    sessions: &SessionManager,
+    vps_id: &str,
+    sources: &[String],
+    dest_dir: &str,
+    move_them: bool,
+) -> Result<CommandOutput, String> {
+    if sources.is_empty() {
+        return Err("nothing selected".into());
+    }
+    let dest = validate_remote_path(dest_dir)?;
+    let mut args = String::new();
+    for src in sources {
+        let src = validate_remote_path(src)?;
+        // Moving a directory into itself, or copying it into itself, is a way to lose it.
+        if dest == src || dest.starts_with(&format!("{src}/")) {
+            return Err(format!("cannot put {src} inside itself"));
+        }
+        args.push_str(&shell_quote(&src));
+        args.push(' ');
+    }
+    let tool = if move_them { "mv --" } else { "cp -R --" };
+    let cmd = format!("{tool} {args}{}", shell_quote(&dest));
+    let out = sessions.run_command(vps_id, &cmd).await?;
+    if out.exit_code != 0 {
+        return Err(command_err(out));
+    }
+    Ok(out)
+}
+
+/// How deep a recursive search will look, and how many hits it will return.
+///
+/// Both are bounds on a command running on someone's production server: an unbounded
+/// `find /` on a large filesystem is a long stall and a lot of I/O, and a result list
+/// nobody can read is not worth the wait.
+const SEARCH_MAX_DEPTH: u32 = 12;
+const SEARCH_MAX_RESULTS: u32 = 500;
+
+/// Find entries under `root` whose name matches, optionally restricted to extensions.
+///
+/// Deliberately tolerant of a non-zero exit. `find` returns failure if it could not read
+/// *any* directory along the way — which on a real server means almost always, since a
+/// search from `/` will meet something it may not read — and `head` closing the pipe kills
+/// it with SIGPIPE besides. Neither means the results so far are wrong, so stdout is
+/// parsed regardless and only a genuinely empty result is empty.
+///
+/// No redirections and no backslashes: this string is handed to the account's login shell,
+/// which on FreeBSD is csh, and csh understands neither `2>/dev/null` nor `\(`. The
+/// parentheses are passed as quoted arguments instead, which both shells hand to `find`
+/// unchanged.
+pub async fn search(
+    sessions: &SessionManager,
+    vps_id: &str,
+    root: &str,
+    pattern: &str,
+    extensions: &[String],
+    recursive: bool,
+) -> Result<Vec<String>, String> {
+    let root = validate_remote_path(root)?;
+    let pattern = pattern.trim();
+    if pattern.is_empty() && extensions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let depth = if recursive { SEARCH_MAX_DEPTH } else { 1 };
+
+    // A bare pattern is matched as a substring, which is what people expect from a search
+    // box; a pattern already carrying a wildcard is taken as written.
+    let glob = |p: &str| {
+        if p.contains('*') || p.contains('?') {
+            p.to_string()
+        } else {
+            format!("*{p}*")
+        }
+    };
+
+    let mut matcher = String::new();
+    if extensions.is_empty() {
+        matcher.push_str(&format!("-iname {}", shell_quote(&glob(pattern))));
+    } else {
+        // Every extension is its own -iname, OR-ed inside parentheses so the whole group
+        // binds as one condition rather than the last one winning.
+        matcher.push_str(&format!("{} ", shell_quote("(")));
+        for (i, ext) in extensions.iter().enumerate() {
+            let ext = ext.trim().trim_start_matches('.');
+            if ext.is_empty() {
+                continue;
+            }
+            if i > 0 {
+                matcher.push_str("-o ");
+            }
+            let pat = if pattern.is_empty() {
+                format!("*.{ext}")
+            } else {
+                format!("{}.{ext}", glob(pattern).trim_end_matches('*'))
+            };
+            matcher.push_str(&format!("-iname {} ", shell_quote(&pat)));
+        }
+        matcher.push_str(&shell_quote(")"));
+    }
+
+    let cmd = format!(
+        "find {} -maxdepth {depth} {matcher} -print | head -n {SEARCH_MAX_RESULTS}",
+        shell_quote(&root)
+    );
+    let out = sessions.run_command(vps_id, &cmd).await?;
+    Ok(out
+        .stdout
+        .lines()
+        .map(|l| l.trim_end())
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect())
+}
+
 /// A symlink target, which — unlike every other path here — may legitimately be relative.
 ///
 /// `../releases/v3` and `bin/app` are ordinary, correct targets; requiring absolute paths

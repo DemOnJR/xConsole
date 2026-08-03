@@ -715,6 +715,24 @@ export const api = {
     invoke<void>("vps_file_mkdir", { vpsId, path }),
   vpsFileTouch: (vpsId: string, path: string) =>
     invoke<void>("vps_file_touch", { vpsId, path }),
+  /** Delete a selection, in one remote command. */
+  vpsFileDeleteMany: (vpsId: string, paths: string[]) =>
+    invoke<void>("vps_file_delete_many", { vpsId, paths }),
+  /** Copy (or move) a selection into a directory, in one remote command. */
+  vpsFileCopy: (
+    vpsId: string,
+    sources: string[],
+    destDir: string,
+    moveThem: boolean,
+  ) => invoke<void>("vps_file_copy", { vpsId, sources, destDir, moveThem }),
+  /** Search by name and/or extension, optionally through subdirectories. */
+  vpsFileSearch: (
+    vpsId: string,
+    root: string,
+    pattern: string,
+    extensions: string[],
+    recursive: boolean,
+  ) => invoke<string[]>("vps_file_search", { vpsId, root, pattern, extensions, recursive }),
   /** Create a symlink at `path` pointing at `target`, or repoint an existing one. */
   vpsFileSymlink: (vpsId: string, path: string, target: string) =>
     invoke<void>("vps_file_symlink", { vpsId, path, target }),

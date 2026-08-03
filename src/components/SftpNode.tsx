@@ -11,6 +11,20 @@ import { startInternalDrag } from "../stores/dragStore";
  * way; this brings SFTP in line. Only `closeNode` really disconnects.
  */
 const keptSftpSessions = new Map<string, { sessionId: string; path: string }>();
+
+/**
+ * The cut/copy clipboard, deliberately module-level.
+ *
+ * Copying in one panel and pasting in another is the whole point of having two panels
+ * open, and it is what every file manager does. Per-component state would make the
+ * clipboard die with the panel it was filled from.
+ */
+let fileClipboard: { mode: "copy" | "cut"; paths: string[] } | null = null;
+
+/** How long a typeahead buffer survives without another keystroke. */
+const TYPEAHEAD_RESET_MS = 1000;
+/** Characters typed before the search box opens, so a stray keypress does not open it. */
+const TYPEAHEAD_OPEN_AT = 2;
 import {
   Handle,
   NodeResizer,
@@ -26,6 +40,8 @@ import {
   type SftpEntry,
 } from "../lib/tauri";
 import { looksLikeDeadSession } from "../lib/sessionHealth";
+import { actionTargets, parseExtensions, rangeBetween } from "../lib/selection";
+import { onOsDropHover, onOsFilesDropped } from "../hooks/useOsFileDrop";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useMouseNavButtons, useNavHistory } from "../hooks/useNavHistory";
 import { useCanvasStore, type SftpNode as SftpNodeType } from "../stores/canvasStore";
@@ -175,6 +191,27 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   const [menu, setMenu] = useState<SftpMenuState | null>(null);
   const [propsEntry, setPropsEntry] = useState<SftpEntry | null>(null);
   const [editEntry, setEditEntry] = useState<SftpEntry | null>(null);
+
+  /** Paths currently selected, for the bulk actions. */
+  const [selection, setSelection] = useState<Set<string>>(() => new Set());
+  /** Anchor for shift-click ranges — the last row clicked without shift. */
+  const anchorRef = useRef<string | null>(null);
+  const [clipboardTick, setClipboardTick] = useState(0);
+
+  const [query, setQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [advanced, setAdvanced] = useState(false);
+  const [extInput, setExtInput] = useState("");
+  const [recursive, setRecursive] = useState(false);
+  /** Recursive-search hits. `null` means "showing the directory", not "no results". */
+  const [results, setResults] = useState<string[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const typeaheadTimer = useRef<number | null>(null);
+
+  /** Files being dragged in from Explorer are over this panel. */
+  const [dropActive, setDropActive] = useState(false);
+  const dropId = `sftp-${id}`;
 
   const loadDir = useCallback(async (sessionId: string, dir: string) => {
     setLoading(true);
@@ -403,9 +440,282 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     [history, openDir],
   );
 
+  // ---------------------------------------------------------------------------
+  // Selection
+  // ---------------------------------------------------------------------------
+
+  /** What the rows currently show — the directory, or the hits from a search. */
+  const visible = useCallback((): SftpEntry[] => {
+    if (results) {
+      // Search hits are bare paths; give them just enough shape to render and act on.
+      return results.map((hit) => ({
+        name: hit.slice(hit.lastIndexOf("/") + 1) || hit,
+        path: hit,
+        is_dir: false,
+        size: 0,
+        is_symlink: false,
+        link_target: null,
+        link_broken: false,
+      }));
+    }
+    if (!searchOpen || !query.trim()) return entries;
+    const q = query.trim().toLowerCase();
+    return entries.filter((e) => e.name.toLowerCase().includes(q));
+  }, [results, searchOpen, query, entries]);
+
+  const rows = visible();
+
+  /**
+   * Click, ctrl-click and shift-click, the way every file manager does it.
+   *
+   * Plain click replaces the selection rather than opening — opening moved to
+   * double-click, which is what makes a selection possible at all: you cannot select
+   * something that navigates away the moment you touch it.
+   */
+  const clickRow = (entry: SftpEntry, e: React.MouseEvent) => {
+    const list = rows.map((r) => r.path);
+    if (e.shiftKey) {
+      const range = rangeBetween(list, anchorRef.current, entry.path);
+      if (range.length > 0) {
+        setSelection(new Set(range));
+        return;
+      }
+    }
+    if (e.ctrlKey || e.metaKey) {
+      setSelection((prev) => {
+        const next = new Set(prev);
+        if (!next.delete(entry.path)) next.add(entry.path);
+        return next;
+      });
+      anchorRef.current = entry.path;
+      return;
+    }
+    setSelection(new Set([entry.path]));
+    anchorRef.current = entry.path;
+  };
+
+  /**
+   * The paths an action applies to.
+   *
+   * Right-clicking a row that is not in the selection acts on that row alone, which is
+   * what the click visibly did; right-clicking inside the selection acts on all of it.
+   * Getting this backwards is how a file manager deletes the wrong things.
+   */
+  const targets = (entry: SftpEntry | null): string[] => actionTargets(entry, selection);
+
+  const clearSelection = () => {
+    setSelection(new Set());
+    anchorRef.current = null;
+  };
+
+  // ---------------------------------------------------------------------------
+  // Bulk actions
+  // ---------------------------------------------------------------------------
+
+  const bulkDownload = async (entry: SftpEntry | null) => {
+    const sid = sessionRef.current;
+    const paths = targets(entry);
+    if (!sid || paths.length === 0) return;
+    try {
+      await useTransferStore.getState().download(sid, paths);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const bulkDelete = async (entry: SftpEntry | null) => {
+    const paths = targets(entry);
+    if (paths.length === 0) return;
+    const listed = paths.slice(0, 8).join("\n");
+    const more = paths.length > 8 ? "\n... and " + (paths.length - 8) + " more" : "";
+    const what = paths.length === 1 ? paths[0] : paths.length + " items:\n\n" + listed + more;
+    if (
+      !(await dialog.confirm({
+        title: paths.length === 1 ? "Delete" : "Delete " + paths.length + " items",
+        message: "Delete " + what + "\n\nDirectories go with everything inside them.",
+        danger: true,
+        confirmText: "Delete",
+      }))
+    )
+      return;
+    try {
+      await api.vpsFileDeleteMany(data.vpsId, paths);
+      clearSelection();
+      refreshListing();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  /** Copy or cut: remember the paths and let the paste decide what to do with them. */
+  const putOnClipboard = (entry: SftpEntry | null, mode: "copy" | "cut") => {
+    const paths = targets(entry);
+    if (paths.length === 0) return;
+    fileClipboard = { mode, paths };
+    setClipboardTick((n) => n + 1);
+  };
+
+  const paste = async () => {
+    if (!fileClipboard || fileClipboard.paths.length === 0) return;
+    const { mode, paths } = fileClipboard;
+    try {
+      await api.vpsFileCopy(data.vpsId, paths, path, mode === "cut");
+      // A cut is consumed by its paste; a copy stays, so it can be pasted again.
+      if (mode === "cut") {
+        fileClipboard = null;
+        setClipboardTick((n) => n + 1);
+      }
+      refreshListing();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Search
+  // ---------------------------------------------------------------------------
+
+  const closeSearch = () => {
+    setSearchOpen(false);
+    setAdvanced(false);
+    setQuery("");
+    setResults(null);
+  };
+
+  /** Run the recursive / by-extension search on the server. */
+  const runSearch = async () => {
+    const exts = parseExtensions(extInput);
+    if (!query.trim() && exts.length === 0) {
+      setResults(null);
+      return;
+    }
+    setSearching(true);
+    try {
+      const hits = await api.vpsFileSearch(data.vpsId, path, query.trim(), exts, recursive);
+      setResults(hits);
+      clearSelection();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  /**
+   * Typeahead: start typing anywhere in the panel and the search box opens holding what
+   * was already typed.
+   *
+   * Every printable key appends to `query` whether or not the box is open yet, and the box
+   * is a controlled input reading that same state. So the characters that arrive in the
+   * window between the box opening and the browser moving focus into it are not lost —
+   * that gap is exactly where a naive "open it, then let the input take over" drops a
+   * letter or two, and dropping the first letters of a filename makes the whole feature
+   * useless.
+   */
+  const onPanelKeyDown = (e: React.KeyboardEvent) => {
+    const el = e.target as HTMLElement;
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) return;
+
+    const mod = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
+    if (mod && key === "a") {
+      e.preventDefault();
+      setSelection(new Set(rows.map((r) => r.path)));
+      return;
+    }
+    if (mod && key === "c") {
+      putOnClipboard(null, "copy");
+      return;
+    }
+    if (mod && key === "x") {
+      putOnClipboard(null, "cut");
+      return;
+    }
+    if (mod && key === "v") {
+      void paste();
+      return;
+    }
+    if (mod && key === "f") {
+      e.preventDefault();
+      setSearchOpen(true);
+      return;
+    }
+    if (e.key === "Escape") {
+      if (searchOpen) closeSearch();
+      else clearSelection();
+      return;
+    }
+    if (e.key === "Delete" && selection.size > 0) {
+      e.preventDefault();
+      void bulkDelete(null);
+      return;
+    }
+    if (e.key.length !== 1 || mod || e.altKey) return;
+    e.preventDefault();
+    setQuery((q) => {
+      const next = q + e.key;
+      if (next.length >= TYPEAHEAD_OPEN_AT) setSearchOpen(true);
+      return next;
+    });
+    if (typeaheadTimer.current) clearTimeout(typeaheadTimer.current);
+    typeaheadTimer.current = window.setTimeout(() => {
+      // The buffer only expires while the box is still closed. Once it is open the text
+      // belongs to the user, not to a typeahead timing out underneath them.
+      setSearchOpen((open) => {
+        if (!open) setQuery("");
+        return open;
+      });
+    }, TYPEAHEAD_RESET_MS);
+  };
+
+  // Focus the box as soon as it opens, so the rest of the word is typed normally into it.
+  // `query` already carries whatever arrived before this ran.
+  useEffect(() => {
+    if (searchOpen) searchInputRef.current?.focus();
+  }, [searchOpen]);
+
+  // ---------------------------------------------------------------------------
+  // Files dragged in from the desktop
+  // ---------------------------------------------------------------------------
+
+  useEffect(() => {
+    const offDrop = onOsFilesDropped((target, paths) => {
+      if (target !== dropId || paths.length === 0) return;
+      const sid = sessionRef.current;
+      if (!sid) return;
+      void useTransferStore
+        .getState()
+        .upload(sid, pathRef.current, paths)
+        .then(() => refreshListing())
+        .catch((e) => setError(String(e)));
+    });
+    const offHover = onOsDropHover((t) => setDropActive(t === dropId));
+    return () => {
+      offDrop();
+      offHover();
+    };
+    // `refreshListing` changes with the directory, so this re-subscribes on navigation.
+    // That is deliberate: the alternative is a stale closure uploading into the folder
+    // that was open when the panel mounted.
+  }, [dropId, refreshListing]);
+
   const openEntry = (entry: SftpEntry) => {
-    if (!entry.is_dir) return;
-    navigateTo(entry.path);
+    // A search hit is a path from somewhere else in the tree, and `find` does not say
+    // whether it is a file or a directory. Going to its folder and filtering to its name
+    // lands on it either way, and shows it in context — which is what someone who
+    // searched for it actually wants to see.
+    if (results) {
+      setResults(null);
+      setQuery(entry.name);
+      setSearchOpen(true);
+      navigateTo(parentDirOf(entry.path));
+      return;
+    }
+    if (entry.is_dir) {
+      navigateTo(entry.path);
+      return;
+    }
+    setEditEntry(entry);
   };
 
   const goUp = () => navigateTo(parentPath(path));
@@ -431,25 +741,6 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     e.preventDefault();
     e.stopPropagation();
     setMenu({ x: e.clientX, y: e.clientY, entry });
-  };
-
-  const handleDelete = async (entry: SftpEntry) => {
-    const label = entry.is_dir ? "directory and all contents" : "file";
-    if (
-      !(await dialog.confirm({
-        title: "Delete",
-        message: `Delete ${label}?\n\n${entry.path}`,
-        danger: true,
-        confirmText: "Delete",
-      }))
-    )
-      return;
-    try {
-      await api.vpsFileDelete(data.vpsId, entry.path, entry.is_dir);
-      refreshListing();
-    } catch (err) {
-      setError(String(err));
-    }
   };
 
   const handleRename = async (entry: SftpEntry) => {
@@ -668,6 +959,10 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   // Freeform: scale with the canvas (shrink on zoom out). Tile/snap: keep a
   // constant on-screen size by countering the zoom.
   const layoutMode = useCanvasStore((s) => s.layoutMode);
+  // Read through the tick so the menu re-renders when another panel fills the
+  // clipboard — the clipboard itself is module state and cannot be subscribed to.
+  const canPaste = clipboardTick >= 0 && !!fileClipboard && fileClipboard.paths.length > 0;
+
   const freeform = layoutMode === "freeform";
   const tiled = layoutMode === "tile";
   const zoom = useStore((s) => s.transform[2]);
@@ -678,8 +973,16 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       className={`group flex h-full w-full flex-col overflow-hidden border bg-[var(--bg)] shadow-lg ${
         tiled ? "rounded-none" : "rounded-lg"
       } ${selected ? "border-cyan-500" : "border-[var(--border)]"}`}
-      style={freeform ? undefined : { transform: `scale(${1 / zoom})`, transformOrigin: "top left" }}
       onMouseDown={() => focus(id)}
+      // Focusable so the panel receives keys at all; the outline is suppressed because
+      // the whole panel lighting up on every click is noise, and the selected rows
+      // already show where the keyboard is pointed.
+      tabIndex={0}
+      onKeyDown={onPanelKeyDown}
+      style={{
+        ...(freeform ? {} : { transform: `scale(${1 / zoom})`, transformOrigin: "top left" }),
+        outline: "none",
+      }}
     >
       <Handle
         type="source"
@@ -794,6 +1097,18 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           <button
             type="button"
             className={`rounded px-1.5 py-0.5 text-[10px] ${
+              searchOpen
+                ? "bg-[var(--border)] text-gray-200"
+                : "text-gray-400 hover:bg-[var(--border)]"
+            }`}
+            data-tooltip="Find in this folder (Ctrl+F, or just start typing)"
+            onClick={() => (searchOpen ? closeSearch() : setSearchOpen(true))}
+          >
+            Find
+          </button>
+          <button
+            type="button"
+            className={`rounded px-1.5 py-0.5 text-[10px] ${
               showTree ? "bg-[var(--border)] text-gray-200" : "text-gray-400 hover:bg-[var(--border)]"
             }`}
             data-tooltip="Toggle directory tree"
@@ -814,6 +1129,111 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
             data-tooltip="Remote path — press Enter to go"
           />
         </div>
+
+        {searchOpen && (
+          <div className="border-b border-[var(--border)] bg-[var(--surface)]/60 px-2 py-1">
+            <div className="flex items-center gap-1.5">
+              <span className="shrink-0 text-[10px] text-gray-500">Find</span>
+              <input
+                ref={searchInputRef}
+                type="text"
+                className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 text-[11px] text-gray-200 outline-none focus:border-cyan-600"
+                value={query}
+                spellCheck={false}
+                placeholder="name contains…"
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    e.stopPropagation();
+                    closeSearch();
+                    panelRef.current?.focus();
+                  }
+                  if (e.key === "Enter") {
+                    // In the directory, Enter opens the single match — the fastest path
+                    // from "type a name" to "be in it". In advanced mode it searches.
+                    if (advanced || recursive) void runSearch();
+                    else if (rows.length > 0) openEntry(rows[0]);
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${
+                  advanced
+                    ? "bg-[var(--border)] text-gray-200"
+                    : "text-gray-400 hover:bg-[var(--border)]"
+                }`}
+                data-tooltip="Search subdirectories, filter by extension"
+                onClick={() => setAdvanced((v) => !v)}
+              >
+                Advanced
+              </button>
+              <button
+                type="button"
+                className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+                onClick={() => {
+                  closeSearch();
+                  panelRef.current?.focus();
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {advanced && (
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <input
+                  type="text"
+                  className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 font-mono text-[10px] text-gray-300 outline-none focus:border-cyan-600"
+                  value={extInput}
+                  spellCheck={false}
+                  placeholder="extensions: php, js, tar.gz"
+                  onChange={(e) => setExtInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void runSearch();
+                  }}
+                />
+                <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-gray-400">
+                  <input
+                    type="checkbox"
+                    checked={recursive}
+                    onChange={(e) => setRecursive(e.target.checked)}
+                  />
+                  All subdirectories
+                </label>
+                <button
+                  type="button"
+                  className="shrink-0 rounded border border-cyan-800/60 px-2 py-0.5 text-[10px] text-cyan-300 hover:bg-cyan-900/30 disabled:opacity-40"
+                  disabled={searching}
+                  onClick={() => void runSearch()}
+                >
+                  {searching ? "Searching…" : "Search"}
+                </button>
+                {results && (
+                  <button
+                    type="button"
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-[var(--border)]"
+                    onClick={() => setResults(null)}
+                  >
+                    Back to folder
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Say what is on screen. A filtered list and a short directory look
+                identical, and a search that found nothing looks like an empty folder. */}
+            <div className="mt-0.5 text-[10px] text-gray-600">
+              {results
+                ? `${results.length} match${results.length === 1 ? "" : "es"}${
+                    results.length >= 500 ? " (capped)" : ""
+                  } under ${path}`
+                : query.trim()
+                  ? `${rows.length} of ${entries.length} in this folder`
+                  : "Type to filter this folder — Advanced searches inside subdirectories"}
+            </div>
+          </div>
+        )}
 
         {linkedTerminalId && followTerminal && !terminalCwd && (
           <div className="border-b border-amber-900/30 bg-amber-950/20 px-2 py-0.5 text-[10px] text-amber-300/90">
@@ -837,6 +1257,56 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
               }
             >
               Reconnect
+            </button>
+          </div>
+        )}
+
+        {selection.size > 1 && (
+          <div className="flex items-center gap-2 border-b border-cyan-900/40 bg-cyan-950/30 px-2 py-1 text-[10px] text-cyan-200">
+            <span className="shrink-0">{selection.size} selected</span>
+            <button
+              type="button"
+              className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
+              onClick={() => void bulkDownload(null)}
+            >
+              Download
+            </button>
+            <button
+              type="button"
+              className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
+              onClick={() => putOnClipboard(null, "copy")}
+            >
+              Copy
+            </button>
+            <button
+              type="button"
+              className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
+              onClick={() => putOnClipboard(null, "cut")}
+            >
+              Cut
+            </button>
+            <button
+              type="button"
+              className="rounded px-1.5 py-0.5 text-red-300 hover:bg-red-900/40"
+              onClick={() => void bulkDelete(null)}
+            >
+              Delete
+            </button>
+            {canPaste && (
+              <button
+                type="button"
+                className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
+                onClick={() => void paste()}
+              >
+                Paste here
+              </button>
+            )}
+            <button
+              type="button"
+              className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-gray-400 hover:bg-[var(--border)]"
+              onClick={clearSelection}
+            >
+              Clear
             </button>
           </div>
         )}
@@ -882,24 +1352,50 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
             )}
 
             <div
-              className="min-h-0 flex-1 overflow-y-auto px-1 py-1"
+              className="relative min-h-0 flex-1 overflow-y-auto px-1 py-1"
+              data-drop={dropId}
               onContextMenu={(e) => showContextMenu(e, null)}
+              onClick={(e) => {
+                // A click on the empty space below the rows clears the selection, the
+                // same as it does on a desktop.
+                if (e.target === e.currentTarget) clearSelection();
+              }}
             >
-              {loading && entries.length === 0 ? (
+              {dropActive && (
+                <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center border-2 border-dashed border-cyan-500 bg-cyan-500/10 text-xs text-cyan-200">
+                  Upload to {path}
+                </div>
+              )}
+              {loading && rows.length === 0 ? (
                 <div className="px-2 py-4 text-center text-xs text-gray-500">Loading…</div>
-              ) : entries.length === 0 ? (
-                <div className="px-2 py-4 text-center text-xs text-gray-600">Empty directory</div>
+              ) : rows.length === 0 ? (
+                <div className="px-2 py-4 text-center text-xs text-gray-600">
+                  {results
+                    ? "Nothing matched"
+                    : query.trim()
+                      ? "Nothing in this folder matches"
+                      : "Empty directory"}
+                </div>
               ) : (
-                entries.map((entry) => (
+                rows.map((entry) => (
                   <div
                     key={entry.path}
-                    className="group flex items-center gap-2 rounded px-2 py-1 hover:bg-[var(--surface)]"
-                    onContextMenu={(e) => showContextMenu(e, entry)}
+                    className={`group flex items-center gap-2 rounded px-2 py-1 ${
+                      selection.has(entry.path)
+                        ? "bg-cyan-950/60 ring-1 ring-inset ring-cyan-700/60"
+                        : "hover:bg-[var(--surface)]"
+                    }`}
+                    onContextMenu={(e) => {
+                      // Right-clicking outside the selection moves the selection there
+                      // first, so the menu always acts on what is visibly highlighted.
+                      if (!selection.has(entry.path)) setSelection(new Set([entry.path]));
+                      showContextMenu(e, entry);
+                    }}
                   >
                     <button
                       type="button"
                       className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                      onClick={() => openEntry(entry)}
+                      onClick={(e) => clickRow(entry, e)}
                       onDoubleClick={() => openEntry(entry)}
                       // Drag onto a terminal to type this path there. Pointer-based,
                       // and only arms after a few pixels of movement, so the click
@@ -939,6 +1435,14 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                       >
                         {entry.name}
                       </span>
+                      {/* Where a hit lives. Twenty files called index.php are the normal
+                          outcome of a recursive search, and the name alone cannot tell
+                          them apart. */}
+                      {results && (
+                        <span className="truncate font-mono text-[10px] text-gray-600">
+                          {parentDirOf(entry.path)}
+                        </span>
+                      )}
                       {/* The target inline: a link is only meaningful together with where
                           it points, and opening a dialog to find out defeats the purpose. */}
                       {entry.link_target && (
@@ -981,10 +1485,17 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           onUpload={() => void uploadHere()}
           onProperties={(e) => setPropsEntry(e)}
           onRename={(e) => void handleRename(e)}
-          onDelete={(e) => void handleDelete(e)}
+          onDelete={(e) => void bulkDelete(e)}
           onCopyPath={(p) => void handleCopyPath(p)}
           onNewFolder={() => void handleNewFolder()}
           onNewFile={() => void handleNewFile()}
+          selectionCount={selection.size}
+          onDownloadSelection={(e) => void bulkDownload(e)}
+          onDeleteSelection={(e) => void bulkDelete(e)}
+          onCopy={(e) => putOnClipboard(e, "copy")}
+          onCut={(e) => putOnClipboard(e, "cut")}
+          onPaste={() => void paste()}
+          canPaste={canPaste}
           onEditLink={(e) => void handleEditLink(e)}
           onNewLink={() => void handleNewLink()}
           onRefresh={refresh}
