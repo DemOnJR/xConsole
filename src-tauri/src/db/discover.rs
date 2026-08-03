@@ -200,23 +200,39 @@ pub enum DbKind {
 /// | `netstat -an` | every Unix, including OpenBSD, Solaris, AIX | no |
 ///
 /// The last is the floor: no process attribution, but it finds the port everywhere.
-const DISCOVER_CMD: &str = "\
-echo '@@OS'; (uname -s 2>/dev/null) || true; \
-echo '@@LISTEN'; (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null \
+/// The probe itself, in POSIX `sh`, and **containing no single quote**.
+///
+/// That restriction is load-bearing rather than stylistic. `channel.exec` hands one
+/// string to sshd, which runs it with the account's *login shell* — and on FreeBSD root's
+/// login shell is `csh`, which has no `2>/dev/null` at all. The whole probe was a syntax
+/// error before it ran a single command, which is why a natively installed MySQL stayed
+/// invisible there even after the BSD-aware probes were added: they never executed.
+///
+/// So it is wrapped in `sh -c '...'` by [`discover_cmd`], and for that wrapper to survive
+/// being parsed by csh *and then* by sh, the inner text must contain no single quote of
+/// its own — csh has no equivalent of sh's `'\''` escape for embedding one. Double
+/// quotes inside are fine: the inner `sh` is what interprets those.
+const DISCOVER_INNER: &str = "\
+echo @@OS; (uname -s 2>/dev/null) || true; \
+echo @@LISTEN; (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null \
  || sockstat -46lP tcp 2>/dev/null || lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null \
  || netstat -an 2>/dev/null) || true; \
-echo '@@DOCKER'; (docker ps --no-trunc --format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Ports}}' 2>/dev/null) || true; \
-echo '@@DOCKERIP'; (docker ps -q 2>/dev/null | xargs -r docker inspect \
- -f '{{.Name}}\t{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' 2>/dev/null) || true; \
-echo '@@PIDCG'; (ss -ltnpH 2>/dev/null | sed -n 's/.*pid=\\([0-9]*\\).*/\\1/p' | sort -u \
- | while read p; do printf '%s\t' \"$p\"; tr '\\n' ' ' < /proc/$p/cgroup 2>/dev/null; echo; done) || true";
+echo @@DOCKER; (docker ps --no-trunc --format \"{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Ports}}\" 2>/dev/null) || true; \
+echo @@DOCKERIP; (docker ps -q 2>/dev/null | xargs -r docker inspect \
+ -f \"{{.Name}}\t{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}\" 2>/dev/null) || true; \
+echo @@PIDCG; (ss -ltnpH 2>/dev/null | sed -n \"s/.*pid=\\([0-9]*\\).*/\\1/p\" | sort -u \
+ | while read p; do printf \"%s\t\" \"$p\"; tr \"\\n\" \" \" < /proc/$p/cgroup 2>/dev/null; echo; done) || true";
 
+/// The command actually sent over the wire: the probe, forced through POSIX `sh`.
+fn discover_cmd() -> String {
+    format!("sh -c '{DISCOVER_INNER}'")
+}
 /// Discover database endpoints reachable on `vps_id`.
 pub async fn discover(
     sessions: &SessionManager,
     vps_id: &str,
 ) -> Result<Vec<DbEndpoint>, String> {
-    let out = sessions.run_command(vps_id, DISCOVER_CMD).await?;
+    let out = sessions.run_command(vps_id, &discover_cmd()).await?;
     Ok(parse(&out.stdout))
 }
 
@@ -636,6 +652,42 @@ fn parse_container_ips(text: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The probe is handed to the account's LOGIN shell, and on FreeBSD root's is csh,
+    /// which cannot parse `2>/dev/null`. Wrapping it in `sh -c` is what makes it run at
+    /// all there — and the wrapper only survives csh's parse if the inner text has no
+    /// single quote, because csh has no way to escape one inside a quoted string.
+    #[test]
+    fn the_probe_runs_under_posix_sh_whatever_the_login_shell_is() {
+        let cmd = discover_cmd();
+        assert!(cmd.starts_with("sh -c '"), "{cmd}");
+        assert!(cmd.ends_with('\''), "{cmd}");
+        assert!(
+            !DISCOVER_INNER.contains('\''),
+            "a single quote inside would close the sh -c argument early under csh"
+        );
+        // csh performs history expansion even inside quotes, so a bare ! would be eaten.
+        assert!(!DISCOVER_INNER.contains('!'), "csh would expand this as history");
+    }
+
+    /// The probe has to still contain every one of the five listener tools after being
+    /// requoted — dropping one silently is invisible until a whole platform goes blind.
+    #[test]
+    fn the_probe_still_asks_every_platform_its_own_question() {
+        for tool in [
+            "ss -ltnp",
+            "netstat -ltnp",
+            "sockstat -46lP tcp",
+            "lsof -nP -iTCP -sTCP:LISTEN",
+            "netstat -an",
+        ] {
+            assert!(DISCOVER_INNER.contains(tool), "lost the {tool} probe");
+        }
+        // The section markers the parser splits on must survive requoting too.
+        for marker in ["@@OS", "@@LISTEN", "@@DOCKER", "@@DOCKERIP", "@@PIDCG"] {
+            assert!(DISCOVER_INNER.contains(marker), "lost the {marker} marker");
+        }
+    }
 
     #[test]
     fn finds_a_native_listener() {
