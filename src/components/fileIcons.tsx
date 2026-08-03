@@ -3,15 +3,24 @@
  *
  * The listing used three emoji — folder, page, link — so a PHP file, a tarball and a
  * private key were the same picture, and scanning a directory meant reading every
- * filename. This gives each family its own shape and each specific type its own colour.
+ * filename.
  *
- * # Shape by family, colour by type
+ * # Two kinds of icon, because files come in two kinds
  *
- * Drawing a bespoke glyph per extension would mean a hundred hand-built paths, and at the
- * 14px this renders at, most of them would be indistinguishable mush. So the *shape* says
- * what kind of thing it is — archive, image, key, database — and the *colour* says which
- * one, using each ecosystem's own: PHP indigo, Go cyan, Rust orange, Ruby red. Two
- * channels at a size where one is not enough, and both survive being small.
+ * Things with a physical shape get a drawing of that shape: an archive is a box, an image
+ * a framed picture, a key a key, a database a cylinder. Those are recognisable at a
+ * glance and need no reading.
+ *
+ * Text formats have no shape. A PHP file and a YAML file are both "a page of text", so a
+ * drawing can only ever say *page*, which is how forty languages ended up sharing one
+ * glyph separated by colour alone. They get a sheet whose lower band carries their own
+ * name instead — PHP, YML, TSX, SCSS — built per extension at module load. That is what
+ * every file manager does with them, and it is the only mark that stays both legible and
+ * unambiguous this small.
+ *
+ * Colour still runs through both, using each ecosystem's own where it has one: PHP indigo,
+ * Go cyan, Rust orange, Ruby red. And every kind carries a hover label, so the picture
+ * never has to be the whole explanation.
  *
  * Icons follow the house style in `icons.tsx`: 24×24, `currentColor` stroke, 1.8 wide,
  * round caps. Colour is applied by the caller through `className`, so a row can dim or
@@ -48,6 +57,48 @@ export function PlainFileIcon(props: IconProps) {
       <path d="M14 3v5h5" />
     </svg>
   );
+}
+
+/**
+ * A sheet whose lower band carries the format's own name.
+ *
+ * Text formats do not have distinguishable silhouettes — a PHP file and a YAML file are
+ * both "a page of text" — so a shared glyph plus a colour was the best that shape alone
+ * could do, and it left PHP and Go with the same picture. Their name is the mark: that is
+ * how every file manager renders them, and it is the only thing that stays legible at this
+ * size while remaining unambiguous.
+ *
+ * Built once per format at module load, so each extension gets a real component rather
+ * than a shape shared by forty languages.
+ */
+export function labelled(tag: string): ComponentType<IconProps> {
+  // Narrow the lettering as it lengthens so four characters still fit the band.
+  const fontSize = tag.length >= 4 ? 6.2 : tag.length === 3 ? 7.4 : 9;
+  function LabelledFileIcon({ size = 16, ...props }: IconProps) {
+    return (
+      <svg {...base({ size, ...props })}>
+        <path d="M13 3H6a1.8 1.8 0 0 0-1.8 1.8v14.4A1.8 1.8 0 0 0 6 21h12a1.8 1.8 0 0 0 1.8-1.8V9.8z" />
+        <path d="M13 3v6.8h6.8" />
+        {/* A solid band: letters knocked out of fill read far better at 14-18px than
+            stroked glyphs, which smear into their own outline. */}
+        <rect x="2.2" y="12.4" width="19.6" height="7.6" rx="1.6" fill="currentColor" stroke="none" />
+        <text
+          x="12"
+          y="18.05"
+          textAnchor="middle"
+          fontSize={fontSize}
+          fontWeight="700"
+          letterSpacing="-0.2"
+          fontFamily="ui-sans-serif, system-ui, -apple-system, sans-serif"
+          fill="var(--bg, #16161e)"
+          stroke="none"
+        >
+          {tag}
+        </text>
+      </svg>
+    );
+  }
+  return LabelledFileIcon;
 }
 
 /** Source code: angle brackets. */
@@ -290,7 +341,7 @@ const code = (className: string, label: string): FileKind => ({
  * Extension → kind. Colours are each ecosystem's own where it has one, which is what
  * makes them recognisable without a legend.
  */
-const BY_EXTENSION: Record<string, FileKind> = {
+const RAW_BY_EXTENSION: Record<string, FileKind> = {
   // --- languages ---------------------------------------------------------
   php: code("text-indigo-400", "PHP source"),
   js: code("text-yellow-400", "JavaScript"),
@@ -480,6 +531,44 @@ const BY_EXTENSION: Record<string, FileKind> = {
   err: { Icon: LogIcon, className: "text-red-300", label: "Error output" },
   pid: { Icon: LogIcon, className: "text-gray-500", label: "PID file" },
 };
+
+/**
+ * Families whose members are told apart by their name rather than their outline.
+ *
+ * Anything landing on one of these generic text shapes gets a lettered sheet built from
+ * its own extension instead, so `php`, `go`, `yml` and `scss` each end up with a distinct
+ * icon rather than four tints of the same one.
+ */
+const LETTERED_FAMILIES = new Set<ComponentType<IconProps>>([
+  CodeFileIcon,
+  MarkupIcon,
+  StyleIcon,
+  DataIcon,
+]);
+
+/**
+ * Display forms that differ from the raw extension.
+ *
+ * Only where the extension itself reads wrong: `cpp` is not what anyone calls the
+ * language, and `cs` is ambiguous with a stylesheet at a glance. Everything else is
+ * clearer as its own extension than as anything we could invent for it.
+ */
+const TAG_OVERRIDES: Record<string, string> = {
+  cpp: "C++",
+  cc: "C++",
+  hpp: "H++",
+  cs: "C#",
+  jsonc: "JSON",
+};
+
+const BY_EXTENSION: Record<string, FileKind> = Object.fromEntries(
+  Object.entries(RAW_BY_EXTENSION).map(([ext, kind]) => [
+    ext,
+    LETTERED_FAMILIES.has(kind.Icon)
+      ? { ...kind, Icon: labelled(TAG_OVERRIDES[ext] ?? ext.toUpperCase().slice(0, 4)) }
+      : kind,
+  ]),
+);
 
 /**
  * Files known by their whole name rather than an extension.

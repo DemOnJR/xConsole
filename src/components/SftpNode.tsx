@@ -928,7 +928,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                                 : kind.label
                             }
                           >
-                            <kind.Icon size={14} />
+                            <kind.Icon size={17} />
                           </span>
                         );
                       })()}

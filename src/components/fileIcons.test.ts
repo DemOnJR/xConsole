@@ -1,7 +1,8 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
   ArchiveIcon,
-  CodeFileIcon,
   DatabaseFileIcon,
   DocIcon,
   ImageFileIcon,
@@ -15,9 +16,15 @@ import { FolderIcon } from "./icons";
 
 const file = (name: string) => ({ name, is_dir: false });
 
+/** The letters a lettered sheet puts in its band, read straight off the rendered SVG. */
+function renderTag(name: string): string {
+  const { Icon } = fileKindFor(file(name));
+  const markup = renderToStaticMarkup(createElement(Icon));
+  return /<text[^>]*>([^<]*)<\/text>/.exec(markup)?.[1] ?? "";
+}
+
 describe("fileKindFor", () => {
-  it("gives each family its own shape", () => {
-    expect(fileKindFor(file("index.php")).Icon).toBe(CodeFileIcon);
+  it("draws the shape of things that have one", () => {
     expect(fileKindFor(file("backup.tar.gz")).Icon).toBe(ArchiveIcon);
     expect(fileKindFor(file("logo.png")).Icon).toBe(ImageFileIcon);
     expect(fileKindFor(file("id_rsa")).Icon).toBe(KeyFileIcon);
@@ -26,14 +33,35 @@ describe("fileKindFor", () => {
     expect(fileKindFor(file("notes.md")).Icon).toBe(DocIcon);
   });
 
-  /// Shape alone cannot separate a hundred languages at 14px, so colour carries the rest.
-  /// PHP and Go share the code glyph and must not share a colour.
-  it("separates languages that share a shape by colour", () => {
-    const php = fileKindFor(file("index.php"));
-    const go = fileKindFor(file("main.go"));
-    const rust = fileKindFor(file("main.rs"));
-    expect(php.Icon).toBe(go.Icon);
-    expect(new Set([php.className, go.className, rust.className]).size).toBe(3);
+  /// The point of the lettered sheets: a text format is identified by its name, so every
+  /// language gets its own icon rather than forty sharing one glyph and a tint.
+  it("gives every text format its own icon, not a shared one", () => {
+    const icons = [
+      "index.php",
+      "main.go",
+      "main.rs",
+      "app.ts",
+      "app.tsx",
+      "style.scss",
+      "config.yml",
+      "data.json",
+      "page.html",
+    ].map((n) => fileKindFor(file(n)).Icon);
+    expect(new Set(icons).size).toBe(icons.length);
+    // ...and none of them is the generic sheet.
+    expect(icons).not.toContain(PlainFileIcon);
+  });
+
+  /// The band carries the extension itself, so what is rendered is predictable from the
+  /// filename — except where the raw extension reads wrong.
+  it("labels a sheet with the format's own name", () => {
+    expect(renderTag("index.php")).toBe("PHP");
+    expect(renderTag("app.tsx")).toBe("TSX");
+    expect(renderTag("config.yml")).toBe("YML");
+    expect(renderTag("main.cpp")).toBe("C++");
+    expect(renderTag("Program.cs")).toBe("C#");
+    // Long extensions are cut rather than allowed to overflow the band.
+    expect(renderTag("a.properties").length).toBeLessThanOrEqual(4);
   });
 
   /// What a thing *is* outranks what it is called: a directory named like a stylesheet is
@@ -84,7 +112,7 @@ describe("fileKindFor", () => {
   /// The stem is a fallback, so `README.md` still reads as a readme — but only after the
   /// extension has had its say, or `license.js` would stop being JavaScript.
   it("prefers the extension over the stem", () => {
-    expect(fileKindFor(file("license.js")).Icon).toBe(CodeFileIcon);
+    expect(renderTag("license.js")).toBe("JS");
     expect(fileKindFor(file("README.md")).Icon).toBe(DocIcon);
     expect(fileKindFor(file("README")).label).toBe("Readme");
   });
