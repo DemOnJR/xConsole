@@ -139,13 +139,6 @@ pub async fn run_turn(
     } else {
         tool_defs.clone()
     };
-    if cli_mode && !tc.targets.is_empty() && resolved.kind != "cursor" {
-        let hint = "Add an OpenAI or Anthropic provider in Settings → Providers to execute \
-             commands on your VPS. OpenCode/Codex CLI cannot SSH directly.";
-        emit(Some(sink), StreamEvent::Error(hint.to_string()));
-        emit_ws("idle");
-        return Err(hint.to_string());
-    }
 
     let data_dir = tc
         .app
