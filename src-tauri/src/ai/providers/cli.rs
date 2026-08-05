@@ -966,17 +966,7 @@ impl Provider for CliProvider {
         let flags = self.run_flags(req.xconsole.as_ref(), workspace.as_deref());
         let key = self.api_key.as_deref();
 
-        let child = if self.kind == "cursor" {
-            spawn_with_stdin(&self.kind, &self.bin, &flags, &prompt, key).await?
-        } else {
-            let mut args = flags;
-            args.push(prompt);
-            spawn_cli(&self.bin, &args)?
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("failed to launch '{}': {e}", self.bin))?
-        };
+        let child = spawn_with_stdin(&self.kind, &self.bin, &flags, &prompt, key).await?;
 
         let started = std::time::Instant::now();
         let resp =
