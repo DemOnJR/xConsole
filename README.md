@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="public/logo.svg" alt="xConsole Logo" width="128" height="128" />
+
 # xConsole
 
 **All your servers, on one canvas.**
