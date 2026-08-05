@@ -133,8 +133,11 @@ pub fn resolve_for_turn(
         return Ok((preferred, None));
     }
 
-    // Cursor Agent CLI runs SSH through xConsole MCP — keep the Cursor provider.
-    if preferred.kind == "cursor" {
+    // CLI providers (Cursor, OpenCode, Codex) run their own tool loop.
+    // Cursor uses xConsole MCP for SSH. OpenCode/Codex can't SSH — the agent
+    // loop shows an error when VPS targets are selected (agent.rs:142-148).
+    // Either way, never silently swap a CLI for a different provider.
+    if preferred.kind == "cursor" || preferred.provider.is_autonomous_cli() {
         return Ok((preferred, None));
     }
 

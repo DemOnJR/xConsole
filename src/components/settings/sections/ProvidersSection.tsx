@@ -549,14 +549,16 @@ function ProviderForm({
             <Field
               label="Model"
               hint={
-                form.kind === "opencode_cli" && localModels.length > 0
-                  ? "Pick a model or type a provider/model ID. Save first to load models."
-                  : form.kind === "opencode_cli"
-                    ? "Save the provider first, then re-edit to load available models."
-                    : undefined
+                form.kind === "opencode_cli"
+                  ? localModels.length > 0
+                    ? "Pick a model or type a provider/model ID."
+                    : form.id
+                      ? "Type a provider/model ID (e.g. opencode/big-pickle)."
+                      : "Save the provider first, then re-edit to load available models."
+                  : undefined
               }
             >
-              {form.kind === "opencode_cli" && localModels.length > 0 ? (
+              {form.kind === "opencode_cli" ? (
                 <ModelCombo
                   value={form.model ?? ""}
                   onChange={(v) => patch({ model: v })}
@@ -567,7 +569,7 @@ function ProviderForm({
                 <TextInput
                   value={form.model ?? ""}
                   onChange={(e) => patch({ model: e.target.value })}
-                  placeholder={form.kind === "opencode_cli" ? "opencode/big-pickle" : "default"}
+                  placeholder="default"
                 />
               )}
             </Field>
