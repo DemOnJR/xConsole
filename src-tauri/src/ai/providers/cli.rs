@@ -256,13 +256,40 @@ fn spawn_cli_program(bin: &str) -> Result<Command, String> {
     #[cfg(windows)]
     {
         let lower = bin.to_ascii_lowercase();
+        // Explicit .cmd / .bat path → run through cmd /C.
         if lower.ends_with(".cmd") || lower.ends_with(".bat") {
             let mut cmd = crate::proc::quiet_tokio("cmd");
             cmd.arg("/C").arg(bin);
             return Ok(cmd);
         }
+        // Bare name with no path separators and no extension (e.g. "opencode",
+        // "codex"): npm-installed CLIs only create .cmd/.ps1 shims on Windows,
+        // so a direct spawn fails.  Probe PATH for the .cmd wrapper and route
+        // through `cmd /C` when found.
+        if !bin.contains('\\') && !bin.contains('/') && !bin.contains('.') {
+            if let Some(resolved) = resolve_cmd_on_path(bin) {
+                let mut cmd = crate::proc::quiet_tokio("cmd");
+                cmd.arg("/C").arg(resolved);
+                return Ok(cmd);
+            }
+        }
     }
     Ok(crate::proc::quiet_tokio(bin))
+}
+
+/// Search PATH for `name.cmd` or `name.bat` and return the first hit.
+#[cfg(windows)]
+fn resolve_cmd_on_path(name: &str) -> Option<String> {
+    let path_var = std::env::var("PATH").ok()?;
+    for dir in std::env::split_paths(&path_var) {
+        for ext in &["cmd", "bat"] {
+            let candidate = dir.join(format!("{name}.{ext}"));
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
 }
 
 fn spawn_cli(bin: &str, args: &[String]) -> Result<Command, String> {
