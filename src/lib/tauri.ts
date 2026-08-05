@@ -827,6 +827,8 @@ export const api = {
 
   aiCliLogin: (providerId: string) =>
     invoke<string>("ai_cli_login", { providerId }),
+  aiCliModels: (providerId: string) =>
+    invoke<string[]>("ai_cli_models", { providerId }),
 
   aiChat: (args: {
     sessionId: string;

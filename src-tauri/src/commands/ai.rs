@@ -901,3 +901,26 @@ pub async fn ai_cli_login(
     let _ = forward.await;
     result
 }
+
+/// List available models for a CLI provider (e.g. `opencode models`).
+#[tauri::command]
+pub async fn ai_cli_models(
+    db: State<'_, Db>,
+    provider_id: String,
+) -> Result<Vec<String>, String> {
+    let provider = db
+        .get_provider(&provider_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "provider not found".to_string())?;
+
+    if !cli::is_cli_kind(&provider.kind) {
+        return Err("models listing is only available for CLI providers".to_string());
+    }
+    let bin = provider
+        .bin_path
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| cli::CliProvider::default_bin(&provider.kind));
+
+    cli::list_models(&provider.kind, &bin).await
+}

@@ -245,6 +245,9 @@ function ProviderForm({
         } else if (form.kind === "llamacpp") {
           const files = await api.listLocalFiles();
           if (alive) setLocalModels(files.map((f) => f.file));
+        } else if (form.kind === "opencode_cli" && form.id) {
+          const models = await api.aiCliModels(form.id);
+          if (alive) setLocalModels(models);
         } else if (alive) {
           setLocalModels([]);
         }
@@ -255,7 +258,7 @@ function ProviderForm({
     return () => {
       alive = false;
     };
-  }, [form.kind, form.base_url]);
+  }, [form.kind, form.base_url, form.id]);
 
   const patch = (p: Partial<AiProviderInput>) => setForm((f) => ({ ...f, ...p }));
 
@@ -543,12 +546,30 @@ function ProviderForm({
                 placeholder={form.kind === "codex_cli" ? "codex" : "opencode"}
               />
             </Field>
-            <Field label="Model (optional)">
-              <TextInput
-                value={form.model ?? ""}
-                onChange={(e) => patch({ model: e.target.value })}
-                placeholder="default"
-              />
+            <Field
+              label="Model"
+              hint={
+                form.kind === "opencode_cli" && localModels.length > 0
+                  ? "Pick a model or type a provider/model ID. Save first to load models."
+                  : form.kind === "opencode_cli"
+                    ? "Save the provider first, then re-edit to load available models."
+                    : undefined
+              }
+            >
+              {form.kind === "opencode_cli" && localModels.length > 0 ? (
+                <ModelCombo
+                  value={form.model ?? ""}
+                  onChange={(v) => patch({ model: v })}
+                  options={localModels}
+                  placeholder="opencode/big-pickle"
+                />
+              ) : (
+                <TextInput
+                  value={form.model ?? ""}
+                  onChange={(e) => patch({ model: e.target.value })}
+                  placeholder={form.kind === "opencode_cli" ? "opencode/big-pickle" : "default"}
+                />
+              )}
             </Field>
           </>
         )}

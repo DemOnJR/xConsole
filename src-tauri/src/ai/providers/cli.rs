@@ -1016,6 +1016,41 @@ pub fn is_cli_kind(kind: &str) -> bool {
     matches!(kind, "codex_cli" | "opencode_cli" | "cursor")
 }
 
+/// Run `opencode models` (or the equivalent for other CLIs) and return the
+/// list of available model IDs.
+pub async fn list_models(kind: &str, bin: &str) -> Result<Vec<String>, String> {
+    let args: Vec<String> = match kind {
+        "opencode_cli" => vec!["models".into()],
+        // Other CLI providers don't have a models command yet.
+        _ => return Ok(Vec::new()),
+    };
+
+    let mut cmd = spawn_cli_program(bin)?;
+    cmd.args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    crate::proc::hide_console(&mut cmd);
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to launch '{bin}': {e}"))?;
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("failed to read output from '{bin}': {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let models: Vec<String> = stdout
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    Ok(models)
+}
+
 pub async fn login(kind: &str, bin: &str, sink: Option<&EventSink>) -> Result<String, String> {
     let args = login_args(kind);
     emit(

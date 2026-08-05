@@ -380,6 +380,7 @@ pub fn run() {
             commands::update::check_for_update,
             commands::update::start_app_update,
             commands::ai::ai_cli_login,
+            commands::ai::ai_cli_models,
             commands::ai::ai_chat,
             commands::ai::list_agent_conversations,
             commands::ai::get_agent_conversation,
