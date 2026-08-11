@@ -987,6 +987,32 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       setSearchOpen(true);
       return;
     }
+    if (mod && key === "g") {
+      e.preventDefault();
+      void (async () => {
+        const next = await dialog.prompt({
+          title: "Go to path",
+          label: "Absolute remote path",
+          defaultValue: path,
+          confirmText: "Go",
+        });
+        if (next?.trim()) navigateTo(next.trim());
+      })();
+      return;
+    }
+    if (mod && key === "l" && dualPane) {
+      e.preventDefault();
+      void (async () => {
+        const next = await dialog.prompt({
+          title: "Go to local path",
+          label: "Local folder path",
+          defaultValue: localPath,
+          confirmText: "Go",
+        });
+        if (next?.trim()) void loadLocalDir(next.trim());
+      })();
+      return;
+    }
     if (e.key === "Escape") {
       if (searchOpen) closeSearch();
       else clearSelection();
@@ -1708,11 +1734,13 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
               <span>Ctrl+A select all</span>
               <span>Ctrl+C/X/V copy/cut/paste</span>
               <span>Ctrl+F find</span>
+              <span>Ctrl+G go to path</span>
               {dualPane ? (
                 <>
                   <span>F5 → local</span>
                   <span>F6 ↑ remote</span>
                   <span>F7 compare</span>
+                  <span>Ctrl+L local path</span>
                   <span>Drag panes transfer</span>
                 </>
               ) : null}
