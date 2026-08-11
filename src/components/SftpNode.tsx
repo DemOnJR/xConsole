@@ -1981,6 +1981,14 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
             >
               Reconnect
             </button>
+            <button
+              type="button"
+              className="shrink-0 rounded px-1.5 py-0.5 text-red-400/80 hover:bg-red-900/30 hover:text-red-200"
+              onClick={() => setError(null)}
+              data-tooltip="Dismiss"
+            >
+              ✕
+            </button>
           </div>
         )}
 
