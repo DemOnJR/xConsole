@@ -17,6 +17,7 @@ export function StatusStrip() {
   const nodes = useCanvasStore((s) => s.nodes);
   const streaming = useAgentStore((s) => s.streaming);
   const streamStats = useAgentStore((s) => s.streamStats);
+  const planMode = useAgentStore((s) => s.planMode);
   const pendingApprovals = useAgentStore((s) => s.pendingApprovals.length);
   const pendingQuestions = useAgentStore((s) => s.pendingQuestions.length);
   const hasPlan = useAgentStore((s) => s.pendingPlan !== null);
@@ -106,7 +107,9 @@ export function StatusStrip() {
         ? `Approval needed (${pendingApprovals})`
         : pendingQuestions > 0
           ? `Question pending (${pendingQuestions})`
-          : "Agent idle";
+          : planMode
+            ? "Agent idle · plan mode"
+            : "Agent idle";
 
   const agentTone = streaming
     ? "var(--accent)"
