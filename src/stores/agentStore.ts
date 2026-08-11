@@ -699,6 +699,20 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       if (m.role === "user") {
         lines.push("## User", "", m.content, "");
       } else if (m.role === "assistant") {
+        if (m.activity && m.activity.length > 0) {
+          lines.push("### Activity");
+          for (const a of m.activity) {
+            if (a.kind === "status" || a.id === "collapsed-meta") continue;
+            const bit =
+              a.kind === "command"
+                ? `$ ${a.detail || a.label}`
+                : a.kind === "file_edit"
+                  ? `edit ${a.path || a.label}`
+                  : a.label;
+            lines.push(`- ${bit}`);
+          }
+          lines.push("");
+        }
         lines.push("## Assistant", "", m.content, "");
       }
     }
