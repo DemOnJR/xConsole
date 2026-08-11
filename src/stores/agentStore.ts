@@ -460,7 +460,16 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   contextUsage: null,
   compactFlipCount: 0,
   error: null,
-  targets: [],
+  targets: (() => {
+    try {
+      const raw = localStorage.getItem("xconsole-agent-targets");
+      if (!raw) return [] as string[];
+      const parsed = JSON.parse(raw) as unknown;
+      return Array.isArray(parsed) ? (parsed as string[]) : [];
+    } catch {
+      return [] as string[];
+    }
+  })(),
   pendingApprovals: [],
   pendingQuestions: [],
   pendingPlan: null,
@@ -486,7 +495,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set({ hydrated: true });
   },
 
-  setTargets: (ids) => set({ targets: ids }),
+  setTargets: (ids) => {
+    try {
+      localStorage.setItem("xconsole-agent-targets", JSON.stringify(ids));
+    } catch {
+      /* ignore */
+    }
+    set({ targets: ids });
+  },
 
   togglePlanMode: () =>
     set((s) => {
