@@ -54,6 +54,7 @@ import { fileKindFor } from "./fileIcons";
 import { SftpContextMenu, type SftpMenuState } from "./SftpContextMenu";
 import { SftpPermissionsDialog } from "./SftpPermissionsDialog";
 import { SftpCodeEditor } from "./SftpCodeEditor";
+import { GitBranchBadge, useGitBranch } from "../hooks/useGitBranch";
 
 type ConnState = "connecting" | "connected" | "error" | "disconnected";
 
@@ -362,6 +363,21 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   const [localEntries, setLocalEntries] = useState<LocalFsEntry[]>([]);
   const [localLoading, setLocalLoading] = useState(false);
   const [localSelection, setLocalSelection] = useState<Set<string>>(() => new Set());
+
+  const remoteGitBranch = useGitBranch({
+    enabled: status === "connected",
+    path,
+    vpsId: data.vpsId,
+  });
+  const localGitBranch = useGitBranch({
+    enabled: dualPane && Boolean(localPath),
+    path: localPath || null,
+    vpsId: null,
+  });
+  // Surface remote branch on the session so other UI can read it.
+  useEffect(() => {
+    setSessionInfo(id, { gitBranch: remoteGitBranch, sftpPath: path });
+  }, [remoteGitBranch, path, id, setSessionInfo]);
 
   const loadLocalDir = useCallback(async (dir?: string) => {
     setLocalLoading(true);
@@ -1207,6 +1223,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           >
             Refresh
           </button>
+          <GitBranchBadge branch={remoteGitBranch} className="ml-1" />
           <button
             type="button"
             className={`rounded px-1.5 py-0.5 text-[10px] ${
@@ -1501,6 +1518,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                   >
                     {localPath || "Local"}
                   </span>
+                  <GitBranchBadge branch={localGitBranch} />
                   <button
                     type="button"
                     className="rounded px-1.5 py-0.5 text-[10px] text-cyan-300 hover:bg-cyan-900/30 disabled:opacity-40"

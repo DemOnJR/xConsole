@@ -1,7 +1,7 @@
 use base64::Engine;
 use tauri::State;
 
-use crate::ssh::{ConnectOutcome, SessionManager};
+use crate::ssh::{shell_quote, ConnectOutcome, SessionManager};
 use crate::storage::Db;
 
 #[tauri::command]
@@ -53,4 +53,42 @@ pub fn ssh_disconnect(
 #[tauri::command]
 pub fn ssh_replay(sessions: State<'_, SessionManager>, session_id: String) -> Option<String> {
     sessions.replay(&session_id)
+}
+
+/// Git branch for a remote directory, if it is (or is inside) a git work tree.
+///
+/// Returns `None` when the path is not a repo, `git` is missing, or the command fails.
+/// Detached HEAD is reported as a short SHA prefixed with `detached@`.
+#[tauri::command]
+pub async fn remote_git_branch(
+    sessions: State<'_, SessionManager>,
+    vps_id: String,
+    path: String,
+) -> Result<Option<String>, String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Ok(None);
+    }
+    // One short shell script: resolve work-tree root, then branch (or short SHA).
+    // Silent on non-repos so the UI can call this on every cwd/path change.
+    let q = shell_quote(path);
+    let cmd = format!(
+        "d={q}; \
+         git -C \"$d\" rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0; \
+         b=$(git -C \"$d\" rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0; \
+         if [ \"$b\" = \"HEAD\" ]; then \
+           s=$(git -C \"$d\" rev-parse --short HEAD 2>/dev/null) || exit 0; \
+           echo \"detached@$s\"; \
+         else \
+           echo \"$b\"; \
+         fi"
+    );
+    let out = sessions.run_command(&vps_id, &cmd).await?;
+    let branch = out
+        .stdout
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|s| s.to_string());
+    Ok(branch)
 }

@@ -617,6 +617,11 @@ export const api = {
     invoke<void>("ssh_disconnect", { sessionId }),
   sshReplay: (sessionId: string) =>
     invoke<string | null>("ssh_replay", { sessionId }),
+  /** Git branch for a remote path when it is inside a repo; null otherwise. */
+  remoteGitBranch: (vpsId: string, path: string) =>
+    invoke<string | null>("remote_git_branch", { vpsId, path }),
+  localGitBranch: (path: string) =>
+    invoke<string | null>("local_git_branch", { path }),
 
   sftpConnect: (vpsId: string) =>
     invoke<SftpConnectOutcome>("sftp_connect", { vpsId }),

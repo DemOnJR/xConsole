@@ -109,6 +109,44 @@ pub struct LocalFsList {
     pub entries: Vec<LocalFsEntry>,
 }
 
+/// Git branch for a local path when it is inside a work tree.
+pub fn local_git_branch(path: &str) -> Option<String> {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return None;
+    }
+    let out = std::process::Command::new("git")
+        .args(["-C", path, "rev-parse", "--is-inside-work-tree"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let br = std::process::Command::new("git")
+        .args(["-C", path, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !br.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&br.stdout).trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    if name == "HEAD" {
+        let short = std::process::Command::new("git")
+            .args(["-C", path, "rev-parse", "--short", "HEAD"])
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&short.stdout).trim().to_string();
+        if s.is_empty() {
+            return None;
+        }
+        return Some(format!("detached@{s}"));
+    }
+    Some(name)
+}
+
 /// Structured local directory list for the dual-pane file manager.
 pub fn list_local_dir_entries(path: &str) -> Result<LocalFsList, String> {
     let p = std::path::PathBuf::from(path);

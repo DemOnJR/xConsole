@@ -21,6 +21,7 @@ import { shellQuote } from "../lib/terminalClipboard";
 import { onOsDropHover, onOsFilesDropped } from "../hooks/useOsFileDrop";
 import { onInternalDrop, useDragStore } from "../stores/dragStore";
 import { bytesToB64 } from "../lib/tauri";
+import { GitBranchBadge, useGitBranch } from "../hooks/useGitBranch";
 
 /** A file that was just put on the server, shown as a dismissible chip. */
 interface DroppedChip {
@@ -62,6 +63,16 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
   const setInfo = useSessionStore((s) => s.setInfo);
   const removeInfo = useSessionStore((s) => s.remove);
   const info = useSessionStore((s) => s.sessions[id]);
+  const status = (info?.status ?? "connecting") as ConnState;
+  const gitBranch = useGitBranch({
+    enabled: status === "connected",
+    path: info?.cwd,
+    vpsId: data.vpsId,
+  });
+  // Keep session store in sync so other UI (and agent canvas context) can see the branch.
+  useEffect(() => {
+    setInfo(id, { gitBranch });
+  }, [gitBranch, id, setInfo]);
   const themeId = useThemeStore((s) => s.themeId);
   const customVars = useThemeStore((s) => s.customVars);
   const layoutMode = useCanvasStore((s) => s.layoutMode);
@@ -316,7 +327,6 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
     removeNode(id);
   };
 
-  const status = info?.status ?? "connecting";
   const mismatch = info?.hostKey === "mismatch";
   const canReconnect = status === "disconnected" || status === "error";
 
@@ -449,6 +459,7 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
             {info.cwd}
           </span>
         )}
+        <GitBranchBadge branch={gitBranch} />
         {info?.hostKey === "pinned_on_first_use" && (
           <span
             className="rounded bg-amber-900/50 px-1 text-[10px] text-amber-300"

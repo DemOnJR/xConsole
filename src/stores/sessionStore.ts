@@ -16,6 +16,8 @@ export interface SessionInfo {
   cwd?: string;
   /** SFTP panels: the remote path currently being browsed. */
   sftpPath?: string;
+  /** Git branch when cwd/sftpPath is inside a repo (`null` = not a repo / unknown). */
+  gitBranch?: string | null;
 }
 
 interface SessionState {

@@ -229,6 +229,12 @@ pub fn local_fs_home() -> Result<String, String> {
         .ok_or_else(|| "could not resolve home directory".into())
 }
 
+/// Git branch for a local directory (dual-pane / local tools).
+#[tauri::command]
+pub fn local_git_branch(path: String) -> Result<Option<String>, String> {
+    Ok(crate::local::local_git_branch(path.trim()))
+}
+
 /// Read a local text file (SQL dumps, etc.). Capped to avoid blowing the IPC channel.
 #[tauri::command]
 pub fn local_fs_read_text(path: String, max_bytes: Option<u64>) -> Result<String, String> {
