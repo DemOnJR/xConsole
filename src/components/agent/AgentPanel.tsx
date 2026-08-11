@@ -498,6 +498,27 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
   const [input, setInput] = useState("");
 
+  // Persist draft per conversation so switching sessions does not lose typed text.
+  useEffect(() => {
+    try {
+      const key = `xconsole-agent-draft:${sessionId}`;
+      const saved = localStorage.getItem(key);
+      setInput(saved ?? "");
+    } catch {
+      setInput("");
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    try {
+      const key = `xconsole-agent-draft:${sessionId}`;
+      if (input) localStorage.setItem(key, input);
+      else localStorage.removeItem(key);
+    } catch {
+      /* ignore */
+    }
+  }, [input, sessionId]);
+
   const history = useInputHistory(setInput);
 
   // Up/Down recalls previously sent user messages (shell-style). null = not recalling.
