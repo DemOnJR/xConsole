@@ -113,6 +113,16 @@ function MessageBubble({
         >
 
           <AgentMarkdown content={content} variant={isUser ? "user" : "assistant"} />
+          <button
+            type="button"
+            className={`mt-1.5 text-[10px] opacity-60 transition hover:opacity-100 ${
+              isUser ? "text-blue-100" : "text-gray-500"
+            }`}
+            onClick={() => void navigator.clipboard.writeText(content)}
+            data-tooltip="Copy message"
+          >
+            Copy
+          </button>
 
         </div>
 
