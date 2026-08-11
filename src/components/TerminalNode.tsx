@@ -460,7 +460,17 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
           data-tooltip={status}
         />
         <span className="truncate font-medium text-gray-200">{data.name}</span>
-        <span className="truncate text-gray-500">{data.host}</span>
+        <button
+          type="button"
+          className="truncate text-gray-500 hover:text-gray-300"
+          data-tooltip="Click to copy host"
+          onClick={(e) => {
+            e.stopPropagation();
+            void navigator.clipboard.writeText(String(data.host ?? ""));
+          }}
+        >
+          {data.host}
+        </button>
         {info?.cwd && (
           <button
             type="button"
