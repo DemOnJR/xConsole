@@ -490,6 +490,34 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
             </button>
           )}
           <button
+            className="rounded px-1 py-0.5 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+            data-tooltip="Smaller font"
+            onClick={(e) => {
+              e.stopPropagation();
+              const term = termRef.current;
+              if (!term) return;
+              const next = Math.max(10, (term.options.fontSize as number) - 1);
+              term.options.fontSize = next;
+              fitRef.current?.fit();
+            }}
+          >
+            A−
+          </button>
+          <button
+            className="rounded px-1 py-0.5 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+            data-tooltip="Larger font"
+            onClick={(e) => {
+              e.stopPropagation();
+              const term = termRef.current;
+              if (!term) return;
+              const next = Math.min(22, (term.options.fontSize as number) + 1);
+              term.options.fontSize = next;
+              fitRef.current?.fit();
+            }}
+          >
+            A+
+          </button>
+          <button
             className="rounded px-1.5 py-0.5 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
             data-tooltip="Clear scrollback (does not kill the shell)"
             onClick={(e) => {
