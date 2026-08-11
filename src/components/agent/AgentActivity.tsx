@@ -457,6 +457,19 @@ export function AgentActivityFeed({
 
   if (visible.length === 0 && !live) return null;
 
+  const copyActivity = () => {
+    const lines = collapsedBlocks.map((item) => {
+      if (item.kind === "command") {
+        return `$ ${item.detail || item.label}${item.output ? `\n${item.output}` : ""}`;
+      }
+      if (item.kind === "file_edit") {
+        return `edit ${item.path || item.label} +${item.linesAdded ?? 0}/-${item.linesRemoved ?? 0}`;
+      }
+      return item.label + (item.detail ? ` — ${item.detail}` : "");
+    });
+    void navigator.clipboard.writeText(lines.join("\n"));
+  };
+
   return (
     <div className="flex w-full flex-col gap-2">
       {parallelMeta.show ? (
@@ -465,6 +478,16 @@ export function AgentActivityFeed({
           label={parallelMeta.label}
           done={parallelMeta.done && !live}
         />
+      ) : null}
+      {!live && collapsedBlocks.length > 2 ? (
+        <button
+          type="button"
+          onClick={copyActivity}
+          className="self-start text-[10px] text-gray-600 hover:text-gray-400"
+          data-tooltip="Copy activity log as text"
+        >
+          Copy activity
+        </button>
       ) : null}
       {collapsedBlocks.map((item) =>
         item.id === "collapsed-meta" ? (
