@@ -25,6 +25,8 @@ export function StatusStrip() {
   const activeWs = useWorkspaceStore((s) => s.activeId);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const setAgentOpen = useUiStore((s) => s.setAgentOpen);
+  const leftOpen = useUiStore((s) => s.leftOpen);
+  const toggleLeft = useUiStore((s) => s.toggleLeft);
   const setTransfersOpen = useTransferStore((s) => s.setOpen);
   const openSettings = useUiStore((s) => s.openSettings);
   const channel = useUpdateStore((s) => s.channel);
@@ -113,9 +115,16 @@ export function StatusStrip() {
 
   return (
     <footer className="xc-status-strip" role="status">
-      <span className="truncate text-[var(--text-dim)]" title={wsName}>
+      <button
+        type="button"
+        className="truncate text-[var(--text-dim)] transition hover:text-[var(--text)]"
+        title={`${wsName} — open workspaces`}
+        onClick={() => {
+          if (!leftOpen) toggleLeft();
+        }}
+      >
         {wsName}
-      </span>
+      </button>
 
       <span className="text-[var(--border-strong)]">·</span>
 
