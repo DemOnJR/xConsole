@@ -1001,9 +1001,17 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
           {connectedCount > 0 ? ` · ${connectedCount} connected` : ""}
         </span>
         {sel ? (
-          <span className="truncate text-[10px] text-violet-300">
+          <button
+            type="button"
+            className="truncate text-[10px] text-violet-300 hover:text-violet-100"
+            data-tooltip="Click to copy schema.table"
+            onClick={(e) => {
+              e.stopPropagation();
+              void navigator.clipboard.writeText(`${sel.schema}.${sel.table}`);
+            }}
+          >
             {sel.schema}.{sel.table}
-          </span>
+          </button>
         ) : null}
         <button
           className="ml-auto shrink-0 rounded px-1 text-gray-500 hover:bg-[var(--border)] hover:text-white"
