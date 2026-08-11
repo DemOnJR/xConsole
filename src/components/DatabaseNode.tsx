@@ -8,7 +8,8 @@ import { CodeEditArea } from "./CodeEditArea";
 import { DatabaseTree, newInstance, type DbInstance } from "./DatabaseTree";
 import { DatabaseIcon } from "./icons";
 
-const PAGE_SIZE = 200;
+const PAGE_SIZE_OPTIONS = [50, 100, 200, 500, 1000] as const;
+const DEFAULT_PAGE_SIZE = 200;
 
 /**
  * Split a SQL dump into statements for sequential import.
@@ -365,6 +366,7 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
   const [columns, setColumns] = useState<DbColumn[]>([]);
   const [rows, setRows] = useState<DbResultSet | null>(null);
   const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
   const [tab, setTab] = useState<Tab>("data");
   const [sql, setSql] = useState("SELECT * FROM ");
   const [sqlResult, setSqlResult] = useState<DbResultSet | null>(null);
@@ -493,7 +495,7 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
       try {
         const [cols, data] = await Promise.all([
           api.dbDescribeTable(next.sessionId, next.schema, next.table),
-          api.dbSelectPage(next.sessionId, next.schema, next.table, PAGE_SIZE, atPage * PAGE_SIZE),
+          api.dbSelectPage(next.sessionId, next.schema, next.table, pageSize, atPage * pageSize),
         ]);
         setColumns(cols);
         setRows(data);
@@ -518,7 +520,7 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
         setBusy(false);
       }
     },
-    [],
+    [pageSize],
   );
 
   // Back/forward across tables, like the SFTP panel. Paging and post-edit refreshes call
@@ -672,7 +674,7 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
           sel.sessionId,
           sel.schema,
           sel.table,
-          PAGE_SIZE,
+          pageSize,
           offset,
         );
         if (!cols) {
@@ -680,8 +682,8 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
           lines.push(cols.map(esc).join(","));
         }
         for (const row of pageData.rows) lines.push(row.map(esc).join(","));
-        if (pageData.rows.length < PAGE_SIZE) break;
-        offset += PAGE_SIZE;
+        if (pageData.rows.length < pageSize) break;
+        offset += pageSize;
       }
       if (offset >= MAX_ROWS) {
         setError(`Export capped at ${MAX_ROWS} rows.`);
@@ -1082,18 +1084,34 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                     ‹
                   </button>
                   <span className="tabular-nums">
-                    {page * PAGE_SIZE + 1}–{page * PAGE_SIZE + (rows?.rows.length ?? 0)}
+                    {page * pageSize + 1}–{page * pageSize + (rows?.rows.length ?? 0)}
                     {tableRowCount != null ? (
                       <span className="text-gray-600"> / {tableRowCount.toLocaleString()}</span>
                     ) : null}
                   </span>
                   <button
-                    disabled={(rows?.rows.length ?? 0) < PAGE_SIZE}
+                    disabled={(rows?.rows.length ?? 0) < pageSize}
                     onClick={() => void showTable(sel, page + 1)}
                     className="rounded px-1 hover:bg-[var(--border)] disabled:opacity-30"
                   >
                     ›
                   </button>
+                  <select
+                    className="rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-gray-400"
+                    value={pageSize}
+                    onChange={(e) => {
+                      const n = Number(e.target.value);
+                      setPageSize(n);
+                      if (sel) void showTable(sel, 0);
+                    }}
+                    data-tooltip="Rows per page"
+                  >
+                    {PAGE_SIZE_OPTIONS.map((n) => (
+                      <option key={n} value={n}>
+                        {n}/page
+                      </option>
+                    ))}
+                  </select>
                 </div>
               ) : null}
               {tab === "sql" ? (
