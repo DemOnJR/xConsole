@@ -90,8 +90,8 @@ export function StatusStrip() {
   const runningTools = activity.filter((a) => a.state === "running").length;
 
   const tokRate =
-    streamStats && streamStats.tokens_per_sec > 0
-      ? ` · ${streamStats.tokens_per_sec.toFixed(1)} t/s`
+    streamStats && streamStats.tokensPerSec > 0
+      ? ` · ${streamStats.tokensPerSec.toFixed(1)} t/s`
       : "";
   const agentLabel = streaming
     ? runningTools > 1
