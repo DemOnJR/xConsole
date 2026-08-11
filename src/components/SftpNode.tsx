@@ -194,7 +194,14 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   const [showTree, setShowTree] = useState(
     () => localStorage.getItem("xconsole-sftp-tree") !== "0",
   );
-  const [treeWidth, setTreeWidth] = useState(DEFAULT_TREE_W);
+  const [treeWidth, setTreeWidth] = useState(() => {
+    try {
+      const n = Number(localStorage.getItem("xconsole-sftp-tree-w"));
+      return n >= MIN_TREE_W && n <= MAX_TREE_W ? n : DEFAULT_TREE_W;
+    } catch {
+      return DEFAULT_TREE_W;
+    }
+  });
   const [treeResizing, setTreeResizing] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["/"]));
   const [treeCache, setTreeCache] = useState<Record<string, SftpEntry[]>>({});
@@ -1510,12 +1517,19 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     const startW = treeWidth;
     setTreeResizing(true);
 
+    let last = startW;
     const onMove = (ev: MouseEvent) => {
       const next = Math.min(MAX_TREE_W, Math.max(MIN_TREE_W, startW + ev.clientX - startX));
+      last = next;
       setTreeWidth(next);
     };
     const onUp = () => {
       setTreeResizing(false);
+      try {
+        localStorage.setItem("xconsole-sftp-tree-w", String(last));
+      } catch {
+        /* ignore */
+      }
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
     };
