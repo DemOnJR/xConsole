@@ -14,12 +14,14 @@ function RailBtn({
   active,
   title,
   onClick,
+  onDoubleClick,
   badge,
   children,
 }: {
   active: boolean;
   title: string;
   onClick: () => void;
+  onDoubleClick?: () => void;
   badge?: number;
   children: React.ReactNode;
 }) {
@@ -31,6 +33,7 @@ function RailBtn({
       data-tooltip={title}
       data-tooltip-side="right"
       onClick={onClick}
+      onDoubleClick={onDoubleClick}
       aria-pressed={active}
     >
       {children}
@@ -92,6 +95,7 @@ export function NavRail() {
   const toggleRight = useUiStore((s) => s.toggleRight);
   const toggleBottom = useUiStore((s) => s.toggleBottom);
   const toggleAgent = useUiStore((s) => s.toggleAgent);
+  const toggleAgentExpanded = useUiStore((s) => s.toggleAgentExpanded);
   const openSettings = useUiStore((s) => s.openSettings);
 
   const pendingApprovals = useAgentStore((s) => s.pendingApprovals.length);
@@ -139,10 +143,11 @@ export function NavRail() {
             : agentBusy
               ? "Agent working…"
               : agentOpen
-                ? "Hide agent"
-                : "Agent"
+                ? "Hide agent (double-click fullscreen)"
+                : "Agent (double-click fullscreen)"
         }
         onClick={toggleAgent}
+        onDoubleClick={toggleAgentExpanded}
         badge={agentNeedsYou > 0 ? agentNeedsYou : undefined}
       >
         <BotIcon size={18} />
