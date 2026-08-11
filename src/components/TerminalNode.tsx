@@ -491,6 +491,16 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
           )}
           <button
             className="rounded px-1.5 py-0.5 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+            data-tooltip="Clear scrollback (does not kill the shell)"
+            onClick={(e) => {
+              e.stopPropagation();
+              termRef.current?.clear();
+            }}
+          >
+            ⌫
+          </button>
+          <button
+            className="rounded px-1.5 py-0.5 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
             data-tooltip="Close terminal"
             onClick={(e) => {
               e.stopPropagation();
