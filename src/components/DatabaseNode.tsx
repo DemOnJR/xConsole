@@ -1267,6 +1267,37 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                     </button>
                     <button
                       type="button"
+                      disabled={!sql.trim()}
+                      onClick={() => {
+                        // Lightweight pretty-print: keywords uppercase, collapse spaces.
+                        const kw =
+                          /\b(select|from|where|and|or|join|left|right|inner|outer|on|group by|order by|limit|offset|insert into|values|update|set|delete|create|table|alter|drop|as|in|not|null|is|like|between|union|all|distinct|having|case|when|then|else|end)\b/gi;
+                        let s = sql
+                          .replace(/\r\n/g, "\n")
+                          .replace(/[ \t]+/g, " ")
+                          .replace(/ *\n */g, "\n")
+                          .trim();
+                        s = s.replace(kw, (m) => m.toUpperCase());
+                        s = s
+                          .replace(/\bFROM\b/g, "\nFROM")
+                          .replace(/\bWHERE\b/g, "\nWHERE")
+                          .replace(/\b(AND|OR)\b/g, "\n  $1")
+                          .replace(/\bJOIN\b/g, "\nJOIN")
+                          .replace(/\bLEFT JOIN\b/g, "\nLEFT JOIN")
+                          .replace(/\bGROUP BY\b/g, "\nGROUP BY")
+                          .replace(/\bORDER BY\b/g, "\nORDER BY")
+                          .replace(/\bLIMIT\b/g, "\nLIMIT")
+                          .replace(/\bVALUES\b/g, "\nVALUES")
+                          .replace(/\bSET\b/g, "\nSET");
+                        setSql(s.trim() + (s.trim().endsWith(";") ? "" : ";"));
+                      }}
+                      className="rounded border border-[var(--border)] px-2 py-0.5 text-[11px] text-gray-400 hover:bg-[var(--border)] disabled:opacity-40"
+                      data-tooltip="Light SQL format (keywords + line breaks)"
+                    >
+                      Format
+                    </button>
+                    <button
+                      type="button"
                       onClick={toggleFavorite}
                       disabled={!sql.trim()}
                       className={`rounded px-1.5 py-0.5 text-[11px] disabled:opacity-30 ${
