@@ -367,6 +367,7 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
   const [rows, setRows] = useState<DbResultSet | null>(null);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+  const [autoRefresh, setAutoRefresh] = useState(false);
   const [tab, setTab] = useState<Tab>("data");
   const [sql, setSql] = useState("SELECT * FROM ");
   const [sqlResult, setSqlResult] = useState<DbResultSet | null>(null);
@@ -522,6 +523,15 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     },
     [pageSize],
   );
+
+  // Optional live refresh of the current data page (e.g. watching a queue table).
+  useEffect(() => {
+    if (!autoRefresh || !sel || tab !== "data") return;
+    const t = window.setInterval(() => {
+      void showTable(sel, page);
+    }, 5000);
+    return () => window.clearInterval(t);
+  }, [autoRefresh, sel, page, tab, showTable]);
 
   // Back/forward across tables, like the SFTP panel. Paging and post-edit refreshes call
   // showTable directly so they don't pile up history entries for the same table.
@@ -1119,6 +1129,22 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                       </option>
                     ))}
                   </select>
+                  <button
+                    type="button"
+                    className={`rounded px-1.5 py-0.5 text-[10px] ${
+                      autoRefresh
+                        ? "bg-emerald-900/40 text-emerald-300"
+                        : "text-gray-500 hover:bg-[var(--border)]"
+                    }`}
+                    onClick={() => setAutoRefresh((v) => !v)}
+                    data-tooltip={
+                      autoRefresh
+                        ? "Auto-refresh on (every 5s) — click to stop"
+                        : "Auto-refresh this page every 5 seconds"
+                    }
+                  >
+                    {autoRefresh ? "↻ live" : "↻"}
+                  </button>
                 </div>
               ) : null}
               {tab === "sql" ? (
