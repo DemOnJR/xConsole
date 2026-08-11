@@ -29,6 +29,8 @@ export function StatusStrip() {
   const leftOpen = useUiStore((s) => s.leftOpen);
   const toggleLeft = useUiStore((s) => s.toggleLeft);
   const toggleBottom = useUiStore((s) => s.toggleBottom);
+  const rightOpen = useUiStore((s) => s.rightOpen);
+  const toggleRight = useUiStore((s) => s.toggleRight);
   const setTransfersOpen = useTransferStore((s) => s.setOpen);
   const openSettings = useUiStore((s) => s.openSettings);
   const channel = useUpdateStore((s) => s.channel);
@@ -144,9 +146,16 @@ export function StatusStrip() {
 
       <span className="text-[var(--border-strong)]">·</span>
 
-      <span title={`${vpsCount} saved servers`}>
+      <button
+        type="button"
+        className="transition hover:text-[var(--text)]"
+        title={`${vpsCount} saved servers — open server list`}
+        onClick={() => {
+          if (!rightOpen) toggleRight();
+        }}
+      >
         {vpsCount} server{vpsCount === 1 ? "" : "s"}
-      </span>
+      </button>
 
       <span className="text-[var(--border-strong)]">·</span>
 
