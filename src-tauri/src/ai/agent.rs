@@ -620,18 +620,57 @@ pub async fn run_turn(
             break;
         }
         emit_ws(if testing { "testing" } else { "working" });
-        for call in &resp.tool_calls {
-            // The provider already streamed StreamEvent::ToolCall for each call;
-            // the single ToolResult is emitted by this loop below. No re-emit here.
-            let output = tools::dispatch(tc, call, sink).await;
+        // Parallelize read-only tool batches (e.g. run_command_all-style multi-host
+        // checks issued as separate run_command calls, list/read tools). Mutating tools
+        // stay sequential so safety/approvals and ordering stay predictable.
+        let all_readonly = resp
+            .tool_calls
+            .iter()
+            .all(|c| !tools::tool_is_mutating(&c.name, &c.arguments));
+        if all_readonly && resp.tool_calls.len() > 1 {
             emit(
                 Some(sink),
-                StreamEvent::ToolResult {
-                    id: call.id.clone(),
-                    output: output.clone(),
-                },
+                StreamEvent::Status(format!(
+                    "Running {} read-only tools in parallel…",
+                    resp.tool_calls.len()
+                )),
             );
-            messages.push(ChatMessage::tool_result(call.id.clone(), output));
+            let futs: Vec<_> = resp
+                .tool_calls
+                .iter()
+                .map(|call| {
+                    let call = call.clone();
+                    async move {
+                        let output = tools::dispatch(tc, &call, sink).await;
+                        (call.id, output)
+                    }
+                })
+                .collect();
+            let results = futures_util::future::join_all(futs).await;
+            for (id, output) in results {
+                emit(
+                    Some(sink),
+                    StreamEvent::ToolResult {
+                        id: id.clone(),
+                        output: output.clone(),
+                    },
+                );
+                messages.push(ChatMessage::tool_result(id, output));
+            }
+        } else {
+            for call in &resp.tool_calls {
+                // The provider already streamed StreamEvent::ToolCall for each call;
+                // the single ToolResult is emitted by this loop below. No re-emit here.
+                let output = tools::dispatch(tc, call, sink).await;
+                emit(
+                    Some(sink),
+                    StreamEvent::ToolResult {
+                        id: call.id.clone(),
+                        output: output.clone(),
+                    },
+                );
+                messages.push(ChatMessage::tool_result(call.id.clone(), output));
+            }
         }
 
         if iter == MAX_ITERS - 1 && !resp.tool_calls.is_empty() {

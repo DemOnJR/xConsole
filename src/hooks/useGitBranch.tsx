@@ -52,9 +52,12 @@ export function GitBranchBadge({
 }) {
   if (!info?.branch) return null;
   const label = info.dirty ? `${info.branch}*` : info.branch;
-  const tip = info.dirty
-    ? `git · ${info.branch} (uncommitted changes)`
-    : `git · ${info.branch}`;
+  const tipParts = [
+    `git · ${info.branch}`,
+    info.dirty ? "uncommitted changes" : null,
+    info.root ? `root: ${info.root}` : null,
+  ].filter(Boolean);
+  const tip = tipParts.join(" · ");
   return (
     <span
       className={`inline-flex max-w-[160px] items-center gap-1 truncate rounded px-1.5 py-0.5 font-mono text-[10px] ${
@@ -64,6 +67,11 @@ export function GitBranchBadge({
       } ${className}`}
       data-tooltip={tip}
       title={tip}
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        // Quick copy branch name for scripts / PRs.
+        void navigator.clipboard?.writeText(info.branch).catch(() => {});
+      }}
     >
       <span className="opacity-70" aria-hidden>
         ⎇
