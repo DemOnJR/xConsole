@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { AgentConversationMeta } from "../../lib/tauri";
 import type { AgentActivityItem } from "../../stores/agentStore";
 
@@ -149,6 +150,16 @@ export function AgentHistory({
   onRename?: (id: string, title: string) => void;
   onClose: () => void;
 }) {
+  const [filter, setFilter] = useState("");
+  const q = filter.trim().toLowerCase();
+  const list = !q
+    ? conversations
+    : conversations.filter(
+        (c) =>
+          c.title.toLowerCase().includes(q) ||
+          (c.summary ?? "").toLowerCase().includes(q),
+      );
+
   if (!open) return null;
 
   return (
@@ -170,11 +181,22 @@ export function AgentHistory({
           hide
         </button>
       </div>
+      {conversations.length > 4 ? (
+        <input
+          type="text"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter chats…"
+          className="mb-1.5 w-full rounded border border-[var(--border)] bg-[var(--surface)] px-2 py-1 text-[11px] text-gray-200 outline-none focus:border-blue-600"
+        />
+      ) : null}
       <div className="max-h-40 space-y-0.5 overflow-y-auto">
-        {conversations.length === 0 && (
-          <p className="px-1 py-2 text-[10px] text-gray-600">No saved chats yet.</p>
+        {list.length === 0 && (
+          <p className="px-1 py-2 text-[10px] text-gray-600">
+            {conversations.length === 0 ? "No saved chats yet." : "No matches."}
+          </p>
         )}
-        {conversations.map((c) => {
+        {list.map((c) => {
           const active = c.id === activeId;
           return (
             <div
