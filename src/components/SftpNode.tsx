@@ -373,6 +373,8 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   const [localSelection, setLocalSelection] = useState<Set<string>>(() => new Set());
   /** Dual-pane compare: highlight files only-local / only-remote / size-diff. */
   const [compareOn, setCompareOn] = useState(false);
+  /** Which dual-pane side receives keyboard selection (Ctrl+A, F5/F6 context). */
+  const [activeSide, setActiveSide] = useState<"local" | "remote">("remote");
   type CompareMark = "only-local" | "only-remote" | "diff" | "same";
   const compareMap = useMemo(() => {
     if (!dualPane || !compareOn) return null as Map<string, CompareMark> | null;
@@ -915,7 +917,11 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     const key = e.key.toLowerCase();
     if (mod && key === "a") {
       e.preventDefault();
-      setSelection(new Set(rows.map((r) => r.path)));
+      if (dualPane && activeSide === "local") {
+        setLocalSelection(new Set(localEntries.map((r) => r.path)));
+      } else {
+        setSelection(new Set(rows.map((r) => r.path)));
+      }
       return;
     }
     if (mod && key === "c") {
@@ -1700,7 +1706,12 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
         {status !== "connecting" && (
           <div className="flex min-h-0 flex-1">
             {dualPane && (
-              <div className="relative flex min-h-0 w-[42%] min-w-[160px] max-w-[50%] shrink-0 flex-col border-r border-[var(--border)]">
+              <div
+                className={`relative flex min-h-0 w-[42%] min-w-[160px] max-w-[50%] shrink-0 flex-col border-r border-[var(--border)] ${
+                  activeSide === "local" ? "bg-cyan-950/10 ring-1 ring-inset ring-cyan-800/30" : ""
+                }`}
+                onMouseDown={() => setActiveSide("local")}
+              >
                 <div className="flex items-center gap-1 border-b border-[var(--border)]/80 px-1.5 py-1">
                   <button
                     type="button"
@@ -1930,8 +1941,13 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
             )}
 
             <div
-              className="relative min-h-0 flex-1 overflow-y-auto px-1 py-1"
+              className={`relative min-h-0 flex-1 overflow-y-auto px-1 py-1 ${
+                dualPane && activeSide === "remote"
+                  ? "bg-cyan-950/10 ring-1 ring-inset ring-cyan-800/30"
+                  : ""
+              }`}
               data-drop={dropId}
+              onMouseDown={() => setActiveSide("remote")}
               onContextMenu={(e) => showContextMenu(e, null)}
               onClick={(e) => {
                 // A click on the empty space below the rows clears the selection, the

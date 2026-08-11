@@ -58,8 +58,40 @@ export function StatusStrip() {
     [jobs],
   );
 
+  /** Aggregate transfer progress when jobs report bytes. */
+  const transferProgress = useMemo(() => {
+    const active = Object.values(jobs).filter(
+      (j) => j.state === "running" || j.state === "scanning",
+    );
+    if (active.length === 0) return null;
+    let done = 0;
+    let total = 0;
+    for (const j of active) {
+      if (j.bytes_total > 0) {
+        total += j.bytes_total;
+        done += Math.min(j.bytes_done, j.bytes_total);
+      }
+    }
+    if (total <= 0) return null;
+    return Math.round((done / total) * 100);
+  }, [jobs]);
+
+  /** Git branch of the focused canvas node, if any. */
+  const focusedId = useCanvasStore((s) => s.focusedId);
+  const focusGit = useMemo(() => {
+    if (!focusedId) return null;
+    const info = sessions[focusedId];
+    if (!info?.gitBranch) return null;
+    return { branch: info.gitBranch, dirty: Boolean(info.gitDirty) };
+  }, [focusedId, sessions]);
+
+  const activity = useAgentStore((s) => s.activity);
+  const runningTools = activity.filter((a) => a.state === "running").length;
+
   const agentLabel = streaming
-    ? "Agent working…"
+    ? runningTools > 1
+      ? `Agent · ${runningTools} tools…`
+      : "Agent working…"
     : hasPlan
       ? "Plan awaiting approval"
       : pendingApprovals > 0
@@ -114,6 +146,28 @@ export function StatusStrip() {
         </>
       ) : null}
 
+      {focusGit ? (
+        <>
+          <span className="text-[var(--border-strong)]">·</span>
+          <span
+            className="inline-flex max-w-[140px] items-center gap-1 truncate font-mono text-[10px]"
+            title={
+              focusGit.dirty
+                ? `${focusGit.branch} (dirty)`
+                : focusGit.branch
+            }
+          >
+            <span className="text-[var(--text-faint)]">⎇</span>
+            <span className="truncate text-[var(--text-dim)]">{focusGit.branch}</span>
+            {focusGit.dirty ? (
+              <span className="text-amber-400" title="Uncommitted changes">
+                *
+              </span>
+            ) : null}
+          </span>
+        </>
+      ) : null}
+
       <div className="ml-auto flex items-center gap-3">
         {activeTransfers > 0 ? (
           <button
@@ -122,6 +176,7 @@ export function StatusStrip() {
             onClick={() => setTransfersOpen(true)}
           >
             {activeTransfers} transfer{activeTransfers === 1 ? "" : "s"}
+            {transferProgress != null ? ` · ${transferProgress}%` : ""}
           </button>
         ) : null}
 

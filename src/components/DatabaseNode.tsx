@@ -1008,21 +1008,66 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
 
               {tab === "structure" ? (
                 columns.length > 0 ? (
-                  <Grid
-                    set={{
-                      columns: ["Column", "Type", "Null", "Key", "Default", "Extra"],
-                      rows: columns.map((c) => [
-                        c.name,
-                        c.data_type,
-                        c.nullable ? "YES" : "NO",
-                        c.primary ? "PRI" : "",
-                        c.default,
-                        c.extra,
-                      ]),
-                      affected: null,
-                      message: null,
-                    }}
-                  />
+                  <div className="flex h-full min-h-0 flex-col">
+                    <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)] px-2 py-1">
+                      <button
+                        type="button"
+                        className="rounded px-1.5 py-0.5 text-[10px] text-gray-300 hover:bg-[var(--border)]"
+                        data-tooltip="Copy column definitions as SQL fragment"
+                        onClick={() => {
+                          const lines = columns.map((c) => {
+                            const nullish = c.nullable ? "NULL" : "NOT NULL";
+                            const def =
+                              c.default != null && c.default !== ""
+                                ? ` DEFAULT ${c.default}`
+                                : "";
+                            const key = c.primary ? " PRIMARY KEY" : "";
+                            const extra = c.extra ? ` ${c.extra}` : "";
+                            return `  ${c.name} ${c.data_type} ${nullish}${def}${key}${extra}`;
+                          });
+                          const body = lines.join(",\n");
+                          const sqlFrag = sel
+                            ? `CREATE TABLE ${sel.schema}.${sel.table} (\n${body}\n);`
+                            : body;
+                          void navigator.clipboard.writeText(sqlFrag);
+                        }}
+                      >
+                        Copy CREATE
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded px-1.5 py-0.5 text-[10px] text-gray-300 hover:bg-[var(--border)]"
+                        data-tooltip="Copy column names as comma-separated list"
+                        onClick={() => {
+                          void navigator.clipboard.writeText(
+                            columns.map((c) => c.name).join(", "),
+                          );
+                        }}
+                      >
+                        Copy names
+                      </button>
+                      <span className="ml-auto text-[10px] text-gray-600">
+                        {columns.length} column{columns.length === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                    <div className="min-h-0 flex-1">
+                      <Grid
+                        set={{
+                          columns: ["Column", "Type", "Null", "Key", "Default", "Extra"],
+                          rows: columns.map((c) => [
+                            c.name,
+                            c.data_type,
+                            c.nullable ? "YES" : "NO",
+                            c.primary ? "PRI" : "",
+                            c.default,
+                            c.extra,
+                          ]),
+                          affected: null,
+                          message: null,
+                        }}
+                      />
+                    </div>
+                  </div>
                 ) : (
                   <p className="p-3 text-[11px] text-gray-500">Pick a table on the left.</p>
                 )
