@@ -973,8 +973,16 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
 
       <div className="nodrag nowheel flex min-h-0 flex-1 flex-col">
         {error ? (
-          <div className="shrink-0 border-b border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-300">
-            {error}
+          <div className="flex shrink-0 items-start gap-2 border-b border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-300">
+            <span className="min-w-0 flex-1 break-words">{error}</span>
+            <button
+              type="button"
+              className="shrink-0 rounded px-1 text-red-400/80 hover:bg-red-900/30 hover:text-red-200"
+              onClick={() => setError(null)}
+              data-tooltip="Dismiss"
+            >
+              ✕
+            </button>
           </div>
         ) : null}
 
