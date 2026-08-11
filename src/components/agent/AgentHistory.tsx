@@ -15,6 +15,71 @@ function formatWhen(iso?: string | null): string {
   return d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
+function shortTitle(title: string, max = 22): string {
+  const t = title.trim() || "Untitled";
+  if (t.length <= max) return t;
+  return `${t.slice(0, max - 1)}…`;
+}
+
+/** Always-visible recent conversation chips for fast multi-session switching. */
+export function AgentSessionTabs({
+  conversations,
+  activeId,
+  onSelect,
+  onNew,
+  disabled,
+}: {
+  conversations: AgentConversationMeta[];
+  activeId: string;
+  onSelect: (id: string) => void;
+  onNew: () => void;
+  disabled?: boolean;
+}) {
+  // Active first, then most recently updated.
+  const tabs = [...conversations]
+    .sort((a, b) => {
+      if (a.id === activeId) return -1;
+      if (b.id === activeId) return 1;
+      return (b.updated_at || "").localeCompare(a.updated_at || "");
+    })
+    .slice(0, 6);
+
+  if (tabs.length === 0) return null;
+
+  return (
+    <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-[var(--border)]/80 bg-[var(--bg)]/80 px-2 py-1">
+      {tabs.map((c) => {
+        const active = c.id === activeId;
+        return (
+          <button
+            key={c.id}
+            type="button"
+            disabled={disabled && !active}
+            onClick={() => onSelect(c.id)}
+            className={`max-w-[140px] shrink-0 truncate rounded-md px-2 py-0.5 text-[10px] transition ${
+              active
+                ? "bg-blue-600/30 text-blue-100 ring-1 ring-inset ring-blue-500/40"
+                : "bg-[var(--surface)] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+            } disabled:opacity-40`}
+            data-tooltip={c.title}
+          >
+            {shortTitle(c.title)}
+          </button>
+        );
+      })}
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={onNew}
+        className="shrink-0 rounded-md px-1.5 py-0.5 text-[10px] text-gray-500 hover:bg-[var(--border)] hover:text-gray-300 disabled:opacity-40"
+        data-tooltip="New conversation"
+      >
+        +
+      </button>
+    </div>
+  );
+}
+
 export function AgentHistory({
   open,
   conversations,

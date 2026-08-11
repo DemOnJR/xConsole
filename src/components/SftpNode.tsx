@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   onInternalDrop,
   startInternalDrag,
@@ -371,6 +371,41 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   const [localEntries, setLocalEntries] = useState<LocalFsEntry[]>([]);
   const [localLoading, setLocalLoading] = useState(false);
   const [localSelection, setLocalSelection] = useState<Set<string>>(() => new Set());
+  /** Dual-pane compare: highlight files only-local / only-remote / size-diff. */
+  const [compareOn, setCompareOn] = useState(false);
+  type CompareMark = "only-local" | "only-remote" | "diff" | "same";
+  const compareMap = useMemo(() => {
+    if (!dualPane || !compareOn) return null as Map<string, CompareMark> | null;
+    const map = new Map<string, CompareMark>();
+    const localByName = new Map(
+      localEntries.filter((e) => !e.is_dir).map((e) => [e.name, e]),
+    );
+    const remoteByName = new Map(
+      entries.filter((e) => !e.is_dir).map((e) => [e.name, e]),
+    );
+    const names = new Set([...localByName.keys(), ...remoteByName.keys()]);
+    for (const name of names) {
+      const L = localByName.get(name);
+      const R = remoteByName.get(name);
+      if (L && !R) map.set(name, "only-local");
+      else if (!L && R) map.set(name, "only-remote");
+      else if (L && R) map.set(name, L.size !== R.size ? "diff" : "same");
+    }
+    return map;
+  }, [dualPane, compareOn, localEntries, entries]);
+
+  const compareStats = useMemo(() => {
+    if (!compareMap) return null;
+    let onlyLocal = 0;
+    let onlyRemote = 0;
+    let diff = 0;
+    for (const m of compareMap.values()) {
+      if (m === "only-local") onlyLocal += 1;
+      else if (m === "only-remote") onlyRemote += 1;
+      else if (m === "diff") diff += 1;
+    }
+    return { onlyLocal, onlyRemote, diff };
+  }, [compareMap]);
 
   /** Internal drag hover targets (dual-pane upload/download). */
   const dragOver = useDragStore((s) => s.over);
@@ -496,6 +531,57 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     } catch (e) {
       setError(String(e));
     }
+  };
+
+  /** Upload files that exist only on local (or size-diff) into remote dir. */
+  const syncLocalMissing = async () => {
+    if (!compareMap || !sessionRef.current) return;
+    const paths = localEntries
+      .filter((e) => {
+        if (e.is_dir) return false;
+        const m = compareMap.get(e.name);
+        return m === "only-local" || m === "diff";
+      })
+      .map((e) => e.path);
+    if (paths.length === 0) {
+      setError("Nothing to upload — remote already has matching files.");
+      return;
+    }
+    const ok = await dialog.confirm({
+      title: "Upload to remote?",
+      message: `Upload ${paths.length} file(s) from local into ${path}? Size-differing files will be overwritten on the remote.`,
+      confirmText: "Upload",
+    });
+    if (!ok) return;
+    try {
+      setError(null);
+      await useTransferStore.getState().upload(sessionRef.current, path, paths);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  /** Download files that exist only on remote (or size-diff) into local dir. */
+  const syncRemoteMissing = async () => {
+    if (!compareMap || !sessionRef.current || !localPath) return;
+    const paths = entries
+      .filter((e) => {
+        if (e.is_dir) return false;
+        const m = compareMap.get(e.name);
+        return m === "only-remote" || m === "diff";
+      })
+      .map((e) => e.path);
+    if (paths.length === 0) {
+      setError("Nothing to download — local already has matching files.");
+      return;
+    }
+    const ok = await dialog.confirm({
+      title: "Download to local?",
+      message: `Download ${paths.length} file(s) from remote into ${localPath}? Size-differing files will be overwritten locally.`,
+      confirmText: "Download",
+    });
+    if (!ok) return;
+    void downloadRemoteToLocal(paths);
   };
 
   // Dual-pane drag: remote → local (download) and local → remote (upload).
@@ -1637,6 +1723,54 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                   >
                     ↑ Upload
                   </button>
+                  <button
+                    type="button"
+                    className={`rounded px-1.5 py-0.5 text-[10px] ${
+                      compareOn
+                        ? "bg-amber-900/40 text-amber-200"
+                        : "text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+                    }`}
+                    onClick={() => setCompareOn((v) => !v)}
+                    data-tooltip="Compare local vs remote files by name and size"
+                  >
+                    ⇄
+                  </button>
+                  {compareOn && compareStats ? (
+                    <>
+                      <span
+                        className="max-w-[90px] truncate font-mono text-[9px] text-gray-500"
+                        title={`Only local: ${compareStats.onlyLocal} · Only remote: ${compareStats.onlyRemote} · Size diff: ${compareStats.diff}`}
+                      >
+                        L{compareStats.onlyLocal} R{compareStats.onlyRemote} Δ
+                        {compareStats.diff}
+                      </span>
+                      <button
+                        type="button"
+                        className="rounded px-1 py-0.5 text-[9px] text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-40"
+                        disabled={
+                          compareStats.onlyLocal + compareStats.diff === 0 ||
+                          status !== "connected"
+                        }
+                        onClick={() => void syncLocalMissing()}
+                        data-tooltip="Upload only-local + size-diff files to remote"
+                      >
+                        ↑ miss
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded px-1 py-0.5 text-[9px] text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-40"
+                        disabled={
+                          compareStats.onlyRemote + compareStats.diff === 0 ||
+                          status !== "connected" ||
+                          !localPath
+                        }
+                        onClick={() => void syncRemoteMissing()}
+                        data-tooltip="Download only-remote + size-diff files to local"
+                      >
+                        ↓ miss
+                      </button>
+                    </>
+                  ) : null}
                 </div>
                 <div
                   className="relative min-h-0 flex-1 overflow-y-auto px-1 py-1"
@@ -1656,14 +1790,32 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                       Empty folder — drag remote files here to download
                     </div>
                   ) : (
-                    localEntries.map((entry) => (
+                    localEntries.map((entry) => {
+                      const mark =
+                        !entry.is_dir && compareMap
+                          ? compareMap.get(entry.name)
+                          : undefined;
+                      const markCls =
+                        mark === "only-local"
+                          ? "bg-emerald-950/50 ring-1 ring-inset ring-emerald-700/40"
+                          : mark === "diff"
+                            ? "bg-amber-950/45 ring-1 ring-inset ring-amber-700/40"
+                            : localSelection.has(entry.path)
+                              ? "bg-cyan-950/60 ring-1 ring-inset ring-cyan-700/50"
+                              : "hover:bg-[var(--surface)]";
+                      return (
                       <div
                         key={entry.path}
-                        className={`flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[11px] ${
-                          localSelection.has(entry.path)
-                            ? "bg-cyan-950/60 ring-1 ring-inset ring-cyan-700/50"
-                            : "hover:bg-[var(--surface)]"
-                        }`}
+                        className={`flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[11px] ${markCls}`}
+                        title={
+                          mark === "only-local"
+                            ? "Only on local"
+                            : mark === "diff"
+                              ? "Size differs from remote"
+                              : mark === "same"
+                                ? "Same name+size as remote"
+                                : undefined
+                        }
                       >
                         <button
                           type="button"
@@ -1715,9 +1867,15 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                                   : `${(entry.size / (1024 * 1024)).toFixed(1)} MB`}
                             </span>
                           )}
+                          {mark === "only-local" ? (
+                            <span className="shrink-0 text-[9px] text-emerald-400">L</span>
+                          ) : mark === "diff" ? (
+                            <span className="shrink-0 text-[9px] text-amber-400">Δ</span>
+                          ) : null}
                         </button>
                       </div>
-                    ))
+                    );
+                    })
                   )}
                 </div>
               </div>
@@ -1781,14 +1939,32 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                       : "Empty directory"}
                 </div>
               ) : (
-                rows.map((entry) => (
+                rows.map((entry) => {
+                  const mark =
+                    !entry.is_dir && compareMap
+                      ? compareMap.get(entry.name)
+                      : undefined;
+                  const rowCls =
+                    mark === "only-remote"
+                      ? "bg-sky-950/45 ring-1 ring-inset ring-sky-700/40"
+                      : mark === "diff"
+                        ? "bg-amber-950/45 ring-1 ring-inset ring-amber-700/40"
+                        : selection.has(entry.path)
+                          ? "bg-cyan-950/60 ring-1 ring-inset ring-cyan-700/60"
+                          : "hover:bg-[var(--surface)]";
+                  return (
                   <div
                     key={entry.path}
-                    className={`group flex items-center gap-2 rounded px-2 py-1 ${
-                      selection.has(entry.path)
-                        ? "bg-cyan-950/60 ring-1 ring-inset ring-cyan-700/60"
-                        : "hover:bg-[var(--surface)]"
-                    }`}
+                    className={`group flex items-center gap-2 rounded px-2 py-1 ${rowCls}`}
+                    title={
+                      mark === "only-remote"
+                        ? "Only on remote"
+                        : mark === "diff"
+                          ? "Size differs from local"
+                          : mark === "same"
+                            ? "Same name+size as local"
+                            : undefined
+                    }
                     onContextMenu={(e) => {
                       // Right-clicking outside the selection moves the selection there
                       // first, so the menu always acts on what is visibly highlighted.
@@ -1867,6 +2043,11 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                           {formatSize(entry.size)}
                         </span>
                       )}
+                      {mark === "only-remote" ? (
+                        <span className="shrink-0 text-[9px] text-sky-400">R</span>
+                      ) : mark === "diff" ? (
+                        <span className="shrink-0 text-[9px] text-amber-400">Δ</span>
+                      ) : null}
                     </button>
                     {/* Folders download too now — the engine walks them. */}
                     <button
@@ -1878,7 +2059,8 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                       ↓
                     </button>
                   </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>

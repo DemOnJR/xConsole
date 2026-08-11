@@ -560,6 +560,54 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     URL.revokeObjectURL(url);
   };
 
+  /** Drop the current table after typing its name to confirm. */
+  const dropTable = async () => {
+    if (!sel) return;
+    const typed = await dialog.prompt({
+      title: `Drop table ${sel.schema}.${sel.table}?`,
+      label: `Type the table name "${sel.table}" to confirm permanent DROP`,
+      defaultValue: "",
+      confirmText: "Drop table",
+    });
+    if (typed === null) return;
+    if (typed.trim() !== sel.table) {
+      setError("Drop cancelled — table name did not match.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await api.dbRunSql(sel.sessionId, `DROP TABLE ${sel.schema}.${sel.table}`);
+      const droppedSchema = sel.schema;
+      const droppedSession = sel.sessionId;
+      setSel(null);
+      setRows(null);
+      setColumns([]);
+      // Clear cached tables so the tree reloads without the dropped table.
+      setInstances((prev) =>
+        prev.map((inst) =>
+          inst.sessionId === droppedSession ? { ...inst, tables: {} } : inst,
+        ),
+      );
+      try {
+        const tables = await api.dbListTables(droppedSession, droppedSchema);
+        setInstances((prev) =>
+          prev.map((inst) =>
+            inst.sessionId === droppedSession
+              ? { ...inst, tables: { ...inst.tables, [droppedSchema]: tables } }
+              : inst,
+          ),
+        );
+      } catch {
+        /* tree will reload when schema is re-opened */
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   /** Empty the current table (TRUNCATE / DELETE) after a strong confirm. */
   const truncateTable = async () => {
     if (!sel) return;
@@ -812,6 +860,15 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                     data-tooltip="Delete all rows in this table"
                   >
                     Truncate
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void dropTable()}
+                    className="rounded px-1.5 py-0.5 text-red-500/90 hover:bg-red-950/50 hover:text-red-200 disabled:opacity-30"
+                    data-tooltip="DROP TABLE permanently (type name to confirm)"
+                  >
+                    Drop
                   </button>
                   <button
                     type="button"
