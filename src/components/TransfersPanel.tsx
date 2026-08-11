@@ -141,6 +141,7 @@ export function TransfersPanel() {
   const lastDestination = useTransferStore((s) => s.lastDestination);
   const setLastDestination = useTransferStore((s) => s.setLastDestination);
   const clearFinished = useTransferStore((s) => s.clearFinished);
+  const cancel = useTransferStore((s) => s.cancel);
 
   useEffect(() => {
     let un: (() => void) | undefined;
@@ -172,6 +173,22 @@ export function TransfersPanel() {
               <span className="rounded-full bg-cyan-500/20 px-1.5 text-[10px] text-cyan-300">
                 {activeCount} active
               </span>
+            ) : null}
+            {activeCount > 0 ? (
+              <button
+                type="button"
+                onClick={() => {
+                  for (const j of list) {
+                    if (j.state === "running" || j.state === "scanning") {
+                      void cancel(j.id);
+                    }
+                  }
+                }}
+                className="rounded px-1.5 py-0.5 text-[10px] text-red-300/90 hover:bg-red-950/40"
+                data-tooltip="Cancel all active transfers"
+              >
+                Cancel all
+              </button>
             ) : null}
             <button
               onClick={() => void clearFinished()}
