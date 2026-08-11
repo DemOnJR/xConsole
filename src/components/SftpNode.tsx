@@ -2110,6 +2110,20 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                 <button
                   type="button"
                   className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
+                  onClick={() => {
+                    const names = [...selection].map((p) => {
+                      const i = p.lastIndexOf("/");
+                      return i >= 0 ? p.slice(i + 1) : p;
+                    });
+                    void navigator.clipboard.writeText(names.join("\n"));
+                  }}
+                  data-tooltip="Copy basenames only"
+                >
+                  Names
+                </button>
+                <button
+                  type="button"
+                  className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
                   onClick={() => putOnClipboard(null, "cut")}
                 >
                   Cut
