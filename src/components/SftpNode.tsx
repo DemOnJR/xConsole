@@ -769,11 +769,16 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   // Selection
   // ---------------------------------------------------------------------------
 
-  const [hideDotfiles, setHideDotfiles] = useState(false);
+  const [hideDotfiles, setHideDotfiles] = useState(
+    () => localStorage.getItem("xconsole-sftp-hide-dots") === "1",
+  );
   /** Quick extension filter (e.g. "php") — empty = all. */
   const [extFilter, setExtFilter] = useState("");
   type SortMode = "name" | "size" | "dirs";
-  const [sortMode, setSortMode] = useState<SortMode>("dirs");
+  const [sortMode, setSortMode] = useState<SortMode>(() => {
+    const s = localStorage.getItem("xconsole-sftp-sort");
+    return s === "name" || s === "size" || s === "dirs" ? s : "dirs";
+  });
   const [showKeysHelp, setShowKeysHelp] = useState(false);
   /** Local pane width % when dual-pane is on (18–55). */
   const [localPanePct, setLocalPanePct] = useState(42);
@@ -1745,14 +1750,32 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                 : "text-gray-400 hover:bg-[var(--border)]"
             }`}
             data-tooltip={hideDotfiles ? "Show dotfiles" : "Hide dotfiles"}
-            onClick={() => setHideDotfiles((v) => !v)}
+            onClick={() =>
+              setHideDotfiles((v) => {
+                const next = !v;
+                try {
+                  localStorage.setItem("xconsole-sftp-hide-dots", next ? "1" : "0");
+                } catch {
+                  /* ignore */
+                }
+                return next;
+              })
+            }
           >
             ··
           </button>
           <select
             className="rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-gray-400"
             value={sortMode}
-            onChange={(e) => setSortMode(e.target.value as SortMode)}
+            onChange={(e) => {
+              const v = e.target.value as SortMode;
+              setSortMode(v);
+              try {
+                localStorage.setItem("xconsole-sftp-sort", v);
+              } catch {
+                /* ignore */
+              }
+            }}
             data-tooltip="Sort files"
           >
             <option value="dirs">Dirs first</option>
