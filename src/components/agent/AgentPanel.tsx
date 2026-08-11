@@ -45,7 +45,7 @@ import { AgentActivityFeed, AgentThinking } from "./AgentActivity";
 import { AgentTokenStats } from "./AgentTokenStats";
 import { AgentContextUsageButton } from "./AgentContextUsage";
 
-import { AgentHistory, AgentSessionTabs } from "./AgentHistory";
+import { AgentHistory, AgentLiveStatus, AgentSessionTabs } from "./AgentHistory";
 
 import type { AgentChatMessage } from "../../stores/agentStore";
 
@@ -850,6 +850,11 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
           void openConversation(id);
         }}
         onNew={() => void newConversation()}
+      />
+      <AgentLiveStatus
+        streaming={streaming}
+        activity={activity}
+        planMode={planMode}
       />
       <AgentHistory
 

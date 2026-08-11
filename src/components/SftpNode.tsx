@@ -967,6 +967,22 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       setCompareOn((v) => !v);
       return;
     }
+    if (e.key === "F2") {
+      e.preventDefault();
+      const first = [...selection][0];
+      if (first) {
+        const entry = rows.find((r) => r.path === first);
+        if (entry) void handleRename(entry);
+      }
+      return;
+    }
+    if (e.key === "Enter" && selection.size === 1) {
+      e.preventDefault();
+      const first = [...selection][0];
+      const entry = rows.find((r) => r.path === first);
+      if (entry) openEntry(entry);
+      return;
+    }
     if (e.key.length !== 1 || mod || e.altKey) return;
     e.preventDefault();
     setQuery((q) => {
@@ -1514,6 +1530,42 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
             onBlur={() => setPathInput(path)}
             data-tooltip="Remote path — press Enter to go"
           />
+        </div>
+
+        {/* Clickable breadcrumb — faster than retyping the path. */}
+        <div className="flex min-w-0 shrink-0 items-center gap-0.5 overflow-x-auto border-b border-[var(--border)]/60 px-2 py-0.5">
+          <button
+            type="button"
+            className="shrink-0 rounded px-1 py-0.5 font-mono text-[10px] text-cyan-400/90 hover:bg-[var(--border)] hover:text-cyan-200"
+            onClick={() => navigateTo("/")}
+            data-tooltip="Go to /"
+          >
+            /
+          </button>
+          {pathSegments(path).map((seg, i, all) => {
+            const full = `/${all.slice(0, i + 1).join("/")}`;
+            const last = i === all.length - 1;
+            return (
+              <span key={full} className="flex shrink-0 items-center gap-0.5">
+                <span className="text-[10px] text-gray-600">/</span>
+                <button
+                  type="button"
+                  disabled={last}
+                  className={`max-w-[120px] truncate rounded px-1 py-0.5 font-mono text-[10px] ${
+                    last
+                      ? "text-gray-200"
+                      : "text-cyan-400/90 hover:bg-[var(--border)] hover:text-cyan-200"
+                  } disabled:cursor-default`}
+                  onClick={() => {
+                    if (!last) navigateTo(full);
+                  }}
+                  data-tooltip={full}
+                >
+                  {seg}
+                </button>
+              </span>
+            );
+          })}
         </div>
 
         {searchOpen && (

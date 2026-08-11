@@ -1,4 +1,5 @@
 import type { AgentConversationMeta } from "../../lib/tauri";
+import type { AgentActivityItem } from "../../stores/agentStore";
 
 function formatWhen(iso?: string | null): string {
   if (!iso) return "";
@@ -76,6 +77,48 @@ export function AgentSessionTabs({
       >
         +
       </button>
+    </div>
+  );
+}
+
+/** Thin live line under session tabs while the agent is working. */
+export function AgentLiveStatus({
+  streaming,
+  activity,
+  planMode,
+}: {
+  streaming: boolean;
+  activity: AgentActivityItem[];
+  planMode?: boolean;
+}) {
+  if (!streaming && !planMode) return null;
+  const running = activity.filter((a) => a.state === "running");
+  const label = !streaming
+    ? planMode
+      ? "Plan mode — read-only until you approve"
+      : null
+    : running.length > 1
+      ? `Running ${running.length} tools in parallel…`
+      : running.length === 1
+        ? running[0].label || "Working…"
+        : "Thinking…";
+  if (!label) return null;
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)]/60 bg-[var(--surface)]/40 px-2.5 py-1">
+      {streaming ? (
+        <span
+          className="inline-block h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-cyan-400"
+          aria-hidden
+        />
+      ) : (
+        <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400/80" />
+      )}
+      <span className="min-w-0 flex-1 truncate text-[10px] text-gray-400">{label}</span>
+      {running.length > 0 ? (
+        <span className="shrink-0 font-mono text-[9px] text-cyan-500/80">
+          {running.length} active
+        </span>
+      ) : null}
     </div>
   );
 }
