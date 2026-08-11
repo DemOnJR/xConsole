@@ -18,6 +18,24 @@ export function ServerPanel() {
   const [query, setQuery] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Vps | null>(null);
+  const [pinned, setPinned] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("xconsole-pinned-servers") || "[]") as string[];
+    } catch {
+      return [];
+    }
+  });
+  const togglePin = (id: string) => {
+    setPinned((prev) => {
+      const next = prev.includes(id) ? prev.filter((x) => x !== id) : [id, ...prev];
+      try {
+        localStorage.setItem("xconsole-pinned-servers", JSON.stringify(next.slice(0, 40)));
+      } catch {
+        /* ignore */
+      }
+      return next.slice(0, 40);
+    });
+  };
 
   useEffect(() => {
     load();
@@ -25,14 +43,23 @@ export function ServerPanel() {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return vpsList;
-    return vpsList.filter((v) =>
-      [v.name, v.host, v.username, v.tags ?? ""]
-        .join(" ")
-        .toLowerCase()
-        .includes(q),
-    );
-  }, [vpsList, query]);
+    const base = !q
+      ? vpsList
+      : vpsList.filter((v) =>
+          [v.name, v.host, v.username, v.tags ?? ""]
+            .join(" ")
+            .toLowerCase()
+            .includes(q),
+        );
+    // Pinned first, preserving relative order within each group.
+    const pinSet = new Set(pinned);
+    return [...base].sort((a, b) => {
+      const ap = pinSet.has(a.id) ? 0 : 1;
+      const bp = pinSet.has(b.id) ? 0 : 1;
+      if (ap !== bp) return ap - bp;
+      return pinned.indexOf(a.id) - pinned.indexOf(b.id);
+    });
+  }, [vpsList, query, pinned]);
 
   return (
     <aside className="xc-drawer flex h-full flex-col" data-side="right" style={{ width: "var(--drawer-w)" }}>
@@ -98,12 +125,31 @@ export function ServerPanel() {
                 className="min-w-0 flex-1 text-left"
                 onClick={() => addVps(v)}
               >
-                <div className="truncate text-sm text-gray-200">{v.name}</div>
+                <div className="flex items-center gap-1 truncate text-sm text-gray-200">
+                  {pinned.includes(v.id) ? (
+                    <span className="shrink-0 text-[10px] text-amber-400" title="Pinned">
+                      ★
+                    </span>
+                  ) : null}
+                  <span className="truncate">{v.name}</span>
+                </div>
                 <div className="truncate text-xs text-gray-500">
                   {v.username}@{v.host}:{v.port}
                 </div>
               </button>
               <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
+                <button
+                  className={`rounded p-1 text-xs hover:bg-[var(--border)] ${
+                    pinned.includes(v.id) ? "text-amber-300 opacity-100" : "text-gray-500"
+                  }`}
+                  data-tooltip={pinned.includes(v.id) ? "Unpin" : "Pin to top"}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    togglePin(v.id);
+                  }}
+                >
+                  ★
+                </button>
                 <button
                   className="rounded p-1 text-cyan-400/80 hover:bg-[var(--border)] hover:text-cyan-300"
                   data-tooltip="Open SFTP on canvas"
