@@ -459,7 +459,17 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
           style={{ background: STATUS_COLOR[status] }}
           data-tooltip={status}
         />
-        <span className="truncate font-medium text-gray-200">{data.name}</span>
+        <button
+          type="button"
+          className="truncate font-medium text-gray-200 hover:text-white"
+          data-tooltip="Click to copy server name"
+          onClick={(e) => {
+            e.stopPropagation();
+            void navigator.clipboard.writeText(String(data.name ?? ""));
+          }}
+        >
+          {data.name}
+        </button>
         <button
           type="button"
           className="truncate text-gray-500 hover:text-gray-300"
