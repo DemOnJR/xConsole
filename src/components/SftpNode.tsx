@@ -1622,7 +1622,17 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
         />
         <FolderIcon size={14} className="shrink-0 text-cyan-400" />
         <span className="truncate font-medium text-gray-200">{data.name}</span>
-        <span className="truncate text-gray-500">SFTP · {data.host}</span>
+        <button
+          type="button"
+          className="truncate text-gray-500 hover:text-gray-300"
+          data-tooltip="Click to copy host"
+          onClick={(e) => {
+            e.stopPropagation();
+            void navigator.clipboard.writeText(String(data.host ?? ""));
+          }}
+        >
+          SFTP · {data.host}
+        </button>
         {linkedTerminalId && (
           <button
             type="button"
