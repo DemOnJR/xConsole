@@ -1621,7 +1621,17 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           data-tooltip={status}
         />
         <FolderIcon size={14} className="shrink-0 text-cyan-400" />
-        <span className="truncate font-medium text-gray-200">{data.name}</span>
+        <button
+          type="button"
+          className="truncate font-medium text-gray-200 hover:text-white"
+          data-tooltip="Click to copy server name"
+          onClick={(e) => {
+            e.stopPropagation();
+            void navigator.clipboard.writeText(String(data.name ?? ""));
+          }}
+        >
+          {data.name}
+        </button>
         <button
           type="button"
           className="truncate text-gray-500 hover:text-gray-300"
