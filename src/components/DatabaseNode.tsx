@@ -63,7 +63,9 @@ function Grid({
 
   const hasKey = (columns ?? []).some((c) => c.primary);
   const editable = Boolean(onEdit) && hasKey;
-  const selectable = Boolean(onDeleteRows) && hasKey;
+  /** Row selection is always on so users can copy JSON/CSV; delete only with a PK. */
+  const selectable = true;
+  const canDelete = Boolean(onDeleteRows) && hasKey;
 
   // A new result set invalidates the old indices — keeping them would delete whatever
   // now happens to sit at those positions.
@@ -119,7 +121,7 @@ function Grid({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {selectable && selected.size > 0 ? (
+      {selected.size > 0 ? (
         <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)] bg-violet-950/30 px-2 py-1 text-[11px]">
           <span className="text-violet-200">
             {selected.size} row{selected.size === 1 ? "" : "s"} selected
@@ -131,11 +133,52 @@ function Grid({
             Clear
           </button>
           <button
-            onClick={() => onDeleteRows?.([...selected].sort((a, b) => a - b))}
-            className="ml-auto rounded bg-red-700 px-2 py-0.5 text-white hover:bg-red-600"
+            type="button"
+            className="rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--border)]"
+            data-tooltip="Copy selected rows as JSON"
+            onClick={() => {
+              const idxs = [...selected].sort((a, b) => a - b);
+              const objs = idxs.map((i) => {
+                const row = set.rows[i];
+                const o: Record<string, string | null> = {};
+                set.columns.forEach((c, ci) => {
+                  o[c] = row[ci] ?? null;
+                });
+                return o;
+              });
+              void navigator.clipboard.writeText(JSON.stringify(objs, null, 2));
+            }}
           >
-            Delete selected
+            Copy JSON
           </button>
+          <button
+            type="button"
+            className="rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--border)]"
+            data-tooltip="Copy selected rows as CSV"
+            onClick={() => {
+              const idxs = [...selected].sort((a, b) => a - b);
+              const esc = (v: string | null) => {
+                const s = v ?? "";
+                if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+                return s;
+              };
+              const lines = [
+                set.columns.map(esc).join(","),
+                ...idxs.map((i) => set.rows[i].map(esc).join(",")),
+              ];
+              void navigator.clipboard.writeText(lines.join("\n"));
+            }}
+          >
+            Copy CSV
+          </button>
+          {canDelete ? (
+            <button
+              onClick={() => onDeleteRows?.([...selected].sort((a, b) => a - b))}
+              className="ml-auto rounded bg-red-700 px-2 py-0.5 text-white hover:bg-red-600"
+            >
+              Delete selected
+            </button>
+          ) : null}
         </div>
       ) : null}
 

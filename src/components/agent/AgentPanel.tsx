@@ -1307,7 +1307,7 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
                 aria-label="Stop"
                 className="relative z-10 ml-auto mr-7 flex items-center gap-1 rounded-md bg-red-600/90 px-2 py-1 text-[11px] font-medium text-white transition hover:bg-red-600"
               >
-                <StopIcon size={12} /> {speaking && !streaming ? "Hush" : "Stop"}
+                <StopIcon size={12} /> {speaking && !streaming ? "Hush" : activity.filter((a) => a.state === "running").length > 1 ? `Stop (${activity.filter((a) => a.state === "running").length})` : "Stop"}
               </button>
             )}
 

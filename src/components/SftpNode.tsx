@@ -945,6 +945,22 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       void bulkDelete(null);
       return;
     }
+    // WinSCP-style dual-pane transfer keys (work when dual pane is open).
+    if (dualPane && e.key === "F5") {
+      e.preventDefault();
+      if (selection.size > 0) void downloadRemoteToLocal();
+      return;
+    }
+    if (dualPane && e.key === "F6") {
+      e.preventDefault();
+      if (localSelection.size > 0) void uploadLocalSelection();
+      return;
+    }
+    if (dualPane && e.key === "F7") {
+      e.preventDefault();
+      setCompareOn((v) => !v);
+      return;
+    }
     if (e.key.length !== 1 || mod || e.altKey) return;
     e.preventDefault();
     setQuery((q) => {
