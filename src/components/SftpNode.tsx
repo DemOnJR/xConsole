@@ -2153,6 +2153,14 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                     return bytes > 0 ? ` · ${formatSize(bytes)}` : "";
                   })()
                 : ""}
+              {localSelection.size > 0
+                ? (() => {
+                    const bytes = localEntries
+                      .filter((e) => localSelection.has(e.path) && !e.is_dir)
+                      .reduce((s, e) => s + (e.size || 0), 0);
+                    return bytes > 0 ? ` · local ${formatSize(bytes)}` : "";
+                  })()
+                : ""}
             </span>
             {selection.size > 0 ? (
               <>
