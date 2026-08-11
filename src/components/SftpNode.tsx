@@ -1721,15 +1721,26 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
         </div>
 
         <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)]/50 px-2 py-0.5 text-[10px] text-gray-600">
-          <span>
+          <button
+            type="button"
+            className="truncate text-left hover:text-gray-300"
+            title="Click to copy remote path"
+            onClick={() => void handleCopyPath(path)}
+          >
             {rows.length} item{rows.length === 1 ? "" : "s"}
             {hideDotfiles ? " · dots hidden" : ""}
             {selection.size > 0 ? ` · ${selection.size} selected` : ""}
-          </span>
+            <span className="ml-1.5 font-mono text-gray-500">{path}</span>
+          </button>
           {dualPane && localPath ? (
-            <span className="ml-auto truncate" title={localPath}>
+            <button
+              type="button"
+              className="ml-auto max-w-[45%] truncate text-right hover:text-gray-300"
+              title="Click to copy local path"
+              onClick={() => void navigator.clipboard.writeText(localPath)}
+            >
               Local {localEntries.length} · {localPath}
-            </span>
+            </button>
           ) : null}
         </div>
 
