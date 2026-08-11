@@ -758,6 +758,8 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   // ---------------------------------------------------------------------------
 
   const [hideDotfiles, setHideDotfiles] = useState(false);
+  /** Quick extension filter (e.g. "php") — empty = all. */
+  const [extFilter, setExtFilter] = useState("");
   type SortMode = "name" | "size" | "dirs";
   const [sortMode, setSortMode] = useState<SortMode>("dirs");
   const [showKeysHelp, setShowKeysHelp] = useState(false);
@@ -808,6 +810,12 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     if (hideDotfiles) {
       list = list.filter((e) => !e.name.startsWith("."));
     }
+    if (extFilter) {
+      const ext = extFilter.toLowerCase();
+      list = list.filter(
+        (e) => e.is_dir || e.name.toLowerCase().endsWith(`.${ext}`),
+      );
+    }
     const byName = (a: SftpEntry, b: SftpEntry) =>
       a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
     list = [...list].sort((a, b) => {
@@ -823,7 +831,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       return byName(a, b);
     });
     return list;
-  }, [results, searchOpen, query, entries, hideDotfiles, sortMode]);
+  }, [results, searchOpen, query, entries, hideDotfiles, sortMode, extFilter]);
 
   const rows = visible();
 
@@ -1738,6 +1746,21 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
             <option value="dirs">Dirs first</option>
             <option value="name">Name</option>
             <option value="size">Size</option>
+          </select>
+          <select
+            className="max-w-[72px] rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-gray-400"
+            value={extFilter}
+            onChange={(e) => setExtFilter(e.target.value)}
+            data-tooltip="Filter by extension (dirs always shown)"
+          >
+            <option value="">*.*</option>
+            {["php", "js", "ts", "tsx", "json", "yml", "yaml", "conf", "env", "md", "sql", "log", "sh"].map(
+              (ext) => (
+                <option key={ext} value={ext}>
+                  *.{ext}
+                </option>
+              ),
+            )}
           </select>
           <button
             type="button"
