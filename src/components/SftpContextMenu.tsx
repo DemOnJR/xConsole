@@ -22,6 +22,7 @@ interface Props {
   /** Optional: apply octal mode to the current selection (bulk chmod). */
   onChmodSelection?: (entry: SftpEntry) => void;
   onRename: (entry: SftpEntry) => void;
+  onDuplicate?: (entry: SftpEntry) => void;
   onDelete: (entry: SftpEntry) => void;
   onCopyPath: (path: string) => void;
   /** Open (or focus) a terminal and cd into this directory. */
@@ -58,6 +59,7 @@ export function SftpContextMenu({
   onProperties,
   onChmodSelection,
   onRename,
+  onDuplicate,
   onDelete,
   onCopyPath,
   onOpenTerminalHere,
@@ -187,6 +189,7 @@ export function SftpContextMenu({
           {/* Only for links: for anything else there is no target to point anywhere. */}
           {entry.is_symlink ? item("Edit link target…", () => onEditLink(entry)) : null}
           {item("Rename…", () => onRename(entry))}
+          {onDuplicate ? item("Duplicate", () => onDuplicate(entry)) : null}
           {item("Copy path", () => onCopyPath(entry.path))}
           {item("Open terminal here", () => onOpenTerminalHere(entry))}
           <div className="my-1 border-t border-[var(--border)]" />

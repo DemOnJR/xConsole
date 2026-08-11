@@ -171,6 +171,27 @@ function Grid({
           >
             Copy CSV
           </button>
+          <button
+            type="button"
+            className="rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--border)]"
+            data-tooltip="Copy selected as INSERT statements"
+            onClick={() => {
+              const idxs = [...selected].sort((a, b) => a - b);
+              const cols = set.columns.join(", ");
+              const lines = idxs.map((i) => {
+                const vals = set.rows[i]
+                  .map((v) => {
+                    if (v === null) return "NULL";
+                    return `'${String(v).replace(/'/g, "''")}'`;
+                  })
+                  .join(", ");
+                return `INSERT INTO /*table*/ (${cols}) VALUES (${vals});`;
+              });
+              void navigator.clipboard.writeText(lines.join("\n"));
+            }}
+          >
+            Copy INSERT
+          </button>
           {canDelete ? (
             <button
               onClick={() => onDeleteRows?.([...selected].sort((a, b) => a - b))}

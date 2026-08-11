@@ -1135,6 +1135,31 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     }
   };
 
+  /** Duplicate a remote file/folder next to the original (`name_copy.ext`). */
+  const handleDuplicate = async (entry: SftpEntry) => {
+    const parent = parentDirOf(entry.path);
+    const base = entry.name;
+    const dot = base.includes(".") && !entry.is_dir ? base.lastIndexOf(".") : -1;
+    const stem = dot > 0 ? base.slice(0, dot) : base;
+    const ext = dot > 0 ? base.slice(dot) : "";
+    let candidate = `${stem}_copy${ext}`;
+    let n = 2;
+    const existing = new Set(entries.map((e) => e.name));
+    while (existing.has(candidate)) {
+      candidate = `${stem}_copy${n}${ext}`;
+      n += 1;
+    }
+    // cp -R src dest creates `dest` when it does not exist (full path, not only dir).
+    const dest = joinRemotePath(parent, candidate);
+    try {
+      setError(null);
+      await api.vpsFileCopy(data.vpsId, [entry.path], dest, false);
+      refreshListing();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
   /** Apply octal mode to selection (or the right-clicked entry). */
   const handleChmodSelection = async (entry: SftpEntry) => {
     const paths =
@@ -2324,6 +2349,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           onProperties={(e) => setPropsEntry(e)}
           onChmodSelection={(e) => void handleChmodSelection(e)}
           onRename={(e) => void handleRename(e)}
+          onDuplicate={(e) => void handleDuplicate(e)}
           onDelete={(e) => void bulkDelete(e)}
           onCopyPath={(p) => void handleCopyPath(p)}
           onOpenTerminalHere={(e) => openTerminalHere(e)}
