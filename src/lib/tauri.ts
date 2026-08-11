@@ -644,6 +644,9 @@ export const api = {
   pickDirectory: (title: string) =>
     invoke<string | null>("pick_directory", { title }),
   pickFiles: (title: string) => invoke<string[]>("pick_files", { title }),
+  pickFile: (title: string) => invoke<string | null>("pick_file", { title }),
+  localFsReadText: (path: string, maxBytes?: number) =>
+    invoke<string>("local_fs_read_text", { path, maxBytes: maxBytes ?? null }),
   sftpTransferStart: (
     sessionId: string,
     direction: TransferDirection,

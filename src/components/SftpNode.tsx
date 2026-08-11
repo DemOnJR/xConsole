@@ -390,16 +390,32 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   const uploadLocalSelection = async () => {
     const sid = sessionRef.current;
     if (!sid || localSelection.size === 0) return;
-    const files = [...localSelection].filter((p) => {
-      const e = localEntries.find((x) => x.path === p);
-      return e && !e.is_dir;
-    });
-    if (files.length === 0) {
-      setError("Select one or more local files to upload (folders: use drag from Explorer).");
-      return;
-    }
+    // Transfer engine already walks local directories recursively.
+    const paths = [...localSelection];
+    if (paths.length === 0) return;
     try {
-      await useTransferStore.getState().upload(sid, path, files);
+      setError(null);
+      await useTransferStore.getState().upload(sid, path, paths);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const downloadRemoteToLocal = async () => {
+    const sid = sessionRef.current;
+    if (!sid || selection.size === 0 || !localPath) return;
+    try {
+      setError(null);
+      await api.sftpTransferStart(
+        sid,
+        "download",
+        [...selection],
+        localPath,
+        useTransferStore.getState().concurrency,
+      );
+      useTransferStore.getState().setOpen(true);
+      // Refresh local pane after a short delay so finished files appear.
+      window.setTimeout(() => void loadLocalDir(localPath), 1500);
     } catch (e) {
       setError(String(e));
     }
@@ -1488,9 +1504,18 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                   <button
                     type="button"
                     className="rounded px-1.5 py-0.5 text-[10px] text-cyan-300 hover:bg-cyan-900/30 disabled:opacity-40"
+                    disabled={selection.size === 0 || status !== "connected" || !localPath}
+                    onClick={() => void downloadRemoteToLocal()}
+                    data-tooltip="Download selected remote items into this local folder"
+                  >
+                    ↓
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded px-1.5 py-0.5 text-[10px] text-cyan-300 hover:bg-cyan-900/30 disabled:opacity-40"
                     disabled={localSelection.size === 0 || status !== "connected"}
                     onClick={() => void uploadLocalSelection()}
-                    data-tooltip="Upload selected local files to the remote folder"
+                    data-tooltip="Upload selected local files/folders to the remote folder"
                   >
                     ↑ Upload
                   </button>

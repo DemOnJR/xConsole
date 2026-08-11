@@ -228,3 +228,30 @@ pub fn local_fs_home() -> Result<String, String> {
         .map(|p| p.to_string_lossy().into_owned())
         .ok_or_else(|| "could not resolve home directory".into())
 }
+
+/// Read a local text file (SQL dumps, etc.). Capped to avoid blowing the IPC channel.
+#[tauri::command]
+pub fn local_fs_read_text(path: String, max_bytes: Option<u64>) -> Result<String, String> {
+    let max = max_bytes.unwrap_or(8 * 1024 * 1024);
+    let meta = std::fs::metadata(&path).map_err(|e| format!("stat failed: {e}"))?;
+    if meta.len() > max {
+        return Err(format!(
+            "file too large ({} bytes, max {max}). Split the dump or import via SSH.",
+            meta.len()
+        ));
+    }
+    std::fs::read_to_string(&path).map_err(|e| format!("read failed: {e}"))
+}
+
+/// Pick a single local file (e.g. .sql import). Empty string when cancelled.
+#[tauri::command]
+pub async fn pick_file(app: AppHandle, title: String) -> Result<Option<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title(&title)
+        .pick_file(move |path| {
+            let _ = tx.send(path.map(|p| p.to_string()));
+        });
+    rx.await.map_err(|_| "file picker closed unexpectedly".to_string())
+}

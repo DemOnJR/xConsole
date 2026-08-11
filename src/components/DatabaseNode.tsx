@@ -262,6 +262,31 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
       return [];
     }
   });
+  const favKey = `xconsole-sql-favorites:${data.vpsId}`;
+  const [sqlFavorites, setSqlFavorites] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(favKey) || "[]") as string[];
+    } catch {
+      return [];
+    }
+  });
+  const saveFavorites = (next: string[]) => {
+    setSqlFavorites(next);
+    try {
+      localStorage.setItem(favKey, JSON.stringify(next));
+    } catch {
+      /* ignore */
+    }
+  };
+  const toggleFavorite = () => {
+    const q = sql.trim();
+    if (!q) return;
+    if (sqlFavorites.includes(q)) {
+      saveFavorites(sqlFavorites.filter((f) => f !== q));
+    } else {
+      saveFavorites([q, ...sqlFavorites].slice(0, 30));
+    }
+  };
 
   // Every session opened by this node, so unmount can close all of them. A ref because
   // the cleanup must see the latest set without re-running on every change.
@@ -489,6 +514,34 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     URL.revokeObjectURL(url);
   };
 
+  /** Import a .sql file from disk and run it against the current connection. */
+  const importSqlFile = async () => {
+    if (!sel?.sessionId) {
+      setError("Connect to a database first.");
+      return;
+    }
+    try {
+      const picked = await api.pickFile("Import SQL file");
+      if (!picked) return;
+      setBusy(true);
+      setError(null);
+      const text = await api.localFsReadText(picked, 8 * 1024 * 1024);
+      if (!text.trim()) {
+        setError("SQL file is empty.");
+        return;
+      }
+      // Run as one script; multi-statement support depends on the remote client.
+      const result = await api.dbRunSql(sel.sessionId, text);
+      setSqlResult(result);
+      setTab("sql");
+      setSql(text.length > 4000 ? `${text.slice(0, 4000)}\n/* …truncated for editor */` : text);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   /** Insert a row by prompting for each column (phpMyAdmin-style quick insert). */
   const insertRow = async () => {
     if (!sel || columns.length === 0) return;
@@ -646,6 +699,15 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                   </button>
                   <button
                     type="button"
+                    disabled={busy}
+                    onClick={() => void importSqlFile()}
+                    className="rounded px-1.5 py-0.5 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:opacity-30"
+                    data-tooltip="Import a .sql file (max 8 MB)"
+                  >
+                    Import
+                  </button>
+                  <button
+                    type="button"
                     disabled={!rows}
                     onClick={() =>
                       exportCsv(rows, `${sel.schema}_${sel.table}_p${page + 1}.csv`)
@@ -674,15 +736,28 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                   </button>
                 </div>
               ) : null}
-              {tab === "sql" && sqlResult ? (
-                <button
-                  type="button"
-                  onClick={() => exportCsv(sqlResult, "query_result.csv")}
-                  className="ml-auto rounded px-1.5 py-0.5 text-[10px] text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
-                  data-tooltip="Export query result as CSV"
-                >
-                  CSV
-                </button>
+              {tab === "sql" ? (
+                <div className="ml-auto flex items-center gap-1">
+                  <button
+                    type="button"
+                    disabled={busy || !sel?.sessionId}
+                    onClick={() => void importSqlFile()}
+                    className="rounded px-1.5 py-0.5 text-[10px] text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:opacity-30"
+                    data-tooltip="Import a .sql file (max 8 MB)"
+                  >
+                    Import
+                  </button>
+                  {sqlResult ? (
+                    <button
+                      type="button"
+                      onClick={() => exportCsv(sqlResult, "query_result.csv")}
+                      className="rounded px-1.5 py-0.5 text-[10px] text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
+                      data-tooltip="Export query result as CSV"
+                    >
+                      CSV
+                    </button>
+                  ) : null}
+                </div>
               ) : null}
             </div>
 
@@ -739,6 +814,43 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                     >
                       {busy ? "Running…" : "Run"}
                     </button>
+                    <button
+                      type="button"
+                      onClick={toggleFavorite}
+                      disabled={!sql.trim()}
+                      className={`rounded px-1.5 py-0.5 text-[11px] disabled:opacity-30 ${
+                        sqlFavorites.includes(sql.trim())
+                          ? "text-amber-300"
+                          : "text-gray-500 hover:text-gray-300"
+                      }`}
+                      data-tooltip={
+                        sqlFavorites.includes(sql.trim())
+                          ? "Remove from favorites"
+                          : "Save query to favorites"
+                      }
+                    >
+                      ★
+                    </button>
+                    {sqlFavorites.length > 0 ? (
+                      <select
+                        className="max-w-[160px] rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-[var(--text-dim)]"
+                        defaultValue=""
+                        onChange={(e) => {
+                          if (e.target.value) setSql(e.target.value);
+                          e.target.value = "";
+                        }}
+                        data-tooltip="Favorite queries"
+                      >
+                        <option value="" disabled>
+                          ★ Favorites
+                        </option>
+                        {sqlFavorites.map((q, i) => (
+                          <option key={`f-${i}`} value={q}>
+                            {q.length > 70 ? `${q.slice(0, 70)}…` : q}
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
                     {sqlHistory.length > 0 ? (
                       <select
                         className="max-w-[200px] rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-[var(--text-dim)]"
