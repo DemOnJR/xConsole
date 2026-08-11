@@ -14,17 +14,19 @@ import { create } from "zustand";
  * no registration and work inside React Flow's transformed canvas.
  */
 
-export type DragKind = "vps" | "remote-file";
+export type DragKind = "vps" | "remote-file" | "local-file";
 
 export interface DragPayload {
   kind: DragKind;
-  /** VPS id, or the SFTP session's vps id for a remote file. */
+  /** VPS id, or the SFTP session's vps id for a remote file. Empty for pure local. */
   vpsId: string;
-  /** Remote absolute path (remote-file only). */
+  /** Primary absolute path (remote-file / local-file). */
   path?: string;
+  /** Multi-select paths when dragging a selection (same pane). */
+  paths?: string[];
   /** Display label for the ghost. */
   label: string;
-  /** Remote-file only: directory rather than file. */
+  /** Directory rather than file. */
   isDir?: boolean;
 }
 

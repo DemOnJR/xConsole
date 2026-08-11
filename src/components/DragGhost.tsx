@@ -19,9 +19,22 @@ export function DragGhost() {
       style={{ left: x + 12, top: y + 12 }}
     >
       <span className="text-[var(--accent)]">
-        {drag.kind === "vps" ? "▤" : drag.isDir ? "▸" : "○"}
+        {drag.kind === "vps"
+          ? "▤"
+          : drag.kind === "local-file"
+            ? drag.isDir
+              ? "📁"
+              : "⬆"
+            : drag.isDir
+              ? "▸"
+              : "○"}
       </span>
       <span className="truncate">{drag.label}</span>
+      {drag.paths && drag.paths.length > 1 ? (
+        <span className="shrink-0 rounded bg-[var(--accent)]/20 px-1 text-[10px] text-[var(--accent)]">
+          ×{drag.paths.length}
+        </span>
+      ) : null}
     </div>
   );
 }

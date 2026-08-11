@@ -17,7 +17,10 @@ export function visibleActivityItems(items: AgentActivityItem[]): AgentActivityI
   const fileEditIds = new Set(items.filter((i) => i.kind === "file_edit").map((i) => i.id));
   return items.filter((item) => {
     if (!item.label.trim() && item.kind !== "file_edit") return false;
-    if (item.kind === "status") return false;
+    // Parallel-batch status is the one status line users care about.
+    if (item.kind === "status") {
+      return item.id === "parallel-batch" || /parallel/i.test(item.label);
+    }
     if (item.id.startsWith("snapshot-")) return false;
     if (item.kind === "tool" && fileEditIds.has(item.id)) return false;
     if (item.label === "SSH snapshot" || item.label === "Command output") return false;
@@ -92,12 +95,69 @@ function commandBody(item: AgentActivityItem): string {
   );
 }
 
-function MetaLine({ text, dimmed }: { text: string; dimmed?: boolean }) {
+function MetaLine({
+  text,
+  dimmed,
+  running,
+}: {
+  text: string;
+  dimmed?: boolean;
+  running?: boolean;
+}) {
   return (
     <div
-      className={`text-[11px] leading-[1.35] ${dimmed ? "text-gray-600" : "text-gray-500"}`}
+      className={`flex items-center gap-1.5 text-[11px] leading-[1.35] ${
+        dimmed ? "text-gray-600" : "text-gray-500"
+      }`}
     >
-      {text}
+      {running ? (
+        <span
+          className="inline-block h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-cyan-500/80"
+          aria-hidden
+        />
+      ) : null}
+      <span className="min-w-0 truncate">{text}</span>
+    </div>
+  );
+}
+
+/** Banner shown while several read-only tools run concurrently. */
+function ParallelBanner({
+  count,
+  label,
+  done,
+}: {
+  count: number;
+  label?: string;
+  done?: boolean;
+}) {
+  return (
+    <div
+      className={`flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-[11px] ${
+        done
+          ? "border-[var(--border)] bg-[var(--surface)]/40 text-gray-500"
+          : "border-cyan-800/50 bg-cyan-950/35 text-cyan-200/90"
+      }`}
+    >
+      {done ? (
+        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)]" />
+      ) : (
+        <span
+          className="inline-block h-2 w-2 shrink-0 animate-spin rounded-full border border-cyan-400/70 border-t-transparent"
+          aria-hidden
+        />
+      )}
+      <span className="min-w-0 flex-1 truncate font-medium">
+        {label?.trim() ||
+          (done
+            ? `Finished ${count} tools in parallel`
+            : `Running ${count} tools in parallel`)}
+      </span>
+      {!done && count > 0 ? (
+        <span className="shrink-0 rounded bg-cyan-900/50 px-1.5 py-px font-mono text-[10px] text-cyan-300/90">
+          ×{count}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -264,6 +324,10 @@ function CommandCard({ item }: { item: AgentActivityItem }) {
 }
 
 function ActivityBlock({ item }: { item: AgentActivityItem }) {
+  if (item.kind === "status" && (item.id === "parallel-batch" || /parallel/i.test(item.label))) {
+    // Banner is rendered once by the feed when grouping; skip duplicate rows.
+    return null;
+  }
   if (item.kind === "file_edit") {
     return <FileEditCard item={item} />;
   }
@@ -271,9 +335,21 @@ function ActivityBlock({ item }: { item: AgentActivityItem }) {
     return <CommandCard item={item} />;
   }
   if (isMetaItem(item)) {
-    return <MetaLine text={metaLine(item)} />;
+    return (
+      <MetaLine
+        text={metaLine(item)}
+        running={item.state === "running"}
+        dimmed={item.state === "done"}
+      />
+    );
   }
-  return <MetaLine text={metaLine(item)} dimmed={item.state === "running"} />;
+  return (
+    <MetaLine
+      text={metaLine(item)}
+      dimmed={item.state === "running"}
+      running={item.state === "running"}
+    />
+  );
 }
 
 export function AgentThinking() {
@@ -298,15 +374,58 @@ export function AgentActivityFeed({
 }) {
   const visible = useMemo(() => visibleActivityItems(items), [items]);
 
+  const parallelMeta = useMemo(() => {
+    const banner = visible.find(
+      (i) => i.kind === "status" && (i.id === "parallel-batch" || /parallel/i.test(i.label)),
+    );
+    const running = visible.filter(
+      (i) => i.state === "running" && i.kind !== "status" && i.id !== "parallel-batch",
+    );
+    // Show banner when backend announced parallel, or live with 2+ concurrent tools.
+    const show = Boolean(banner) || (live && running.length >= 2);
+    const done = banner ? banner.state === "done" : false;
+    return {
+      show,
+      done,
+      count: running.length || (banner ? 0 : 0),
+      label: banner?.label,
+      // Prefer live running count; fall back to parsing "Running N …" from status.
+      displayCount:
+        running.length ||
+        (() => {
+          const m = banner?.label?.match(/(\d+)/);
+          return m ? Number(m[1]) : 0;
+        })(),
+    };
+  }, [visible, live]);
+
   if (visible.length === 0 && !live) return null;
+
+  const blocks = visible.filter(
+    (item) =>
+      !(
+        item.kind === "status" &&
+        (item.id === "parallel-batch" || /parallel/i.test(item.label))
+      ),
+  );
 
   return (
     <div className="flex w-full flex-col gap-2">
-      {visible.map((item) => (
+      {parallelMeta.show ? (
+        <ParallelBanner
+          count={parallelMeta.displayCount}
+          label={parallelMeta.label}
+          done={parallelMeta.done && !live}
+        />
+      ) : null}
+      {blocks.map((item) => (
         <ActivityBlock key={`${item.id}-${item.kind}`} item={item} />
       ))}
-      {live && visible.length > 0 && (
+      {live && blocks.length > 0 && !parallelMeta.show && (
         <MetaLine text="Planning next moves" dimmed />
+      )}
+      {live && parallelMeta.show && !parallelMeta.done && parallelMeta.displayCount > 0 && (
+        <MetaLine text="Tools running together…" dimmed />
       )}
     </div>
   );

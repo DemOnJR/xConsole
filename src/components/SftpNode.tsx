@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { startInternalDrag } from "../stores/dragStore";
+import {
+  onInternalDrop,
+  startInternalDrag,
+  useDragStore,
+} from "../stores/dragStore";
 
 /**
  * SFTP sessions that outlive their component, keyed by canvas node id.
@@ -217,6 +221,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   /** Files being dragged in from Explorer are over this panel. */
   const [dropActive, setDropActive] = useState(false);
   const dropId = `sftp-${id}`;
+  const localDropId = `${dropId}:local`;
 
   const loadDir = useCallback(async (sessionId: string, dir: string) => {
     setLoading(true);
@@ -367,6 +372,18 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   const [localLoading, setLocalLoading] = useState(false);
   const [localSelection, setLocalSelection] = useState<Set<string>>(() => new Set());
 
+  /** Internal drag hover targets (dual-pane upload/download). */
+  const dragOver = useDragStore((s) => s.over);
+  const activeDrag = useDragStore((s) => s.drag);
+  const remoteDropHighlight =
+    dropActive ||
+    (dragOver === dropId && activeDrag?.kind === "local-file");
+  const localDropHighlight =
+    dualPane &&
+    dragOver === localDropId &&
+    activeDrag?.kind === "remote-file" &&
+    activeDrag.vpsId === data.vpsId;
+
   const remoteGit = useGitBranch({
     enabled: status === "connected",
     path,
@@ -460,15 +477,16 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     sendCd(0);
   };
 
-  const downloadRemoteToLocal = async () => {
+  const downloadRemoteToLocal = async (remotePaths?: string[]) => {
     const sid = sessionRef.current;
-    if (!sid || selection.size === 0 || !localPath) return;
+    const paths = remotePaths ?? [...selection];
+    if (!sid || paths.length === 0 || !localPath) return;
     try {
       setError(null);
       await api.sftpTransferStart(
         sid,
         "download",
-        [...selection],
+        paths,
         localPath,
         useTransferStore.getState().concurrency,
       );
@@ -479,6 +497,45 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       setError(String(e));
     }
   };
+
+  // Dual-pane drag: remote → local (download) and local → remote (upload).
+  useEffect(() => {
+    if (!dualPane) return;
+    const offLocal = onInternalDrop(localDropId, (payload) => {
+      if (payload.kind !== "remote-file" || payload.vpsId !== data.vpsId) return;
+      const paths =
+        payload.paths && payload.paths.length > 0
+          ? payload.paths
+          : payload.path
+            ? [payload.path]
+            : [];
+      if (paths.length === 0) return;
+      void downloadRemoteToLocal(paths);
+    });
+    const offRemote = onInternalDrop(dropId, (payload) => {
+      if (payload.kind !== "local-file") return;
+      const sid = sessionRef.current;
+      if (!sid) return;
+      const paths =
+        payload.paths && payload.paths.length > 0
+          ? payload.paths
+          : payload.path
+            ? [payload.path]
+            : [];
+      if (paths.length === 0) return;
+      void useTransferStore
+        .getState()
+        .upload(sid, pathRef.current, paths)
+        .then(() => refreshListing())
+        .catch((e) => setError(String(e)));
+    });
+    return () => {
+      offLocal();
+      offRemote();
+    };
+    // downloadRemoteToLocal / refreshListing close over current dirs — rebind on nav.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional path deps
+  }, [dualPane, localDropId, dropId, data.vpsId, localPath, path]);
 
   // Report saves pushed back from the external editor — especially refusals, which
   // are the whole point of the guard and must not be silent.
@@ -1541,7 +1598,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
         {status !== "connecting" && (
           <div className="flex min-h-0 flex-1">
             {dualPane && (
-              <div className="flex min-h-0 w-[42%] min-w-[160px] max-w-[50%] shrink-0 flex-col border-r border-[var(--border)]">
+              <div className="relative flex min-h-0 w-[42%] min-w-[160px] max-w-[50%] shrink-0 flex-col border-r border-[var(--border)]">
                 <div className="flex items-center gap-1 border-b border-[var(--border)]/80 px-1.5 py-1">
                   <button
                     type="button"
@@ -1581,14 +1638,22 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                     ↑ Upload
                   </button>
                 </div>
-                <div className="min-h-0 flex-1 overflow-y-auto px-1 py-1">
+                <div
+                  className="relative min-h-0 flex-1 overflow-y-auto px-1 py-1"
+                  data-drop={localDropId}
+                >
+                  {localDropHighlight && (
+                    <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center border-2 border-dashed border-emerald-500 bg-emerald-500/10 text-[11px] text-emerald-200">
+                      Download to {localPath || "local"}
+                    </div>
+                  )}
                   {localLoading && localEntries.length === 0 ? (
                     <div className="px-2 py-3 text-center text-[10px] text-gray-500">
                       Loading…
                     </div>
                   ) : localEntries.length === 0 ? (
                     <div className="px-2 py-3 text-center text-[10px] text-gray-600">
-                      Empty folder
+                      Empty folder — drag remote files here to download
                     </div>
                   ) : (
                     localEntries.map((entry) => (
@@ -1617,6 +1682,24 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                           }}
                           onDoubleClick={() => {
                             if (entry.is_dir) void loadLocalDir(entry.path);
+                          }}
+                          onPointerDown={(e) => {
+                            if (e.button !== 0) return;
+                            const paths =
+                              localSelection.has(entry.path) && localSelection.size > 1
+                                ? [...localSelection]
+                                : [entry.path];
+                            startInternalDrag(e, {
+                              kind: "local-file",
+                              vpsId: data.vpsId,
+                              path: entry.path,
+                              paths,
+                              label:
+                                paths.length > 1
+                                  ? `${paths.length} local items`
+                                  : entry.name,
+                              isDir: entry.is_dir,
+                            });
                           }}
                         >
                           <span className="shrink-0 text-gray-500">
@@ -1682,7 +1765,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                 if (e.target === e.currentTarget) clearSelection();
               }}
             >
-              {dropActive && (
+              {remoteDropHighlight && (
                 <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center border-2 border-dashed border-cyan-500 bg-cyan-500/10 text-xs text-cyan-200">
                   Upload to {path}
                 </div>
@@ -1723,11 +1806,19 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                       // above still opens the entry.
                       onPointerDown={(e) => {
                         if (e.button !== 0) return;
+                        const paths =
+                          selection.has(entry.path) && selection.size > 1
+                            ? [...selection]
+                            : [entry.path];
                         startInternalDrag(e, {
                           kind: "remote-file",
                           vpsId: data.vpsId,
                           path: entry.path,
-                          label: entry.name,
+                          paths,
+                          label:
+                            paths.length > 1
+                              ? `${paths.length} remote items`
+                              : entry.name,
                           isDir: entry.is_dir,
                         });
                       }}

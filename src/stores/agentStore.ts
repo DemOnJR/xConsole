@@ -238,9 +238,22 @@ function applyStreamEvent(
   ev: StreamEvent,
 ): AgentActivityItem[] {
   switch (ev.kind) {
-    case "Status":
-      // Internal progress only — not shown in the Cursor-style tool feed.
+    case "Status": {
+      // Most status lines are internal noise. Parallel tool batches are user-visible:
+      // the agent is genuinely doing multiple read-only tools at once.
+      if (/parallel/i.test(ev.data)) {
+        return [
+          ...activity.filter((a) => a.id !== "parallel-batch"),
+          {
+            id: "parallel-batch",
+            kind: "status" as const,
+            label: ev.data,
+            state: "running" as const,
+          },
+        ];
+      }
       return activity;
+    }
     case "ToolCall":
       if (activity.some((a) => a.id === ev.data.id)) return activity;
       if (/mcp/i.test(ev.data.name)) return activity;
@@ -256,16 +269,33 @@ function applyStreamEvent(
     case "ToolResult": {
       if (ev.data.id.startsWith("snapshot-")) return activity;
       const idx = activity.findIndex((a) => a.id === ev.data.id);
+      let next = activity;
       if (idx >= 0) {
-        const next = [...activity];
+        next = [...activity];
         next[idx] = {
           ...next[idx],
           output: ev.data.output,
-          state: ev.data.output.startsWith("error") ? "error" : "done",
+          state: (ev.data.output.startsWith("error") ? "error" : "done") as
+            | "error"
+            | "done",
         };
-        return next;
       }
-      return activity;
+      // When every tool in a parallel batch has finished, mark the banner done.
+      const stillRunning = next.some(
+        (a) => a.state === "running" && a.id !== "parallel-batch" && a.kind !== "status",
+      );
+      if (!stillRunning) {
+        next = next.map((a) =>
+          a.id === "parallel-batch" && a.state === "running"
+            ? ({
+                ...a,
+                state: "done" as const,
+                label: a.label.replace(/…$/, " — done"),
+              } satisfies AgentActivityItem)
+            : a,
+        );
+      }
+      return next;
     }
     case "Activity": {
       const d = ev.data;
@@ -296,11 +326,12 @@ function applyStreamEvent(
               state: "done",
             },
           ];
-        case "ToolEnd":
-          return activity.map((a) => {
+        case "ToolEnd": {
+          const endState: "done" | "error" = d.data.ok ? "done" : "error";
+          const afterEnd: AgentActivityItem[] = activity.map((a) => {
             if (a.id !== d.data.id && !a.id.startsWith(`${d.data.id}-`)) return a;
             if (a.kind === "file_edit") {
-              return { ...a, state: d.data.ok ? "done" : "error" };
+              return { ...a, state: endState };
             }
             if (
               a.kind === "tool" &&
@@ -322,14 +353,26 @@ function applyStreamEvent(
                 linesAdded: a.detail.split("\n").length,
                 linesRemoved: 0,
                 hunks,
-                state: d.data.ok ? ("done" as const) : ("error" as const),
+                state: endState,
               };
             }
             if (a.kind === "tool" || a.kind === "skill_read" || a.kind === "command") {
-              return { ...a, state: d.data.ok ? "done" : "error" };
+              return { ...a, state: endState };
             }
             return a;
           });
+          const stillRunning = afterEnd.some(
+            (a) => a.state === "running" && a.id !== "parallel-batch" && a.kind !== "status",
+          );
+          if (!stillRunning) {
+            return afterEnd.map((a) =>
+              a.id === "parallel-batch" && a.state === "running"
+                ? { ...a, state: "done" as const, label: a.label.replace(/…$/, " — done") }
+                : a,
+            );
+          }
+          return afterEnd;
+        }
         case "SkillRead":
           return [
             ...activity,

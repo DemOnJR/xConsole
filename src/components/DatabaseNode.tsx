@@ -10,6 +10,28 @@ import { DatabaseIcon } from "./icons";
 
 const PAGE_SIZE = 200;
 
+/**
+ * Split a SQL dump into statements for sequential import.
+ * Handles `--` line comments and `/* … *​/` block comments; does not fully parse
+ * string literals (good enough for typical mysqldump / pg_dump style files).
+ */
+function splitSqlStatements(script: string): string[] {
+  // Strip block comments then line comments.
+  const stripped = script
+    .replace(/\/\*[\s\S]*?\*\//g, "\n")
+    .replace(/^[ \t]*--[^\n]*$/gm, "");
+  const parts = stripped
+    .split(/;\s*(?:\r?\n|$)/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && !/^\/\*/.test(s));
+  if (parts.length === 0) {
+    const t = script.trim();
+    return t ? [t] : [];
+  }
+  // Re-attach semicolon is not required by most engines; keep bare statements.
+  return parts;
+}
+
 type Tab = "data" | "structure" | "sql";
 
 /** Which table the right-hand pane is showing. */
@@ -568,7 +590,9 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     }
   };
 
-  /** Import a .sql file from disk and run it against the current connection. */
+  /** Import a .sql file from disk and run it against the current connection.
+   *  Supports larger dumps (up to 64 MB) and naive multi-statement splitting so
+   *  phpMyAdmin-style exports with many statements still land. */
   const importSqlFile = async () => {
     if (!sel?.sessionId) {
       setError("Connect to a database first.");
@@ -579,16 +603,45 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
       if (!picked) return;
       setBusy(true);
       setError(null);
-      const text = await api.localFsReadText(picked, 8 * 1024 * 1024);
+      const text = await api.localFsReadText(picked, 64 * 1024 * 1024);
       if (!text.trim()) {
         setError("SQL file is empty.");
         return;
       }
-      // Run as one script; multi-statement support depends on the remote client.
-      const result = await api.dbRunSql(sel.sessionId, text);
-      setSqlResult(result);
+      // Strip SQL comments and split on semicolons at end-of-line (common dump style).
+      // Falls back to whole-file exec if only one chunk.
+      const statements = splitSqlStatements(text);
+      let last: DbResultSet | null = null;
+      let ok = 0;
+      const errors: string[] = [];
+      for (const stmt of statements) {
+        try {
+          last = await api.dbRunSql(sel.sessionId, stmt);
+          ok += 1;
+        } catch (e) {
+          errors.push(String(e));
+          // Keep going so a single bad statement does not abort a 10k-line dump mid-way.
+          if (errors.length >= 20) {
+            errors.push("…stopped after 20 statement errors");
+            break;
+          }
+        }
+      }
+      if (last) setSqlResult(last);
       setTab("sql");
-      setSql(text.length > 4000 ? `${text.slice(0, 4000)}\n/* …truncated for editor */` : text);
+      setSql(
+        text.length > 4000
+          ? `${text.slice(0, 4000)}\n/* …truncated for editor · imported ${ok}/${statements.length} statements */`
+          : text,
+      );
+      if (errors.length > 0) {
+        setError(
+          `Imported ${ok}/${statements.length} statements with ${errors.length} error(s): ${errors[0]}`,
+        );
+      } else if (statements.length > 1) {
+        setError(null);
+      }
+      if (sel) await showTable(sel, page).catch(() => {});
     } catch (e) {
       setError(String(e));
     } finally {
