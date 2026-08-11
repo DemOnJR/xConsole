@@ -366,7 +366,16 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
   const [columns, setColumns] = useState<DbColumn[]>([]);
   const [rows, setRows] = useState<DbResultSet | null>(null);
   const [page, setPage] = useState(0);
-  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+  const [pageSize, setPageSize] = useState<number>(() => {
+    try {
+      const n = Number(localStorage.getItem("xconsole-db-page-size"));
+      return PAGE_SIZE_OPTIONS.includes(n as (typeof PAGE_SIZE_OPTIONS)[number])
+        ? n
+        : DEFAULT_PAGE_SIZE;
+    } catch {
+      return DEFAULT_PAGE_SIZE;
+    }
+  });
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [tab, setTab] = useState<Tab>("data");
   const [sql, setSql] = useState("SELECT * FROM ");
@@ -1131,6 +1140,11 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                     onChange={(e) => {
                       const n = Number(e.target.value);
                       setPageSize(n);
+                      try {
+                        localStorage.setItem("xconsole-db-page-size", String(n));
+                      } catch {
+                        /* ignore */
+                      }
                       if (!sel) return;
                       setPage(0);
                       setBusy(true);
