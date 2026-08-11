@@ -181,7 +181,7 @@ export function AgentHistory({
           hide
         </button>
       </div>
-      {conversations.length > 4 ? (
+      {conversations.length > 1 ? (
         <input
           type="text"
           value={filter}
