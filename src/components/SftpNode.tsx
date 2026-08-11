@@ -191,7 +191,9 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   const [pathInput, setPathInput] = useState("/");
   const [entries, setEntries] = useState<SftpEntry[]>([]);
   const [loading, setLoading] = useState(false);
-  const [showTree, setShowTree] = useState(true);
+  const [showTree, setShowTree] = useState(
+    () => localStorage.getItem("xconsole-sftp-tree") !== "0",
+  );
   const [treeWidth, setTreeWidth] = useState(DEFAULT_TREE_W);
   const [treeResizing, setTreeResizing] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["/"]));
@@ -1771,7 +1773,17 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
               showTree ? "bg-[var(--border)] text-gray-200" : "text-gray-400 hover:bg-[var(--border)]"
             }`}
             data-tooltip="Toggle directory tree"
-            onClick={() => setShowTree((v) => !v)}
+            onClick={() =>
+              setShowTree((v) => {
+                const next = !v;
+                try {
+                  localStorage.setItem("xconsole-sftp-tree", next ? "1" : "0");
+                } catch {
+                  /* ignore */
+                }
+                return next;
+              })
+            }
           >
             Tree
           </button>
