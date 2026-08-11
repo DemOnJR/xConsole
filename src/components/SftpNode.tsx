@@ -761,6 +761,9 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   type SortMode = "name" | "size" | "dirs";
   const [sortMode, setSortMode] = useState<SortMode>("dirs");
   const [showKeysHelp, setShowKeysHelp] = useState(false);
+  /** Local pane width % when dual-pane is on (18–55). */
+  const [localPanePct, setLocalPanePct] = useState(42);
+  const dualSplitDragging = useRef(false);
   const localBookmarkKey = `xconsole-local-bookmarks`;
   const [localBookmarks, setLocalBookmarks] = useState<string[]>(() => {
     try {
@@ -2091,9 +2094,10 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           <div className="flex min-h-0 flex-1">
             {dualPane && (
               <div
-                className={`relative flex min-h-0 w-[42%] min-w-[160px] max-w-[50%] shrink-0 flex-col border-r border-[var(--border)] ${
+                className={`relative flex min-h-0 min-w-[140px] max-w-[55%] shrink-0 flex-col border-r border-[var(--border)] ${
                   activeSide === "local" ? "bg-cyan-950/10 ring-1 ring-inset ring-cyan-800/30" : ""
                 }`}
+                style={{ width: `${localPanePct}%` }}
                 onMouseDown={() => setActiveSide("local")}
               >
                 <div className="flex items-center gap-1 border-b border-[var(--border)]/80 px-1.5 py-1">
@@ -2340,6 +2344,41 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                 </div>
               </div>
             )}
+
+            {dualPane ? (
+              <div
+                role="separator"
+                aria-orientation="vertical"
+                aria-valuenow={localPanePct}
+                data-tooltip="Drag to resize dual panes"
+                className={`nodrag nowheel shrink-0 cursor-col-resize touch-none select-none ${
+                  dualSplitDragging.current
+                    ? "bg-cyan-500/50"
+                    : "bg-[var(--border)]/80 hover:bg-cyan-500/40"
+                }`}
+                style={{ width: 3 }}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  dualSplitDragging.current = true;
+                  const startX = e.clientX;
+                  const startPct = localPanePct;
+                  const parent = (e.currentTarget.parentElement as HTMLElement | null);
+                  const onMove = (ev: MouseEvent) => {
+                    if (!parent) return;
+                    const w = parent.getBoundingClientRect().width || 1;
+                    const delta = ((ev.clientX - startX) / w) * 100;
+                    setLocalPanePct(Math.min(55, Math.max(18, startPct + delta)));
+                  };
+                  const onUp = () => {
+                    dualSplitDragging.current = false;
+                    window.removeEventListener("mousemove", onMove);
+                    window.removeEventListener("mouseup", onUp);
+                  };
+                  window.addEventListener("mousemove", onMove);
+                  window.addEventListener("mouseup", onUp);
+                }}
+              />
+            ) : null}
 
             {showTree && !dualPane && (
               <>
