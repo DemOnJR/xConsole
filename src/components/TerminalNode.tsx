@@ -462,12 +462,17 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
         <span className="truncate font-medium text-gray-200">{data.name}</span>
         <span className="truncate text-gray-500">{data.host}</span>
         {info?.cwd && (
-          <span
-            className="max-w-[120px] truncate font-mono text-[10px] text-gray-600"
-            data-tooltip={info.cwd}
+          <button
+            type="button"
+            className="max-w-[120px] truncate font-mono text-[10px] text-gray-600 hover:text-gray-300"
+            data-tooltip={`${info.cwd} — click to copy`}
+            onClick={(e) => {
+              e.stopPropagation();
+              void navigator.clipboard.writeText(info.cwd!);
+            }}
           >
             {info.cwd}
-          </span>
+          </button>
         )}
         <GitBranchBadge info={gitInfo} />
         {info?.hostKey === "pinned_on_first_use" && (
