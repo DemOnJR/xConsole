@@ -458,7 +458,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   pendingApprovals: [],
   pendingQuestions: [],
   pendingPlan: null,
-  planMode: false,
+  planMode:
+    typeof localStorage !== "undefined" &&
+    localStorage.getItem("xconsole-agent-plan-mode") === "1",
   hydrated: false,
 
   init: async () => {
@@ -480,7 +482,16 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   setTargets: (ids) => set({ targets: ids }),
 
-  togglePlanMode: () => set((s) => ({ planMode: !s.planMode })),
+  togglePlanMode: () =>
+    set((s) => {
+      const planMode = !s.planMode;
+      try {
+        localStorage.setItem("xconsole-agent-plan-mode", planMode ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return { planMode };
+    }),
 
   // Subscribes to all three interactive agent events (approval / question /
   // plan), each of which fires an OS notification and shows an in-chat popup.

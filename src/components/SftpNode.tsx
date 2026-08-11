@@ -1001,6 +1001,17 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       }
       return;
     }
+    // F8 = new folder (WinSCP uses F7 for mkdir; F7 already toggles compare in dual-pane).
+    if (e.key === "F8") {
+      e.preventDefault();
+      void handleNewFolder();
+      return;
+    }
+    if (e.key === "F4") {
+      e.preventDefault();
+      void handleNewFile();
+      return;
+    }
     if (e.key === "Enter" && selection.size === 1) {
       e.preventDefault();
       const first = [...selection][0];
@@ -2096,7 +2107,9 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                     ? "Nothing matched"
                     : query.trim()
                       ? "Nothing in this folder matches"
-                      : "Empty directory"}
+                      : dualPane
+                        ? "Empty — F4 new file · F8 folder · F5/F6 transfer · drag across panes"
+                        : "Empty directory — F4 new file · F8 new folder · drop files to upload"}
                 </div>
               ) : (
                 rows.map((entry) => {
