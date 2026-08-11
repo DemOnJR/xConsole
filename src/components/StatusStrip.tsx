@@ -93,10 +93,22 @@ export function StatusStrip() {
   const activity = useAgentStore((s) => s.activity);
   const runningTools = activity.filter((a) => a.state === "running").length;
 
-  const tokRate =
-    streamStats && streamStats.tokensPerSec > 0
-      ? ` · ${streamStats.tokensPerSec.toFixed(1)} t/s`
-      : "";
+  const tokRate = (() => {
+    if (!streamStats) return "";
+    const bits: string[] = [];
+    if (streamStats.tokensPerSec > 0) {
+      bits.push(`${streamStats.tokensPerSec.toFixed(1)} t/s`);
+    }
+    if (
+      streamStats.cachedTokens != null &&
+      streamStats.promptTokens != null &&
+      streamStats.promptTokens > 0
+    ) {
+      const pct = Math.round((streamStats.cachedTokens / streamStats.promptTokens) * 100);
+      bits.push(`${pct}% cache`);
+    }
+    return bits.length ? ` · ${bits.join(" · ")}` : "";
+  })();
   const agentLabel = streaming
     ? runningTools > 1
       ? `Agent · ${runningTools} tools…${tokRate}`
