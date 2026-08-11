@@ -1720,6 +1720,19 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           />
         </div>
 
+        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)]/50 px-2 py-0.5 text-[10px] text-gray-600">
+          <span>
+            {rows.length} item{rows.length === 1 ? "" : "s"}
+            {hideDotfiles ? " · dots hidden" : ""}
+            {selection.size > 0 ? ` · ${selection.size} selected` : ""}
+          </span>
+          {dualPane && localPath ? (
+            <span className="ml-auto truncate" title={localPath}>
+              Local {localEntries.length} · {localPath}
+            </span>
+          ) : null}
+        </div>
+
         {showKeysHelp ? (
           <div className="shrink-0 border-b border-[var(--border)] bg-[var(--surface)]/80 px-2 py-1.5 font-mono text-[10px] leading-relaxed text-gray-400">
             <div className="mb-0.5 text-[10px] font-sans font-medium text-gray-300">
