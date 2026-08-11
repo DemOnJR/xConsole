@@ -867,6 +867,9 @@ export const api = {
   // back up data + re-run the installer's rebuild.
   checkForUpdate: () => invoke<UpdateInfo>("check_for_update"),
   startAppUpdate: () => invoke<string>("start_app_update"),
+  getUpdateChannel: () => invoke<ChannelInfo>("get_update_channel"),
+  setUpdateChannel: (channel: string) =>
+    invoke<ChannelInfo>("set_update_channel", { channel }),
 
   // App lock / at-rest DB encryption.
   lockStatus: () => invoke<LockStatus>("lock_status"),
@@ -1095,6 +1098,18 @@ export interface UpdateInfo {
   date: string;
   can_self_update: boolean;
   note: string | null;
+  /** Active update channel: `main` (stable) or `dev`. */
+  channel: string;
+  /** Local checkout branch, when known. */
+  local_branch: string | null;
+}
+
+/** Active channel + local build identity (matches Rust `ChannelInfo`). */
+export interface ChannelInfo {
+  channel: string;
+  local_branch: string | null;
+  current: string | null;
+  can_self_update: boolean;
 }
 
 export interface FileChange {

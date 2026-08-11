@@ -73,9 +73,10 @@ function UnlockedApp() {
     void useSettingsStore.getState().load();
   }, [loadTheme]);
 
-  // Check GitHub for a newer signed release shortly after launch (silent — only
-  // shows a card if one is available). Manual checks live in Settings → General.
+  // Load channel identity, then silently check GitHub for a newer build on that channel.
+  // Manual checks live in Settings → General.
   useEffect(() => {
+    void useUpdateStore.getState().loadChannel();
     const t = setTimeout(() => void useUpdateStore.getState().check(false), 4000);
     return () => clearTimeout(t);
   }, []);

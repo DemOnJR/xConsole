@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { useSessionStore } from "../stores/sessionStore";
 import { useCanvasStore } from "../stores/canvasStore";
 import { useAgentStore } from "../stores/agentStore";
@@ -6,6 +6,7 @@ import { useTransferStore } from "../stores/transferStore";
 import { useVpsStore } from "../stores/vpsStore";
 import { useWorkspaceStore } from "../stores/workspaceStore";
 import { useUiStore } from "../stores/uiStore";
+import { useUpdateStore } from "../stores/updateStore";
 
 /**
  * Compact bottom status strip — always visible, minimal.
@@ -24,6 +25,14 @@ export function StatusStrip() {
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const setAgentOpen = useUiStore((s) => s.setAgentOpen);
   const setTransfersOpen = useTransferStore((s) => s.setOpen);
+  const openSettings = useUiStore((s) => s.openSettings);
+  const channel = useUpdateStore((s) => s.channel);
+  const currentSha = useUpdateStore((s) => s.current);
+  const loadChannel = useUpdateStore((s) => s.loadChannel);
+
+  useEffect(() => {
+    void loadChannel();
+  }, [loadChannel]);
 
   const wsName = useMemo(() => {
     if (!activeWs) return "No workspace";
@@ -115,6 +124,26 @@ export function StatusStrip() {
             {activeTransfers} transfer{activeTransfers === 1 ? "" : "s"}
           </button>
         ) : null}
+
+        <button
+          type="button"
+          className="inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide transition hover:bg-[var(--surface-hover)]"
+          title="Release channel — open Settings → General to switch"
+          onClick={() => openSettings("general")}
+        >
+          <span
+            className={
+              channel === "dev" ? "text-amber-300" : "text-[var(--text-faint)]"
+            }
+          >
+            {channel === "dev" ? "dev" : "stable"}
+          </span>
+          {currentSha ? (
+            <span className="font-mono normal-case tracking-normal text-[var(--text-faint)]">
+              {currentSha}
+            </span>
+          ) : null}
+        </button>
 
         <button
           type="button"

@@ -26,6 +26,51 @@ use tauri::{AppHandle, Emitter};
 
 const REPO_URL: &str = "https://github.com/DemOnJR/xConsole";
 const GNU_TOOLCHAIN: &str = "stable-x86_64-pc-windows-gnu";
+/// Default update channel when none is requested / persisted.
+const DEFAULT_BRANCH: &str = "main";
+
+/// Allowed release channels (git branches we may clone/update from).
+fn is_valid_branch(s: &str) -> bool {
+    matches!(s, "main" | "dev")
+}
+
+/// Which branch to install / update from.
+///
+/// Priority: `--branch <name>` / `--branch=<name>` CLI args → `%LOCALAPPDATA%\xConsole\channel`
+/// file (written by the app when the user switches channels) → `main`.
+pub fn install_branch() -> String {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--branch" {
+            if let Some(b) = args.next() {
+                let b = b.trim().to_string();
+                if is_valid_branch(&b) {
+                    return b;
+                }
+            }
+        } else if let Some(b) = a.strip_prefix("--branch=") {
+            let b = b.trim();
+            if is_valid_branch(b) {
+                return b.to_string();
+            }
+        }
+    }
+    let path = base_dir().join("channel");
+    if let Ok(s) = std::fs::read_to_string(path) {
+        let s = s.trim().to_string();
+        if is_valid_branch(&s) {
+            return s;
+        }
+    }
+    DEFAULT_BRANCH.to_string()
+}
+
+/// Persist the active channel so future updates (and the next installer run) stay on it.
+fn write_channel_file(branch: &str) {
+    let path = base_dir().join("channel");
+    let _ = std::fs::create_dir_all(base_dir());
+    let _ = std::fs::write(path, format!("{branch}\n"));
+}
 
 // Portable toolchain downloads (only used when the tool isn't already on PATH).
 //
@@ -826,21 +871,34 @@ fn remove_dir_robust(p: &Path) {
     }
 }
 
-fn clone_fresh(rep: &Reporter, env: &BuildEnv, src: &Path) -> Result<(), String> {
+fn clone_fresh(rep: &Reporter, env: &BuildEnv, src: &Path, branch: &str) -> Result<(), String> {
     remove_dir_robust(src);
     if src.exists() {
         return Err(format!("could not clear existing folder {}", src.display()));
     }
-    rep.log(format!("Cloning {REPO_URL} into {}", src.display()));
+    rep.log(format!(
+        "Cloning {REPO_URL} (branch {branch}) into {}",
+        src.display()
+    ));
     let dest = src.display().to_string();
     // schannel = use the Windows certificate store (robust on minimal/portable gits).
+    // --branch + --single-branch keeps the checkout on the chosen channel (main or dev).
     if run_tool(
         rep,
         env,
         None,
         "git",
         &[
-            "-c", "http.sslBackend=schannel", "clone", "--depth", "1", "--progress", REPO_URL,
+            "-c",
+            "http.sslBackend=schannel",
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            branch,
+            "--single-branch",
+            "--progress",
+            REPO_URL,
             &dest,
         ],
         "git clone",
@@ -856,7 +914,17 @@ fn clone_fresh(rep: &Reporter, env: &BuildEnv, src: &Path) -> Result<(), String>
         env,
         None,
         "git",
-        &["-c", "http.sslBackend=schannel", "clone", "--progress", REPO_URL, &dest],
+        &[
+            "-c",
+            "http.sslBackend=schannel",
+            "clone",
+            "--branch",
+            branch,
+            "--single-branch",
+            "--progress",
+            REPO_URL,
+            &dest,
+        ],
         "git clone",
     )
 }
@@ -1111,18 +1179,47 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
     step!(6, {
         let env = current_env(&base);
         let src = src_dir();
+        let branch = install_branch();
         rep.log(format!("Using git: {}", env.capture("where git")));
+        rep.log(format!("Update channel / branch: {branch}"));
         if src.join(".git").exists() {
-            rep.log("Updating existing source (git fetch + reset)...");
-            let ok = run_tool(rep, &env, Some(&src), "git", &["fetch", "--depth", "1", "origin", "main"], "git fetch").is_ok()
-                && run_tool(rep, &env, Some(&src), "git", &["reset", "--hard", "origin/main"], "git reset").is_ok();
+            rep.log(format!("Updating existing source (git fetch + reset origin/{branch})..."));
+            let remote = format!("origin/{branch}");
+            let ok = run_tool(
+                rep,
+                &env,
+                Some(&src),
+                "git",
+                &["fetch", "--depth", "1", "origin", &branch],
+                "git fetch",
+            )
+            .is_ok()
+                && run_tool(
+                    rep,
+                    &env,
+                    Some(&src),
+                    "git",
+                    &["checkout", "-B", &branch, &remote],
+                    "git checkout",
+                )
+                .is_ok()
+                && run_tool(
+                    rep,
+                    &env,
+                    Some(&src),
+                    "git",
+                    &["reset", "--hard", &remote],
+                    "git reset",
+                )
+                .is_ok();
             if !ok {
                 rep.log("Update failed — re-cloning fresh...");
-                clone_fresh(rep, &env, &src)?;
+                clone_fresh(rep, &env, &src, &branch)?;
             }
         } else {
-            clone_fresh(rep, &env, &src)?;
+            clone_fresh(rep, &env, &src, &branch)?;
         }
+        write_channel_file(&branch);
         Ok(())
     });
 

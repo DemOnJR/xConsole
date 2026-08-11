@@ -1,32 +1,38 @@
 name: Installer Release
 
 # Builds the one-click xConsole installer — the "clone + compile on your PC" setup.exe
-# that lives in installer/ — and publishes it to a rolling GitHub Release. Anyone can then
-# grab the newest installer from:
-#   https://github.com/DemOnJR/xConsole/releases/latest
+# that lives in installer/ — and publishes it to a rolling GitHub Release.
 #
-# It re-runs automatically whenever the installer source changes on main, so editing the
-# installer ships a fresh download with no manual steps. You can also trigger it by hand
-# from the Actions tab (Run workflow).
+# Channels:
+#   main → tag `installer-latest` (marked --latest; public download /releases/latest)
+#   dev  → tag `installer-dev`    (pre-release channel; same full installer, from dev)
 #
-# No repo secrets are required: it publishes with the automatic GITHUB_TOKEN and uses only
-# tools preinstalled on the runner (rustup + the GitHub CLI), so there is no third-party
-# action in the release path to trust.
+# It re-runs when the installer source changes on main or dev, or via workflow_dispatch.
+# No repo secrets are required: GITHUB_TOKEN + preinstalled rustup + gh.
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths:
       - "installer/**"
       - ".github/workflows/installer-release.yml"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Channel to build (main or dev)"
+        required: false
+        default: "main"
+        type: choice
+        options:
+          - main
+          - dev
 
 permissions:
   contents: write # required to create/update the GitHub Release
 
-# Never let two installer releases race each other.
+# One release per channel at a time (don't cancel main when dev builds).
 concurrency:
-  group: installer-release
+  group: installer-release-${{ github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -35,10 +41,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # windows-latest ships rustup + the MSVC toolchain + the Windows SDK preinstalled,
-      # so the installer .exe builds with the default stable-msvc target right away.
-      # (The *GNU* toolchain is only needed on the END USER's machine, where the installer
-      # itself compiles the main app at install time — that is not built here.)
       - name: Show Rust toolchain
         run: rustup show
 
@@ -57,9 +59,6 @@ jobs:
         working-directory: installer
         run: cargo build --release --locked
 
-      # Optional Authenticode signing — the durable fix for AV false positives. No-ops
-      # unless the repo has a WINDOWS_SIGN_PFX_BASE64 secret (a base64-encoded .pfx) and,
-      # if the key is password-protected, WINDOWS_SIGN_PASSWORD. See installer/ANTIVIRUS.md.
       - name: Sign the installer (optional)
         shell: pwsh
         working-directory: installer
@@ -98,8 +97,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item $exe (Join-Path $stage "xConsole-Setup.exe")
 
-          # WebView2Loader.dll is only emitted when it is not statically linked into the
-          # exe; bundle it next to the installer when present so the setup window always opens.
           $dll = Join-Path $rel "WebView2Loader.dll"
           if (Test-Path $dll) {
             Copy-Item $dll (Join-Path $stage "WebView2Loader.dll")
@@ -114,39 +111,52 @@ jobs:
           "zip=installer/$zip" >> $env:GITHUB_OUTPUT
           "exe=installer/$rel/xConsole-Setup.exe" >> $env:GITHUB_OUTPUT
 
-      - name: Publish the rolling "installer-latest" release
+      - name: Publish rolling installer release
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $tag  = "installer-latest"
+          $branch = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.channel }}") {
+            $branch = "${{ inputs.channel }}"
+          }
+          $isMain = $branch -eq "main"
+          $tag  = if ($isMain) { "installer-latest" } else { "installer-dev" }
+          $title = if ($isMain) { "xConsole Installer (latest)" } else { "xConsole Installer (dev)" }
           $sha  = "${{ github.sha }}".Substring(0, 7)
           $date = Get-Date -Format "yyyy-MM-dd"
+          $channelLabel = if ($isMain) { "main (stable)" } else { "dev" }
 
-          # Built as a string array (not a here-string) so YAML indentation can't break it.
           $notes = @(
-            "**One-click xConsole installer** - always the latest build from the main branch.",
+            "**One-click xConsole installer** — always the latest build from the **$channelLabel** branch.",
             "",
             "### Install",
             "1. Download **xConsole-Setup-windows-x64.zip** below.",
             "2. Right-click the zip and choose **Extract All**.",
             "3. Double-click **xConsole-Setup.exe** and press **Install**.",
             "",
-            "The installer fetches the build tools and compiles xConsole from source on your own PC (about 10-20 minutes the first time). No admin rights are needed - everything installs under your user profile. Running it again later updates xConsole in place.",
+            "The installer fetches the build tools and compiles xConsole from the **$branch** branch on your own PC (about 10-20 minutes the first time). No admin rights are needed. Running it again later updates xConsole in place on the same channel.",
+            "",
+            "In the app: **Settings → General → Release channel** switches between Stable (main) and Dev. Updates check that channel and rebuild from it.",
             "",
             "### If your antivirus warns about it",
             "Because xConsole is compiled fresh on your PC, the resulting exe is unsigned and unique to your machine, so it has no reputation yet - some antivirus (e.g. Kaspersky) or SmartScreen may warn or quarantine it. This is a false positive: xConsole is open source and scans statically clean on VirusTotal. To allow it - SmartScreen: More info -> Run anyway; Kaspersky: add the folder %LOCALAPPDATA%\xConsole to Exclusions / trusted apps, and optionally report it at https://opentip.kaspersky.com/. Full details: https://github.com/DemOnJR/xConsole/blob/main/installer/ANTIVIRUS.md",
             "",
-            "Built from commit ``$sha`` on $date."
+            "Built from commit ``$sha`` on $date (branch ``$branch``)."
           ) -join "`n"
 
-          # Rolling release: drop the previous tag/release so this one tracks the latest
-          # commit, then recreate it with fresh assets. The first run has nothing to delete.
           gh release delete $tag --yes --cleanup-tag 2>$null
-          gh release create $tag `
-            "${{ steps.package.outputs.zip }}" `
-            "${{ steps.package.outputs.exe }}" `
-            --target "${{ github.sha }}" `
-            --title "xConsole Installer (latest)" `
-            --notes "$notes" `
-            --latest
+          $createArgs = @(
+            "release", "create", $tag,
+            "${{ steps.package.outputs.zip }}",
+            "${{ steps.package.outputs.exe }}",
+            "--target", "${{ github.sha }}",
+            "--title", $title,
+            "--notes", $notes
+          )
+          if ($isMain) {
+            $createArgs += "--latest"
+          } else {
+            $createArgs += "--prerelease"
+          }
+          gh @createArgs

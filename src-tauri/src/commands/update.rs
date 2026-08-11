@@ -1,25 +1,32 @@
 //! In-app updater for the clone+compile distribution.
 //!
 //! The app is installed by cloning + compiling from GitHub (see `installer/`). To
-//! update, we compare the local checkout's HEAD against `origin/main` on GitHub and,
-//! on the user's accept, re-run the installer — which does `git fetch + reset --hard`,
-//! rebuilds, and swaps in the new exe. The installer self-copies to
-//! `%LOCALAPPDATA%\xConsole\uninstall.exe`, so it's always available to re-invoke.
+//! update, we compare the local checkout's HEAD against the **active channel branch**
+//! (`main` or `dev`) on GitHub and, on the user's accept, re-run the installer — which
+//! does `git fetch + reset --hard` for that branch, rebuilds, and swaps in the new exe.
 //!
-//! USER DATA IS SAFE: it lives in the app-data dir (`%APPDATA%\com.xconsole.app`:
-//! `xconsole.db` = chats/VPS/providers/workspaces/settings/cron, and `agent\` =
-//! memory/soul/skills) and the OS keychain (credentials) — a *different* tree from the
-//! app binary, so the rebuild can't touch it. As an extra safety net we also snapshot
-//! the DB + agent files to a timestamped backup BEFORE launching the update.
+//! Channel is stored in:
+//!   * SQLite setting `update.channel` (app UI)
+//!   * `%LOCALAPPDATA%\xConsole\channel` (read by the installer / next launch)
+//!
+//! USER DATA IS SAFE: it lives in the app-data dir (`%APPDATA%\com.xconsole.app`) and the
+//! OS keychain — never in the install tree. We also snapshot DB + agent files before update.
 
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
+use crate::storage::Db;
+
 const REPO: &str = "DemOnJR/xConsole";
-const BRANCH: &str = "main";
 const KEEP_BACKUPS: usize = 5;
+const CHANNEL_SETTING: &str = "update.channel";
+
+/// Allowed channels (git branches).
+pub fn is_valid_channel(s: &str) -> bool {
+    matches!(s, "main" | "dev")
+}
 
 /// Where the installer placed the app (and itself). Mirrors the installer's `base_dir`.
 fn install_base() -> PathBuf {
@@ -31,35 +38,105 @@ fn install_base() -> PathBuf {
     PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("xConsole")
 }
 
-/// The SHA the local source is checked out at (depth-1 clone of `main`).
+fn channel_file() -> PathBuf {
+    install_base().join("channel")
+}
+
+/// Resolve the active update channel: setting → channel file → `main`.
+pub fn active_channel(db: &Db) -> String {
+    if let Ok(Some(s)) = db.get_setting(CHANNEL_SETTING) {
+        let s = s.trim().to_string();
+        if is_valid_channel(&s) {
+            return s;
+        }
+    }
+    if let Ok(s) = std::fs::read_to_string(channel_file()) {
+        let s = s.trim().to_string();
+        if is_valid_channel(&s) {
+            return s;
+        }
+    }
+    "main".into()
+}
+
+fn write_channel_file(channel: &str) {
+    let base = install_base();
+    let _ = std::fs::create_dir_all(&base);
+    let _ = std::fs::write(channel_file(), format!("{channel}\n"));
+}
+
+/// Persist channel to SQLite + the installer's channel file.
+pub fn set_channel(db: &Db, channel: &str) -> Result<(), String> {
+    if !is_valid_channel(channel) {
+        return Err(format!("invalid channel '{channel}' (use main or dev)"));
+    }
+    db.set_setting(CHANNEL_SETTING, channel)
+        .map_err(|e| e.to_string())?;
+    write_channel_file(channel);
+    Ok(())
+}
+
+/// The SHA the local source is checked out at (any branch).
 fn local_head(src: &Path) -> Option<String> {
     let git = src.join(".git");
-    if let Ok(s) = std::fs::read_to_string(git.join("refs").join("heads").join(BRANCH)) {
+    // Prefer symbolic HEAD → branch ref (works for main and dev).
+    if let Ok(head) = std::fs::read_to_string(git.join("HEAD")) {
+        let head = head.trim();
+        if let Some(r) = head.strip_prefix("ref: ") {
+            let ref_path = git.join(r.trim());
+            if let Ok(s) = std::fs::read_to_string(&ref_path) {
+                let s = s.trim();
+                if s.len() >= 7 {
+                    return Some(s.to_string());
+                }
+            }
+            // packed-refs fallback for that ref
+            if let Ok(packed) = std::fs::read_to_string(git.join("packed-refs")) {
+                let needle = r.trim();
+                for line in packed.lines() {
+                    if line.trim_end().ends_with(needle) {
+                        if let Some(sha) = line.split_whitespace().next() {
+                            return Some(sha.to_string());
+                        }
+                    }
+                }
+            }
+        } else if head.len() >= 7 && head.chars().all(|c| c.is_ascii_hexdigit()) {
+            // Detached HEAD — raw SHA.
+            return Some(head.to_string());
+        }
+    }
+    // Legacy: main branch only (older installs).
+    if let Ok(s) = std::fs::read_to_string(git.join("refs").join("heads").join("main")) {
         let s = s.trim();
         if s.len() >= 7 {
             return Some(s.to_string());
         }
     }
-    // Fallback: a packed-refs entry "<sha> refs/heads/main".
-    if let Ok(packed) = std::fs::read_to_string(git.join("packed-refs")) {
-        for line in packed.lines() {
-            if line.trim_end().ends_with(&format!("refs/heads/{BRANCH}")) {
-                if let Some(sha) = line.split_whitespace().next() {
-                    return Some(sha.to_string());
-                }
-            }
+    None
+}
+
+/// Best-effort: which branch the checkout is currently on.
+fn local_branch(src: &Path) -> Option<String> {
+    let head = std::fs::read_to_string(src.join(".git").join("HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(r) = head.strip_prefix("ref: refs/heads/") {
+        let b = r.trim();
+        if is_valid_channel(b) {
+            return Some(b.to_string());
         }
+        return Some(b.to_string());
     }
     None
 }
 
 #[derive(Serialize)]
 pub struct UpdateInfo {
-    /// A newer commit is on GitHub and we can update in place.
+    /// A newer commit is on GitHub for the active channel and we can update in place.
     pub available: bool,
     /// Short SHA the app was built from (None if unknown).
     pub current: Option<String>,
-    /// Short SHA of the latest commit on GitHub.
+    /// Short SHA of the latest commit on the active channel.
     pub latest: Option<String>,
     /// First line of the latest commit message ("what's new").
     pub message: String,
@@ -69,12 +146,47 @@ pub struct UpdateInfo {
     pub can_self_update: bool,
     /// Human note when we can't determine the local version, etc.
     pub note: Option<String>,
+    /// Active update channel (`main` or `dev`).
+    pub channel: String,
+    /// Local checkout branch name, when known.
+    pub local_branch: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ChannelInfo {
+    pub channel: String,
+    pub local_branch: Option<String>,
+    pub current: Option<String>,
+    pub can_self_update: bool,
 }
 
 #[tauri::command]
-pub async fn check_for_update() -> Result<UpdateInfo, String> {
+pub fn get_update_channel(db: tauri::State<'_, Db>) -> Result<ChannelInfo, String> {
+    let channel = active_channel(&db);
     let base = install_base();
-    let local = local_head(&base.join("src"));
+    let src = base.join("src");
+    let short = |s: &str| s.chars().take(7).collect::<String>();
+    Ok(ChannelInfo {
+        channel,
+        local_branch: local_branch(&src),
+        current: local_head(&src).as_deref().map(short),
+        can_self_update: base.join("uninstall.exe").exists(),
+    })
+}
+
+#[tauri::command]
+pub fn set_update_channel(db: tauri::State<'_, Db>, channel: String) -> Result<ChannelInfo, String> {
+    set_channel(&db, channel.trim())?;
+    get_update_channel(db)
+}
+
+#[tauri::command]
+pub async fn check_for_update(db: tauri::State<'_, Db>) -> Result<UpdateInfo, String> {
+    let channel = active_channel(&db);
+    let base = install_base();
+    let src = base.join("src");
+    let local = local_head(&src);
+    let local_br = local_branch(&src);
     let can_self_update = base.join("uninstall.exe").exists();
 
     let client = reqwest::Client::builder()
@@ -82,7 +194,7 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
         .user_agent("xConsole-updater")
         .build()
         .map_err(|e| e.to_string())?;
-    let url = format!("https://api.github.com/repos/{REPO}/commits/{BRANCH}");
+    let url = format!("https://api.github.com/repos/{REPO}/commits/{channel}");
     let resp = client
         .get(&url)
         .header("Accept", "application/vnd.github+json")
@@ -90,10 +202,17 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
         .await
         .map_err(|e| format!("GitHub check failed: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("GitHub returned HTTP {}", resp.status()));
+        return Err(format!(
+            "GitHub returned HTTP {} for branch '{channel}'",
+            resp.status()
+        ));
     }
     let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    let latest_sha = v.get("sha").and_then(|s| s.as_str()).unwrap_or("").to_string();
+    let latest_sha = v
+        .get("sha")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
     let message = v
         .pointer("/commit/message")
         .and_then(|s| s.as_str())
@@ -110,10 +229,30 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
 
     let short = |s: &str| s.chars().take(7).collect::<String>();
     let (available, note) = match &local {
-        Some(l) if !latest_sha.is_empty() => (*l != latest_sha, None),
+        Some(l) if !latest_sha.is_empty() => {
+            // Different commit, OR local branch doesn't match the selected channel
+            // (user switched main↔dev without rebuilding yet).
+            let branch_mismatch = local_br
+                .as_deref()
+                .map(|b| b != channel.as_str())
+                .unwrap_or(false);
+            let available = *l != latest_sha || branch_mismatch;
+            let note = if branch_mismatch {
+                Some(format!(
+                    "Selected channel is '{channel}' but this install is on '{}'. Update to switch.",
+                    local_br.as_deref().unwrap_or("unknown")
+                ))
+            } else {
+                None
+            };
+            (available, note)
+        }
         _ => (
             false,
-            Some("Couldn't read the local version — update by re-running the installer.".to_string()),
+            Some(
+                "Couldn't read the local version — update by re-running the installer."
+                    .to_string(),
+            ),
         ),
     };
 
@@ -125,6 +264,8 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
         date,
         can_self_update,
         note,
+        channel,
+        local_branch: local_br,
     })
 }
 
@@ -146,7 +287,9 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 /// Keep only the newest `keep` backup folders; delete older ones.
 fn prune_backups(dir: &Path, keep: usize) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut dirs: Vec<PathBuf> = rd
         .flatten()
         .map(|e| e.path())
@@ -191,9 +334,16 @@ fn backup_user_data(app: &AppHandle) -> Result<PathBuf, String> {
     }
 
     // Sanity-check the primary DB artifact copied non-empty before we proceed.
-    let primary = if encrypted { "xconsole.db.enc" } else { "xconsole.db" };
+    let primary = if encrypted {
+        "xconsole.db.enc"
+    } else {
+        "xconsole.db"
+    };
     if data.join(primary).exists()
-        && std::fs::metadata(dest.join(primary)).map(|m| m.len()).unwrap_or(0) == 0
+        && std::fs::metadata(dest.join(primary))
+            .map(|m| m.len())
+            .unwrap_or(0)
+            == 0
     {
         return Err("data backup looks empty — aborting update to protect your data".into());
     }
@@ -203,9 +353,13 @@ fn backup_user_data(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// Back up the user's data, then launch the installer's rebuild-update with its
-/// progress window. Returns the backup path on success.
+/// progress window, targeting the **active channel**. Returns the backup path.
 #[tauri::command]
-pub async fn start_app_update(app: AppHandle) -> Result<String, String> {
+pub async fn start_app_update(app: AppHandle, db: tauri::State<'_, Db>) -> Result<String, String> {
+    let channel = active_channel(&db);
+    // Ensure the installer sees the same channel even if SQLite isn't consulted.
+    write_channel_file(&channel);
+
     let backup = backup_user_data(&app)?;
 
     let updater = install_base().join("uninstall.exe");
@@ -217,16 +371,19 @@ pub async fn start_app_update(app: AppHandle) -> Result<String, String> {
         );
     }
 
-    // Launch the installer in update mode (shows its build-progress window), detached so
-    // it outlives this app — the installer stops the running app before swapping the exe.
+    // Launch the installer in update mode for this channel. Detached so it outlives
+    // this app — the installer stops the running app before swapping the exe.
     let mut cmd = std::process::Command::new(&updater);
     cmd.arg("--update");
+    cmd.arg("--branch");
+    cmd.arg(&channel);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0000_0008); // DETACHED_PROCESS
     }
-    cmd.spawn().map_err(|e| format!("failed to launch the updater: {e}"))?;
+    cmd.spawn()
+        .map_err(|e| format!("failed to launch the updater: {e}"))?;
 
     Ok(backup.to_string_lossy().into_owned())
 }
