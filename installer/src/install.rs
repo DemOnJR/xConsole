@@ -36,9 +36,18 @@ fn is_valid_branch(s: &str) -> bool {
 
 /// Which branch to install / update from.
 ///
-/// Priority: `--branch <name>` / `--branch=<name>` CLI args → `%LOCALAPPDATA%\xConsole\channel`
-/// file (written by the app when the user switches channels) → `main`.
+/// Priority:
+///   1. `XCONSOLE_UPDATE_BRANCH` env (set by the app when launching the updater)
+///   2. `--branch <name>` / `--branch=<name>` CLI args
+///   3. `%LOCALAPPDATA%\xConsole\channel` (written by the app on channel switch)
+///   4. `main`
 pub fn install_branch() -> String {
+    if let Ok(b) = std::env::var("XCONSOLE_UPDATE_BRANCH") {
+        let b = b.trim().to_string();
+        if is_valid_branch(&b) {
+            return b;
+        }
+    }
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == "--branch" {
@@ -872,9 +881,42 @@ fn remove_dir_robust(p: &Path) {
 }
 
 fn clone_fresh(rep: &Reporter, env: &BuildEnv, src: &Path, branch: &str) -> Result<(), String> {
-    remove_dir_robust(src);
+    // Retry clear — Windows + antivirus often holds a lock for a beat after the
+    // previous git process exits, which used to leave a half-deleted `src` with
+    // no `.git` and permanently break channel switches.
+    for attempt in 1..=4 {
+        remove_dir_robust(src);
+        if !src.exists() {
+            break;
+        }
+        if attempt < 4 {
+            rep.log(format!(
+                "Waiting to clear {} (attempt {attempt}/4)...",
+                src.display()
+            ));
+            std::thread::sleep(std::time::Duration::from_millis(400 * attempt as u64));
+        }
+    }
     if src.exists() {
-        return Err(format!("could not clear existing folder {}", src.display()));
+        // Last resort: rename out of the way so clone can proceed.
+        let zombie = src.with_file_name(format!(
+            "src.old-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        ));
+        rep.log(format!(
+            "Could not delete {} — moving it to {} and continuing.",
+            src.display(),
+            zombie.display()
+        ));
+        std::fs::rename(src, &zombie).map_err(|e| {
+            format!(
+                "could not clear existing folder {} ({e}). Close any program using that folder (IDE, antivirus) and retry.",
+                src.display()
+            )
+        })?;
     }
     rep.log(format!(
         "Cloning {REPO_URL} (branch {branch}) into {}",
@@ -1182,19 +1224,60 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
         let branch = install_branch();
         rep.log(format!("Using git: {}", env.capture("where git")));
         rep.log(format!("Update channel / branch: {branch}"));
+        // Channel file first so a mid-run crash still leaves the intended channel for
+        // the next attempt (and the app keeps reading the user's choice).
+        write_channel_file(&branch);
+
+        // Existing installs were often cloned with `--single-branch` for main only.
+        // `git fetch origin dev` then leaves FETCH_HEAD populated but does NOT create
+        // `refs/remotes/origin/dev`, so `checkout -B dev origin/dev` fails forever and
+        // we spin on "update available — install is on main". Always:
+        //   1) expand remote.fetch so every branch can be tracked
+        //   2) fetch the target branch into refs/remotes/origin/<branch>
+        //   3) checkout that remote-tracking ref (or FETCH_HEAD as fallback)
         if src.join(".git").exists() {
-            rep.log(format!("Updating existing source (git fetch + reset origin/{branch})..."));
-            let remote = format!("origin/{branch}");
-            let ok = run_tool(
+            rep.log(format!(
+                "Updating existing source onto branch '{branch}'..."
+            ));
+            // Allow fetching branches other than the one the shallow clone was made with.
+            let _ = run_tool(
                 rep,
                 &env,
                 Some(&src),
                 "git",
-                &["fetch", "--depth", "1", "origin", &branch],
+                &[
+                    "config",
+                    "remote.origin.fetch",
+                    "+refs/heads/*:refs/remotes/origin/*",
+                ],
+                "git config remote.origin.fetch",
+            );
+            let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
+            let remote = format!("origin/{branch}");
+            let fetch_ok = run_tool(
+                rep,
+                &env,
+                Some(&src),
+                "git",
+                &["fetch", "--depth", "1", "origin", &refspec],
                 "git fetch",
             )
             .is_ok()
-                && run_tool(
+                || run_tool(
+                    rep,
+                    &env,
+                    Some(&src),
+                    "git",
+                    &["fetch", "--depth", "1", "origin", &branch],
+                    "git fetch (fallback)",
+                )
+                .is_ok();
+
+            let mut ok = false;
+            if fetch_ok {
+                // Prefer the remote-tracking ref; fall back to FETCH_HEAD (always set
+                // after a successful fetch of that branch).
+                ok = run_tool(
                     rep,
                     &env,
                     Some(&src),
@@ -1203,23 +1286,45 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
                     "git checkout",
                 )
                 .is_ok()
-                && run_tool(
-                    rep,
-                    &env,
-                    Some(&src),
-                    "git",
-                    &["reset", "--hard", &remote],
-                    "git reset",
-                )
-                .is_ok();
+                    || run_tool(
+                        rep,
+                        &env,
+                        Some(&src),
+                        "git",
+                        &["checkout", "-B", &branch, "FETCH_HEAD"],
+                        "git checkout FETCH_HEAD",
+                    )
+                    .is_ok();
+                if ok {
+                    let _ = run_tool(
+                        rep,
+                        &env,
+                        Some(&src),
+                        "git",
+                        &["reset", "--hard", "HEAD"],
+                        "git reset",
+                    );
+                    // Bind upstream so future `git status` / pulls know the channel.
+                    let _ = run_tool(
+                        rep,
+                        &env,
+                        Some(&src),
+                        "git",
+                        &["branch", "--set-upstream-to", &remote, &branch],
+                        "git branch -u",
+                    );
+                }
+            }
             if !ok {
-                rep.log("Update failed — re-cloning fresh...");
+                rep.log("Update onto channel failed — re-cloning fresh...");
                 clone_fresh(rep, &env, &src, &branch)?;
             }
         } else {
+            // Missing .git (partial wipe / antivirus) — full re-clone of the channel.
             clone_fresh(rep, &env, &src, &branch)?;
         }
         write_channel_file(&branch);
+        rep.log(format!("Source is on channel '{branch}'."));
         Ok(())
     });
 

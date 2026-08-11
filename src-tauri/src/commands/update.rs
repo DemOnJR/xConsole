@@ -73,6 +73,70 @@ pub fn set_channel(db: &Db, channel: &str) -> Result<(), String> {
     db.set_setting(CHANNEL_SETTING, channel)
         .map_err(|e| e.to_string())?;
     write_channel_file(channel);
+    // Best-effort: retarget the local git checkout so the next update/installer
+    // run is already on the right branch (and UI stops saying "install is on main").
+    let src = install_base().join("src");
+    let _ = ensure_checkout_branch(&src, channel);
+    Ok(())
+}
+
+/// Run a git command in `cwd`. Uses PATH (system/Hermes git is fine).
+fn git_in(cwd: &Path, args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| format!("git not found: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        return Err(format!(
+            "git {} failed: {}{}",
+            args.first().unwrap_or(&""),
+            err.trim(),
+            if stdout.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", stdout.trim())
+            }
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Point the local source tree at `channel` without a full rebuild.
+///
+/// Handles shallow single-branch clones of `main` that never had `origin/dev` by
+/// rewriting `remote.origin.fetch` and fetching an explicit refspec.
+fn ensure_checkout_branch(src: &Path, channel: &str) -> Result<(), String> {
+    if !is_valid_channel(channel) {
+        return Err(format!("invalid channel '{channel}'"));
+    }
+    if !src.join(".git").exists() {
+        return Err("no local source checkout".into());
+    }
+    // Already there?
+    if local_branch(src).as_deref() == Some(channel) {
+        write_channel_file(channel);
+        return Ok(());
+    }
+    let _ = git_in(
+        src,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ],
+    );
+    let refspec = format!("+refs/heads/{channel}:refs/remotes/origin/{channel}");
+    git_in(src, &["fetch", "--depth", "1", "origin", &refspec])
+        .or_else(|_| git_in(src, &["fetch", "--depth", "1", "origin", channel]))?;
+    let remote = format!("origin/{channel}");
+    git_in(src, &["checkout", "-B", channel, &remote])
+        .or_else(|_| git_in(src, &["checkout", "-B", channel, "FETCH_HEAD"]))?;
+    let _ = git_in(src, &["reset", "--hard", "HEAD"]);
+    let _ = git_in(src, &["branch", "--set-upstream-to", &remote, channel]);
+    write_channel_file(channel);
     Ok(())
 }
 
@@ -177,6 +241,7 @@ pub fn get_update_channel(db: tauri::State<'_, Db>) -> Result<ChannelInfo, Strin
 #[tauri::command]
 pub fn set_update_channel(db: tauri::State<'_, Db>, channel: String) -> Result<ChannelInfo, String> {
     set_channel(&db, channel.trim())?;
+    // Return post-switch identity (branch may already match after ensure_checkout_branch).
     get_update_channel(db)
 }
 
@@ -228,18 +293,24 @@ pub async fn check_for_update(db: tauri::State<'_, Db>) -> Result<UpdateInfo, St
         .to_string();
 
     let short = |s: &str| s.chars().take(7).collect::<String>();
+    // Availability is **commit-based only** (first 7 chars). Branch-name mismatch alone
+    // must NOT keep offering updates forever: main and dev often share the same tip, and
+    // shallow single-branch clones of main used to fail switching to origin/dev.
     let (available, note) = match &local {
         Some(l) if !latest_sha.is_empty() => {
-            // Different commit, OR local branch doesn't match the selected channel
-            // (user switched main↔dev without rebuilding yet).
+            let available = short(l) != short(&latest_sha);
             let branch_mismatch = local_br
                 .as_deref()
                 .map(|b| b != channel.as_str())
                 .unwrap_or(false);
-            let available = *l != latest_sha || branch_mismatch;
-            let note = if branch_mismatch {
+            // Same tip as the selected channel: quietly retarget the git branch so the
+            // UI stops saying "install is on main" without a full rebuild.
+            if !available && branch_mismatch {
+                let _ = ensure_checkout_branch(&src, &channel);
+            }
+            let note = if available && branch_mismatch {
                 Some(format!(
-                    "Selected channel is '{channel}' but this install is on '{}'. Update to switch.",
+                    "Will rebuild from the '{channel}' channel (currently on '{}').",
                     local_br.as_deref().unwrap_or("unknown")
                 ))
             } else {
@@ -248,9 +319,10 @@ pub async fn check_for_update(db: tauri::State<'_, Db>) -> Result<UpdateInfo, St
             (available, note)
         }
         _ => (
-            false,
+            // No readable checkout — offer an update that re-clones the channel.
+            can_self_update,
             Some(
-                "Couldn't read the local version — update by re-running the installer."
+                "Couldn't read the local version — update will re-clone from your selected channel."
                     .to_string(),
             ),
         ),
@@ -359,6 +431,14 @@ pub async fn start_app_update(app: AppHandle, db: tauri::State<'_, Db>) -> Resul
     let channel = active_channel(&db);
     // Ensure the installer sees the same channel even if SQLite isn't consulted.
     write_channel_file(&channel);
+    // Switch the git tree onto the channel *before* the installer runs, so even an
+    // older uninstall.exe that still hardcodes `main` will at least build from a tree
+    // that was already checked out to dev (and the new installer will reaffirm it).
+    let src = install_base().join("src");
+    if let Err(e) = ensure_checkout_branch(&src, &channel) {
+        // Non-fatal: the new installer will re-clone; log-worthy but don't block.
+        eprintln!("[update] pre-switch to {channel}: {e}");
+    }
 
     let backup = backup_user_data(&app)?;
 
@@ -373,10 +453,13 @@ pub async fn start_app_update(app: AppHandle, db: tauri::State<'_, Db>) -> Resul
 
     // Launch the installer in update mode for this channel. Detached so it outlives
     // this app — the installer stops the running app before swapping the exe.
+    // Also set XCONSOLE_UPDATE_BRANCH so any future installer reads the channel
+    // even if CLI flags are stripped.
     let mut cmd = std::process::Command::new(&updater);
     cmd.arg("--update");
     cmd.arg("--branch");
     cmd.arg(&channel);
+    cmd.env("XCONSOLE_UPDATE_BRANCH", &channel);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
