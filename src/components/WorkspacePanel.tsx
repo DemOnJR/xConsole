@@ -410,6 +410,12 @@ export function WorkspacePanel() {
   const [collapsed, setCollapsed] = useState(
     () => localStorage.getItem(WS_COLLAPSE_KEY) === "1",
   );
+  const [filter, setFilter] = useState("");
+  const filtered = filter.trim()
+    ? workspaces.filter((w) =>
+        w.name.toLowerCase().includes(filter.trim().toLowerCase()),
+      )
+    : workspaces;
 
   useEffect(() => {
     loadWorkspaces();
@@ -477,16 +483,32 @@ export function WorkspacePanel() {
           ))}
         </div>
       ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
-          {workspaces.length === 0 && (
-            <p className="px-2 py-6 text-center text-xs text-gray-600">
-              No workspaces yet. Click + to create one, or drop servers on the canvas
-              and Save from the top toolbar.
-            </p>
-          )}
-          {workspaces.map((w) => (
-            <WorkspaceRow key={w.id} w={w} />
-          ))}
+        <div className="flex min-h-0 flex-1 flex-col">
+          {workspaces.length > 5 ? (
+            <div className="shrink-0 px-2 pb-1 pt-2">
+              <input
+                type="text"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                placeholder="Filter workspaces…"
+                className="w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-2 py-1 text-xs text-gray-200 outline-none focus:border-blue-500"
+              />
+            </div>
+          ) : null}
+          <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+            {workspaces.length === 0 && (
+              <p className="px-2 py-6 text-center text-xs text-gray-600">
+                No workspaces yet. Click + to create one, or drop servers on the canvas
+                and Save from the top toolbar.
+              </p>
+            )}
+            {workspaces.length > 0 && filtered.length === 0 && (
+              <p className="px-2 py-4 text-center text-xs text-gray-600">No matches.</p>
+            )}
+            {filtered.map((w) => (
+              <WorkspaceRow key={w.id} w={w} />
+            ))}
+          </div>
         </div>
       )}
     </aside>
