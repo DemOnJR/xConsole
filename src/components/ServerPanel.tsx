@@ -66,6 +66,21 @@ export function ServerPanel() {
       <div className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-2.5">
         <span className="xc-panel-title">Servers</span>
         <div className="ml-auto flex items-center gap-1">
+          {pinned.length > 0 ? (
+            <button
+              type="button"
+              className="rounded-md border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-amber-200/90 hover:bg-[var(--border)]"
+              data-tooltip="Open terminals for all pinned servers"
+              onClick={() => {
+                for (const id of pinned) {
+                  const v = vpsList.find((x) => x.id === id);
+                  if (v) addVps(v);
+                }
+              }}
+            >
+              ★ Open {pinned.length}
+            </button>
+          ) : null}
           <button
             className="flex items-center gap-1 rounded-md bg-blue-600 px-2 py-0.5 text-xs text-white hover:bg-blue-500"
             onClick={() => {
