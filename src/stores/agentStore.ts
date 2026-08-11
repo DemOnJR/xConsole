@@ -187,6 +187,7 @@ interface AgentState {
   newConversation: () => Promise<void>;
   openConversation: (id: string) => Promise<void>;
   removeConversation: (id: string) => Promise<void>;
+  renameConversation: (id: string, title: string) => Promise<void>;
   subscribeApprovals: () => Promise<UnlistenFn>;
   resolveApproval: (id: string, approved: boolean, remember?: boolean) => Promise<void>;
   answerQuestion: (id: string, answer: string) => Promise<void>;
@@ -646,6 +647,29 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         await get().newConversation();
       }
     }
+  },
+
+  renameConversation: async (id, title) => {
+    const t = title.trim();
+    if (!t) return;
+    const conv = await api.getAgentConversation(id);
+    if (!conv) return;
+    let targets: string[] = [];
+    try {
+      targets = conv.targets_json
+        ? (JSON.parse(conv.targets_json) as string[])
+        : [];
+    } catch {
+      targets = get().targets;
+    }
+    await api.saveAgentConversation({
+      id,
+      title: t,
+      targets,
+      messagesJson: conv.messages_json,
+    });
+    const list = await api.listAgentConversations().catch(() => get().conversations);
+    set({ conversations: list });
   },
 
   setSpeaking: (speaking) => set({ speaking }),

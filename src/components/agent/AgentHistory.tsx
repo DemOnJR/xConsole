@@ -28,12 +28,14 @@ export function AgentSessionTabs({
   activeId,
   onSelect,
   onNew,
+  onRename,
   disabled,
 }: {
   conversations: AgentConversationMeta[];
   activeId: string;
   onSelect: (id: string) => void;
   onNew: () => void;
+  onRename?: (id: string, title: string) => void;
   disabled?: boolean;
 }) {
   // Active first, then most recently updated.
@@ -57,12 +59,17 @@ export function AgentSessionTabs({
             type="button"
             disabled={disabled && !active}
             onClick={() => onSelect(c.id)}
+            onDoubleClick={() => {
+              if (!onRename) return;
+              const next = window.prompt("Rename conversation", c.title);
+              if (next != null && next.trim()) onRename(c.id, next.trim());
+            }}
             className={`max-w-[140px] shrink-0 truncate rounded-md px-2 py-0.5 text-[10px] transition ${
               active
                 ? "bg-blue-600/30 text-blue-100 ring-1 ring-inset ring-blue-500/40"
                 : "bg-[var(--surface)] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
             } disabled:opacity-40`}
-            data-tooltip={c.title}
+            data-tooltip={`${c.title} — double-click to rename`}
           >
             {shortTitle(c.title)}
           </button>
@@ -130,6 +137,7 @@ export function AgentHistory({
   onSelect,
   onNew,
   onDelete,
+  onRename,
   onClose,
 }: {
   open: boolean;
@@ -138,6 +146,7 @@ export function AgentHistory({
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (id: string) => void;
+  onRename?: (id: string, title: string) => void;
   onClose: () => void;
 }) {
   if (!open) return null;
@@ -178,8 +187,15 @@ export function AgentHistory({
                 type="button"
                 className="min-w-0 flex-1 text-left"
                 onClick={() => onSelect(c.id)}
+                onDoubleClick={() => {
+                  if (!onRename) return;
+                  const next = window.prompt("Rename conversation", c.title);
+                  if (next != null && next.trim()) onRename(c.id, next.trim());
+                }}
               >
-                <div className="truncate text-[11px] text-gray-200">{c.title}</div>
+                <div className="truncate text-[11px] text-gray-200" title="Double-click to rename">
+                  {c.title}
+                </div>
                 {c.summary && (
                   <div className="mt-0.5 line-clamp-2 text-[10px] leading-snug text-gray-500">
                     {c.summary.replace(/^-\s*/gm, "").slice(0, 120)}

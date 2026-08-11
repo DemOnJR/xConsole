@@ -471,6 +471,7 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
     openConversation,
 
     removeConversation,
+    renameConversation,
 
     resolveApproval,
 
@@ -877,6 +878,7 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
           void openConversation(id);
         }}
         onNew={() => void newConversation()}
+        onRename={(id, title) => void renameConversation(id, title)}
       />
       <AgentLiveStatus
         streaming={streaming}
@@ -908,6 +910,7 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
         }}
 
         onDelete={(id) => void removeConversation(id)}
+        onRename={(id, title) => void renameConversation(id, title)}
 
         onClose={() => setShowHistory(false)}
 
