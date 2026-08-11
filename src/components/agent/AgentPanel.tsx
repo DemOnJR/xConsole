@@ -838,7 +838,7 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
           >
 
-            History
+            History{conversations.length > 0 ? ` (${conversations.length})` : ""}
 
           </button>
           <button
