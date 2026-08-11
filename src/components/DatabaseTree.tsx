@@ -287,6 +287,9 @@ export function DatabaseTree({
   onSavedChanged: () => void;
   onForget: (id: string) => void;
 }) {
+  const [filter, setFilter] = useState("");
+  const filterQ = filter.trim().toLowerCase();
+
   const toggleInstance = (inst: DbInstance) =>
     onPatch(inst.endpoint.id, { expanded: !inst.expanded });
 
@@ -327,6 +330,16 @@ export function DatabaseTree({
         >
           ⟳
         </button>
+      </div>
+      <div className="shrink-0 border-b border-[var(--border)] px-1.5 py-1">
+        <input
+          type="text"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter tables…"
+          spellCheck={false}
+          className="w-full rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 text-[10px] text-gray-300 outline-none focus:border-violet-600"
+        />
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto py-1">
@@ -423,7 +436,14 @@ export function DatabaseTree({
                               <span className="truncate">{schema}</span>
                             </button>
                             {open
-                              ? (inst.tables[schema] ?? []).map((t) => {
+                              ? (inst.tables[schema] ?? [])
+                                  .filter(
+                                    (t) =>
+                                      !filterQ ||
+                                      t.name.toLowerCase().includes(filterQ) ||
+                                      schema.toLowerCase().includes(filterQ),
+                                  )
+                                  .map((t) => {
                                   const active =
                                     selected?.endpointId === ep.id &&
                                     selected?.schema === schema &&
@@ -453,9 +473,19 @@ export function DatabaseTree({
                                   );
                                 })
                               : null}
-                            {open && (inst.tables[schema] ?? []).length === 0 ? (
+                            {open &&
+                            (inst.tables[schema] ?? []).filter(
+                              (t) =>
+                                !filterQ ||
+                                t.name.toLowerCase().includes(filterQ) ||
+                                schema.toLowerCase().includes(filterQ),
+                            ).length === 0 ? (
                               <p className="py-0.5 pl-12 text-[10px] text-gray-600">
-                                {inst.busy ? "Loading…" : "No tables."}
+                                {inst.busy
+                                  ? "Loading…"
+                                  : filterQ
+                                    ? "No matching tables."
+                                    : "No tables."}
                               </p>
                             ) : null}
                           </div>
