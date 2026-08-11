@@ -538,6 +538,36 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     URL.revokeObjectURL(url);
   };
 
+  /** Empty the current table (TRUNCATE / DELETE) after a strong confirm. */
+  const truncateTable = async () => {
+    if (!sel) return;
+    const ok = await dialog.confirm({
+      title: `Truncate ${sel.schema}.${sel.table}?`,
+      message: `This deletes ALL rows in ${sel.schema}.${sel.table}. It cannot be undone from this app.`,
+      danger: true,
+      confirmText: "Truncate",
+    });
+    if (!ok) return;
+    setBusy(true);
+    setError(null);
+    try {
+      // Prefer TRUNCATE; fall back to DELETE for engines that refuse TRUNCATE.
+      try {
+        await api.dbRunSql(
+          sel.sessionId,
+          `TRUNCATE TABLE ${sel.schema}.${sel.table}`,
+        );
+      } catch {
+        await api.dbRunSql(sel.sessionId, `DELETE FROM ${sel.schema}.${sel.table}`);
+      }
+      await showTable(sel, 0);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   /** Import a .sql file from disk and run it against the current connection. */
   const importSqlFile = async () => {
     if (!sel?.sessionId) {
@@ -720,6 +750,15 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                     data-tooltip="Insert a new row"
                   >
                     Insert
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void truncateTable()}
+                    className="rounded px-1.5 py-0.5 text-red-400/80 hover:bg-red-950/40 hover:text-red-300 disabled:opacity-30"
+                    data-tooltip="Delete all rows in this table"
+                  >
+                    Truncate
                   </button>
                   <button
                     type="button"
