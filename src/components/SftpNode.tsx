@@ -807,6 +807,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     }
   });
   const dualSplitDragging = useRef(false);
+  const dualSplitLastPct = useRef(42);
   const localBookmarkKey = `xconsole-local-bookmarks`;
   const [localBookmarks, setLocalBookmarks] = useState<string[]>(() => {
     try {
@@ -2502,16 +2503,15 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                     const delta = ((ev.clientX - startX) / w) * 100;
                     const next = Math.min(55, Math.max(18, startPct + delta));
                     setLocalPanePct(next);
-                    dualSplitDragging.current = true;
-                    (dualSplitDragging as { lastPct?: number }).lastPct = next;
+                    dualSplitLastPct.current = next;
                   };
                   const onUp = () => {
                     dualSplitDragging.current = false;
                     try {
-                      const pct =
-                        (dualSplitDragging as { lastPct?: number }).lastPct ??
-                        startPct;
-                      localStorage.setItem("xconsole-sftp-pane-pct", String(pct));
+                      localStorage.setItem(
+                        "xconsole-sftp-pane-pct",
+                        String(dualSplitLastPct.current),
+                      );
                     } catch {
                       /* ignore */
                     }
