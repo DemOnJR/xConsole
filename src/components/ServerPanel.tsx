@@ -6,8 +6,9 @@ import type { Vps } from "../lib/tauri";
 import { VpsForm } from "./VpsForm";
 import { dialog } from "../stores/dialogStore";
 import { PlusIcon, TrashIcon, FolderIcon, DatabaseIcon } from "./icons";
+import { DrawerHeader } from "./DrawerHeader";
 
-export function ServerPanel() {
+export function ServerPanel({ width }: { width?: number }) {
   const { vpsList, load, remove, reorder } = useVpsStore();
   const addVps = useCanvasStore((s) => s.addVps);
   const addSftp = useCanvasStore((s) => s.addSftp);
@@ -62,36 +63,42 @@ export function ServerPanel() {
   }, [vpsList, query, pinned]);
 
   return (
-    <aside className="xc-drawer flex h-full flex-col" data-side="right" style={{ width: "var(--drawer-w)" }}>
-      <div className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-2.5">
-        <span className="xc-panel-title">Servers</span>
-        <div className="ml-auto flex items-center gap-1">
-          {pinned.length > 0 ? (
+    <aside
+      className="xc-drawer flex h-full flex-col"
+      data-side="right"
+      style={{ width: width ?? "var(--drawer-w)" }}
+    >
+      <DrawerHeader
+        title="Servers"
+        actions={
+          <>
+            {pinned.length > 0 ? (
+              <button
+                type="button"
+                className="rounded-md border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-amber-200/90 hover:bg-[var(--border)]"
+                data-tooltip="Open terminals for all pinned servers"
+                onClick={() => {
+                  for (const id of pinned) {
+                    const v = vpsList.find((x) => x.id === id);
+                    if (v) addVps(v);
+                  }
+                }}
+              >
+                ★ Open {pinned.length}
+              </button>
+            ) : null}
             <button
-              type="button"
-              className="rounded-md border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-amber-200/90 hover:bg-[var(--border)]"
-              data-tooltip="Open terminals for all pinned servers"
+              className="flex items-center gap-1 rounded-md bg-blue-600 px-2 py-0.5 text-xs text-white hover:bg-blue-500"
               onClick={() => {
-                for (const id of pinned) {
-                  const v = vpsList.find((x) => x.id === id);
-                  if (v) addVps(v);
-                }
+                setEditing(null);
+                setShowForm(true);
               }}
             >
-              ★ Open {pinned.length}
+              <PlusIcon size={13} /> Add
             </button>
-          ) : null}
-          <button
-            className="flex items-center gap-1 rounded-md bg-blue-600 px-2 py-0.5 text-xs text-white hover:bg-blue-500"
-            onClick={() => {
-              setEditing(null);
-              setShowForm(true);
-            }}
-          >
-            <PlusIcon size={13} /> Add
-          </button>
-        </div>
-      </div>
+          </>
+        }
+      />
 
       <div className="px-3 pb-2 pt-2">
         <input

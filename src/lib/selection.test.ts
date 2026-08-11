@@ -1,7 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { actionTargets, parseExtensions, rangeBetween } from "./selection";
+import { actionTargets, parseExtensions, rangeBetween, toggleSelection } from "./selection";
 
 const row = (path: string) => ({ path });
+
+describe("toggleSelection", () => {
+  it("adds a path without mutating the existing selection", () => {
+    const selection = new Set(["/a"]);
+    expect([...toggleSelection(selection, "/b")].sort()).toEqual(["/a", "/b"]);
+    expect([...selection]).toEqual(["/a"]);
+  });
+
+  it("removes an already-selected path", () => {
+    expect([...toggleSelection(new Set(["/a", "/b"]), "/a")]).toEqual(["/b"]);
+  });
+});
 
 describe("actionTargets", () => {
   /// The whole point of a selection: one menu action, six files.

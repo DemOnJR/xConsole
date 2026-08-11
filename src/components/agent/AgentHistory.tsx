@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { AgentConversationMeta } from "../../lib/tauri";
 import type { AgentActivityItem } from "../../stores/agentStore";
+import { filterAgentConversations, shouldShowHistoryFilter } from "./historyFilter";
 
 function formatWhen(iso?: string | null): string {
   if (!iso) return "";
@@ -151,14 +152,7 @@ export function AgentHistory({
   onClose: () => void;
 }) {
   const [filter, setFilter] = useState("");
-  const q = filter.trim().toLowerCase();
-  const list = !q
-    ? conversations
-    : conversations.filter(
-        (c) =>
-          c.title.toLowerCase().includes(q) ||
-          (c.summary ?? "").toLowerCase().includes(q),
-      );
+  const list = filterAgentConversations(conversations, filter);
 
   if (!open) return null;
 
@@ -181,7 +175,7 @@ export function AgentHistory({
           hide
         </button>
       </div>
-      {conversations.length > 1 ? (
+      {shouldShowHistoryFilter(conversations) ? (
         <input
           type="text"
           value={filter}

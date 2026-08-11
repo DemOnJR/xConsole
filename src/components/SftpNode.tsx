@@ -46,7 +46,7 @@ import {
   type SftpEntry,
 } from "../lib/tauri";
 import { looksLikeDeadSession } from "../lib/sessionHealth";
-import { actionTargets, parseExtensions, rangeBetween } from "../lib/selection";
+import { actionTargets, parseExtensions, rangeBetween, toggleSelection } from "../lib/selection";
 import { onOsDropHover, onOsFilesDropped } from "../hooks/useOsFileDrop";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useMouseNavButtons, useNavHistory } from "../hooks/useNavHistory";
@@ -901,11 +901,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       }
     }
     if (e.ctrlKey || e.metaKey) {
-      setSelection((prev) => {
-        const next = new Set(prev);
-        if (!next.delete(entry.path)) next.add(entry.path);
-        return next;
-      });
+      setSelection((prev) => toggleSelection(prev, entry.path));
       anchorRef.current = entry.path;
       return;
     }
@@ -1926,7 +1922,6 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
             {rows.length} item{rows.length === 1 ? "" : "s"}
             {hideDotfiles ? " · dots hidden" : ""}
             {selection.size > 0 ? ` · ${selection.size} selected` : ""}
-            <span className="ml-1.5 font-mono text-gray-500">{path}</span>
           </button>
           {dualPane && localPath ? (
             <button
@@ -1969,42 +1964,6 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
             </div>
           </div>
         ) : null}
-
-        {/* Clickable breadcrumb — faster than retyping the path. */}
-        <div className="flex min-w-0 shrink-0 items-center gap-0.5 overflow-x-auto border-b border-[var(--border)]/60 px-2 py-0.5">
-          <button
-            type="button"
-            className="shrink-0 rounded px-1 py-0.5 font-mono text-[10px] text-cyan-400/90 hover:bg-[var(--border)] hover:text-cyan-200"
-            onClick={() => navigateTo("/")}
-            data-tooltip="Go to /"
-          >
-            /
-          </button>
-          {pathSegments(path).map((seg, i, all) => {
-            const full = `/${all.slice(0, i + 1).join("/")}`;
-            const last = i === all.length - 1;
-            return (
-              <span key={full} className="flex shrink-0 items-center gap-0.5">
-                <span className="text-[10px] text-gray-600">/</span>
-                <button
-                  type="button"
-                  disabled={last}
-                  className={`max-w-[120px] truncate rounded px-1 py-0.5 font-mono text-[10px] ${
-                    last
-                      ? "text-gray-200"
-                      : "text-cyan-400/90 hover:bg-[var(--border)] hover:text-cyan-200"
-                  } disabled:cursor-default`}
-                  onClick={() => {
-                    if (!last) navigateTo(full);
-                  }}
-                  data-tooltip={full}
-                >
-                  {seg}
-                </button>
-              </span>
-            );
-          })}
-        </div>
 
         {searchOpen && (
           <div className="border-b border-[var(--border)] bg-[var(--surface)]/60 px-2 py-1">
@@ -2141,128 +2100,6 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
               data-tooltip="Dismiss"
             >
               ✕
-            </button>
-          </div>
-        )}
-
-        {(selection.size > 0 || (dualPane && localSelection.size > 0)) && (
-          <div className="flex items-center gap-2 border-b border-cyan-900/40 bg-cyan-950/30 px-2 py-1 text-[10px] text-cyan-200">
-            <span className="shrink-0">
-              {selection.size > 0 ? `${selection.size} remote` : ""}
-              {selection.size > 0 && localSelection.size > 0 ? " · " : ""}
-              {localSelection.size > 0 ? `${localSelection.size} local` : ""}
-              {" selected"}
-              {selection.size > 0
-                ? (() => {
-                    const bytes = entries
-                      .filter((e) => selection.has(e.path) && !e.is_dir)
-                      .reduce((s, e) => s + (e.size || 0), 0);
-                    return bytes > 0 ? ` · ${formatSize(bytes)}` : "";
-                  })()
-                : ""}
-              {localSelection.size > 0
-                ? (() => {
-                    const bytes = localEntries
-                      .filter((e) => localSelection.has(e.path) && !e.is_dir)
-                      .reduce((s, e) => s + (e.size || 0), 0);
-                    return bytes > 0 ? ` · local ${formatSize(bytes)}` : "";
-                  })()
-                : ""}
-            </span>
-            {selection.size > 0 ? (
-              <>
-                <button
-                  type="button"
-                  className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
-                  onClick={() => void bulkDownload(null)}
-                >
-                  Download
-                </button>
-                {dualPane ? (
-                  <button
-                    type="button"
-                    className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
-                    onClick={() => void downloadRemoteToLocal()}
-                    data-tooltip="F5 — download into local pane"
-                  >
-                    ↓ Local (F5)
-                  </button>
-                ) : null}
-                <button
-                  type="button"
-                  className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
-                  onClick={() => putOnClipboard(null, "copy")}
-                >
-                  Copy
-                </button>
-                <button
-                  type="button"
-                  className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
-                  onClick={() =>
-                    void handleCopyPath([...selection][0] ?? path)
-                  }
-                  data-tooltip="Copy selected paths to clipboard"
-                >
-                  Paths
-                </button>
-                <button
-                  type="button"
-                  className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
-                  onClick={() => {
-                    const names = [...selection].map((p) => {
-                      const i = p.lastIndexOf("/");
-                      return i >= 0 ? p.slice(i + 1) : p;
-                    });
-                    void navigator.clipboard.writeText(names.join("\n"));
-                  }}
-                  data-tooltip="Copy basenames only"
-                >
-                  Names
-                </button>
-                <button
-                  type="button"
-                  className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
-                  onClick={() => putOnClipboard(null, "cut")}
-                >
-                  Cut
-                </button>
-                <button
-                  type="button"
-                  className="rounded px-1.5 py-0.5 text-red-300 hover:bg-red-900/40"
-                  onClick={() => void bulkDelete(null)}
-                >
-                  Delete
-                </button>
-              </>
-            ) : null}
-            {dualPane && localSelection.size > 0 ? (
-              <button
-                type="button"
-                className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
-                onClick={() => void uploadLocalSelection()}
-                data-tooltip="F6 — upload into remote pane"
-              >
-                ↑ Remote (F6)
-              </button>
-            ) : null}
-            {canPaste && (
-              <button
-                type="button"
-                className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
-                onClick={() => void paste()}
-              >
-                Paste here
-              </button>
-            )}
-            <button
-              type="button"
-              className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-gray-400 hover:bg-[var(--border)]"
-              onClick={() => {
-                clearSelection();
-                setLocalSelection(new Set());
-              }}
-            >
-              Clear
             </button>
           </div>
         )}
@@ -2673,7 +2510,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                   >
                     <button
                       type="button"
-                      className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                      className="flex min-w-0 flex-1 cursor-default items-center gap-2 text-left"
                       onClick={(e) => clickRow(entry, e)}
                       onDoubleClick={() => openEntry(entry)}
                       // Drag onto a terminal to type this path there. Pointer-based,
@@ -2751,7 +2588,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                     {/* Folders download too now — the engine walks them. */}
                     <button
                       type="button"
-                      className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-gray-500 opacity-0 hover:bg-[var(--border)] hover:text-gray-200 group-hover:opacity-100"
+                      className="shrink-0 cursor-default rounded px-1.5 py-0.5 text-[10px] text-gray-500 opacity-0 hover:bg-[var(--border)] hover:text-gray-200 group-hover:opacity-100"
                       data-tooltip={entry.is_dir ? "Download this folder" : "Download"}
                       onClick={() => void downloadEntry(entry)}
                     >

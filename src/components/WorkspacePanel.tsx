@@ -19,6 +19,7 @@ import {
 import { useOpenWorkspace } from "../hooks/useOpenWorkspace";
 import { EmojiPicker } from "./EmojiPicker";
 import { FolderIcon, PaletteIcon, PlusIcon, TrashIcon } from "./icons";
+import { DrawerHeader } from "./DrawerHeader";
 
 /** Project location + brief editor for a workspace, shown in the settings popover. */
 function ProjectSettings({ w }: { w: Workspace }) {
@@ -403,7 +404,7 @@ function WorkspaceRailItem({ w }: { w: Workspace }) {
 
 const WS_COLLAPSE_KEY = "ui.workspaces.collapsed";
 
-export function WorkspacePanel() {
+export function WorkspacePanel({ width }: { width?: number }) {
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const loadWorkspaces = useWorkspaceStore((s) => s.load);
   const createNew = useWorkspaceStore((s) => s.createNew);
@@ -441,32 +442,33 @@ export function WorkspacePanel() {
   return (
     <aside
       className={`xc-drawer flex h-full flex-col ${collapsed ? "!w-14" : ""}`}
-      style={collapsed ? undefined : { width: "var(--drawer-w)" }}
+      style={collapsed ? undefined : { width: width ?? "var(--drawer-w)" }}
     >
-      <div className="flex items-center gap-1 border-b border-[var(--border)] px-2 py-2.5">
-        {!collapsed && (
-          <div className="xc-panel-title ml-1 flex-1">Workspaces</div>
-        )}
-        {!collapsed && (
-          <button
-            onClick={newWorkspace}
-            data-tooltip="New workspace"
-            className="rounded-md p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
-          >
-            <PlusIcon size={15} />
-          </button>
-        )}
-        <button
-          onClick={toggleCollapsed}
-          data-tooltip={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          data-tooltip-side={collapsed ? "right" : undefined}
-          className={`rounded-md p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 ${
-            collapsed ? "mx-auto" : ""
-          }`}
-        >
-          {collapsed ? "»" : "«"}
-        </button>
-      </div>
+      <DrawerHeader
+        title="Workspaces"
+        collapsed={collapsed}
+        actions={
+          <>
+            {!collapsed && (
+              <button
+                onClick={newWorkspace}
+                data-tooltip="New workspace"
+                className="rounded-md p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+              >
+                <PlusIcon size={15} />
+              </button>
+            )}
+            <button
+              onClick={toggleCollapsed}
+              data-tooltip={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              data-tooltip-side={collapsed ? "right" : undefined}
+              className="rounded-md p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+            >
+              {collapsed ? "»" : "«"}
+            </button>
+          </>
+        }
+      />
 
       {collapsed ? (
         <div className="flex min-h-0 flex-1 flex-col items-center gap-1.5 overflow-y-auto px-1 py-2">

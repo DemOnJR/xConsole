@@ -14,6 +14,16 @@
  * selection acts on all of it. Getting this backwards means a menu that silently applies
  * to one of six highlighted rows, or to six when the user pointed at one.
  */
+export function toggleSelection(
+  selection: ReadonlySet<string>,
+  path: string,
+): Set<string> {
+  const next = new Set(selection);
+  if (next.has(path)) next.delete(path);
+  else next.add(path);
+  return next;
+}
+
 export function actionTargets(
   entry: { path: string } | null,
   selection: ReadonlySet<string>,

@@ -99,6 +99,11 @@ impl SessionState {
         self.map.get(session_id).map(|f| f.plan_approved).unwrap_or(false)
     }
 
+    /// Clear plan approval at the beginning of a new agent turn.
+    pub fn clear_plan_approved(&self, session_id: &str) {
+        self.map.entry(session_id.to_string()).or_default().plan_approved = false;
+    }
+
     /// Request the running turn to stop (user pressed Stop).
     pub fn cancel(&self, session_id: &str) {
         self.map
@@ -151,6 +156,20 @@ mod tests {
         assert!(s.plan_approved("a"));
         // Untouched session stays default.
         assert_eq!(s.safety_override("b"), None);
+    }
+
+    #[test]
+    fn plan_approval_clears_without_resetting_safety_override() {
+        let s = SessionState::new();
+        s.set_full_auto("a");
+        s.mark_plan_approved("a");
+        assert!(s.plan_approved("a"));
+
+        s.clear_plan_approved("a");
+
+        assert!(!s.plan_approved("a"));
+        assert_eq!(s.safety_override("a").as_deref(), Some("full"));
+        assert!(!s.plan_approved("b"));
     }
 
     #[test]
