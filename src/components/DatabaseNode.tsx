@@ -1344,7 +1344,24 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                       onKeyDown={(e) => {
                         if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
                           e.preventDefault();
-                          void runSql();
+                          if (e.shiftKey && sel?.sessionId && sql.trim()) {
+                            void (async () => {
+                              setBusy(true);
+                              setError(null);
+                              try {
+                                const q = sql.trim().replace(/;+\s*$/, "");
+                                setSqlResult(
+                                  await api.dbRunSql(sel.sessionId, `EXPLAIN ${q}`),
+                                );
+                              } catch (err) {
+                                setError(String(err));
+                              } finally {
+                                setBusy(false);
+                              }
+                            })();
+                          } else {
+                            void runSql();
+                          }
                           return true;
                         }
                         return false;
@@ -1384,7 +1401,7 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                         })();
                       }}
                       className="rounded border border-[var(--border)] px-2 py-0.5 text-[11px] text-gray-300 hover:bg-[var(--border)] disabled:opacity-40"
-                      data-tooltip="Run EXPLAIN on the current statement"
+                      data-tooltip="Run EXPLAIN (Ctrl+Shift+Enter)"
                     >
                       Explain
                     </button>
