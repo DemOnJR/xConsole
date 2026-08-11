@@ -166,6 +166,16 @@ export function ServerPanel() {
                   ★
                 </button>
                 <button
+                  className="rounded p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+                  data-tooltip="Copy user@host"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void navigator.clipboard.writeText(`${v.username}@${v.host}`);
+                  }}
+                >
+                  @
+                </button>
+                <button
                   className="rounded p-1 text-cyan-400/80 hover:bg-[var(--border)] hover:text-cyan-300"
                   data-tooltip="Open SFTP on canvas"
                   onClick={(e) => {
