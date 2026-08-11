@@ -525,13 +525,24 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
   );
 
   // Optional live refresh of the current data page (e.g. watching a queue table).
+  // Quiet path: no busy spinner so the grid does not flash every 5s.
   useEffect(() => {
     if (!autoRefresh || !sel || tab !== "data") return;
+    const sessionId = sel.sessionId;
+    const schema = sel.schema;
+    const table = sel.table;
+    const at = page;
+    const size = pageSize;
     const t = window.setInterval(() => {
-      void showTable(sel, page);
+      void api
+        .dbSelectPage(sessionId, schema, table, size, at * size)
+        .then((data) => setRows(data))
+        .catch(() => {
+          /* keep previous page on transient errors */
+        });
     }, 5000);
     return () => window.clearInterval(t);
-  }, [autoRefresh, sel, page, tab, showTable]);
+  }, [autoRefresh, sel, page, pageSize, tab]);
 
   // Back/forward across tables, like the SFTP panel. Paging and post-edit refreshes call
   // showTable directly so they don't pile up history entries for the same table.
