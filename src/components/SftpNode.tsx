@@ -1988,6 +1988,14 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
               {selection.size > 0 && localSelection.size > 0 ? " · " : ""}
               {localSelection.size > 0 ? `${localSelection.size} local` : ""}
               {" selected"}
+              {selection.size > 0
+                ? (() => {
+                    const bytes = entries
+                      .filter((e) => selection.has(e.path) && !e.is_dir)
+                      .reduce((s, e) => s + (e.size || 0), 0);
+                    return bytes > 0 ? ` · ${formatSize(bytes)}` : "";
+                  })()
+                : ""}
             </span>
             {selection.size > 0 ? (
               <>
