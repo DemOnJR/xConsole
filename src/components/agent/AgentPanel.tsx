@@ -524,6 +524,19 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
   // Up/Down recalls previously sent user messages (shell-style). null = not recalling.
   const recallIdx = useRef<number | null>(null);
 
+  // Escape stops the running agent when the panel is focused / open.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (!useAgentStore.getState().streaming) return;
+      e.preventDefault();
+      void useAgentStore.getState().stop();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+
   // Voice: mic capture + spoken replies.
   const recording = useVoiceStore((s) => s.recording);
   const transcribing = useVoiceStore((s) => s.transcribing);
