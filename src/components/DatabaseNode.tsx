@@ -579,6 +579,60 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     URL.revokeObjectURL(url);
   };
 
+  /** Page through the table and export up to a safety cap (phpMyAdmin-style dump). */
+  const exportAllCsv = async () => {
+    if (!sel) return;
+    const ok = await dialog.confirm({
+      title: "Export full table CSV?",
+      message: `Fetch ${sel.schema}.${sel.table} page-by-page (up to 50,000 rows) and download as CSV. Large tables may take a while.`,
+      confirmText: "Export",
+    });
+    if (!ok) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const esc = (v: string | null) => {
+        const s = v ?? "";
+        if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+        return s;
+      };
+      const MAX_ROWS = 50_000;
+      const lines: string[] = [];
+      let offset = 0;
+      let cols: string[] | null = null;
+      while (offset < MAX_ROWS) {
+        const pageData = await api.dbSelectPage(
+          sel.sessionId,
+          sel.schema,
+          sel.table,
+          PAGE_SIZE,
+          offset,
+        );
+        if (!cols) {
+          cols = pageData.columns;
+          lines.push(cols.map(esc).join(","));
+        }
+        for (const row of pageData.rows) lines.push(row.map(esc).join(","));
+        if (pageData.rows.length < PAGE_SIZE) break;
+        offset += PAGE_SIZE;
+      }
+      if (offset >= MAX_ROWS) {
+        setError(`Export capped at ${MAX_ROWS} rows.`);
+      }
+      const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${sel.schema}_${sel.table}_all.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   /** Export current page as INSERT statements (phpMyAdmin-style dump of visible rows). */
   const exportSqlInserts = (set: DbResultSet | null, tableLabel: string) => {
     if (!set || set.columns.length === 0 || set.rows.length === 0) return;
@@ -918,7 +972,7 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                     disabled={busy}
                     onClick={() => void importSqlFile()}
                     className="rounded px-1.5 py-0.5 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:opacity-30"
-                    data-tooltip="Import a .sql file (max 8 MB)"
+                    data-tooltip="Import a .sql file (up to 64 MB, multi-statement)"
                   >
                     Import
                   </button>
@@ -932,6 +986,15 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                     data-tooltip="Export this page as CSV"
                   >
                     CSV
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || !sel}
+                    onClick={() => void exportAllCsv()}
+                    className="rounded px-1.5 py-0.5 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:opacity-30"
+                    data-tooltip="Export entire table as CSV (paged, max 50k rows)"
+                  >
+                    CSV all
                   </button>
                   <button
                     type="button"
@@ -1105,20 +1168,47 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                     </button>
                     {sqlFavorites.length > 0 ? (
                       <select
-                        className="max-w-[160px] rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-[var(--text-dim)]"
+                        className="max-w-[200px] rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-[var(--text-dim)]"
                         defaultValue=""
                         onChange={(e) => {
-                          if (e.target.value) setSql(e.target.value);
+                          const v = e.target.value;
                           e.target.value = "";
+                          if (!v) return;
+                          // "run:" prefix = load into editor and execute immediately.
+                          if (v.startsWith("run:")) {
+                            const q = v.slice(4);
+                            setSql(q);
+                            void (async () => {
+                              if (!sel?.sessionId) return;
+                              setBusy(true);
+                              setError(null);
+                              try {
+                                const result = await api.dbRunSql(sel.sessionId, q);
+                                setSqlResult(result);
+                              } catch (err) {
+                                setError(String(err));
+                              } finally {
+                                setBusy(false);
+                              }
+                            })();
+                          } else {
+                            setSql(v);
+                          }
                         }}
-                        data-tooltip="Favorite queries"
+                        data-tooltip="Favorite queries — pick to load, or Run ★ to execute"
                       >
                         <option value="" disabled>
-                          ★ Favorites
+                          ★ Favorites ({sqlFavorites.length})
                         </option>
                         {sqlFavorites.map((q, i) => (
                           <option key={`f-${i}`} value={q}>
                             {q.length > 70 ? `${q.slice(0, 70)}…` : q}
+                          </option>
+                        ))}
+                        <option disabled>────────</option>
+                        {sqlFavorites.map((q, i) => (
+                          <option key={`fr-${i}`} value={`run:${q}`}>
+                            ▶ Run · {q.length > 50 ? `${q.slice(0, 50)}…` : q}
                           </option>
                         ))}
                       </select>

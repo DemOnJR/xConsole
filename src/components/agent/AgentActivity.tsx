@@ -399,15 +399,63 @@ export function AgentActivityFeed({
     };
   }, [visible, live]);
 
-  if (visible.length === 0 && !live) return null;
-
-  const blocks = visible.filter(
-    (item) =>
-      !(
-        item.kind === "status" &&
-        (item.id === "parallel-batch" || /parallel/i.test(item.label))
+  const blocks = useMemo(
+    () =>
+      visible.filter(
+        (item) =>
+          !(
+            item.kind === "status" &&
+            (item.id === "parallel-batch" || /parallel/i.test(item.label))
+          ),
       ),
+    [visible],
   );
+
+  // Collapse long finished meta lines so command/edit cards stay scannable.
+  const META_KEEP_TAIL = 4;
+  const collapsedBlocks = useMemo(() => {
+    if (live) return blocks;
+    const isMetaDone = (item: AgentActivityItem) =>
+      item.state !== "running" &&
+      item.kind !== "file_edit" &&
+      item.kind !== "command" &&
+      !isCommandItem(item);
+    const metaDoneIdxs = blocks
+      .map((b, i) => (isMetaDone(b) ? i : -1))
+      .filter((i) => i >= 0);
+    if (metaDoneIdxs.length <= META_KEEP_TAIL + 2) return blocks;
+    const drop = new Set(metaDoneIdxs.slice(0, metaDoneIdxs.length - META_KEEP_TAIL));
+    const kept: AgentActivityItem[] = [];
+    let collapsed = 0;
+    let inserted = false;
+    for (let i = 0; i < blocks.length; i++) {
+      if (drop.has(i)) {
+        collapsed += 1;
+        if (!inserted) {
+          kept.push({
+            id: "collapsed-meta",
+            kind: "status",
+            label: `${collapsed} earlier steps`,
+            state: "done",
+          });
+          inserted = true;
+        } else {
+          const last = kept[kept.length - 1];
+          if (last.id === "collapsed-meta") {
+            kept[kept.length - 1] = {
+              ...last,
+              label: `${collapsed} earlier steps`,
+            };
+          }
+        }
+        continue;
+      }
+      kept.push(blocks[i]);
+    }
+    return kept;
+  }, [blocks, live]);
+
+  if (visible.length === 0 && !live) return null;
 
   return (
     <div className="flex w-full flex-col gap-2">
@@ -418,9 +466,13 @@ export function AgentActivityFeed({
           done={parallelMeta.done && !live}
         />
       ) : null}
-      {blocks.map((item) => (
-        <ActivityBlock key={`${item.id}-${item.kind}`} item={item} />
-      ))}
+      {collapsedBlocks.map((item) =>
+        item.id === "collapsed-meta" ? (
+          <MetaLine key="collapsed-meta" text={item.label} dimmed />
+        ) : (
+          <ActivityBlock key={`${item.id}-${item.kind}`} item={item} />
+        ),
+      )}
       {live && blocks.length > 0 && !parallelMeta.show && (
         <MetaLine text="Planning next moves" dimmed />
       )}
