@@ -395,7 +395,18 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     }
   });
   const [autoRefresh, setAutoRefresh] = useState(false);
-  const [tab, setTab] = useState<Tab>("data");
+  const [tab, setTab] = useState<Tab>(() => {
+    const t = localStorage.getItem("xconsole-db-tab");
+    return t === "data" || t === "structure" || t === "sql" ? t : "data";
+  });
+  const setTabPersist = (t: Tab) => {
+    setTab(t);
+    try {
+      localStorage.setItem("xconsole-db-tab", t);
+    } catch {
+      /* ignore */
+    }
+  };
   const [sql, setSql] = useState("SELECT * FROM ");
   const [sqlResult, setSqlResult] = useState<DbResultSet | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1055,7 +1066,7 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
               {(["data", "structure", "sql"] as Tab[]).map((t) => (
                 <button
                   key={t}
-                  onClick={() => setTab(t)}
+                  onClick={() => setTabPersist(t)}
                   className={`rounded px-2 py-0.5 text-[11px] capitalize ${
                     tab === t ? "bg-violet-600 text-white" : "text-gray-400 hover:bg-[var(--border)]"
                   }`}
