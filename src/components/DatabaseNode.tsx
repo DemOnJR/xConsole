@@ -985,7 +985,17 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
         onDoubleClick={() => focus(id)}
       >
         <DatabaseIcon size={13} className="shrink-0 text-violet-400" />
-        <span className="truncate text-xs font-medium text-gray-200">{data.name}</span>
+        <button
+          type="button"
+          className="truncate text-xs font-medium text-gray-200 hover:text-white"
+          data-tooltip="Click to copy server name"
+          onClick={(e) => {
+            e.stopPropagation();
+            void navigator.clipboard.writeText(String(data.name ?? ""));
+          }}
+        >
+          {data.name}
+        </button>
         <span className="shrink-0 text-[10px] text-gray-600">
           {instances.length} instance{instances.length === 1 ? "" : "s"}
           {connectedCount > 0 ? ` · ${connectedCount} connected` : ""}
