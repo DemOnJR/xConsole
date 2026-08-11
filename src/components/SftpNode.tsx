@@ -1037,6 +1037,11 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       setSearchOpen(true);
       return;
     }
+    if (e.key === "F3") {
+      e.preventDefault();
+      setSearchOpen(true);
+      return;
+    }
     if (mod && key === "g") {
       e.preventDefault();
       void (async () => {
@@ -1860,7 +1865,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
               <span>Enter open</span>
               <span>Ctrl+A select all</span>
               <span>Ctrl+C/X/V copy/cut/paste</span>
-              <span>Ctrl+F find</span>
+              <span>Ctrl+F / F3 find</span>
               <span>Ctrl+G go to path</span>
               {dualPane ? (
                 <>
