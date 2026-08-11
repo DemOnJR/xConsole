@@ -1098,6 +1098,35 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     }
   };
 
+  /** Apply octal mode to selection (or the right-clicked entry). */
+  const handleChmodSelection = async (entry: SftpEntry) => {
+    const paths =
+      selection.size > 0 && selection.has(entry.path)
+        ? [...selection]
+        : [entry.path];
+    const mode = await dialog.prompt({
+      title: paths.length > 1 ? `Chmod ${paths.length} items` : "Chmod",
+      label: "Octal mode (e.g. 755 or 644)",
+      defaultValue: "644",
+      confirmText: "Apply",
+    });
+    if (!mode?.trim()) return;
+    const cleaned = mode.trim().replace(/^0/, "");
+    if (!/^[0-7]{3,4}$/.test(cleaned)) {
+      setError("Invalid mode — use 3–4 octal digits (e.g. 755).");
+      return;
+    }
+    try {
+      setError(null);
+      for (const p of paths) {
+        await api.vpsFileChmod(data.vpsId, p, cleaned, false);
+      }
+      refreshListing();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
   const handleNewFolder = async () => {
     const name = await dialog.prompt({
       title: "New folder",
@@ -2162,6 +2191,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           onDownloadArchive={(e, f) => void downloadArchive(e, f)}
           onUpload={() => void uploadHere()}
           onProperties={(e) => setPropsEntry(e)}
+          onChmodSelection={(e) => void handleChmodSelection(e)}
           onRename={(e) => void handleRename(e)}
           onDelete={(e) => void bulkDelete(e)}
           onCopyPath={(p) => void handleCopyPath(p)}

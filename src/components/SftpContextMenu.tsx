@@ -19,6 +19,8 @@ interface Props {
   onDownloadArchive: (entry: SftpEntry, format: ArchiveFormat) => void;
   onUpload: () => void;
   onProperties: (entry: SftpEntry) => void;
+  /** Optional: apply octal mode to the current selection (bulk chmod). */
+  onChmodSelection?: (entry: SftpEntry) => void;
   onRename: (entry: SftpEntry) => void;
   onDelete: (entry: SftpEntry) => void;
   onCopyPath: (path: string) => void;
@@ -54,6 +56,7 @@ export function SftpContextMenu({
   onDownloadArchive,
   onUpload,
   onProperties,
+  onChmodSelection,
   onRename,
   onDelete,
   onCopyPath,
@@ -160,6 +163,9 @@ export function SftpContextMenu({
               {item(`Download ${selectionCount} items`, () => onDownloadSelection(entry))}
               {item(`Copy ${selectionCount} items`, () => onCopy(entry))}
               {item(`Cut ${selectionCount} items`, () => onCut(entry))}
+              {onChmodSelection
+                ? item(`Chmod ${selectionCount} items…`, () => onChmodSelection(entry))
+                : null}
               {item(`Delete ${selectionCount} items`, () => onDeleteSelection(entry), {
                 danger: true,
               })}
@@ -175,6 +181,9 @@ export function SftpContextMenu({
           {canPaste ? item("Paste here", onPaste) : null}
           <div className="my-1 border-t border-[var(--border)]" />
           {item("Properties…", () => onProperties(entry))}
+          {onChmodSelection && !many
+            ? item("Chmod…", () => onChmodSelection(entry))
+            : null}
           {/* Only for links: for anything else there is no target to point anywhere. */}
           {entry.is_symlink ? item("Edit link target…", () => onEditLink(entry)) : null}
           {item("Rename…", () => onRename(entry))}

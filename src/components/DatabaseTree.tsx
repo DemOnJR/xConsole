@@ -432,14 +432,23 @@ export function DatabaseTree({
                                     <button
                                       key={t.name}
                                       onClick={() => onSelectTable(inst, schema, t.name)}
-                                      className={`block w-full truncate py-0.5 pl-12 pr-2 text-left text-[11px] ${
+                                      className={`flex w-full items-center gap-1 truncate py-0.5 pl-12 pr-2 text-left text-[11px] ${
                                         active
                                           ? "bg-violet-600/25 text-violet-200"
                                           : "text-gray-400 hover:bg-[var(--border)]"
                                       }`}
-                                      title={`${t.rows} rows · ${bytes(t.bytes)} · ${t.engine}`}
+                                      title={`${t.rows.toLocaleString()} rows · ${bytes(t.bytes)} · ${t.engine || t.kind}`}
                                     >
-                                      {t.name}
+                                      <span className="min-w-0 flex-1 truncate">{t.name}</span>
+                                      {t.rows > 0 ? (
+                                        <span className="shrink-0 tabular-nums text-[9px] text-gray-600">
+                                          {t.rows >= 1_000_000
+                                            ? `${(t.rows / 1_000_000).toFixed(1)}M`
+                                            : t.rows >= 1000
+                                              ? `${(t.rows / 1000).toFixed(t.rows >= 10_000 ? 0 : 1)}k`
+                                              : t.rows}
+                                        </span>
+                                      ) : null}
                                     </button>
                                   );
                                 })
