@@ -1450,13 +1450,22 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                         {sqlResult.message}
                       </span>
                     ) : null}
+                    {sqlResult ? (
+                      <span className="ml-auto shrink-0 text-[10px] tabular-nums text-gray-500">
+                        {sqlResult.rows.length} row
+                        {sqlResult.rows.length === 1 ? "" : "s"}
+                        {sqlResult.affected != null
+                          ? ` · ${sqlResult.affected} affected`
+                          : ""}
+                      </span>
+                    ) : null}
                   </div>
                   <div className="min-h-0 flex-1 overflow-hidden">
                     {sqlResult ? (
                       <Grid set={sqlResult} />
                     ) : (
                       <p className="p-3 text-[11px] text-gray-500">
-                        Write a statement and press Run.
+                        Write a statement and press Run (Ctrl+Enter).
                       </p>
                     )}
                   </div>
