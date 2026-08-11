@@ -21,12 +21,15 @@ export function CodeEditArea({
   onChange,
   path,
   readOnly,
+  onKeyDown,
 }: {
   value: string;
   onChange: (next: string) => void;
   /** Used to pick the language from the file extension. */
   path: string;
   readOnly?: boolean;
+  /** Extra key handling (e.g. Ctrl+Enter to run). Return true to stop default Tab handling. */
+  onKeyDown?: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void | boolean;
 }) {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const preRef = useRef<HTMLPreElement>(null);
@@ -107,6 +110,7 @@ export function CodeEditArea({
           autoCorrect="off"
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={(e) => {
+            if (onKeyDown?.(e)) return;
             if (e.key === "Tab") {
               e.preventDefault();
               const el = e.currentTarget;

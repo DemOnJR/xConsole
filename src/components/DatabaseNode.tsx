@@ -1214,13 +1214,26 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
               {tab === "sql" ? (
                 <div className="flex h-full flex-col">
                   <div className="h-1/2 min-h-0 p-1">
-                    <CodeEditArea value={sql} onChange={setSql} path="query.sql" />
+                    <CodeEditArea
+                      value={sql}
+                      onChange={setSql}
+                      path="query.sql"
+                      onKeyDown={(e) => {
+                        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                          e.preventDefault();
+                          void runSql();
+                          return true;
+                        }
+                        return false;
+                      }}
+                    />
                   </div>
                   <div className="flex shrink-0 items-center gap-2 border-y border-[var(--border)] px-2 py-1">
                     <button
                       onClick={() => void runSql()}
                       disabled={busy}
                       className="rounded bg-violet-600 px-2 py-0.5 text-[11px] text-white hover:bg-violet-500 disabled:opacity-50"
+                      data-tooltip="Run query (Ctrl+Enter)"
                     >
                       {busy ? "Running…" : "Run"}
                     </button>

@@ -1537,6 +1537,18 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           </button>
           <button
             type="button"
+            className="rounded px-1 py-0.5 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+            data-tooltip="Go to /home (or /)"
+            onClick={() => {
+              // Prefer /home/user if path looks like /home/x/..., else /
+              const m = path.match(/^(\/home\/[^/]+)/);
+              navigateTo(m?.[1] ?? "/home");
+            }}
+          >
+            ~
+          </button>
+          <button
+            type="button"
             className="rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
             onClick={refresh}
             disabled={loading}
@@ -1974,6 +1986,19 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                     data-tooltip="Up"
                   >
                     ‹
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded px-1 text-[10px] text-gray-400 hover:bg-[var(--border)]"
+                    onClick={() =>
+                      void api
+                        .localFsHome()
+                        .then((h) => loadLocalDir(h))
+                        .catch(() => void loadLocalDir())
+                    }
+                    data-tooltip="Local home"
+                  >
+                    ~
                   </button>
                   <span
                     className="min-w-0 flex-1 truncate font-mono text-[10px] text-gray-400"
