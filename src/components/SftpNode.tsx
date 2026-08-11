@@ -739,6 +739,26 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   type SortMode = "name" | "size" | "dirs";
   const [sortMode, setSortMode] = useState<SortMode>("dirs");
   const [showKeysHelp, setShowKeysHelp] = useState(false);
+  const localBookmarkKey = `xconsole-local-bookmarks`;
+  const [localBookmarks, setLocalBookmarks] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(localBookmarkKey) || "[]") as string[];
+    } catch {
+      return [];
+    }
+  });
+  const toggleLocalBookmark = () => {
+    if (!localPath) return;
+    const next = localBookmarks.includes(localPath)
+      ? localBookmarks.filter((b) => b !== localPath)
+      : [localPath, ...localBookmarks].slice(0, 20);
+    setLocalBookmarks(next);
+    try {
+      localStorage.setItem(localBookmarkKey, JSON.stringify(next));
+    } catch {
+      /* ignore */
+    }
+  };
 
   /** What the rows currently show — the directory, or the hits from a search. */
   const visible = useCallback((): SftpEntry[] => {
@@ -2000,6 +2020,42 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                   >
                     ~
                   </button>
+                  <button
+                    type="button"
+                    className={`rounded px-1 text-[10px] ${
+                      localPath && localBookmarks.includes(localPath)
+                        ? "text-amber-300"
+                        : "text-gray-400 hover:bg-[var(--border)]"
+                    }`}
+                    onClick={toggleLocalBookmark}
+                    data-tooltip={
+                      localPath && localBookmarks.includes(localPath)
+                        ? "Remove local bookmark"
+                        : "Bookmark local path"
+                    }
+                  >
+                    ★
+                  </button>
+                  {localBookmarks.length > 0 ? (
+                    <select
+                      className="max-w-[100px] rounded border border-[var(--border)] bg-[var(--bg)] px-0.5 py-0.5 text-[9px] text-gray-400"
+                      defaultValue=""
+                      onChange={(e) => {
+                        if (e.target.value) void loadLocalDir(e.target.value);
+                        e.target.value = "";
+                      }}
+                      data-tooltip="Local bookmarks"
+                    >
+                      <option value="" disabled>
+                        ★
+                      </option>
+                      {localBookmarks.map((b) => (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      ))}
+                    </select>
+                  ) : null}
                   <span
                     className="min-w-0 flex-1 truncate font-mono text-[10px] text-gray-400"
                     title={localPath}
