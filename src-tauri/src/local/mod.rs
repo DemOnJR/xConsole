@@ -109,8 +109,17 @@ pub struct LocalFsList {
     pub entries: Vec<LocalFsEntry>,
 }
 
-/// Git branch for a local path when it is inside a work tree.
-pub fn local_git_branch(path: &str) -> Option<String> {
+/// Local git status (branch + dirty) when `path` is inside a work tree.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalGitInfo {
+    pub branch: String,
+    pub dirty: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+}
+
+/// Git info for a local path when it is inside a work tree.
+pub fn local_git_branch(path: &str) -> Option<LocalGitInfo> {
     let p = std::path::Path::new(path);
     if !p.exists() {
         return None;
@@ -129,7 +138,7 @@ pub fn local_git_branch(path: &str) -> Option<String> {
     if !br.status.success() {
         return None;
     }
-    let name = String::from_utf8_lossy(&br.stdout).trim().to_string();
+    let mut name = String::from_utf8_lossy(&br.stdout).trim().to_string();
     if name.is_empty() {
         return None;
     }
@@ -142,9 +151,26 @@ pub fn local_git_branch(path: &str) -> Option<String> {
         if s.is_empty() {
             return None;
         }
-        return Some(format!("detached@{s}"));
+        name = format!("detached@{s}");
     }
-    Some(name)
+    let root = std::process::Command::new("git")
+        .args(["-C", path, "rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    let dirty = std::process::Command::new("git")
+        .args(["-C", path, "status", "--porcelain"])
+        .output()
+        .ok()
+        .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false);
+    Some(LocalGitInfo {
+        branch: name,
+        dirty,
+        root,
+    })
 }
 
 /// Structured local directory list for the dual-pane file manager.

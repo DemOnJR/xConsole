@@ -18,6 +18,8 @@ export interface SessionInfo {
   sftpPath?: string;
   /** Git branch when cwd/sftpPath is inside a repo (`null` = not a repo / unknown). */
   gitBranch?: string | null;
+  /** Uncommitted changes in that work tree. */
+  gitDirty?: boolean;
 }
 
 interface SessionState {

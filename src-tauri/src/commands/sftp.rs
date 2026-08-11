@@ -229,9 +229,9 @@ pub fn local_fs_home() -> Result<String, String> {
         .ok_or_else(|| "could not resolve home directory".into())
 }
 
-/// Git branch for a local directory (dual-pane / local tools).
+/// Git info for a local directory (dual-pane / local tools).
 #[tauri::command]
-pub fn local_git_branch(path: String) -> Result<Option<String>, String> {
+pub fn local_git_branch(path: String) -> Result<Option<crate::local::LocalGitInfo>, String> {
     Ok(crate::local::local_git_branch(path.trim()))
 }
 

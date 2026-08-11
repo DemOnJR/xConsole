@@ -364,20 +364,24 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   const [localLoading, setLocalLoading] = useState(false);
   const [localSelection, setLocalSelection] = useState<Set<string>>(() => new Set());
 
-  const remoteGitBranch = useGitBranch({
+  const remoteGit = useGitBranch({
     enabled: status === "connected",
     path,
     vpsId: data.vpsId,
   });
-  const localGitBranch = useGitBranch({
+  const localGit = useGitBranch({
     enabled: dualPane && Boolean(localPath),
     path: localPath || null,
     vpsId: null,
   });
-  // Surface remote branch on the session so other UI can read it.
+  // Surface remote branch on the session so other UI / agent can read it.
   useEffect(() => {
-    setSessionInfo(id, { gitBranch: remoteGitBranch, sftpPath: path });
-  }, [remoteGitBranch, path, id, setSessionInfo]);
+    setSessionInfo(id, {
+      gitBranch: remoteGit?.branch ?? null,
+      gitDirty: remoteGit?.dirty ?? false,
+      sftpPath: path,
+    });
+  }, [remoteGit, path, id, setSessionInfo]);
 
   const loadLocalDir = useCallback(async (dir?: string) => {
     setLocalLoading(true);
@@ -1223,7 +1227,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           >
             Refresh
           </button>
-          <GitBranchBadge branch={remoteGitBranch} className="ml-1" />
+          <GitBranchBadge info={remoteGit} className="ml-1" />
           <button
             type="button"
             className={`rounded px-1.5 py-0.5 text-[10px] ${
@@ -1518,7 +1522,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                   >
                     {localPath || "Local"}
                   </span>
-                  <GitBranchBadge branch={localGitBranch} />
+                  <GitBranchBadge info={localGit} />
                   <button
                     type="button"
                     className="rounded px-1.5 py-0.5 text-[10px] text-cyan-300 hover:bg-cyan-900/30 disabled:opacity-40"

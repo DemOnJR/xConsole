@@ -38,6 +38,12 @@ pub struct CanvasNode {
     /// SFTP panel's current remote path.
     #[serde(default)]
     pub path: Option<String>,
+    /// Git branch when the panel path is inside a repo (e.g. `main` or `detached@a1b2c3d`).
+    #[serde(default)]
+    pub git_branch: Option<String>,
+    /// Uncommitted changes in that work tree.
+    #[serde(default)]
+    pub git_dirty: Option<bool>,
 }
 
 /// Max chars of recent terminal output shown per terminal.
@@ -142,6 +148,13 @@ pub fn build_canvas_block(nodes: &[CanvasNode], sessions: &SessionManager) -> Op
                 if let Some(cwd) = n.cwd.as_deref().filter(|s| !s.is_empty()) {
                     head.push_str(&format!("\ncwd: {cwd}"));
                 }
+                if let Some(br) = n.git_branch.as_deref().filter(|s| !s.is_empty()) {
+                    let dirty = n.git_dirty.unwrap_or(false);
+                    head.push_str(&format!(
+                        "\ngit: {br}{}",
+                        if dirty { " (dirty)" } else { "" }
+                    ));
+                }
                 let full = n
                     .session_id
                     .as_deref()
@@ -174,6 +187,13 @@ pub fn build_canvas_block(nodes: &[CanvasNode], sessions: &SessionManager) -> Op
                 head.push_str(&format!("\nvps_id: {} · node_id: {}", n.vps_id, n.node_id));
                 let p = n.path.as_deref().filter(|s| !s.is_empty()).unwrap_or("/");
                 head.push_str(&format!("\nbrowsing: {p}"));
+                if let Some(br) = n.git_branch.as_deref().filter(|s| !s.is_empty()) {
+                    let dirty = n.git_dirty.unwrap_or(false);
+                    head.push_str(&format!(
+                        "\ngit: {br}{}",
+                        if dirty { " (dirty)" } else { "" }
+                    ));
+                }
                 parts.push(head);
             }
             _ => {}

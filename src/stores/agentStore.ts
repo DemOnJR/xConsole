@@ -209,14 +209,27 @@ function canvasSnapshot(): CanvasSnapshotNode[] {
       status: info?.status,
     };
     if (n.type === "sftp") {
-      return { kind: "sftp" as const, ...base, path: info?.sftpPath };
+      return {
+        kind: "sftp" as const,
+        ...base,
+        path: info?.sftpPath,
+        git_branch: info?.gitBranch ?? null,
+        git_dirty: info?.gitDirty ?? null,
+      };
     }
     // Don't describe a database browser as a terminal — the agent would offer to run
     // shell commands in it. The Rust renderer ignores kinds it doesn't know.
     if (n.type === "db") {
       return { kind: "db" as const, ...base };
     }
-    return { kind: "terminal" as const, ...base, session_id: info?.sessionId, cwd: info?.cwd };
+    return {
+      kind: "terminal" as const,
+      ...base,
+      session_id: info?.sessionId,
+      cwd: info?.cwd,
+      git_branch: info?.gitBranch ?? null,
+      git_dirty: info?.gitDirty ?? null,
+    };
   });
 }
 

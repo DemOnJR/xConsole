@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "../lib/tauri";
+import { api, type GitInfo } from "../lib/tauri";
 
 /**
- * Debounced git branch for a remote (SSH) or local path.
+ * Debounced git status for a remote (SSH) or local path.
  * Clears immediately when the path changes so the UI never shows a stale branch.
  */
 export function useGitBranch(opts: {
@@ -12,14 +12,14 @@ export function useGitBranch(opts: {
   /** Remote VPS id — when set, uses SSH; when null, uses local filesystem. */
   vpsId?: string | null;
   debounceMs?: number;
-}): string | null {
+}): GitInfo | null {
   const { enabled, path, vpsId, debounceMs = 350 } = opts;
-  const [branch, setBranch] = useState<string | null>(null);
+  const [info, setInfo] = useState<GitInfo | null>(null);
   const gen = useRef(0);
 
   useEffect(() => {
     const id = ++gen.current;
-    setBranch(null);
+    setInfo(null);
     if (!enabled || !path?.trim()) return;
 
     const t = window.setTimeout(() => {
@@ -28,9 +28,9 @@ export function useGitBranch(opts: {
           const b = vpsId
             ? await api.remoteGitBranch(vpsId, path)
             : await api.localGitBranch(path);
-          if (gen.current === id) setBranch(b);
+          if (gen.current === id) setInfo(b);
         } catch {
-          if (gen.current === id) setBranch(null);
+          if (gen.current === id) setInfo(null);
         }
       };
       void run();
@@ -39,28 +39,36 @@ export function useGitBranch(opts: {
     return () => clearTimeout(t);
   }, [enabled, path, vpsId, debounceMs]);
 
-  return branch;
+  return info;
 }
 
-/** Compact git branch badge for panel headers. */
+/** Compact git branch badge for panel headers (`main` or `main*` when dirty). */
 export function GitBranchBadge({
-  branch,
+  info,
   className = "",
 }: {
-  branch: string | null;
+  info: GitInfo | null;
   className?: string;
 }) {
-  if (!branch) return null;
+  if (!info?.branch) return null;
+  const label = info.dirty ? `${info.branch}*` : info.branch;
+  const tip = info.dirty
+    ? `git · ${info.branch} (uncommitted changes)`
+    : `git · ${info.branch}`;
   return (
     <span
-      className={`inline-flex max-w-[140px] items-center gap-1 truncate rounded bg-emerald-950/50 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300/95 ${className}`}
-      data-tooltip={`git · ${branch}`}
-      title={`git · ${branch}`}
+      className={`inline-flex max-w-[160px] items-center gap-1 truncate rounded px-1.5 py-0.5 font-mono text-[10px] ${
+        info.dirty
+          ? "bg-amber-950/55 text-amber-300/95"
+          : "bg-emerald-950/50 text-emerald-300/95"
+      } ${className}`}
+      data-tooltip={tip}
+      title={tip}
     >
       <span className="opacity-70" aria-hidden>
         ⎇
       </span>
-      <span className="truncate">{branch}</span>
+      <span className="truncate">{label}</span>
     </span>
   );
 }

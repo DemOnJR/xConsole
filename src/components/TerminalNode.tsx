@@ -64,15 +64,18 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
   const removeInfo = useSessionStore((s) => s.remove);
   const info = useSessionStore((s) => s.sessions[id]);
   const status = (info?.status ?? "connecting") as ConnState;
-  const gitBranch = useGitBranch({
+  const gitInfo = useGitBranch({
     enabled: status === "connected",
     path: info?.cwd,
     vpsId: data.vpsId,
   });
   // Keep session store in sync so other UI (and agent canvas context) can see the branch.
   useEffect(() => {
-    setInfo(id, { gitBranch });
-  }, [gitBranch, id, setInfo]);
+    setInfo(id, {
+      gitBranch: gitInfo?.branch ?? null,
+      gitDirty: gitInfo?.dirty ?? false,
+    });
+  }, [gitInfo, id, setInfo]);
   const themeId = useThemeStore((s) => s.themeId);
   const customVars = useThemeStore((s) => s.customVars);
   const layoutMode = useCanvasStore((s) => s.layoutMode);
@@ -459,7 +462,7 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
             {info.cwd}
           </span>
         )}
-        <GitBranchBadge branch={gitBranch} />
+        <GitBranchBadge info={gitInfo} />
         {info?.hostKey === "pinned_on_first_use" && (
           <span
             className="rounded bg-amber-900/50 px-1 text-[10px] text-amber-300"

@@ -127,6 +127,13 @@ export interface ScannerStatus {
   uv_available: boolean;
 }
 
+/** Git work-tree status for a path (terminal cwd / SFTP browse path). */
+export interface GitInfo {
+  branch: string;
+  dirty: boolean;
+  root?: string | null;
+}
+
 export interface ConnectOutcome {
   session_id: string;
   vps_id: string;
@@ -617,11 +624,11 @@ export const api = {
     invoke<void>("ssh_disconnect", { sessionId }),
   sshReplay: (sessionId: string) =>
     invoke<string | null>("ssh_replay", { sessionId }),
-  /** Git branch for a remote path when it is inside a repo; null otherwise. */
+  /** Git status for a remote path when it is inside a repo; null otherwise. */
   remoteGitBranch: (vpsId: string, path: string) =>
-    invoke<string | null>("remote_git_branch", { vpsId, path }),
+    invoke<GitInfo | null>("remote_git_branch", { vpsId, path }),
   localGitBranch: (path: string) =>
-    invoke<string | null>("local_git_branch", { path }),
+    invoke<GitInfo | null>("local_git_branch", { path }),
 
   sftpConnect: (vpsId: string) =>
     invoke<SftpConnectOutcome>("sftp_connect", { vpsId }),
@@ -1085,6 +1092,10 @@ export interface CanvasSnapshotNode {
   cwd?: string;
   /** SFTP panel's current remote path. */
   path?: string;
+  /** Git branch when path/cwd is inside a repo. */
+  git_branch?: string | null;
+  /** Uncommitted changes. */
+  git_dirty?: boolean | null;
 }
 
 /** Subscribe to canvas actions the agent requests (drive the live canvas). */

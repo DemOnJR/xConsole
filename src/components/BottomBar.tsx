@@ -22,6 +22,8 @@ import {
   PlugIcon,
   TerminalIcon,
 } from "./icons";
+import { extractCwdFromOutput } from "../lib/terminalCwd";
+import { GitBranchBadge, useGitBranch } from "../hooks/useGitBranch";
 const STATUS_COLOR: Record<ConnState, string> = {
   connecting: "#e0af68",
   connected: "#9ece6a",
@@ -68,6 +70,12 @@ function ConsolePane({
   const fitRef = useRef<FitAddon | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const [status, setStatus] = useState<ConnState>("connecting");
+  const [cwd, setCwd] = useState<string | null>(null);
+  const gitInfo = useGitBranch({
+    enabled: status === "connected",
+    path: cwd,
+    vpsId: target.vpsId,
+  });
   const themeId = useThemeStore((s) => s.themeId);
   const customVars = useThemeStore((s) => s.customVars);
 
@@ -123,7 +131,12 @@ function ConsolePane({
         ),
       );
       unlisteners.push(
-        await onSessionOutput(sid, (bytes) => term.write(bytes)),
+        await onSessionOutput(sid, (bytes) => {
+          term.write(bytes);
+          const text = new TextDecoder().decode(bytes);
+          const next = extractCwdFromOutput(text);
+          if (next) setCwd(next);
+        }),
       );
       const replay = await api.sshReplay(sid);
       if (replay) term.write(b64ToBytes(replay));
@@ -218,6 +231,15 @@ function ConsolePane({
         />
         <span className="truncate font-medium text-gray-200">{target.name}</span>
         <span className="truncate text-gray-500">{target.host}</span>
+        {cwd ? (
+          <span
+            className="max-w-[100px] truncate font-mono text-[10px] text-gray-600"
+            data-tooltip={cwd}
+          >
+            {cwd}
+          </span>
+        ) : null}
+        <GitBranchBadge info={gitInfo} />
         <button
           className="ml-auto rounded px-1 text-gray-500 hover:bg-[var(--border)] hover:text-gray-200"
           data-tooltip="Close this terminal"
