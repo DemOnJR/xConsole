@@ -1102,7 +1102,14 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                     onChange={(e) => {
                       const n = Number(e.target.value);
                       setPageSize(n);
-                      if (sel) void showTable(sel, 0);
+                      if (!sel) return;
+                      setPage(0);
+                      setBusy(true);
+                      void api
+                        .dbSelectPage(sel.sessionId, sel.schema, sel.table, n, 0)
+                        .then((data) => setRows(data))
+                        .catch((err) => setError(String(err)))
+                        .finally(() => setBusy(false));
                     }}
                     data-tooltip="Rows per page"
                   >
