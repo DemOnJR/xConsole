@@ -430,6 +430,8 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     );
   }, []);
 
+  const [tableRowCount, setTableRowCount] = useState<number | null>(null);
+
   /** Load a table without touching history — used when replaying back/forward. */
   const showTable = useCallback(
     async (next: Selection, atPage = 0) => {
@@ -445,6 +447,20 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
         setColumns(cols);
         setRows(data);
         setTab("data");
+        // Best-effort exact count for the pager (ignored if engine refuses).
+        if (atPage === 0) {
+          void api
+            .dbRunSql(
+              next.sessionId,
+              `SELECT COUNT(*) AS c FROM ${next.schema}.${next.table}`,
+            )
+            .then((r) => {
+              const v = r.rows[0]?.[0];
+              const n = v != null ? Number(v) : NaN;
+              setTableRowCount(Number.isFinite(n) ? n : null);
+            })
+            .catch(() => setTableRowCount(null));
+        }
       } catch (e) {
         setError(String(e));
       } finally {
@@ -1016,6 +1032,9 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                   </button>
                   <span className="tabular-nums">
                     {page * PAGE_SIZE + 1}–{page * PAGE_SIZE + (rows?.rows.length ?? 0)}
+                    {tableRowCount != null ? (
+                      <span className="text-gray-600"> / {tableRowCount.toLocaleString()}</span>
+                    ) : null}
                   </span>
                   <button
                     disabled={(rows?.rows.length ?? 0) < PAGE_SIZE}

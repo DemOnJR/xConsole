@@ -735,11 +735,16 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   // Selection
   // ---------------------------------------------------------------------------
 
+  const [hideDotfiles, setHideDotfiles] = useState(false);
+  type SortMode = "name" | "size" | "dirs";
+  const [sortMode, setSortMode] = useState<SortMode>("dirs");
+
   /** What the rows currently show — the directory, or the hits from a search. */
   const visible = useCallback((): SftpEntry[] => {
+    let list: SftpEntry[];
     if (results) {
       // Search hits are bare paths; give them just enough shape to render and act on.
-      return results.map((hit) => ({
+      list = results.map((hit) => ({
         name: hit.slice(hit.lastIndexOf("/") + 1) || hit,
         path: hit,
         is_dir: false,
@@ -748,11 +753,31 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
         link_target: null,
         link_broken: false,
       }));
+    } else if (!searchOpen || !query.trim()) {
+      list = entries;
+    } else {
+      const q = query.trim().toLowerCase();
+      list = entries.filter((e) => e.name.toLowerCase().includes(q));
     }
-    if (!searchOpen || !query.trim()) return entries;
-    const q = query.trim().toLowerCase();
-    return entries.filter((e) => e.name.toLowerCase().includes(q));
-  }, [results, searchOpen, query, entries]);
+    if (hideDotfiles) {
+      list = list.filter((e) => !e.name.startsWith("."));
+    }
+    const byName = (a: SftpEntry, b: SftpEntry) =>
+      a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    list = [...list].sort((a, b) => {
+      if (sortMode === "dirs") {
+        if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+        return byName(a, b);
+      }
+      if (sortMode === "size") {
+        if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+        if (a.size !== b.size) return b.size - a.size;
+        return byName(a, b);
+      }
+      return byName(a, b);
+    });
+    return list;
+  }, [results, searchOpen, query, entries, hideDotfiles, sortMode]);
 
   const rows = visible();
 
@@ -1547,6 +1572,28 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           >
             Tree
           </button>
+          <button
+            type="button"
+            className={`rounded px-1.5 py-0.5 text-[10px] ${
+              hideDotfiles
+                ? "bg-[var(--border)] text-gray-200"
+                : "text-gray-400 hover:bg-[var(--border)]"
+            }`}
+            data-tooltip={hideDotfiles ? "Show dotfiles" : "Hide dotfiles"}
+            onClick={() => setHideDotfiles((v) => !v)}
+          >
+            ··
+          </button>
+          <select
+            className="rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-gray-400"
+            value={sortMode}
+            onChange={(e) => setSortMode(e.target.value as SortMode)}
+            data-tooltip="Sort files"
+          >
+            <option value="dirs">Dirs first</option>
+            <option value="name">Name</option>
+            <option value="size">Size</option>
+          </select>
           <input
             type="text"
             className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 font-mono text-[10px] text-gray-300 outline-none focus:border-cyan-600"
