@@ -366,7 +366,19 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   };
 
   // Dual-pane: local filesystem (left) | remote (right) — WinSCP-style.
-  const [dualPane, setDualPane] = useState(false);
+  const [dualPane, setDualPane] = useState(
+    () => localStorage.getItem("xconsole-sftp-dual-pane") === "1",
+  );
+  const toggleDualPane = () =>
+    setDualPane((v) => {
+      const next = !v;
+      try {
+        localStorage.setItem("xconsole-sftp-dual-pane", next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
   const [localPath, setLocalPath] = useState("");
   const [localEntries, setLocalEntries] = useState<LocalFsEntry[]>([]);
   const [localLoading, setLocalLoading] = useState(false);
@@ -1645,7 +1657,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
             data-tooltip={
               dualPane ? "Hide local pane" : "Dual pane: local PC | remote (WinSCP-style)"
             }
-            onClick={() => setDualPane((v) => !v)}
+            onClick={toggleDualPane}
           >
             ⧉ Dual
           </button>
