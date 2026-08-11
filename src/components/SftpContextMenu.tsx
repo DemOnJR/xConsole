@@ -22,6 +22,8 @@ interface Props {
   onRename: (entry: SftpEntry) => void;
   onDelete: (entry: SftpEntry) => void;
   onCopyPath: (path: string) => void;
+  /** Open (or focus) a terminal and cd into this directory. */
+  onOpenTerminalHere: (entry: SftpEntry | null) => void;
   onNewFolder: () => void;
   onNewFile: () => void;
   /** How many rows are selected — decides whether the menu talks about one or many. */
@@ -55,6 +57,7 @@ export function SftpContextMenu({
   onRename,
   onDelete,
   onCopyPath,
+  onOpenTerminalHere,
   onNewFolder,
   onNewFile,
   selectionCount,
@@ -176,6 +179,7 @@ export function SftpContextMenu({
           {entry.is_symlink ? item("Edit link target…", () => onEditLink(entry)) : null}
           {item("Rename…", () => onRename(entry))}
           {item("Copy path", () => onCopyPath(entry.path))}
+          {item("Open terminal here", () => onOpenTerminalHere(entry))}
           <div className="my-1 border-t border-[var(--border)]" />
           {item("Delete", () => onDelete(entry), { danger: true })}
         </>
@@ -184,6 +188,7 @@ export function SftpContextMenu({
           {item("Upload here…", onUpload)}
           {canPaste ? item("Paste here", onPaste) : null}
           <div className="my-1 border-t border-[var(--border)]" />
+          {item("Open terminal here", () => onOpenTerminalHere(null))}
           {item("New directory…", onNewFolder)}
           {item("New file…", onNewFile)}
           {item("New symlink…", onNewLink)}

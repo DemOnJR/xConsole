@@ -1569,8 +1569,30 @@ fn terminal_capture(ctx: &ToolContext, args: &Value) -> String {
     };
     let text = ctx.sessions.capture_text(sid).unwrap_or_default();
     let trimmed = text.trim_end();
+    // Prefix with live-canvas git branch when the frontend has reported it for a
+    // terminal on this VPS (avoids an extra SSH round-trip in the tool).
+    let git_note = ctx
+        .canvas
+        .iter()
+        .find(|n| {
+            n.kind == "terminal"
+                && n.vps_id == vps_id
+                && n.git_branch
+                    .as_deref()
+                    .map(|b| !b.is_empty())
+                    .unwrap_or(false)
+        })
+        .map(|n| {
+            let br = n.git_branch.as_deref().unwrap_or("?");
+            let dirty = n.git_dirty.unwrap_or(false);
+            format!(
+                "[git: {br}{}]\n",
+                if dirty { " (dirty)" } else { "" }
+            )
+        })
+        .unwrap_or_default();
     // Return the tail (recent screen) to keep it compact.
-    if trimmed.len() > 4000 {
+    let body = if trimmed.len() > 4000 {
         let start = trimmed.len() - 4000;
         let cut = (start..trimmed.len())
             .find(|&i| trimmed.is_char_boundary(i))
@@ -1580,6 +1602,11 @@ fn terminal_capture(ctx: &ToolContext, args: &Value) -> String {
         "(terminal is empty)".into()
     } else {
         trimmed.to_string()
+    };
+    if git_note.is_empty() {
+        body
+    } else {
+        format!("{git_note}{body}")
     }
 }
 

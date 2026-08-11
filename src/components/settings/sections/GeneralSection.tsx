@@ -129,6 +129,10 @@ export function GeneralSection() {
               ) : null}
             </div>
             {note ? <p className="text-[11px] text-amber-300/90">{note}</p> : null}
+            <p className="font-mono text-[10px] text-gray-600" title="Install location">
+              %LOCALAPPDATA%\\xConsole
+              {localBranch ? ` · checkout ${localBranch}` : ""}
+            </p>
             <div className="flex items-center justify-end">
               <button
                 onClick={() => void checkUpdate(true)}

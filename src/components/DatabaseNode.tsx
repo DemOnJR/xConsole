@@ -514,6 +514,30 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     URL.revokeObjectURL(url);
   };
 
+  /** Export current page as INSERT statements (phpMyAdmin-style dump of visible rows). */
+  const exportSqlInserts = (set: DbResultSet | null, tableLabel: string) => {
+    if (!set || set.columns.length === 0 || set.rows.length === 0) return;
+    const cols = set.columns.join(", ");
+    const lines = set.rows.map((row) => {
+      const vals = row
+        .map((v) => {
+          if (v === null) return "NULL";
+          return `'${String(v).replace(/'/g, "''")}'`;
+        })
+        .join(", ");
+      return `INSERT INTO ${tableLabel} (${cols}) VALUES (${vals});`;
+    });
+    const blob = new Blob([lines.join("\n") + "\n"], {
+      type: "application/sql;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${tableLabel.replace(/[^a-zA-Z0-9_.-]+/g, "_")}_page.sql`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   /** Import a .sql file from disk and run it against the current connection. */
   const importSqlFile = async () => {
     if (!sel?.sessionId) {
@@ -716,6 +740,17 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                     data-tooltip="Export this page as CSV"
                   >
                     CSV
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!rows || (rows?.rows.length ?? 0) === 0}
+                    onClick={() =>
+                      exportSqlInserts(rows, `${sel.schema}.${sel.table}`)
+                    }
+                    className="rounded px-1.5 py-0.5 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:opacity-30"
+                    data-tooltip="Export this page as INSERT SQL"
+                  >
+                    SQL
                   </button>
                   <button
                     disabled={page === 0}

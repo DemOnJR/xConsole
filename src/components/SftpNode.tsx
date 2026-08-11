@@ -36,6 +36,7 @@ import {
 import {
   api,
   onExternalEdit,
+  strToB64,
   type ArchiveFormat,
   type LocalFsEntry,
   type SftpEntry,
@@ -48,6 +49,7 @@ import { useMouseNavButtons, useNavHistory } from "../hooks/useNavHistory";
 import { useCanvasStore, type SftpNode as SftpNodeType } from "../stores/canvasStore";
 import { useSessionStore } from "../stores/sessionStore";
 import { useTransferStore } from "../stores/transferStore";
+import { useVpsStore } from "../stores/vpsStore";
 import { dialog } from "../stores/dialogStore";
 import { ChevronUpIcon, FolderIcon } from "./icons";
 import { fileKindFor } from "./fileIcons";
@@ -55,6 +57,7 @@ import { SftpContextMenu, type SftpMenuState } from "./SftpContextMenu";
 import { SftpPermissionsDialog } from "./SftpPermissionsDialog";
 import { SftpCodeEditor } from "./SftpCodeEditor";
 import { GitBranchBadge, useGitBranch } from "../hooks/useGitBranch";
+import { shellQuote } from "../lib/terminalClipboard";
 
 type ConnState = "connecting" | "connected" | "error" | "disconnected";
 
@@ -419,6 +422,42 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     } catch (e) {
       setError(String(e));
     }
+  };
+
+  /** Open or focus a canvas terminal for this host and `cd` into the chosen directory. */
+  const openTerminalHere = (entry: SftpEntry | null) => {
+    const dir =
+      entry == null
+        ? path
+        : entry.is_dir
+          ? entry.path
+          : parentDirOf(entry.path);
+    const vps = useVpsStore.getState().vpsList.find((v) => v.id === data.vpsId);
+    if (!vps) {
+      setError("Server not found in the list.");
+      return;
+    }
+    const nodes = useCanvasStore.getState().nodes;
+    const existing = nodes.find(
+      (n) => n.type === "terminal" && String(n.data.vpsId) === data.vpsId,
+    );
+    const termId = existing
+      ? existing.id
+      : useCanvasStore.getState().addVps(vps);
+    useCanvasStore.getState().focus(termId);
+
+    const sendCd = (attempt: number) => {
+      const sid = useSessionStore.getState().sessions[termId]?.sessionId;
+      const st = useSessionStore.getState().sessions[termId]?.status;
+      if (sid && st === "connected") {
+        void api.sshWrite(sid, strToB64(`cd ${shellQuote(dir)}\n`));
+        return;
+      }
+      if (attempt < 40) {
+        window.setTimeout(() => sendCd(attempt + 1), 250);
+      }
+    };
+    sendCd(0);
   };
 
   const downloadRemoteToLocal = async () => {
@@ -1769,6 +1808,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           onRename={(e) => void handleRename(e)}
           onDelete={(e) => void bulkDelete(e)}
           onCopyPath={(p) => void handleCopyPath(p)}
+          onOpenTerminalHere={(e) => openTerminalHere(e)}
           onNewFolder={() => void handleNewFolder()}
           onNewFile={() => void handleNewFile()}
           selectionCount={selection.size}
