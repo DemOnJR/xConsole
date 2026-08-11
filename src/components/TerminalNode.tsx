@@ -110,10 +110,17 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
 
     const MAX_RECONNECT = 15;
 
+    let initialFont = 13;
+    try {
+      const n = Number(localStorage.getItem("xconsole-term-font"));
+      if (n >= 10 && n <= 22) initialFont = n;
+    } catch {
+      /* ignore */
+    }
     const term = new Terminal({
       fontFamily:
         '"Cascadia Code", "JetBrains Mono", "Fira Code", Consolas, monospace',
-      fontSize: 13,
+      fontSize: initialFont,
       cursorBlink: true,
       scrollback: 5000,
       theme: useThemeStore.getState().xterm(),
@@ -498,6 +505,11 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
               if (!term) return;
               const next = Math.max(10, (term.options.fontSize as number) - 1);
               term.options.fontSize = next;
+              try {
+                localStorage.setItem("xconsole-term-font", String(next));
+              } catch {
+                /* ignore */
+              }
               fitRef.current?.fit();
             }}
           >
@@ -512,6 +524,11 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
               if (!term) return;
               const next = Math.min(22, (term.options.fontSize as number) + 1);
               term.options.fontSize = next;
+              try {
+                localStorage.setItem("xconsole-term-font", String(next));
+              } catch {
+                /* ignore */
+              }
               fitRef.current?.fit();
             }}
           >
