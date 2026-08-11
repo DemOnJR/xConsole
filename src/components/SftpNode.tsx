@@ -1057,6 +1057,19 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       setSearchOpen(true);
       return;
     }
+    if (mod && key === "h") {
+      e.preventDefault();
+      setHideDotfiles((v) => {
+        const next = !v;
+        try {
+          localStorage.setItem("xconsole-sftp-hide-dots", next ? "1" : "0");
+        } catch {
+          /* ignore */
+        }
+        return next;
+      });
+      return;
+    }
     if (mod && key === "g") {
       e.preventDefault();
       void (async () => {
@@ -1882,6 +1895,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
               <span>Ctrl+C/X/V copy/cut/paste</span>
               <span>Ctrl+F / F3 find</span>
               <span>Ctrl+G go to path</span>
+              <span>Ctrl+H hide dots</span>
               {dualPane ? (
                 <>
                   <span>F5 → local</span>
