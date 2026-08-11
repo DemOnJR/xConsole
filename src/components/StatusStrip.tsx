@@ -27,6 +27,7 @@ export function StatusStrip() {
   const setAgentOpen = useUiStore((s) => s.setAgentOpen);
   const leftOpen = useUiStore((s) => s.leftOpen);
   const toggleLeft = useUiStore((s) => s.toggleLeft);
+  const toggleBottom = useUiStore((s) => s.toggleBottom);
   const setTransfersOpen = useTransferStore((s) => s.setOpen);
   const openSettings = useUiStore((s) => s.openSettings);
   const channel = useUpdateStore((s) => s.channel);
@@ -141,7 +142,12 @@ export function StatusStrip() {
       {conn.total > 0 ? (
         <>
           <span className="text-[var(--border-strong)]">·</span>
-          <span className="inline-flex items-center gap-1.5">
+          <button
+            type="button"
+            className="inline-flex items-center gap-1.5 transition hover:text-[var(--text)]"
+            title="Toggle console drawer"
+            onClick={() => toggleBottom()}
+          >
             <span
               className="inline-block h-1.5 w-1.5 rounded-full"
               style={{
@@ -156,7 +162,7 @@ export function StatusStrip() {
             {conn.connected} live
             {conn.connecting > 0 ? ` · ${conn.connecting} …` : ""}
             {conn.error > 0 ? ` · ${conn.error} err` : ""}
-          </span>
+          </button>
         </>
       ) : null}
 
