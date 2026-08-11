@@ -529,14 +529,22 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       if (!open && !expanded) return;
-      if (!useAgentStore.getState().streaming) return;
       // Don't steal Escape from dialogs/inputs that handle it.
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
         return;
       }
       e.preventDefault();
-      void useAgentStore.getState().stop();
+      if (useAgentStore.getState().streaming) {
+        void useAgentStore.getState().stop();
+        return;
+      }
+      // Not streaming: collapse fullscreen, or close the panel.
+      if (expanded) {
+        useUiStore.getState().setAgentExpanded(false);
+      } else {
+        useUiStore.getState().setAgentOpen(false);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
