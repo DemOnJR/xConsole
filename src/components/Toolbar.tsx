@@ -72,7 +72,15 @@ export function Toolbar() {
     await saveWorkspace(name.trim(), getViewport());
   };
 
-  const clearCanvas = () => {
+  const clearCanvas = async () => {
+    if (nodes.length === 0) return;
+    const ok = await dialog.confirm({
+      title: "Clear canvas?",
+      message: `Close and disconnect ${nodes.length} panel${nodes.length === 1 ? "" : "s"}? This ends live SSH/SFTP/DB sessions for those panels.`,
+      danger: true,
+      confirmText: "Clear",
+    });
+    if (!ok) return;
     // Clear is an explicit teardown, so kill the live sessions (unlike a
     // workspace switch, which keeps them alive in the background).
     const removeInfo = useSessionStore.getState().remove;
@@ -143,7 +151,12 @@ export function Toolbar() {
         <button data-tooltip="Save as a new workspace" onClick={saveAsNew} className={ICON_BTN}>
           <SaveAsIcon size={15} />
         </button>
-        <button data-tooltip="Clear canvas" onClick={() => clearCanvas()} className={ICON_BTN}>
+        <button
+          data-tooltip="Clear canvas"
+          onClick={() => void clearCanvas()}
+          className={ICON_BTN}
+          disabled={nodes.length === 0}
+        >
           <EraserIcon size={15} />
         </button>
     </div>
