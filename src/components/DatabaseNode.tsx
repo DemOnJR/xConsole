@@ -48,12 +48,17 @@ function Grid({
   columns,
   onEdit,
   onDeleteRows,
+  onSqlTemplate,
+  tableLabel,
 }: {
   set: DbResultSet;
   columns?: DbColumn[];
   onEdit?: (rowIndex: number, column: string, next: string | null) => void;
   /** Delete the given row indices. Absent for result sets that aren't a real table. */
   onDeleteRows?: (rowIndices: number[]) => void;
+  /** Open selected rows as SQL in the editor (INSERT template). */
+  onSqlTemplate?: (sql: string) => void;
+  tableLabel?: string;
 }) {
   const [editing, setEditing] = useState<{ row: number; col: number } | null>(null);
   const [draft, setDraft] = useState("");
@@ -178,6 +183,7 @@ function Grid({
             onClick={() => {
               const idxs = [...selected].sort((a, b) => a - b);
               const cols = set.columns.join(", ");
+              const tbl = tableLabel || "/*table*/";
               const lines = idxs.map((i) => {
                 const vals = set.rows[i]
                   .map((v) => {
@@ -185,13 +191,37 @@ function Grid({
                     return `'${String(v).replace(/'/g, "''")}'`;
                   })
                   .join(", ");
-                return `INSERT INTO /*table*/ (${cols}) VALUES (${vals});`;
+                return `INSERT INTO ${tbl} (${cols}) VALUES (${vals});`;
               });
               void navigator.clipboard.writeText(lines.join("\n"));
             }}
           >
             Copy INSERT
           </button>
+          {onSqlTemplate ? (
+            <button
+              type="button"
+              className="rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--border)]"
+              data-tooltip="Load selected as INSERT in the SQL tab"
+              onClick={() => {
+                const idxs = [...selected].sort((a, b) => a - b);
+                const cols = set.columns.join(", ");
+                const tbl = tableLabel || "/*table*/";
+                const lines = idxs.map((i) => {
+                  const vals = set.rows[i]
+                    .map((v) => {
+                      if (v === null) return "NULL";
+                      return `'${String(v).replace(/'/g, "''")}'`;
+                    })
+                    .join(", ");
+                  return `INSERT INTO ${tbl} (${cols}) VALUES (${vals});`;
+                });
+                onSqlTemplate(lines.join("\n"));
+              }}
+            >
+              → SQL
+            </button>
+          ) : null}
           {canDelete ? (
             <button
               onClick={() => onDeleteRows?.([...selected].sort((a, b) => a - b))}
@@ -1097,8 +1127,13 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                   <Grid
                     set={rows}
                     columns={columns}
+                    tableLabel={sel ? `${sel.schema}.${sel.table}` : undefined}
                     onEdit={(r, c, v) => void editCell(r, c, v)}
                     onDeleteRows={(idx) => void deleteRows(idx)}
+                    onSqlTemplate={(text) => {
+                      setSql(text);
+                      setTab("sql");
+                    }}
                   />
                 ) : (
                   <p className="p-3 text-[11px] text-gray-500">
