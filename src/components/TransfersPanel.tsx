@@ -152,6 +152,15 @@ export function TransfersPanel() {
     return () => un?.();
   }, []);
 
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, setOpen]);
+
   const list = Object.values(jobs).sort((a, b) => {
     const rank = (j: TransferSnapshot) =>
       j.state === "running" || j.state === "scanning" ? 0 : 1;
