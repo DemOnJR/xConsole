@@ -1087,7 +1087,7 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
             <p className="text-[10px] text-gray-700">
 
-              Select VPS targets, then ask — commands run live and show in the activity feed.
+              Select VPS targets (or open hosts on the canvas), then ask. Read-only tools run in parallel; Escape stops. Plan mode is safer for reviews.
 
             </p>
 
