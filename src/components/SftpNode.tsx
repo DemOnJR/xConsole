@@ -738,6 +738,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   const [hideDotfiles, setHideDotfiles] = useState(false);
   type SortMode = "name" | "size" | "dirs";
   const [sortMode, setSortMode] = useState<SortMode>("dirs");
+  const [showKeysHelp, setShowKeysHelp] = useState(false);
 
   /** What the rows currently show — the directory, or the hits from a search. */
   const visible = useCallback((): SftpEntry[] => {
@@ -1605,6 +1606,18 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
             <option value="name">Name</option>
             <option value="size">Size</option>
           </select>
+          <button
+            type="button"
+            className={`rounded px-1.5 py-0.5 text-[10px] ${
+              showKeysHelp
+                ? "bg-[var(--border)] text-gray-200"
+                : "text-gray-500 hover:bg-[var(--border)] hover:text-gray-300"
+            }`}
+            data-tooltip="Keyboard shortcuts"
+            onClick={() => setShowKeysHelp((v) => !v)}
+          >
+            ?
+          </button>
           <input
             type="text"
             className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 font-mono text-[10px] text-gray-300 outline-none focus:border-cyan-600"
@@ -1618,6 +1631,32 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
             data-tooltip="Remote path — press Enter to go"
           />
         </div>
+
+        {showKeysHelp ? (
+          <div className="shrink-0 border-b border-[var(--border)] bg-[var(--surface)]/80 px-2 py-1.5 font-mono text-[10px] leading-relaxed text-gray-400">
+            <div className="mb-0.5 text-[10px] font-sans font-medium text-gray-300">
+              Shortcuts
+            </div>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 sm:grid-cols-3">
+              <span>F2 rename</span>
+              <span>F4 new file</span>
+              <span>F8 new folder</span>
+              <span>Del delete</span>
+              <span>Enter open</span>
+              <span>Ctrl+A select all</span>
+              <span>Ctrl+C/X/V copy/cut/paste</span>
+              <span>Ctrl+F find</span>
+              {dualPane ? (
+                <>
+                  <span>F5 → local</span>
+                  <span>F6 ↑ remote</span>
+                  <span>F7 compare</span>
+                  <span>Drag panes transfer</span>
+                </>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
 
         {/* Clickable breadcrumb — faster than retyping the path. */}
         <div className="flex min-w-0 shrink-0 items-center gap-0.5 overflow-x-auto border-b border-[var(--border)]/60 px-2 py-0.5">

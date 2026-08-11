@@ -449,7 +449,7 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
     send,
 
-    setTargets,
+    retryLast, clearError, setTargets,
 
     togglePlanMode,
     stop,
@@ -1072,7 +1072,27 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
         )}
 
-        {error && <div className="text-xs text-red-400">{error}</div>}
+        {error && (
+          <div className="flex items-start gap-2 text-xs text-red-400">
+            <span className="min-w-0 flex-1">{error}</span>
+            <button
+              type="button"
+              className="shrink-0 rounded border border-red-800/50 px-1.5 py-0.5 text-[10px] text-red-200 hover:bg-red-950/50"
+              onClick={() => void retryLast()}
+              data-tooltip="Re-send the last message"
+            >
+              Retry
+            </button>
+            <button
+              type="button"
+              className="shrink-0 rounded px-1 text-[10px] text-red-400/70 hover:text-red-200"
+              onClick={() => clearError()}
+              data-tooltip="Dismiss"
+            >
+              ?
+            </button>
+          </div>
+        )}
 
       </div>
 

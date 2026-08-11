@@ -180,6 +180,9 @@ interface AgentState {
   setSpeaking: (v: boolean) => void;
   togglePlanMode: () => void;
   send: (text: string, opts?: { providerId?: string; conversation?: boolean }) => Promise<void>;
+  /** Re-send the last user message (after an error or aborted turn). */
+  retryLast: () => Promise<void>;
+  clearError: () => void;
   stop: () => Promise<void>;
   newConversation: () => Promise<void>;
   openConversation: (id: string) => Promise<void>;
@@ -816,5 +819,25 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     } finally {
       unlisten();
     }
+  },
+
+  clearError: () => set({ error: null }),
+
+  retryLast: async () => {
+    if (get().streaming) return;
+    const msgs = get().messages;
+    // Prefer last user message; if the last assistant failed empty, still retry that user turn.
+    let lastUserIdx = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === "user") {
+        lastUserIdx = i;
+        break;
+      }
+    }
+    if (lastUserIdx < 0) return;
+    const text = msgs[lastUserIdx].content;
+    // Drop the failed user turn and any trailing assistant so send() re-appends cleanly.
+    set({ messages: msgs.slice(0, lastUserIdx), error: null });
+    await get().send(text);
   },
 }));
