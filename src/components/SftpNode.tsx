@@ -1279,7 +1279,12 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
 
   const handleCopyPath = async (p: string) => {
     try {
-      await navigator.clipboard.writeText(p);
+      // Multi-select: copy all selected paths when the clicked path is in the set.
+      const text =
+        selection.size > 1 && selection.has(p)
+          ? [...selection].join("\n")
+          : p;
+      await navigator.clipboard.writeText(text);
     } catch {
       setError("Could not copy path");
     }
@@ -1883,6 +1888,16 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                   onClick={() => putOnClipboard(null, "copy")}
                 >
                   Copy
+                </button>
+                <button
+                  type="button"
+                  className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
+                  onClick={() =>
+                    void handleCopyPath([...selection][0] ?? path)
+                  }
+                  data-tooltip="Copy selected paths to clipboard"
+                >
+                  Paths
                 </button>
                 <button
                   type="button"

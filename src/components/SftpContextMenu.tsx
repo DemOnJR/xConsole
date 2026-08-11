@@ -190,7 +190,10 @@ export function SftpContextMenu({
           {entry.is_symlink ? item("Edit link target…", () => onEditLink(entry)) : null}
           {item("Rename…", () => onRename(entry))}
           {onDuplicate ? item("Duplicate", () => onDuplicate(entry)) : null}
-          {item("Copy path", () => onCopyPath(entry.path))}
+          {item(
+            many ? `Copy ${selectionCount} paths` : "Copy path",
+            () => onCopyPath(entry.path),
+          )}
           {item("Open terminal here", () => onOpenTerminalHere(entry))}
           <div className="my-1 border-t border-[var(--border)]" />
           {item("Delete", () => onDelete(entry), { danger: true })}
