@@ -742,28 +742,16 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
   return (
 
     <aside
-
       className={`flex shrink-0 flex-col border-[var(--border)] bg-[var(--surface-2)] ${
-
         expanded
-
           ? "h-full min-w-0 flex-1 border-0"
-
-          : "h-full w-[420px] border-l"
-
+          : "h-full border-l"
       }`}
-
+      style={expanded ? undefined : { width: "var(--agent-w)" }}
     >
-
       <div className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-2.5">
-
         <BotIcon size={16} />
-
-        <span className="text-xs font-medium uppercase tracking-wider text-gray-300">
-
-          Agent
-
-        </span>
+        <span className="xc-panel-title text-[var(--text-dim)]">Agent</span>
 
         <ProviderSwitcher />
 

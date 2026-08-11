@@ -1,8 +1,14 @@
 //! System-prompt assembly, mirroring Hermes' three-tier design
-//! (`agent/system_prompt.py`): a `stable` identity/guidance tier, a `context`
-//! tier (project files), and a `volatile` tier (memory + runtime facts). The
-//! tiers are joined with blank lines. Built once per turn here; callers cache it
-//! across a session and only rebuild after compression.
+//! (`agent/system_prompt.py`) with **cache-stable** prefix rules (2025–2026):
+//!
+//! - **static_system** — soul, tool/safety guidance, skills index, static infra.
+//!   Byte-stable across turns so Ollama KV reuse and Anthropic prompt caching hit.
+//! - **dynamic_block** — date, canvas, snapshots, memory, conversation summary,
+//!   selected targets, host dossiers. Injected into the *last user message* of
+//!   the request only (not stored in conversation history).
+//!
+//! Moving dynamic working memory out of the system prefix is the proven way to
+//! raise cache hit rates (e.g. 7% → 84% in production agent systems).
 
 use chrono::Local;
 
@@ -196,10 +202,71 @@ user first; propose precise commands and wait.",
     }
 }
 
-/// Assemble the full system prompt for a turn.
-pub fn build_system_prompt(ctx: &PromptContext) -> String {
+/// Cache-friendly prompt split for one turn.
+#[derive(Debug, Clone)]
+pub struct AssembledPrompt {
+    /// Stable system prefix — cache this; do not put Date/snapshots/memory here.
+    pub static_system: String,
+    /// Volatile context injected into the last user message of the *request only*.
+    pub dynamic_block: String,
+}
+
+/// Assemble static system + dynamic block (preferred for cache hit rate).
+pub fn assemble_prompt(ctx: &PromptContext) -> AssembledPrompt {
     let (tiers, _) = collect_prompt_tiers(ctx);
-    join_tiers(tiers)
+    let [stable, context, volatile] = tiers;
+    AssembledPrompt {
+        static_system: join_parts(stable),
+        dynamic_block: join_parts(
+            context
+                .into_iter()
+                .chain(volatile.into_iter())
+                .collect(),
+        ),
+    }
+}
+
+/// Full system string (static + dynamic). Prefer [`assemble_prompt`] + user injection
+/// for live turns; this remains for benches and callers that want one blob.
+pub fn build_system_prompt(ctx: &PromptContext) -> String {
+    let a = assemble_prompt(ctx);
+    if a.dynamic_block.is_empty() {
+        a.static_system
+    } else if a.static_system.is_empty() {
+        a.dynamic_block
+    } else {
+        format!("{}\n\n{}", a.static_system, a.dynamic_block)
+    }
+}
+
+/// Prepend the dynamic context block to the last user message of a *request* copy.
+/// Conversation history on disk stays clean (no runtime pollution).
+pub fn inject_dynamic_into_last_user(messages: &mut [ChatMessage], dynamic: &str) {
+    let dynamic = dynamic.trim();
+    if dynamic.is_empty() {
+        return;
+    }
+    if let Some(m) = messages.iter_mut().rev().find(|m| m.role == "user") {
+        if m.content.starts_with("# Runtime context") || m.content.contains("# Runtime context\n") {
+            // Already injected (e.g. tool-loop iteration) — replace the prefix.
+            if let Some(rest) = m.content.split_once("\n\n---\n\n") {
+                m.content = format!("# Runtime context\n{dynamic}\n\n---\n\n{}", rest.1);
+            } else {
+                m.content = format!("# Runtime context\n{dynamic}\n\n---\n\n{}", m.content);
+            }
+        } else {
+            m.content = format!("# Runtime context\n{dynamic}\n\n---\n\n{}", m.content);
+        }
+    }
+}
+
+fn join_parts(parts: Vec<String>) -> String {
+    parts
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Per-tier strings for context-usage reporting (same logic as `build_system_prompt`).
@@ -319,21 +386,6 @@ fn count_tokens(text: &str) -> u32 {
     crate::ai::text::count_tokens(text) as u32
 }
 
-fn join_tiers(tiers: [Vec<String>; 3]) -> String {
-    tiers
-        .into_iter()
-        .map(|tier| {
-            tier.into_iter()
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        })
-        .filter(|t| !t.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
 /// Char-boundary-safe truncation with an ellipsis marker.
 fn truncate_chars(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -404,13 +456,19 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
             stable.push(MEMORY_GUIDANCE.to_string());
             stable.push(LEARN_GUIDANCE.to_string());
         }
+        // Safety mode is session-stable enough to keep in the prefix (changes rarely).
         stable.push(safety_guidance(ctx.safety).to_string());
-        if ctx.plan_mode {
-            stable.push(PLAN_MODE_GUIDANCE.to_string());
-        }
     }
     if ctx.force_minimal_prompt {
         stable.push(PONYTAIL_COMPACT_GUIDANCE.to_string());
+    }
+
+    // Taste preferences change rarely — keep in static prefix for cache + style consistency.
+    if !minimal {
+        let taste = crate::ai::taste::format_for_prompt(ctx.home);
+        if !taste.is_empty() {
+            stable.push(taste);
+        }
     }
 
     if !minimal {
@@ -422,8 +480,15 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
         if !skills_index.is_empty() {
             stable.push(skills_index);
         }
+        // Static infra inventory (project/account labels) — not live SSH data.
+        let infra = crate::infra::summary::format_infra_summary(ctx.db);
+        if !infra.is_empty() {
+            stable.push(infra);
+        }
     }
 
+    // ---- DYNAMIC (context + volatile): never put these in the system prefix ----
+    // Workspace brief, live canvas, selected targets, memory body, date, plan mode.
     let mut context: Vec<String> = Vec::new();
     if let Some(ws) = ctx.workspace_context.as_ref().filter(|s| !s.trim().is_empty()) {
         context.push(ws.clone());
@@ -436,15 +501,17 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
         if !catalog.is_empty() {
             context.push(catalog);
         }
-    }
-    if !minimal {
-        let infra = crate::infra::summary::format_infra_summary(ctx.db);
-        if !infra.is_empty() {
-            context.push(infra);
+        // Per-host institutional memory for selected VPS only.
+        let hosts = crate::ai::host_memory::format_for_prompt(ctx.home, ctx.db, ctx.target_ids);
+        if !hosts.is_empty() {
+            context.push(hosts);
         }
     }
 
     let mut volatile: Vec<String> = Vec::new();
+    if ctx.plan_mode {
+        volatile.push(PLAN_MODE_GUIDANCE.to_string());
+    }
     if let Some(note) = &ctx.target_selection_note {
         if !note.trim().is_empty() {
             volatile.push(note.trim().to_string());
@@ -462,6 +529,7 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
     if !mem.is_empty() && !minimal {
         volatile.push(mem);
     }
+    // Date/time MUST stay out of the static system prefix (kills KV/prompt cache).
     let mut runtime = format!("Date: {}", Local::now().format("%A, %B %d, %Y"));
     if !ctx.model_label.is_empty() {
         runtime.push_str(&format!("\nModel: {}", ctx.model_label));

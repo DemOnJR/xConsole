@@ -99,8 +99,14 @@ impl Provider for AnthropicProvider {
             "stream": true,
             "messages": Self::build_messages(&req.messages),
         });
+        // Prompt caching: mark the static system prefix as ephemeral so multi-turn
+        // agent loops reuse Anthropic's server-side cache (up to ~90% latency cut).
         if !req.system.is_empty() {
-            body["system"] = json!(req.system);
+            body["system"] = json!([{
+                "type": "text",
+                "text": req.system,
+                "cache_control": { "type": "ephemeral" }
+            }]);
         }
         let tools = Self::build_tools(req);
         if !tools.is_empty() {
@@ -112,6 +118,8 @@ impl Provider for AnthropicProvider {
             .post(url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
+            // Enable prompt-caching beta for cache_control on system blocks.
+            .header("anthropic-beta", "prompt-caching-2024-07-31")
             .header("content-type", "application/json")
             .json(&body)
             .send()
@@ -128,6 +136,10 @@ impl Provider for AnthropicProvider {
         let mut sse = SseBuffer::new();
         // Tool-call accumulation: index -> (id, name, json string)
         let mut tool_acc: Vec<(String, String, String)> = Vec::new();
+        let mut input_tokens: Option<u32> = None;
+        let mut output_tokens: Option<u32> = None;
+        let mut cache_read_tokens: Option<u32> = None;
+        let started = std::time::Instant::now();
 
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
@@ -147,6 +159,19 @@ impl Provider for AnthropicProvider {
                     Err(_) => continue,
                 };
                 match ev.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+                    "message_start" => {
+                        if let Some(u) = ev.get("message").and_then(|m| m.get("usage")) {
+                            input_tokens = u
+                                .get("input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .map(|n| n as u32);
+                            cache_read_tokens = u
+                                .get("cache_read_input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .map(|n| n as u32)
+                                .or(cache_read_tokens);
+                        }
+                    }
                     "content_block_start" => {
                         let block = &ev["content_block"];
                         if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
@@ -180,6 +205,18 @@ impl Provider for AnthropicProvider {
                         if let Some(sr) = ev["delta"].get("stop_reason").and_then(|v| v.as_str()) {
                             out.stop_reason = sr.to_string();
                         }
+                        if let Some(u) = ev.get("usage") {
+                            output_tokens = u
+                                .get("output_tokens")
+                                .and_then(|v| v.as_u64())
+                                .map(|n| n as u32)
+                                .or(output_tokens);
+                            cache_read_tokens = u
+                                .get("cache_read_input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .map(|n| n as u32)
+                                .or(cache_read_tokens);
+                        }
                     }
                     _ => {}
                 }
@@ -191,6 +228,21 @@ impl Provider for AnthropicProvider {
             let tc = ToolCall { id, name, arguments };
             emit(sink, StreamEvent::ToolCall(tc.clone()));
             out.tool_calls.push(tc);
+        }
+
+        if let Some(completion) = output_tokens {
+            let ms = started.elapsed().as_millis() as u64;
+            let secs = (ms as f64 / 1000.0).max(0.05);
+            emit(
+                sink,
+                StreamEvent::Stats(crate::ai::provider::StreamStats {
+                    completion_tokens: completion,
+                    prompt_tokens: input_tokens,
+                    cached_tokens: cache_read_tokens,
+                    duration_ms: ms.max(1),
+                    tokens_per_sec: (completion as f64 / secs) as f32,
+                }),
+            );
         }
 
         Ok(out)

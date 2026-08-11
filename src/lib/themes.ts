@@ -23,6 +23,7 @@ export const CSS_VARS = {
   bg: "--bg",
   surface: "--surface",
   surface2: "--surface-2",
+  surfaceHover: "--surface-hover",
   border: "--border",
   borderStrong: "--border-strong",
   text: "--text",
@@ -30,9 +31,40 @@ export const CSS_VARS = {
   textFaint: "--text-faint",
   accent: "--accent",
   accentFg: "--accent-fg",
+  success: "--success",
+  warning: "--warning",
+  danger: "--danger",
+  info: "--info",
 } as const;
 
 export type UiVars = Record<keyof typeof CSS_VARS, string>;
+
+/** Derive hover/status tokens when a theme only defines the core palette. */
+function withDerived(
+  vars: Partial<UiVars> &
+    Pick<
+      UiVars,
+      | "bg"
+      | "surface"
+      | "surface2"
+      | "border"
+      | "borderStrong"
+      | "text"
+      | "textDim"
+      | "textFaint"
+      | "accent"
+      | "accentFg"
+    >,
+): UiVars {
+  return {
+    ...vars,
+    surfaceHover: vars.surfaceHover ?? vars.surface,
+    success: vars.success ?? "#9ece6a",
+    warning: vars.warning ?? "#e0af68",
+    danger: vars.danger ?? "#f7768e",
+    info: vars.info ?? "#7dcfff",
+  };
+}
 
 export interface Theme {
   id: string;
@@ -46,10 +78,11 @@ export interface Theme {
 const TOKYO_NIGHT: Theme = {
   id: "tokyo-night",
   name: "Tokyo Night",
-  vars: {
+  vars: withDerived({
     bg: "#0b0f17",
     surface: "#11161f",
     surface2: "#0d121b",
+    surfaceHover: "#161c28",
     border: "#1f2737",
     borderStrong: "#2a3344",
     text: "#e5e7eb",
@@ -57,7 +90,11 @@ const TOKYO_NIGHT: Theme = {
     textFaint: "#6b7280",
     accent: "#3b82f6",
     accentFg: "#ffffff",
-  },
+    success: "#9ece6a",
+    warning: "#e0af68",
+    danger: "#f7768e",
+    info: "#7dcfff",
+  }),
   xterm: {
     background: "#0b0f17",
     foreground: "#d6deeb",
@@ -78,10 +115,11 @@ const TOKYO_NIGHT: Theme = {
 const CATPPUCCIN: Theme = {
   id: "catppuccin-mocha",
   name: "Catppuccin Mocha",
-  vars: {
+  vars: withDerived({
     bg: "#1e1e2e",
     surface: "#181825",
     surface2: "#11111b",
+    surfaceHover: "#1e1e2e",
     border: "#313244",
     borderStrong: "#45475a",
     text: "#cdd6f4",
@@ -89,7 +127,11 @@ const CATPPUCCIN: Theme = {
     textFaint: "#6c7086",
     accent: "#89b4fa",
     accentFg: "#11111b",
-  },
+    success: "#a6e3a1",
+    warning: "#f9e2af",
+    danger: "#f38ba8",
+    info: "#89dceb",
+  }),
   xterm: {
     background: "#1e1e2e",
     foreground: "#cdd6f4",
@@ -110,10 +152,11 @@ const CATPPUCCIN: Theme = {
 const DRACULA: Theme = {
   id: "dracula",
   name: "Dracula",
-  vars: {
+  vars: withDerived({
     bg: "#282a36",
     surface: "#21222c",
     surface2: "#191a21",
+    surfaceHover: "#2d2f3b",
     border: "#44475a",
     borderStrong: "#6272a4",
     text: "#f8f8f2",
@@ -121,7 +164,11 @@ const DRACULA: Theme = {
     textFaint: "#6272a4",
     accent: "#bd93f9",
     accentFg: "#282a36",
-  },
+    success: "#50fa7b",
+    warning: "#f1fa8c",
+    danger: "#ff5555",
+    info: "#8be9fd",
+  }),
   xterm: {
     background: "#282a36",
     foreground: "#f8f8f2",
@@ -142,10 +189,11 @@ const DRACULA: Theme = {
 const GRUVBOX: Theme = {
   id: "gruvbox",
   name: "Gruvbox Dark",
-  vars: {
+  vars: withDerived({
     bg: "#282828",
     surface: "#32302f",
     surface2: "#1d2021",
+    surfaceHover: "#3c3836",
     border: "#3c3836",
     borderStrong: "#504945",
     text: "#ebdbb2",
@@ -153,7 +201,11 @@ const GRUVBOX: Theme = {
     textFaint: "#7c6f64",
     accent: "#fabd2f",
     accentFg: "#282828",
-  },
+    success: "#b8bb26",
+    warning: "#fabd2f",
+    danger: "#fb4934",
+    info: "#83a598",
+  }),
   xterm: {
     background: "#282828",
     foreground: "#ebdbb2",
@@ -174,10 +226,11 @@ const GRUVBOX: Theme = {
 const NORD: Theme = {
   id: "nord",
   name: "Nord",
-  vars: {
+  vars: withDerived({
     bg: "#2e3440",
     surface: "#3b4252",
     surface2: "#272c36",
+    surfaceHover: "#434c5e",
     border: "#434c5e",
     borderStrong: "#4c566a",
     text: "#eceff4",
@@ -185,7 +238,11 @@ const NORD: Theme = {
     textFaint: "#7b88a1",
     accent: "#88c0d0",
     accentFg: "#2e3440",
-  },
+    success: "#a3be8c",
+    warning: "#ebcb8b",
+    danger: "#bf616a",
+    info: "#81a1c1",
+  }),
   xterm: {
     background: "#2e3440",
     foreground: "#d8dee9",
@@ -206,10 +263,11 @@ const NORD: Theme = {
 const ONE_DARK: Theme = {
   id: "one-dark",
   name: "One Dark",
-  vars: {
+  vars: withDerived({
     bg: "#282c34",
     surface: "#21252b",
     surface2: "#1b1f23",
+    surfaceHover: "#2c313a",
     border: "#3b4048",
     borderStrong: "#4b5263",
     text: "#abb2bf",
@@ -217,7 +275,11 @@ const ONE_DARK: Theme = {
     textFaint: "#5c6370",
     accent: "#61afef",
     accentFg: "#282c34",
-  },
+    success: "#98c379",
+    warning: "#e5c07b",
+    danger: "#e06c75",
+    info: "#56b6c2",
+  }),
   xterm: {
     background: "#282c34",
     foreground: "#abb2bf",
@@ -238,10 +300,11 @@ const ONE_DARK: Theme = {
 const SOLARIZED: Theme = {
   id: "solarized-dark",
   name: "Solarized Dark",
-  vars: {
+  vars: withDerived({
     bg: "#002b36",
     surface: "#073642",
     surface2: "#00252e",
+    surfaceHover: "#0a4a59",
     border: "#0a4a59",
     borderStrong: "#586e75",
     text: "#93a1a1",
@@ -249,7 +312,11 @@ const SOLARIZED: Theme = {
     textFaint: "#657b83",
     accent: "#268bd2",
     accentFg: "#fdf6e3",
-  },
+    success: "#859900",
+    warning: "#b58900",
+    danger: "#dc322f",
+    info: "#2aa198",
+  }),
   xterm: {
     background: "#002b36",
     foreground: "#93a1a1",
@@ -288,7 +355,7 @@ export function buildCustomTheme(vars: Partial<UiVars>): Theme {
   return {
     id: "custom",
     name: "Custom",
-    vars: { ...TOKYO_NIGHT.vars, ...vars },
+    vars: withDerived({ ...TOKYO_NIGHT.vars, ...vars }),
     // Custom themes reuse Tokyo Night's terminal palette unless overridden later.
     xterm: { ...TOKYO_NIGHT.xterm, background: vars.bg ?? TOKYO_NIGHT.xterm.background },
   };

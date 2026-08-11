@@ -171,6 +171,9 @@ pub enum ActivityEvent {
 pub struct StreamStats {
     pub completion_tokens: u32,
     pub prompt_tokens: Option<u32>,
+    /// Tokens served from provider prompt cache (Anthropic / OpenAI when reported).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u32>,
     pub duration_ms: u64,
     pub tokens_per_sec: f32,
 }

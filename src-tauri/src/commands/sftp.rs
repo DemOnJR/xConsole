@@ -44,6 +44,45 @@ pub async fn sftp_write(
 }
 
 #[tauri::command]
+pub async fn sftp_mkdir(
+    sftp: State<'_, SftpManager>,
+    session_id: String,
+    path: String,
+) -> Result<(), String> {
+    sftp.mkdir(&session_id, &path).await
+}
+
+#[tauri::command]
+pub async fn sftp_rename(
+    sftp: State<'_, SftpManager>,
+    session_id: String,
+    from: String,
+    to: String,
+) -> Result<(), String> {
+    sftp.rename(&session_id, &from, &to).await
+}
+
+#[tauri::command]
+pub async fn sftp_remove(
+    sftp: State<'_, SftpManager>,
+    session_id: String,
+    path: String,
+    is_dir: bool,
+) -> Result<(), String> {
+    sftp.remove(&session_id, &path, is_dir).await
+}
+
+#[tauri::command]
+pub async fn sftp_symlink(
+    sftp: State<'_, SftpManager>,
+    session_id: String,
+    link_path: String,
+    target: String,
+) -> Result<(), String> {
+    sftp.symlink(&session_id, &link_path, &target).await
+}
+
+#[tauri::command]
 pub fn sftp_disconnect(sftp: State<'_, SftpManager>, session_id: String) -> Result<(), String> {
     sftp.disconnect(&session_id)
 }

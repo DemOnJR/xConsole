@@ -7,6 +7,8 @@ export function estimateTokens(text: string): number {
 export interface TokenStats {
   completionTokens: number;
   promptTokens?: number;
+  /** Provider prompt-cache hits (Anthropic cache_read_input_tokens, etc.). */
+  cachedTokens?: number;
   tokensPerSec: number;
   source: "estimate" | "provider";
 }

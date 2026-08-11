@@ -9,6 +9,8 @@ import { DialogHost } from "./components/Dialog";
 import { TooltipHost } from "./components/Tooltip";
 import { AgentPanel } from "./components/agent/AgentPanel";
 import { AppToolbar } from "./components/AppToolbar";
+import { NavRail } from "./components/NavRail";
+import { StatusStrip } from "./components/StatusStrip";
 import { ChangesPanel } from "./components/agent/ChangesPanel";
 import { UpdateNotice } from "./components/UpdateNotice";
 import { TransfersPanel } from "./components/TransfersPanel";
@@ -25,6 +27,9 @@ import { useLockStore } from "./stores/lockStore";
 import { useAutoLock } from "./hooks/useAutoLock";
 import { useOsFileDrop } from "./hooks/useOsFileDrop";
 import { useWorkspaceAutosave } from "./hooks/useWorkspaceAutosave";
+import { DragGhost } from "./components/DragGhost";
+import { SplashScreen, UnlockScreen } from "./components/lock/UnlockScreen";
+import { useTileShortcuts } from "./hooks/useTileShortcuts";
 
 /** Restores the workspace as it was left and keeps saving it. A component rather than a
  *  hook call in UnlockedApp because it needs React Flow's viewport, and UnlockedApp's own
@@ -33,9 +38,6 @@ function WorkspaceAutosave() {
   useWorkspaceAutosave();
   return null;
 }
-import { DragGhost } from "./components/DragGhost";
-import { SplashScreen, UnlockScreen } from "./components/lock/UnlockScreen";
-import { useTileShortcuts } from "./hooks/useTileShortcuts";
 
 // The real app body. Only mounts once unlocked, so none of its DB-touching effects
 // (theme load, agent/edits subscriptions) run while the database is still encrypted/locked.
@@ -139,6 +141,8 @@ function UnlockedApp() {
         <AppToolbar />
 
         <div className="flex min-h-0 flex-1 overflow-hidden">
+          <NavRail />
+
           {agentOnly ? (
             <AgentPanel expanded />
           ) : (
@@ -149,12 +153,12 @@ function UnlockedApp() {
                 <CanvasFlow />
                 {nodes.length === 0 && (
                   <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                    <div className="text-center">
-                      <p className="text-lg text-gray-500">
-                        Drag a server from the right onto the canvas (or click it).
+                    <div className="max-w-sm px-6 text-center">
+                      <p className="text-base text-[var(--text-dim)]">
+                        Drag a server from the hosts panel onto the canvas, or click it.
                       </p>
-                      <p className="mt-1 text-sm text-gray-600">
-                        Zoom and pan to watch all your VPS at once.
+                      <p className="mt-2 text-sm text-[var(--text-faint)]">
+                        Use the left rail for workspaces, servers, agent, and console.
                       </p>
                     </div>
                   </div>
@@ -168,6 +172,7 @@ function UnlockedApp() {
         </div>
 
         {bottomOpen && !agentOnly ? <BottomBar /> : null}
+        <StatusStrip />
       </div>
       <SettingsModal />
       <ChangesPanel />

@@ -406,6 +406,7 @@ export interface AgentDocs {
   soul: string;
   memory: string;
   user: string;
+  taste: string;
 }
 
 /** Per-event hook counts + enable state for the Hooks settings section. */
@@ -563,6 +564,7 @@ export type StreamEvent =
       data: {
         completion_tokens: number;
         prompt_tokens?: number | null;
+        cached_tokens?: number | null;
         duration_ms: number;
         tokens_per_sec: number;
       };
@@ -611,6 +613,14 @@ export const api = {
     invoke<string>("sftp_download", { sessionId, path }),
   sftpWrite: (sessionId: string, path: string, contentB64: string) =>
     invoke<void>("sftp_write", { sessionId, path, contentB64 }),
+  sftpMkdir: (sessionId: string, path: string) =>
+    invoke<void>("sftp_mkdir", { sessionId, path }),
+  sftpRename: (sessionId: string, from: string, to: string) =>
+    invoke<void>("sftp_rename", { sessionId, from, to }),
+  sftpRemove: (sessionId: string, path: string, isDir: boolean) =>
+    invoke<void>("sftp_remove", { sessionId, path, isDir }),
+  sftpSymlink: (sessionId: string, linkPath: string, target: string) =>
+    invoke<void>("sftp_symlink", { sessionId, linkPath, target }),
   sftpDisconnect: (sessionId: string) =>
     invoke<void>("sftp_disconnect", { sessionId }),
 
@@ -951,6 +961,7 @@ export const api = {
   saveMemoryDoc: (content: string) =>
     invoke<void>("save_memory_doc", { content }),
   saveUserDoc: (content: string) => invoke<void>("save_user_doc", { content }),
+  saveTasteDoc: (content: string) => invoke<void>("save_taste_doc", { content }),
 
   listSkills: () => invoke<Skill[]>("list_skills"),
   getSkill: (category: string, name: string) =>

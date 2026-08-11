@@ -17,6 +17,13 @@ export function AgentTokenStats({
         : `${stats.completionTokens} tok`
       : null;
 
+  const cachePct =
+    stats.cachedTokens != null &&
+    stats.promptTokens != null &&
+    stats.promptTokens > 0
+      ? Math.round((stats.cachedTokens / stats.promptTokens) * 100)
+      : null;
+
   return (
     <div
       className={`flex items-center gap-1.5 font-mono text-[10px] tabular-nums text-gray-500 ${
@@ -30,6 +37,7 @@ export function AgentTokenStats({
         {approx ? "~" : ""}
         {tps}
         {tokens ? ` · ${tokens}` : ""}
+        {cachePct != null ? ` · cache ${cachePct}%` : ""}
       </span>
     </div>
   );

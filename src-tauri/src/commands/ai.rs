@@ -672,6 +672,7 @@ pub struct AgentDocs {
     pub soul: String,
     pub memory: String,
     pub user: String,
+    pub taste: String,
 }
 
 #[tauri::command]
@@ -680,6 +681,7 @@ pub fn get_agent_docs(home: State<'_, AgentHome>) -> AgentDocs {
         soul: crate::ai::soul::load(&home),
         memory: crate::ai::memory::load_memory(&home),
         user: crate::ai::memory::load_user(&home),
+        taste: crate::ai::taste::load(&home),
     }
 }
 
@@ -696,6 +698,11 @@ pub fn save_memory_doc(home: State<'_, AgentHome>, content: String) -> Result<()
 #[tauri::command]
 pub fn save_user_doc(home: State<'_, AgentHome>, content: String) -> Result<(), String> {
     crate::ai::memory::save_user(&home, &content)
+}
+
+#[tauri::command]
+pub fn save_taste_doc(home: State<'_, AgentHome>, content: String) -> Result<(), String> {
+    crate::ai::taste::save(&home, &content)
 }
 
 // ----- Hooks (Claude Code–style lifecycle hooks) -----

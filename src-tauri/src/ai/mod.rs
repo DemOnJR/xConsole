@@ -13,6 +13,7 @@ pub mod conversations;
 pub mod cron;
 pub mod edits;
 pub mod hooks;
+pub mod host_memory;
 pub mod infra_tools;
 pub mod interaction;
 pub mod llama;
@@ -28,6 +29,8 @@ pub mod skill_install;
 pub mod skill_scan;
 pub mod skills;
 pub mod soul;
+pub mod taste;
+pub mod tool_cache;
 pub mod edge_tts;
 pub mod parakeet;
 pub mod piper;
@@ -55,6 +58,14 @@ impl AgentHome {
     }
     pub fn user(&self) -> PathBuf {
         self.0.join("USER.md")
+    }
+    #[allow(dead_code)]
+    pub fn taste(&self) -> PathBuf {
+        self.0.join("TASTE.md")
+    }
+    #[allow(dead_code)]
+    pub fn hosts_dir(&self) -> PathBuf {
+        self.0.join("hosts")
     }
     pub fn skills_dir(&self) -> PathBuf {
         self.0.join("skills")

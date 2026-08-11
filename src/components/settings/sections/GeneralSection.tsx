@@ -8,7 +8,6 @@ export const SK = {
   agentEnabled: "agent.enabled",
   activeProvider: "agent.active_provider",
   safetyMode: "agent.safety_mode",
-  contextTokens: "agent.context_tokens",
   externalEditor: "sftp.external_editor",
 } as const;
 
@@ -32,7 +31,7 @@ export function GeneralSection() {
     <div>
       <SectionHeader
         title="General"
-        description="Core agent settings. xConsole is built to grow into a full DevOps cockpit; this is the brain's master switch."
+        description="App-wide defaults: agent on/off, active provider, remote editor, and updates."
       />
 
       <Card className="mb-3">

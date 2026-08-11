@@ -3,56 +3,62 @@ import { useUiStore } from "../../stores/uiStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import {
   BotIcon,
-  BookIcon,
   BrainIcon,
-  ClockIcon,
-  GridIcon,
   PaletteIcon,
   PlugIcon,
   SettingsIcon,
   ShieldIcon,
   SparkIcon,
-  TerminalIcon,
 } from "../icons";
 import { GeneralSection } from "./sections/GeneralSection";
 import { ThemeSection } from "./sections/ThemeSection";
 import { ModelsSection } from "./sections/ModelsSection";
-import { VoiceSection } from "./sections/VoiceSection";
 import { ProvidersSection } from "./sections/ProvidersSection";
 import { AgentSection } from "./sections/AgentSection";
-import { HooksSection } from "./sections/HooksSection";
-import { SoulSection } from "./sections/SoulSection";
-import { MemorySection } from "./sections/MemorySection";
-import { SkillsSection } from "./sections/SkillsSection";
-import { CloudSection } from "./sections/CloudSection";
-import { CronSection } from "./sections/CronSection";
-import { ProjectsSection } from "./sections/ProjectsSection";
+import { KnowledgeSection } from "./sections/KnowledgeSection";
 import { SecuritySection } from "./sections/SecuritySection";
+import { AdvancedSection } from "./sections/AdvancedSection";
 
 interface Category {
   id: string;
   label: string;
   icon: ComponentType<{ size?: number }>;
   Component: ComponentType;
+  group?: "core" | "ai" | "more";
 }
 
-/** Single source of truth for the settings categories. Add a category here. */
+/**
+ * Compact settings IA. Voice / Cron / Cloud / Terraform / Hooks live under Advanced.
+ * Soul + Memory + Skills share Knowledge.
+ */
 const CATEGORIES: Category[] = [
-  { id: "general", label: "General", icon: SettingsIcon, Component: GeneralSection },
-  { id: "theme", label: "Theme", icon: PaletteIcon, Component: ThemeSection },
-  { id: "providers", label: "Providers", icon: PlugIcon, Component: ProvidersSection },
-  { id: "models", label: "Models", icon: BrainIcon, Component: ModelsSection },
-  { id: "voice", label: "Voice", icon: SparkIcon, Component: VoiceSection },
-  { id: "agent", label: "Agent & Safety", icon: BotIcon, Component: AgentSection },
-  { id: "hooks", label: "Hooks", icon: TerminalIcon, Component: HooksSection },
-  { id: "soul", label: "Soul", icon: SparkIcon, Component: SoulSection },
-  { id: "memory", label: "Memory", icon: BrainIcon, Component: MemorySection },
-  { id: "skills", label: "Skills", icon: BookIcon, Component: SkillsSection },
-  { id: "projects", label: "Projects", icon: GridIcon, Component: ProjectsSection },
-  { id: "cloud", label: "Cloud", icon: PlugIcon, Component: CloudSection },
-  { id: "cron", label: "Cron", icon: ClockIcon, Component: CronSection },
-  { id: "security", label: "Security", icon: ShieldIcon, Component: SecuritySection },
+  { id: "general", label: "General", icon: SettingsIcon, Component: GeneralSection, group: "core" },
+  { id: "theme", label: "Appearance", icon: PaletteIcon, Component: ThemeSection, group: "core" },
+  { id: "providers", label: "Providers", icon: PlugIcon, Component: ProvidersSection, group: "ai" },
+  { id: "models", label: "Models", icon: BrainIcon, Component: ModelsSection, group: "ai" },
+  { id: "agent", label: "Agent & Safety", icon: BotIcon, Component: AgentSection, group: "ai" },
+  { id: "knowledge", label: "Knowledge", icon: SparkIcon, Component: KnowledgeSection, group: "ai" },
+  { id: "security", label: "Security", icon: ShieldIcon, Component: SecuritySection, group: "more" },
+  { id: "advanced", label: "Advanced", icon: SettingsIcon, Component: AdvancedSection, group: "more" },
 ];
+
+/** Map old persisted section ids (pre-reorg) onto the new categories. */
+const LEGACY_SECTION: Record<string, string> = {
+  voice: "advanced",
+  hooks: "advanced",
+  cron: "advanced",
+  cloud: "advanced",
+  projects: "advanced",
+  soul: "knowledge",
+  memory: "knowledge",
+  skills: "knowledge",
+};
+
+const GROUP_LABEL: Record<string, string> = {
+  core: "App",
+  ai: "AI",
+  more: "More",
+};
 
 export function SettingsModal() {
   const open = useUiStore((s) => s.settingsOpen);
@@ -61,9 +67,17 @@ export function SettingsModal() {
   const close = useUiStore((s) => s.closeSettings);
   const loadSettings = useSettingsStore((s) => s.load);
 
+  const resolvedSection = LEGACY_SECTION[section] ?? section;
+
   useEffect(() => {
     if (open) loadSettings();
   }, [open, loadSettings]);
+
+  useEffect(() => {
+    if (LEGACY_SECTION[section]) {
+      setSection(LEGACY_SECTION[section]);
+    }
+  }, [section, setSection]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -75,8 +89,15 @@ export function SettingsModal() {
 
   if (!open) return null;
 
-  const active = CATEGORIES.find((c) => c.id === section) ?? CATEGORIES[0];
+  const active =
+    CATEGORIES.find((c) => c.id === resolvedSection) ?? CATEGORIES[0];
   const Active = active.Component;
+
+  const groups = (["core", "ai", "more"] as const).map((g) => ({
+    id: g,
+    label: GROUP_LABEL[g],
+    items: CATEGORIES.filter((c) => c.group === g),
+  }));
 
   return (
     <div
@@ -85,44 +106,50 @@ export function SettingsModal() {
         if (e.target === e.currentTarget) close();
       }}
     >
-      <div className="flex h-[80vh] w-[min(960px,92vw)] overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface-2)] shadow-2xl">
+      <div className="flex h-[min(80vh,720px)] w-[min(920px,94vw)] overflow-hidden rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-2)] shadow-[var(--shadow-panel)]">
         {/* Category sidebar */}
-        <nav className="flex w-52 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--bg)] py-3">
-          <div className="px-4 pb-3 text-xs font-semibold uppercase tracking-wider text-gray-500">
+        <nav className="flex w-48 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--bg)] py-3">
+          <div className="px-4 pb-3 text-xs font-semibold uppercase tracking-wider text-[var(--text-faint)]">
             Settings
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto px-2">
-            {CATEGORIES.map((c) => {
-              const Icon = c.icon;
-              const isActive = c.id === active.id;
-              return (
-                <button
-                  key={c.id}
-                  onClick={() => setSection(c.id)}
-                  className={`mb-0.5 flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition ${
-                    isActive
-                      ? "bg-blue-600/20 text-blue-100"
-                      : "text-gray-400 hover:bg-[var(--surface)] hover:text-gray-200"
-                  }`}
-                >
-                  <Icon size={16} />
-                  {c.label}
-                </button>
-              );
-            })}
+            {groups.map((g) => (
+              <div key={g.id} className="mb-3">
+                <div className="px-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-faint)]">
+                  {g.label}
+                </div>
+                {g.items.map((c) => {
+                  const Icon = c.icon;
+                  const isActive = c.id === active.id;
+                  return (
+                    <button
+                      key={c.id}
+                      onClick={() => setSection(c.id)}
+                      className={`mb-0.5 flex w-full items-center gap-2.5 rounded-[var(--radius-md)] px-2.5 py-2 text-left text-sm transition ${
+                        isActive
+                          ? "bg-[var(--accent-muted)] text-[var(--accent)]"
+                          : "text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
+                      }`}
+                    >
+                      <Icon size={15} />
+                      {c.label}
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
           </div>
         </nav>
 
         {/* Active section */}
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex items-center justify-between border-b border-[var(--border)] px-5 py-3">
-            <span className="text-sm font-medium text-gray-200">{active.label}</span>
+            <span className="text-sm font-medium text-[var(--text)]">{active.label}</span>
             <button
               onClick={close}
-              className="rounded-md p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
-              title="Close (Esc)"
+              className="rounded-[var(--radius-md)] px-2 py-1 text-xs text-[var(--text-faint)] transition hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
             >
-              ✕
+              Esc
             </button>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">

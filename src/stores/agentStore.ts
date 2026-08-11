@@ -464,10 +464,27 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   resolveApproval: async (id, approved, remember) => {
     const sessionId = get().sessionId;
+    const denied = get().pendingApprovals.find((a) => a.id === id);
     set((s) => ({
       pendingApprovals: s.pendingApprovals.filter((a) => a.id !== id),
     }));
     await api.agentResolveApproval(id, approved, remember, sessionId);
+    // Taste learning: user denied a command → remember not to auto-run that class of action.
+    if (!approved && denied?.command) {
+      try {
+        const docs = await api.getAgentDocs();
+        const cmd = denied.command.trim().slice(0, 120);
+        const bullet = `- [taste] Do not run without approval: ${cmd}`;
+        if (!docs.taste.includes(cmd)) {
+          const next = docs.taste.trim()
+            ? `${docs.taste.trim()}\n${bullet}\n`
+            : `${bullet}\n`;
+          await api.saveTasteDoc(next);
+        }
+      } catch {
+        /* non-fatal */
+      }
+    }
   },
 
   answerQuestion: async (id, answer) => {
@@ -481,6 +498,21 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set({ pendingPlan: null });
     const answer = approve ? "APPROVE" : `REJECT: ${feedback ?? ""}`.trim();
     await api.agentAnswerPrompt(id, answer);
+    // Taste learning: plan rejection feedback becomes a lasting preference.
+    if (!approve && feedback?.trim()) {
+      try {
+        const docs = await api.getAgentDocs();
+        const bullet = `- [taste] Plan feedback: ${feedback.trim()}`;
+        if (!docs.taste.includes(feedback.trim())) {
+          const next = docs.taste.trim()
+            ? `${docs.taste.trim()}\n${bullet}\n`
+            : `${bullet}\n`;
+          await api.saveTasteDoc(next);
+        }
+      } catch {
+        /* non-fatal */
+      }
+    }
   },
 
   newConversation: async () => {
@@ -622,6 +654,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         latestStats = {
           completionTokens: ev.data.completion_tokens,
           promptTokens: ev.data.prompt_tokens ?? undefined,
+          cachedTokens: ev.data.cached_tokens ?? undefined,
           tokensPerSec: ev.data.tokens_per_sec,
           source: "provider",
         };

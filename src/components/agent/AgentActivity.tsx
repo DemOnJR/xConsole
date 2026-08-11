@@ -2,6 +2,9 @@ import { useMemo } from "react";
 import { SettingsIcon, TerminalIcon } from "../icons";
 import type { AgentActivityItem } from "../../stores/agentStore";
 import { CodeHighlight, ConsoleOutput, langFromPath, ShellCommand } from "./SyntaxHighlight";
+import { useVpsStore } from "../../stores/vpsStore";
+import { useCanvasStore } from "../../stores/canvasStore";
+import { useUiStore } from "../../stores/uiStore";
 
 function truncate(s: string, max: number): string {
   const flat = s.replace(/\s+/g, " ").trim();
@@ -159,37 +162,102 @@ function FileEditCard({ item }: { item: AgentActivityItem }) {
   );
 }
 
+/** Extract host label from "Run on <name>" activity titles. */
+function hostFromCommandLabel(label: string): string | null {
+  const m = /^Run on (.+)$/i.exec(label.trim());
+  return m?.[1]?.trim() || null;
+}
+
 function CommandCard({ item }: { item: AgentActivityItem }) {
   const running = item.state === "running";
   const failed = item.state === "error";
   const cmd = commandBody(item);
   const output = item.output?.trim();
+  const hostLabel = hostFromCommandLabel(item.label);
+  const vpsList = useVpsStore((s) => s.vpsList);
+  const addVps = useCanvasStore((s) => s.addVps);
+  const focus = useCanvasStore((s) => s.focus);
+  const nodes = useCanvasStore((s) => s.nodes);
+
+  const openOnCanvas = () => {
+    if (!hostLabel) return;
+    const vps = vpsList.find(
+      (v) => v.name === hostLabel || v.host === hostLabel || v.id === hostLabel,
+    );
+    if (!vps) return;
+    // Reuse an existing terminal for this host when possible.
+    const existing = nodes.find(
+      (n) => n.type === "terminal" && String(n.data.vpsId) === vps.id,
+    );
+    if (existing) {
+      focus(existing.id);
+    } else {
+      const id = addVps(vps);
+      focus(id);
+    }
+    // Keep agent visible; user can still see the canvas terminal.
+    useUiStore.getState().setAgentExpanded(false);
+  };
 
   return (
     <div
-      className={`overflow-hidden rounded-lg border bg-[#0d1118] ${
-        failed ? "border-red-900/50" : "border-[var(--border)]"
+      className={`overflow-hidden rounded-[var(--radius-md)] border bg-[var(--bg)] ${
+        failed
+          ? "border-[color-mix(in_srgb,var(--danger)_45%,var(--border))]"
+          : running
+            ? "border-[color-mix(in_srgb,var(--accent)_35%,var(--border))]"
+            : "border-[var(--border)]"
       }`}
     >
       <div className="flex items-center gap-2 border-b border-[var(--border)]/80 px-2.5 py-1.5">
-        <TerminalIcon size={12} className="shrink-0 text-gray-500" />
-        <span className="min-w-0 flex-1 truncate text-[11px] text-gray-400">
-          {commandTitle(item)}
+        <TerminalIcon size={12} className="shrink-0 text-[var(--text-faint)]" />
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--text-dim)]">
+          {hostLabel ? (
+            <>
+              <span className="text-[var(--text-faint)]">{hostLabel}</span>
+              <span className="mx-1 text-[var(--border-strong)]">·</span>
+              {commandTitle(item)}
+            </>
+          ) : (
+            commandTitle(item)
+          )}
         </span>
-        {running && (
-          <span className="inline-block h-2 w-2 animate-spin rounded-full border border-gray-500 border-t-transparent" />
+        {hostLabel ? (
+          <button
+            type="button"
+            className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-[var(--text-faint)] transition hover:bg-[var(--surface-hover)] hover:text-[var(--accent)]"
+            data-tooltip="Open this host on the canvas"
+            onClick={openOnCanvas}
+          >
+            Canvas
+          </button>
+        ) : null}
+        {running ? (
+          <span
+            className="inline-block h-2 w-2 animate-spin rounded-full border border-[var(--text-faint)] border-t-transparent"
+            aria-label="Running"
+          />
+        ) : failed ? (
+          <span className="h-1.5 w-1.5 rounded-full bg-[var(--danger)]" title="Failed" />
+        ) : (
+          <span className="h-1.5 w-1.5 rounded-full bg-[var(--success)]" title="Done" />
         )}
       </div>
-      <div className="agent-activity-scroll max-h-[200px] overflow-y-auto px-2.5 py-2">
+      <div className="agent-activity-scroll max-h-[280px] overflow-y-auto px-2.5 py-2 font-[family-name:var(--font-mono)]">
         <div className="flex gap-1.5">
-          <span className="shrink-0 select-none font-mono text-[10px] text-emerald-500/90">$</span>
+          <span className="shrink-0 select-none font-mono text-[10px] text-[var(--success)]">
+            $
+          </span>
           <ShellCommand code={cmd} className="min-w-0 flex-1" />
         </div>
-        {output && !running && (
+        {output && !running ? (
           <div className="mt-2 border-t border-[var(--border)]/60 pt-2">
             <ConsoleOutput text={output} />
           </div>
-        )}
+        ) : null}
+        {running && !output ? (
+          <div className="mt-2 text-[10px] text-[var(--text-faint)]">Running on host…</div>
+        ) : null}
       </div>
     </div>
   );

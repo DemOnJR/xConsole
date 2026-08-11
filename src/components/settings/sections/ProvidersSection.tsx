@@ -39,7 +39,7 @@ const OLLAMA_EXTRA_DEFAULT = {
   num_ctx: 65536,
   num_predict: null as number | null,
   think: false,
-  keep_alive: "30m",
+  keep_alive: "60m",
 };
 
 const KIND_DEFAULTS: Record<ProviderKind, Partial<AiProviderInput>> = {
@@ -68,6 +68,20 @@ const PROVIDER_PRESETS: {
 }[] = [
   { id: "openai", label: "OpenAI", kind: "openai", base_url: "https://api.openai.com/v1", model: "gpt-4o" },
   { id: "anthropic", label: "Anthropic (Claude)", kind: "anthropic", base_url: "https://api.anthropic.com", model: "claude-sonnet-4-5" },
+  {
+    id: "commandcode",
+    label: "Command Code",
+    kind: "openai",
+    base_url: "https://api.commandcode.ai/provider/v1",
+    model: "anthropic/claude-sonnet-4-5",
+  },
+  {
+    id: "commandcode-anthropic",
+    label: "Command Code (Anthropic format)",
+    kind: "anthropic",
+    base_url: "https://api.commandcode.ai/provider",
+    model: "claude-sonnet-4-5",
+  },
   { id: "openrouter", label: "OpenRouter", kind: "openai", base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4o" },
   { id: "xai", label: "xAI (Grok)", kind: "openai", base_url: "https://api.x.ai/v1", model: "grok-4" },
   { id: "groq", label: "Groq", kind: "openai", base_url: "https://api.groq.com/openai/v1", model: "llama-3.3-70b-versatile" },

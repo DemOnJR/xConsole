@@ -13,7 +13,8 @@ use serde_json::json;
 use tauri::{Emitter, Manager};
 
 /// Maximum tool-execution iterations before we stop.
-const MAX_ITERS: usize = 12;
+/// Raised for multi-host infra tasks; UI/status still surfaces when the cap is hit.
+const MAX_ITERS: usize = 20;
 
 /// Run one full agent turn, streaming events to `sink`. Returns the final
 /// assistant message (with any tool calls it issued).
@@ -211,7 +212,10 @@ pub async fn run_turn(
         );
     }
 
-    let build_system = |force_minimal: bool, summary: &Option<String>| -> (String, String) {
+    // Returns (static_system, dynamic_block, snapshot_text_for_usage).
+    // Dynamic goes into the last user message of the *request* so the system
+    // prefix stays byte-stable for Ollama KV reuse / Anthropic prompt caching.
+    let build_system = |force_minimal: bool, summary: &Option<String>| -> (String, String, String) {
         let ctx = PromptContext {
             home: &tc.home,
             db: &tc.db,
@@ -256,53 +260,62 @@ pub async fn run_turn(
                      (skill_view) before complex infra work.",
                 );
             }
-            // The CLI system prompt is built from scratch, so the shared context
-            // tiers (workspace + live canvas) are appended explicitly here.
+            // CLI harnesses get one blob (their own tool loop); still keep live bits last.
+            let mut dynamic = String::new();
             if let Some(ws) = &workspace_block {
-                base.push_str("\n\n");
-                base.push_str(ws);
+                dynamic.push_str(ws);
+                dynamic.push_str("\n\n");
             }
             if let Some(cv) = &canvas_block {
+                dynamic.push_str(cv);
+            }
+            if !dynamic.is_empty() {
                 base.push_str("\n\n");
-                base.push_str(cv);
+                base.push_str(dynamic.trim());
             }
-            return (base, String::new());
+            return (base, String::new(), String::new());
         }
 
-        if ollama_mode {
-            if ollama_num_ctx.is_some_and(|n| n < 65_536) && !force_minimal {
-                emit(
-                    Some(sink),
-                    StreamEvent::Status(
-                        "Using compact prompt for local model (context under 64K). \
-                         Increase context to 64K+ in Settings → Providers for full agent memory."
-                            .into(),
-                    ),
-                );
-            }
-            let mut snap_txt = String::new();
-            let mut system = context::build_system_prompt(&ctx);
-            if !snapshot.is_empty() {
-                let ctx_budget = if force_minimal {
-                    ollama_num_ctx.unwrap_or(65_536).min(32_768)
-                } else {
-                    ollama_num_ctx.unwrap_or(65_536)
-                };
-                snap_txt = vps_snapshot::truncate_for_context(&snapshot, ctx_budget);
-                system.push_str("\n\n");
-                system.push_str(&snap_txt);
-            }
-            if !live_command.is_empty() {
-                system.push_str("\n\n");
-                system.push_str(&live_command);
-            }
-            return (system, snap_txt);
+        if ollama_mode
+            && ollama_num_ctx.is_some_and(|n| n < 65_536)
+            && !force_minimal
+        {
+            emit(
+                Some(sink),
+                StreamEvent::Status(
+                    "Using compact prompt for local model (context under 64K). \
+                     Increase context to 64K+ in Settings → Providers for full agent memory."
+                        .into(),
+                ),
+            );
         }
 
-        (context::build_system_prompt(&ctx), String::new())
+        let assembled = context::assemble_prompt(&ctx);
+        let mut dynamic = assembled.dynamic_block;
+        let mut snap_txt = String::new();
+        if !snapshot.is_empty() {
+            let ctx_budget = if force_minimal {
+                ollama_num_ctx.unwrap_or(65_536).min(32_768)
+            } else {
+                ollama_num_ctx.unwrap_or(65_536)
+            };
+            snap_txt = vps_snapshot::truncate_for_context(&snapshot, ctx_budget);
+            if !dynamic.is_empty() {
+                dynamic.push_str("\n\n");
+            }
+            dynamic.push_str(&snap_txt);
+        }
+        if !live_command.is_empty() {
+            if !dynamic.is_empty() {
+                dynamic.push_str("\n\n");
+            }
+            dynamic.push_str(&live_command);
+        }
+        (assembled.static_system, dynamic, snap_txt)
     };
 
-    let (mut system, mut snapshot_text) = build_system(false, &thread_summary);
+    let (mut system, mut dynamic_block, mut snapshot_text) =
+        build_system(false, &thread_summary);
 
     let context_limit =
         context_usage::default_context_limit(&resolved.kind, ollama_num_ctx);
@@ -374,7 +387,8 @@ pub async fn run_turn(
         );
         let rebuilt = build_system(true, &thread_summary);
         system = rebuilt.0;
-        snapshot_text = rebuilt.1;
+        dynamic_block = rebuilt.1;
+        snapshot_text = rebuilt.2;
         usage = context_usage::compute_usage(
             &PromptContext {
                 home: &tc.home,
@@ -421,10 +435,13 @@ pub async fn run_turn(
         }),
     );
 
-    // Fold in any context a UserPromptSubmit hook injected, so the model sees it this turn.
+    // Fold in any context a UserPromptSubmit hook injected — dynamic block (not system).
     if let Some(extra) = &hook_user_context {
-        system.push_str("\n\n## Additional context (from a UserPromptSubmit hook)\n");
-        system.push_str(extra);
+        if !dynamic_block.is_empty() {
+            dynamic_block.push_str("\n\n");
+        }
+        dynamic_block.push_str("## Additional context (from a UserPromptSubmit hook)\n");
+        dynamic_block.push_str(extra);
     }
 
     // ---- Capability-gap autopilot (autoresearch) -------------------------
@@ -507,13 +524,20 @@ pub async fn run_turn(
                                     "Learned a skill for \"{topic}\" ({status}) — applying it."
                                 )),
                             );
-                            system.push_str(&block);
+                            // Keep researched skills out of the static system prefix.
+                            if !dynamic_block.is_empty() {
+                                dynamic_block.push_str("\n\n");
+                            }
+                            dynamic_block.push_str(&block);
                             // Record this turn's outcome against the skill at end-of-turn.
                             autopilot_skill = Some(res.name.clone());
                         }
                         None => {
-                            system.push_str(
-                                "\n\n# Note: the researched approach for this task is quarantined \
+                            if !dynamic_block.is_empty() {
+                                dynamic_block.push_str("\n\n");
+                            }
+                            dynamic_block.push_str(
+                                "# Note: the researched approach for this task is quarantined \
                                  (it failed before). Don't rely on it; tell the user you're not \
                                  certain of the exact steps.",
                             );
@@ -521,8 +545,11 @@ pub async fn run_turn(
                     }
                 }
                 LearnStatus::NoSources | LearnStatus::Refused => {
-                    system.push_str(
-                        "\n\n# Note: a web search for this task didn't yield a reliable procedure. \
+                    if !dynamic_block.is_empty() {
+                        dynamic_block.push_str("\n\n");
+                    }
+                    dynamic_block.push_str(
+                        "# Note: a web search for this task didn't yield a reliable procedure. \
                          Tell the user honestly that you're not certain of the exact steps rather \
                          than guessing commands.",
                     );
@@ -544,7 +571,11 @@ pub async fn run_turn(
         iters_used = iter + 1;
         let mut req = ChatRequest::new(&resolved.model);
         req.system = system.clone();
-        req.messages = messages.clone();
+        // Request-only copy: inject runtime context into last user message so the
+        // system prefix stays cache-stable across multi-turn / multi-iter calls.
+        let mut req_messages = messages.clone();
+        context::inject_dynamic_into_last_user(&mut req_messages, &dynamic_block);
+        req.messages = req_messages;
         req.tools = tool_defs_for_turn.clone();
         req.xconsole = xconsole_exec.clone();
         // Let the provider's stream loop abort the moment the user presses Stop.

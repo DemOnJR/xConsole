@@ -983,6 +983,7 @@ impl Provider for CliProvider {
             StreamEvent::Stats(crate::ai::provider::StreamStats {
                 completion_tokens,
                 prompt_tokens: Some(prompt_tokens),
+                cached_tokens: None,
                 duration_ms: ms,
                 tokens_per_sec: (completion_tokens as f64 / secs) as f32,
             }),

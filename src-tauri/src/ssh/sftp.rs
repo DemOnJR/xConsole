@@ -277,6 +277,69 @@ impl SftpManager {
         write_atomic(&sftp, &path, &bytes).await
     }
 
+    /// Create a remote directory (single level — parent must exist).
+    pub async fn mkdir(&self, session_id: &str, path: &str) -> Result<(), String> {
+        let path = normalize_path(path);
+        let sftp = self.sftp_for(session_id)?;
+        let sftp = sftp.lock().await;
+        sftp.create_dir(&path)
+            .await
+            .map_err(|e| format!("mkdir failed: {e}"))
+    }
+
+    /// Rename / move a remote path.
+    pub async fn rename(&self, session_id: &str, from: &str, to: &str) -> Result<(), String> {
+        let from = normalize_path(from);
+        let to = normalize_path(to);
+        let sftp = self.sftp_for(session_id)?;
+        let sftp = sftp.lock().await;
+        sftp.rename(&from, &to)
+            .await
+            .map_err(|e| format!("rename failed: {e}"))
+    }
+
+    /// Remove a remote file or empty directory.
+    pub async fn remove(&self, session_id: &str, path: &str, is_dir: bool) -> Result<(), String> {
+        let path = normalize_path(path);
+        if path == "/" {
+            return Err("refusing to remove /".into());
+        }
+        let sftp = self.sftp_for(session_id)?;
+        let sftp = sftp.lock().await;
+        if is_dir {
+            sftp.remove_dir(&path)
+                .await
+                .map_err(|e| format!("rmdir failed: {e}"))
+        } else {
+            sftp.remove_file(&path)
+                .await
+                .map_err(|e| format!("remove failed: {e}"))
+        }
+    }
+
+    /// Create a symbolic link at `link_path` pointing to `target`.
+    pub async fn symlink(
+        &self,
+        session_id: &str,
+        link_path: &str,
+        target: &str,
+    ) -> Result<(), String> {
+        let link_path = normalize_path(link_path);
+        let sftp = self.sftp_for(session_id)?;
+        let sftp = sftp.lock().await;
+        sftp.symlink(&link_path, target)
+            .await
+            .map_err(|e| format!("symlink failed: {e}"))
+    }
+
+    fn sftp_for(&self, session_id: &str) -> Result<Arc<Mutex<SftpSession>>, String> {
+        let entry = self
+            .map
+            .get(session_id)
+            .ok_or_else(|| "SFTP session not found".to_string())?;
+        Ok(entry.sftp.clone())
+    }
+
     pub fn disconnect(&self, session_id: &str) -> Result<(), String> {
         // Dropping the entry drops the last `Arc<Handle>` this manager holds; russh
         // tears the session down once every clone is gone (a transfer still running on

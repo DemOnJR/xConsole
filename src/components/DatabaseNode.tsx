@@ -253,6 +253,15 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
   const [sql, setSql] = useState("SELECT * FROM ");
   const [sqlResult, setSqlResult] = useState<DbResultSet | null>(null);
   const [busy, setBusy] = useState(false);
+  const [sqlHistory, setSqlHistory] = useState<string[]>(() => {
+    try {
+      return JSON.parse(
+        localStorage.getItem(`xconsole-sql-history:${data.vpsId}`) || "[]",
+      ) as string[];
+    } catch {
+      return [];
+    }
+  });
 
   // Every session opened by this node, so unmount can close all of them. A ref because
   // the cleanup must see the latest set without re-running on every change.
@@ -439,9 +448,77 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     setError(null);
     try {
       setSqlResult(await api.dbRunSql(sel.sessionId, sql));
+      // Persist recent queries (phpMyAdmin-style history) per server.
+      try {
+        const key = `xconsole-sql-history:${data.vpsId}`;
+        const next = [sql.trim(), ...sqlHistory.filter((q) => q !== sql.trim())].slice(
+          0,
+          40,
+        );
+        localStorage.setItem(key, JSON.stringify(next));
+        setSqlHistory(next);
+      } catch {
+        /* ignore quota */
+      }
     } catch (e) {
       setError(String(e));
       setSqlResult(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Export current grid (data tab or SQL result) as CSV via the browser download path. */
+  const exportCsv = (set: DbResultSet | null, filename: string) => {
+    if (!set || set.columns.length === 0) return;
+    const esc = (v: string | null) => {
+      const s = v ?? "";
+      if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+      return s;
+    };
+    const lines = [
+      set.columns.map(esc).join(","),
+      ...set.rows.map((row) => row.map(esc).join(",")),
+    ];
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename.endsWith(".csv") ? filename : `${filename}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  /** Insert a row by prompting for each column (phpMyAdmin-style quick insert). */
+  const insertRow = async () => {
+    if (!sel || columns.length === 0) return;
+    const values: string[] = [];
+    for (const col of columns) {
+      const v = await dialog.prompt({
+        title: `Insert · ${col.name}`,
+        label: `${col.name} (${col.data_type})${col.nullable ? " — empty = NULL" : ""}`,
+        defaultValue: col.default ?? "",
+        confirmText: col === columns[columns.length - 1] ? "Insert" : "Next",
+      });
+      if (v === null) return; // cancelled
+      values.push(v);
+    }
+    const vals = values
+      .map((v, i) => {
+        if (v === "" && columns[i].nullable) return "NULL";
+        return `'${v.replace(/'/g, "''")}'`;
+      })
+      .join(", ");
+    const engineSql = `INSERT INTO ${sel.schema}.${sel.table} (${columns
+      .map((c) => c.name)
+      .join(", ")}) VALUES (${vals})`;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.dbRunSql(sel.sessionId, engineSql);
+      await showTable(sel, page);
+    } catch (e) {
+      setError(String(e));
     } finally {
       setBusy(false);
     }
@@ -559,6 +636,26 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
               {tab === "data" && sel ? (
                 <div className="ml-auto flex items-center gap-1 text-[10px] text-gray-500">
                   <button
+                    type="button"
+                    disabled={!rows || columns.length === 0 || busy}
+                    onClick={() => void insertRow()}
+                    className="rounded px-1.5 py-0.5 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:opacity-30"
+                    data-tooltip="Insert a new row"
+                  >
+                    Insert
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!rows}
+                    onClick={() =>
+                      exportCsv(rows, `${sel.schema}_${sel.table}_p${page + 1}.csv`)
+                    }
+                    className="rounded px-1.5 py-0.5 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:opacity-30"
+                    data-tooltip="Export this page as CSV"
+                  >
+                    CSV
+                  </button>
+                  <button
                     disabled={page === 0}
                     onClick={() => void showTable(sel, page - 1)}
                     className="rounded px-1 hover:bg-[var(--border)] disabled:opacity-30"
@@ -576,6 +673,16 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                     ›
                   </button>
                 </div>
+              ) : null}
+              {tab === "sql" && sqlResult ? (
+                <button
+                  type="button"
+                  onClick={() => exportCsv(sqlResult, "query_result.csv")}
+                  className="ml-auto rounded px-1.5 py-0.5 text-[10px] text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
+                  data-tooltip="Export query result as CSV"
+                >
+                  CSV
+                </button>
               ) : null}
             </div>
 
@@ -632,6 +739,26 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                     >
                       {busy ? "Running…" : "Run"}
                     </button>
+                    {sqlHistory.length > 0 ? (
+                      <select
+                        className="max-w-[200px] rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-[var(--text-dim)]"
+                        defaultValue=""
+                        onChange={(e) => {
+                          if (e.target.value) setSql(e.target.value);
+                          e.target.value = "";
+                        }}
+                        data-tooltip="Query history"
+                      >
+                        <option value="" disabled>
+                          History…
+                        </option>
+                        {sqlHistory.map((q, i) => (
+                          <option key={i} value={q}>
+                            {q.length > 80 ? `${q.slice(0, 80)}…` : q}
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
                     <span className="truncate text-[10px] text-gray-600">
                       {sel ? `against ${sel.schema} on ${sel.endpointId}` : "open a table first"}
                     </span>

@@ -334,6 +334,27 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       : "external editor"
     : null;
 
+  // Favorite paths for this host (WinSCP-style bookmarks).
+  const bookmarkKey = `xconsole-sftp-bookmarks:${data.vpsId}`;
+  const [bookmarks, setBookmarks] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(bookmarkKey) || "[]") as string[];
+    } catch {
+      return [];
+    }
+  });
+  const toggleBookmark = () => {
+    const next = bookmarks.includes(path)
+      ? bookmarks.filter((b) => b !== path)
+      : [path, ...bookmarks].slice(0, 30);
+    setBookmarks(next);
+    try {
+      localStorage.setItem(bookmarkKey, JSON.stringify(next));
+    } catch {
+      /* ignore */
+    }
+  };
+
   // Report saves pushed back from the external editor — especially refusals, which
   // are the whole point of the guard and must not be silent.
   useEffect(() => {
@@ -532,14 +553,20 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     if (
       !(await dialog.confirm({
         title: paths.length === 1 ? "Delete" : "Delete " + paths.length + " items",
-        message: "Delete " + what + "\n\nDirectories go with everything inside them.",
+        message: "Delete " + what + "\n\nEmpty directories only via SFTP; recursive deletes use the remote shell.",
         danger: true,
         confirmText: "Delete",
       }))
     )
       return;
     try {
-      await api.vpsFileDeleteMany(data.vpsId, paths);
+      const sid = sessionRef.current;
+      if (sid && paths.length === 1 && entry) {
+        // Native SFTP remove for a single empty dir / file (faster, no shell).
+        await api.sftpRemove(sid, entry.path, entry.is_dir);
+      } else {
+        await api.vpsFileDeleteMany(data.vpsId, paths);
+      }
       clearSelection();
       refreshListing();
     } catch (err) {
@@ -753,7 +780,12 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     if (!newName?.trim() || newName.trim() === entry.name) return;
     const to = joinRemotePath(parentDirOf(entry.path), newName.trim());
     try {
-      await api.vpsFileRename(data.vpsId, entry.path, to);
+      const sid = sessionRef.current;
+      if (sid) {
+        await api.sftpRename(sid, entry.path, to);
+      } else {
+        await api.vpsFileRename(data.vpsId, entry.path, to);
+      }
       refreshListing();
     } catch (err) {
       setError(String(err));
@@ -768,7 +800,13 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     });
     if (!name?.trim()) return;
     try {
-      await api.vpsFileMkdir(data.vpsId, joinRemotePath(path, name.trim()));
+      const dest = joinRemotePath(path, name.trim());
+      const sid = sessionRef.current;
+      if (sid) {
+        await api.sftpMkdir(sid, dest);
+      } else {
+        await api.vpsFileMkdir(data.vpsId, dest);
+      }
       refreshListing();
     } catch (err) {
       setError(String(err));
@@ -801,7 +839,14 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     });
     if (next === null || !next.trim()) return;
     try {
-      await api.vpsFileSymlink(data.vpsId, entry.path, next.trim());
+      // Replace: remove old link then create new (SFTP has no atomic retarget).
+      const sid = sessionRef.current;
+      if (sid) {
+        await api.sftpRemove(sid, entry.path, false).catch(() => {});
+        await api.sftpSymlink(sid, entry.path, next.trim());
+      } else {
+        await api.vpsFileSymlink(data.vpsId, entry.path, next.trim());
+      }
       refreshListing();
     } catch (err) {
       setError(String(err));
@@ -822,11 +867,13 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     });
     if (!target?.trim()) return;
     try {
-      await api.vpsFileSymlink(
-        data.vpsId,
-        joinRemotePath(path, name.trim()),
-        target.trim(),
-      );
+      const linkPath = joinRemotePath(path, name.trim());
+      const sid = sessionRef.current;
+      if (sid) {
+        await api.sftpSymlink(sid, linkPath, target.trim());
+      } else {
+        await api.vpsFileSymlink(data.vpsId, linkPath, target.trim());
+      }
       refreshListing();
     } catch (err) {
       setError(String(err));
@@ -1094,6 +1141,40 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           >
             Refresh
           </button>
+          <button
+            type="button"
+            className={`rounded px-1.5 py-0.5 text-[10px] ${
+              bookmarks.includes(path)
+                ? "text-amber-300"
+                : "text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+            }`}
+            data-tooltip={
+              bookmarks.includes(path) ? "Remove bookmark" : "Bookmark this path"
+            }
+            onClick={toggleBookmark}
+          >
+            ★
+          </button>
+          {bookmarks.length > 0 ? (
+            <select
+              className="max-w-[140px] rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-[var(--text-dim)]"
+              defaultValue=""
+              data-tooltip="Bookmarks"
+              onChange={(e) => {
+                if (e.target.value) void openDir(e.target.value);
+                e.target.value = "";
+              }}
+            >
+              <option value="" disabled>
+                ★
+              </option>
+              {bookmarks.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+          ) : null}
           <button
             type="button"
             className={`rounded px-1.5 py-0.5 text-[10px] ${

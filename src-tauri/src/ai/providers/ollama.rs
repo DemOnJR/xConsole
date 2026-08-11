@@ -30,7 +30,9 @@ impl Default for OllamaOptions {
             num_ctx: DEFAULT_NUM_CTX,
             num_predict: None,
             think: false,
-            keep_alive: "30m".into(),
+            // Long keep_alive keeps the model + KV cache warm for multi-turn agent
+            // sessions (unloading wipes prefix cache and forces full re-prefill).
+            keep_alive: "60m".into(),
         }
     }
 }
@@ -326,6 +328,7 @@ fn stats_event(
     Some(StreamEvent::Stats(StreamStats {
         completion_tokens: count as u32,
         prompt_tokens: prompt_eval_count.map(|n| n as u32),
+        cached_tokens: None,
         duration_ms: (dur_ns / 1_000_000).max(1),
         tokens_per_sec: tps,
     }))

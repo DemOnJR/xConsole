@@ -434,15 +434,12 @@ export function WorkspacePanel() {
 
   return (
     <aside
-      className={`flex h-full shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface-2)] ${
-        collapsed ? "w-14" : "w-64"
-      }`}
+      className={`xc-drawer flex h-full flex-col ${collapsed ? "!w-14" : ""}`}
+      style={collapsed ? undefined : { width: "var(--drawer-w)" }}
     >
       <div className="flex items-center gap-1 border-b border-[var(--border)] px-2 py-2.5">
         {!collapsed && (
-          <div className="ml-1 flex-1 text-sm font-semibold tracking-wide text-gray-100">
-            Workspaces
-          </div>
+          <div className="xc-panel-title ml-1 flex-1">Workspaces</div>
         )}
         {!collapsed && (
           <button

@@ -35,11 +35,9 @@ export function ServerPanel() {
   }, [vpsList, query]);
 
   return (
-    <aside className="flex h-full w-72 shrink-0 flex-col border-l border-[var(--border)] bg-[var(--surface-2)]">
+    <aside className="xc-drawer flex h-full flex-col" data-side="right" style={{ width: "var(--drawer-w)" }}>
       <div className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-2.5">
-        <span className="text-xs font-medium uppercase tracking-wider text-gray-400">
-          Servers
-        </span>
+        <span className="xc-panel-title">Servers</span>
         <div className="ml-auto flex items-center gap-1">
           <button
             className="flex items-center gap-1 rounded-md bg-blue-600 px-2 py-0.5 text-xs text-white hover:bg-blue-500"

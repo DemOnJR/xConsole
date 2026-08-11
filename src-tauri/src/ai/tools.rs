@@ -121,6 +121,46 @@ workspace/project is active this saves to that workspace's memory; otherwise to 
             }),
         },
         ToolDef {
+            name: "host_memory_get".into(),
+            description: "Read the institutional dossier (PROFILE + MEMORY) for one VPS. \
+Prefer this over guessing OS/stack/history. Use the exact vps_id from the target list."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "vps_id": {"type": "string", "description": "Exact target UUID."}
+                },
+                "required": ["vps_id"]
+            }),
+        },
+        ToolDef {
+            name: "host_memory_update".into(),
+            description: "Update knowledge about one VPS. Use kind=profile to set/replace PROFILE.md \
+(role, OS, stack, services). Use kind=memory to append a durable fact about THIS host only. \
+Never store secrets/passwords."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "vps_id": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["profile", "memory"]},
+                    "content": {"type": "string", "description": "Full PROFILE body, or one memory bullet."}
+                },
+                "required": ["vps_id", "kind", "content"]
+            }),
+        },
+        ToolDef {
+            name: "taste_save".into(),
+            description: "Save a user working-style preference (how they like ops done) to TASTE.md. \
+Examples: prefer systemd restarts, never apt upgrade without approval, terse replies. Keep terse."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"entry": {"type": "string"}},
+                "required": ["entry"]
+            }),
+        },
+        ToolDef {
             name: "set_project_brief".into(),
             description: "Create or update the brief for the active workspace's project — what it is, \
 its layout, conventions, and what the user is working on. The brief is shown to you whenever this \
@@ -456,6 +496,9 @@ const OLLAMA_VPS_TOOLS: &[&str] = &[
     "ask_user",
     "present_plan",
     "memory_save",
+    "host_memory_get",
+    "host_memory_update",
+    "taste_save",
     "set_project_brief",
     "skills_list",
     "skill_view",
@@ -474,6 +517,7 @@ const OLLAMA_LOCAL_TOOLS: &[&str] = &[
     "ask_user",
     "present_plan",
     "memory_save",
+    "taste_save",
     "set_project_brief",
     "skills_list",
     "skill_view",
@@ -543,6 +587,22 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
     emit_skill_activity(ctx, call, sink);
 
     let args = &call.arguments;
+
+    // Short-TTL cache for read-only tools / web lookups (same args → skip re-exec).
+    if let Some(hit) = crate::ai::tool_cache::get(&call.name, args) {
+        emit(
+            Some(sink),
+            StreamEvent::Status(format!("Cache hit · {}", call.name)),
+        );
+        emit(
+            Some(sink),
+            StreamEvent::Activity(ActivityEvent::ToolEnd {
+                id: call.id.clone(),
+                ok: true,
+            }),
+        );
+        return hit;
+    }
 
     // PreToolUse hooks: a user-configured command can block this tool before it runs
     // (exit 2 / `decision:block` / `permissionDecision:deny`) or inject extra context
@@ -624,6 +684,9 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
         "canvas_close" => canvas_node_command(ctx, args, "close"),
         "canvas_refresh" => canvas_node_command(ctx, args, "reconnect"),
         "memory_save" => memory_save(ctx, args),
+        "host_memory_get" => host_memory_get(ctx, args),
+        "host_memory_update" => host_memory_update(ctx, args),
+        "taste_save" => taste_save(ctx, args),
         "skills_list" => skills_list(ctx),
         "skill_view" => skill_view(ctx, args),
         "skill_save" => skill_save(ctx, args),
@@ -699,6 +762,9 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
     };
 
     let ok = !result.starts_with("error:");
+    if ok {
+        crate::ai::tool_cache::put(&call.name, args, &result);
+    }
     emit(
         Some(sink),
         StreamEvent::Activity(ActivityEvent::ToolEnd {
@@ -1308,6 +1374,69 @@ fn memory_save(ctx: &ToolContext, args: &Value) -> String {
     }
     match memory::append_memory(&ctx.home, entry) {
         Ok(_) => "saved to memory".into(),
+        Err(e) => format!("error: {e}"),
+    }
+}
+
+fn host_memory_get(ctx: &ToolContext, args: &Value) -> String {
+    let vps_id = args.get("vps_id").and_then(|v| v.as_str()).unwrap_or("");
+    if vps_id.is_empty() {
+        return "error: missing 'vps_id'".into();
+    }
+    if !ctx.targets.is_empty() && !ctx.targets.iter().any(|t| t == vps_id) {
+        return "error: vps_id is not in the selected targets for this turn".into();
+    }
+    let profile = crate::ai::host_memory::load_profile(&ctx.home, vps_id);
+    let mem = crate::ai::host_memory::load_memory(&ctx.home, vps_id);
+    if profile.trim().is_empty() && mem.trim().is_empty() {
+        return format!("(no dossier yet for {vps_id} — update with host_memory_update)");
+    }
+    let mut out = String::new();
+    if !profile.trim().is_empty() {
+        out.push_str("# PROFILE\n");
+        out.push_str(profile.trim());
+        out.push('\n');
+    }
+    if !mem.trim().is_empty() {
+        out.push_str("\n# MEMORY\n");
+        out.push_str(mem.trim());
+    }
+    out
+}
+
+fn host_memory_update(ctx: &ToolContext, args: &Value) -> String {
+    let vps_id = args.get("vps_id").and_then(|v| v.as_str()).unwrap_or("");
+    let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    if vps_id.is_empty() {
+        return "error: missing 'vps_id'".into();
+    }
+    if content.trim().is_empty() {
+        return "error: missing 'content'".into();
+    }
+    if !ctx.targets.is_empty() && !ctx.targets.iter().any(|t| t == vps_id) {
+        return "error: vps_id is not in the selected targets for this turn".into();
+    }
+    match kind {
+        "profile" => match crate::ai::host_memory::save_profile(&ctx.home, vps_id, content) {
+            Ok(()) => "saved host PROFILE".into(),
+            Err(e) => format!("error: {e}"),
+        },
+        "memory" => match crate::ai::host_memory::append_memory(&ctx.home, vps_id, content) {
+            Ok(_) => "appended to host MEMORY".into(),
+            Err(e) => format!("error: {e}"),
+        },
+        _ => "error: kind must be 'profile' or 'memory'".into(),
+    }
+}
+
+fn taste_save(ctx: &ToolContext, args: &Value) -> String {
+    let entry = args.get("entry").and_then(|v| v.as_str()).unwrap_or("");
+    if entry.trim().is_empty() {
+        return "error: missing 'entry'".into();
+    }
+    match crate::ai::taste::append(&ctx.home, entry) {
+        Ok(_) => "saved to TASTE.md".into(),
         Err(e) => format!("error: {e}"),
     }
 }

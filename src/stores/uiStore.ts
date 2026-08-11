@@ -50,7 +50,7 @@ const PERSIST_DEFAULTS: PersistedUi = {
   agentExpanded: false,
   consoleExpanded: true,
   consoleBroadcast: true,
-  settingsSection: "providers",
+  settingsSection: "general",
 };
 
 export const useUiStore = create<UiState>()(
