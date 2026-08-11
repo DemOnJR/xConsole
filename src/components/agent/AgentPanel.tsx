@@ -20,6 +20,7 @@ import { api } from "../../lib/tauri";
 import { useUiStore } from "../../stores/uiStore";
 
 import { useVpsStore } from "../../stores/vpsStore";
+import { useCanvasStore } from "../../stores/canvasStore";
 
 import { useSettingsStore } from "../../stores/settingsStore";
 
@@ -733,6 +734,22 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
     );
 
+  const canvasNodes = useCanvasStore((s) => s.nodes);
+  const canvasVpsIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const n of canvasNodes) {
+      const v = String(n.data.vpsId ?? "");
+      if (v) ids.add(v);
+    }
+    return [...ids];
+  }, [canvasNodes]);
+
+  // If no targets picked yet but the canvas has hosts open, pre-select those.
+  useEffect(() => {
+    if (targets.length > 0 || canvasVpsIds.length === 0) return;
+    setTargets(canvasVpsIds);
+  }, [canvasVpsIds.join("|")]); // eslint-disable-line react-hooks/exhaustive-deps
+
 
 
   if (!open && !expanded) return null;
@@ -920,28 +937,24 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
           <div className="mt-1.5 flex flex-wrap gap-1 pb-1">
 
-            <button
-
-              onClick={() => setTargets(vpsList.map((v) => v.id))}
-
+                        <button
+              onClick={() => setTargets(canvasVpsIds)}
               className="rounded-full border border-[var(--border)] px-2 py-0.5 text-[10px] text-gray-300 hover:bg-[var(--border)]"
-
+              data-tooltip="Select hosts that are open on the canvas"
             >
-
-              All
-
+              Canvas
             </button>
-
             <button
-
-              onClick={() => setTargets([])}
-
+              onClick={() => setTargets(vpsList.map((v) => v.id))}
               className="rounded-full border border-[var(--border)] px-2 py-0.5 text-[10px] text-gray-300 hover:bg-[var(--border)]"
-
             >
-
+              All
+            </button>
+            <button
+              onClick={() => setTargets([])}
+              className="rounded-full border border-[var(--border)] px-2 py-0.5 text-[10px] text-gray-300 hover:bg-[var(--border)]"
+            >
               None
-
             </button>
 
             {vpsList.map((v) => (
