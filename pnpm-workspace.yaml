@@ -8,7 +8,7 @@ minimumReleaseAgeExclude: [] # only add a package here with a written, reviewed 
 # Pin exact versions on `pnpm add` so dependency updates are always deliberate.
 savePrefix: ''
 
-# Force a patched transitive dependency.
+# Force patched transitive dependencies.
 #
 # postcss <=8.5.17 is GHSA-r28c-9q8g-f849 (high): its sourceMappingURL handling follows
 # a path out of the source directory, disclosing arbitrary .map files. It reaches us only
@@ -16,12 +16,17 @@ savePrefix: ''
 # no direct dependency to bump — an override is the only way to pull the fix without
 # waiting for three upstreams to release.
 #
-# Build-time only: postcss runs in our own build, never in the shipped app, so exposure
-# here is to a malicious stylesheet in the repo rather than to anything a user does.
-# Overridden anyway, because `pnpm audit` is a merge gate and silently lowering the gate
-# is worse than taking the patch.
+# nanoid <3.3.17 is GHSA-2v37-7h3g-55p8 (high): custom generators can loop forever when
+# size is 0. Reaches us as postcss → nanoid under vite; same story as postcss — no direct
+# dep to bump until postcss pins a fixed nanoid.
+#
+# Build-time only: both run in our own build, never in the shipped app. Overridden
+# because `pnpm audit` is a merge gate and silently lowering the gate is worse than
+# taking the patch.
 overrides:
   postcss: '>=8.5.18'
+  # Stay on the 3.x line postcss already depends on; `>=3.3.17` alone would float to 6.x.
+  nanoid: '>=3.3.17 <4'
 
 # Allow-list of dependencies permitted to run install/build scripts (pnpm blocks
 # all by default as a supply-chain measure). Only well-known build tooling here.
