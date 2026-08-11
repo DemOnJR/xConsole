@@ -720,15 +720,37 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     removeNode(id);
   };
 
+  const [recentPaths, setRecentPaths] = useState<string[]>(() => {
+    try {
+      return JSON.parse(
+        localStorage.getItem(`xconsole-sftp-recent:${data.vpsId}`) || "[]",
+      ) as string[];
+    } catch {
+      return [];
+    }
+  });
+
   /** Navigate somewhere new, recording it so the mouse's back button can undo it. */
   const navigateTo = useCallback(
     (next: string) => {
       history.visit(next);
       void openDir(next);
+      setRecentPaths((prev) => {
+        const nextList = [next, ...prev.filter((p) => p !== next)].slice(0, 12);
+        try {
+          localStorage.setItem(
+            `xconsole-sftp-recent:${data.vpsId}`,
+            JSON.stringify(nextList),
+          );
+        } catch {
+          /* ignore */
+        }
+        return nextList;
+      });
     },
     // `history` is stable enough (its callbacks are memoised) that including it here
     // doesn't churn; openDir changes only with the session.
-    [history, openDir],
+    [history, openDir, data.vpsId],
   );
 
   // ---------------------------------------------------------------------------
@@ -1644,6 +1666,26 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                 ★
               </option>
               {bookmarks.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+          ) : null}
+          {recentPaths.length > 0 ? (
+            <select
+              className="max-w-[140px] rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-[var(--text-dim)]"
+              defaultValue=""
+              data-tooltip="Recent paths"
+              onChange={(e) => {
+                if (e.target.value) navigateTo(e.target.value);
+                e.target.value = "";
+              }}
+            >
+              <option value="" disabled>
+                ⏱
+              </option>
+              {recentPaths.map((b) => (
                 <option key={b} value={b}>
                   {b}
                 </option>
