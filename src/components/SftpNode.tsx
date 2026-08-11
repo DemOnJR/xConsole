@@ -1786,37 +1786,66 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           </div>
         )}
 
-        {selection.size > 1 && (
+        {(selection.size > 0 || (dualPane && localSelection.size > 0)) && (
           <div className="flex items-center gap-2 border-b border-cyan-900/40 bg-cyan-950/30 px-2 py-1 text-[10px] text-cyan-200">
-            <span className="shrink-0">{selection.size} selected</span>
-            <button
-              type="button"
-              className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
-              onClick={() => void bulkDownload(null)}
-            >
-              Download
-            </button>
-            <button
-              type="button"
-              className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
-              onClick={() => putOnClipboard(null, "copy")}
-            >
-              Copy
-            </button>
-            <button
-              type="button"
-              className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
-              onClick={() => putOnClipboard(null, "cut")}
-            >
-              Cut
-            </button>
-            <button
-              type="button"
-              className="rounded px-1.5 py-0.5 text-red-300 hover:bg-red-900/40"
-              onClick={() => void bulkDelete(null)}
-            >
-              Delete
-            </button>
+            <span className="shrink-0">
+              {selection.size > 0 ? `${selection.size} remote` : ""}
+              {selection.size > 0 && localSelection.size > 0 ? " · " : ""}
+              {localSelection.size > 0 ? `${localSelection.size} local` : ""}
+              {" selected"}
+            </span>
+            {selection.size > 0 ? (
+              <>
+                <button
+                  type="button"
+                  className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
+                  onClick={() => void bulkDownload(null)}
+                >
+                  Download
+                </button>
+                {dualPane ? (
+                  <button
+                    type="button"
+                    className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
+                    onClick={() => void downloadRemoteToLocal()}
+                    data-tooltip="F5 — download into local pane"
+                  >
+                    ↓ Local (F5)
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
+                  onClick={() => putOnClipboard(null, "copy")}
+                >
+                  Copy
+                </button>
+                <button
+                  type="button"
+                  className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
+                  onClick={() => putOnClipboard(null, "cut")}
+                >
+                  Cut
+                </button>
+                <button
+                  type="button"
+                  className="rounded px-1.5 py-0.5 text-red-300 hover:bg-red-900/40"
+                  onClick={() => void bulkDelete(null)}
+                >
+                  Delete
+                </button>
+              </>
+            ) : null}
+            {dualPane && localSelection.size > 0 ? (
+              <button
+                type="button"
+                className="rounded px-1.5 py-0.5 hover:bg-cyan-900/40"
+                onClick={() => void uploadLocalSelection()}
+                data-tooltip="F6 — upload into remote pane"
+              >
+                ↑ Remote (F6)
+              </button>
+            ) : null}
             {canPaste && (
               <button
                 type="button"
@@ -1829,7 +1858,10 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
             <button
               type="button"
               className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-gray-400 hover:bg-[var(--border)]"
-              onClick={clearSelection}
+              onClick={() => {
+                clearSelection();
+                setLocalSelection(new Set());
+              }}
             >
               Clear
             </button>

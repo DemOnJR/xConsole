@@ -1170,6 +1170,34 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                     </button>
                     <button
                       type="button"
+                      disabled={busy || !sql.trim() || !sel?.sessionId}
+                      onClick={() => {
+                        void (async () => {
+                          if (!sel?.sessionId || !sql.trim()) return;
+                          setBusy(true);
+                          setError(null);
+                          try {
+                            // MySQL/MariaDB/Postgres-style EXPLAIN; Redis will error clearly.
+                            const q = sql.trim().replace(/;+\s*$/, "");
+                            const result = await api.dbRunSql(
+                              sel.sessionId,
+                              `EXPLAIN ${q}`,
+                            );
+                            setSqlResult(result);
+                          } catch (e) {
+                            setError(String(e));
+                          } finally {
+                            setBusy(false);
+                          }
+                        })();
+                      }}
+                      className="rounded border border-[var(--border)] px-2 py-0.5 text-[11px] text-gray-300 hover:bg-[var(--border)] disabled:opacity-40"
+                      data-tooltip="Run EXPLAIN on the current statement"
+                    >
+                      Explain
+                    </button>
+                    <button
+                      type="button"
                       onClick={toggleFavorite}
                       disabled={!sql.trim()}
                       className={`rounded px-1.5 py-0.5 text-[11px] disabled:opacity-30 ${
