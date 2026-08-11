@@ -180,6 +180,24 @@ function Grid({
           <button
             type="button"
             className="rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--border)]"
+            data-tooltip="Copy selected rows as Markdown table"
+            onClick={() => {
+              const idxs = [...selected].sort((a, b) => a - b);
+              const cell = (v: string | null) =>
+                String(v ?? "NULL").replace(/\|/g, "\\|").replace(/\n/g, " ");
+              const header = `| ${set.columns.map(cell).join(" | ")} |`;
+              const sep = `| ${set.columns.map(() => "---").join(" | ")} |`;
+              const body = idxs.map(
+                (i) => `| ${set.rows[i].map(cell).join(" | ")} |`,
+              );
+              void navigator.clipboard.writeText([header, sep, ...body].join("\n"));
+            }}
+          >
+            Copy MD
+          </button>
+          <button
+            type="button"
+            className="rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--border)]"
             data-tooltip="Copy selected as INSERT statements"
             onClick={() => {
               const idxs = [...selected].sort((a, b) => a - b);
