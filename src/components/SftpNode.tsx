@@ -1087,6 +1087,12 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       });
       return;
     }
+    if (e.key === "F9") {
+      e.preventDefault();
+      refresh();
+      if (dualPane && localPath) void loadLocalDir(localPath);
+      return;
+    }
     if (mod && key === "g") {
       e.preventDefault();
       void (async () => {
@@ -1950,6 +1956,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
               <span>Ctrl+F / F3 find</span>
               <span>Ctrl+G go to path</span>
               <span>Ctrl+H hide dots</span>
+              <span>F9 refresh</span>
               {dualPane ? (
                 <>
                   <span>F5 → local</span>
