@@ -37,6 +37,7 @@ import {
   api,
   onExternalEdit,
   type ArchiveFormat,
+  type LocalFsEntry,
   type SftpEntry,
 } from "../lib/tauri";
 import { looksLikeDeadSession } from "../lib/sessionHealth";
@@ -352,6 +353,55 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       localStorage.setItem(bookmarkKey, JSON.stringify(next));
     } catch {
       /* ignore */
+    }
+  };
+
+  // Dual-pane: local filesystem (left) | remote (right) — WinSCP-style.
+  const [dualPane, setDualPane] = useState(false);
+  const [localPath, setLocalPath] = useState("");
+  const [localEntries, setLocalEntries] = useState<LocalFsEntry[]>([]);
+  const [localLoading, setLocalLoading] = useState(false);
+  const [localSelection, setLocalSelection] = useState<Set<string>>(() => new Set());
+
+  const loadLocalDir = useCallback(async (dir?: string) => {
+    setLocalLoading(true);
+    try {
+      const out = await api.localFsList(dir || undefined);
+      setLocalPath(out.path);
+      setLocalEntries(out.entries);
+      setLocalSelection(new Set());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLocalLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!dualPane) return;
+    if (!localPath) {
+      void api
+        .localFsHome()
+        .then((h) => loadLocalDir(h))
+        .catch(() => void loadLocalDir());
+    }
+  }, [dualPane, localPath, loadLocalDir]);
+
+  const uploadLocalSelection = async () => {
+    const sid = sessionRef.current;
+    if (!sid || localSelection.size === 0) return;
+    const files = [...localSelection].filter((p) => {
+      const e = localEntries.find((x) => x.path === p);
+      return e && !e.is_dir;
+    });
+    if (files.length === 0) {
+      setError("Select one or more local files to upload (folders: use drag from Explorer).");
+      return;
+    }
+    try {
+      await useTransferStore.getState().upload(sid, path, files);
+    } catch (e) {
+      setError(String(e));
     }
   };
 
@@ -1144,6 +1194,20 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
           <button
             type="button"
             className={`rounded px-1.5 py-0.5 text-[10px] ${
+              dualPane
+                ? "bg-cyan-900/40 text-cyan-200"
+                : "text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+            }`}
+            data-tooltip={
+              dualPane ? "Hide local pane" : "Dual pane: local PC | remote (WinSCP-style)"
+            }
+            onClick={() => setDualPane((v) => !v)}
+          >
+            ⧉ Dual
+          </button>
+          <button
+            type="button"
+            className={`rounded px-1.5 py-0.5 text-[10px] ${
               bookmarks.includes(path)
                 ? "text-amber-300"
                 : "text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
@@ -1400,7 +1464,97 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
 
         {status !== "connecting" && (
           <div className="flex min-h-0 flex-1">
-            {showTree && (
+            {dualPane && (
+              <div className="flex min-h-0 w-[42%] min-w-[160px] max-w-[50%] shrink-0 flex-col border-r border-[var(--border)]">
+                <div className="flex items-center gap-1 border-b border-[var(--border)]/80 px-1.5 py-1">
+                  <button
+                    type="button"
+                    className="rounded px-1 text-[10px] text-gray-400 hover:bg-[var(--border)] disabled:opacity-30"
+                    disabled={!localPath || localLoading}
+                    onClick={() => {
+                      const parent = localPath.replace(/[\\/][^\\/]+$/, "") || localPath;
+                      void loadLocalDir(parent);
+                    }}
+                    data-tooltip="Up"
+                  >
+                    ‹
+                  </button>
+                  <span
+                    className="min-w-0 flex-1 truncate font-mono text-[10px] text-gray-400"
+                    title={localPath}
+                  >
+                    {localPath || "Local"}
+                  </span>
+                  <button
+                    type="button"
+                    className="rounded px-1.5 py-0.5 text-[10px] text-cyan-300 hover:bg-cyan-900/30 disabled:opacity-40"
+                    disabled={localSelection.size === 0 || status !== "connected"}
+                    onClick={() => void uploadLocalSelection()}
+                    data-tooltip="Upload selected local files to the remote folder"
+                  >
+                    ↑ Upload
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto px-1 py-1">
+                  {localLoading && localEntries.length === 0 ? (
+                    <div className="px-2 py-3 text-center text-[10px] text-gray-500">
+                      Loading…
+                    </div>
+                  ) : localEntries.length === 0 ? (
+                    <div className="px-2 py-3 text-center text-[10px] text-gray-600">
+                      Empty folder
+                    </div>
+                  ) : (
+                    localEntries.map((entry) => (
+                      <div
+                        key={entry.path}
+                        className={`flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[11px] ${
+                          localSelection.has(entry.path)
+                            ? "bg-cyan-950/60 ring-1 ring-inset ring-cyan-700/50"
+                            : "hover:bg-[var(--surface)]"
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                          onClick={(e) => {
+                            setLocalSelection((prev) => {
+                              const next = new Set(prev);
+                              if (e.ctrlKey || e.metaKey) {
+                                if (next.has(entry.path)) next.delete(entry.path);
+                                else next.add(entry.path);
+                              } else {
+                                return new Set([entry.path]);
+                              }
+                              return next;
+                            });
+                          }}
+                          onDoubleClick={() => {
+                            if (entry.is_dir) void loadLocalDir(entry.path);
+                          }}
+                        >
+                          <span className="shrink-0 text-gray-500">
+                            {entry.is_dir ? "📁" : "📄"}
+                          </span>
+                          <span className="min-w-0 truncate text-gray-200">{entry.name}</span>
+                          {!entry.is_dir && (
+                            <span className="ml-auto shrink-0 tabular-nums text-[10px] text-gray-600">
+                              {entry.size < 1024
+                                ? `${entry.size} B`
+                                : entry.size < 1024 * 1024
+                                  ? `${(entry.size / 1024).toFixed(1)} KB`
+                                  : `${(entry.size / (1024 * 1024)).toFixed(1)} MB`}
+                            </span>
+                          )}
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+
+            {showTree && !dualPane && (
               <>
                 <div
                   className="shrink-0 overflow-y-auto py-1"

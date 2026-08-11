@@ -78,13 +78,14 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
         localBranch: info.local_branch,
         current: info.current,
         canSelfUpdate: info.can_self_update,
+        note: null,
         status: "idle",
-        dismissed: false,
+        dismissed: true, // don't flash an old toast while we re-check
       });
-      // Immediately see if the new channel has a different build waiting.
-      await get().check(true);
+      // Only surface the update card when the *commit* on this channel is newer.
+      await get().check(false);
     } catch (e) {
-      set({ status: "error", error: String(e) });
+      set({ status: "error", error: String(e), dismissed: false });
     }
   },
 

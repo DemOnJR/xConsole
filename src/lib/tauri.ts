@@ -154,6 +154,19 @@ export interface SftpEntry {
   link_broken: boolean;
 }
 
+/** Local filesystem listing for dual-pane SFTP (WinSCP-style). */
+export interface LocalFsEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+}
+
+export interface LocalFsList {
+  path: string;
+  entries: LocalFsEntry[];
+}
+
 // ----- Database client -----
 
 /** An engine the client can actually drive. */
@@ -623,6 +636,9 @@ export const api = {
     invoke<void>("sftp_symlink", { sessionId, linkPath, target }),
   sftpDisconnect: (sessionId: string) =>
     invoke<void>("sftp_disconnect", { sessionId }),
+  localFsList: (path?: string | null) =>
+    invoke<LocalFsList>("local_fs_list", { path: path ?? null }),
+  localFsHome: () => invoke<string>("local_fs_home"),
 
   // --- bulk transfers ---
   pickDirectory: (title: string) =>

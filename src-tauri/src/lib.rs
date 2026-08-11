@@ -350,6 +350,8 @@ pub fn run() {
             commands::sftp::sftp_disconnect,
             commands::sftp::pick_directory,
             commands::sftp::pick_files,
+            commands::sftp::local_fs_list,
+            commands::sftp::local_fs_home,
             commands::sftp::sftp_transfer_start,
             commands::sftp::sftp_archive_start,
             commands::sftp::sftp_transfer_cancel,

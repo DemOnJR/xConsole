@@ -209,3 +209,22 @@ pub async fn sftp_edit_external(
 
 /// Settings key holding the external editor command (e.g. `code`).
 pub const EXTERNAL_EDITOR_SETTING: &str = "sftp.external_editor";
+
+/// List a local directory for the dual-pane SFTP browser (WinSCP-style).
+#[tauri::command]
+pub fn local_fs_list(path: Option<String>) -> Result<crate::local::LocalFsList, String> {
+    let p = path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    crate::local::list_local_dir_entries(p)
+}
+
+/// Default starting folder for the local pane (user home).
+#[tauri::command]
+pub fn local_fs_home() -> Result<String, String> {
+    dirs::home_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .ok_or_else(|| "could not resolve home directory".into())
+}

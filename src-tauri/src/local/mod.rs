@@ -79,24 +79,66 @@ pub fn write_local_file(path: &str, content: &str) -> Result<(), String> {
 /// List a local directory as a human-readable listing (dirs first, then files
 /// with byte sizes), for the agent's `local_list_dir` tool.
 pub fn list_local_dir(path: &str) -> Result<String, String> {
-    let rd = std::fs::read_dir(path).map_err(|e| format!("list failed: {e}"))?;
-    let mut dirs: Vec<String> = Vec::new();
-    let mut files: Vec<String> = Vec::new();
-    for entry in rd.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        match entry.metadata() {
-            Ok(m) if m.is_dir() => dirs.push(format!("{name}/")),
-            Ok(m) => files.push(format!("{name}  ({} bytes)", m.len())),
-            Err(_) => files.push(name),
-        }
-    }
-    dirs.sort();
-    files.sort();
-    if dirs.is_empty() && files.is_empty() {
+    let listing = list_local_dir_entries(path)?;
+    if listing.entries.is_empty() {
         return Ok("(empty)".to_string());
     }
-    dirs.extend(files);
-    Ok(dirs.join("\n"))
+    let mut lines: Vec<String> = Vec::new();
+    for e in &listing.entries {
+        if e.is_dir {
+            lines.push(format!("{}/", e.name));
+        } else {
+            lines.push(format!("{}  ({} bytes)", e.name, e.size));
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
+/// One entry in a local directory listing (UI / dual-pane SFTP).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalFsEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalFsList {
+    pub path: String,
+    pub entries: Vec<LocalFsEntry>,
+}
+
+/// Structured local directory list for the dual-pane file manager.
+pub fn list_local_dir_entries(path: &str) -> Result<LocalFsList, String> {
+    let p = std::path::PathBuf::from(path);
+    let canonical = if p.as_os_str().is_empty() {
+        dirs::home_dir().ok_or_else(|| "could not resolve home directory".to_string())?
+    } else {
+        p.canonicalize().unwrap_or(p)
+    };
+    let rd = std::fs::read_dir(&canonical).map_err(|e| format!("list failed: {e}"))?;
+    let mut entries: Vec<LocalFsEntry> = Vec::new();
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // Skip Windows special/dot noise only when hidden is not useful for a manager
+        // (still show .git etc. — power users want them).
+        let meta = entry.metadata().ok();
+        let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let full = entry.path().to_string_lossy().into_owned();
+        entries.push(LocalFsEntry {
+            name,
+            path: full,
+            is_dir,
+            size,
+        });
+    }
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    Ok(LocalFsList {
+        path: canonical.to_string_lossy().into_owned(),
+        entries,
+    })
 }
 
 #[cfg(test)]
