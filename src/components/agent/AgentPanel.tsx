@@ -472,6 +472,7 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
     removeConversation,
     renameConversation,
+    exportConversationMarkdown,
 
     resolveApproval,
 
@@ -799,6 +800,24 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
             History
 
+          </button>
+          <button
+            className="rounded-md px-1.5 py-1 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 disabled:opacity-40"
+            data-tooltip="Export conversation as Markdown"
+            disabled={messages.length === 0}
+            onClick={() => {
+              const md = exportConversationMarkdown();
+              void navigator.clipboard.writeText(md);
+              const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = "xconsole-chat.md";
+              a.click();
+              URL.revokeObjectURL(url);
+            }}
+          >
+            Export
           </button>
 
           <button

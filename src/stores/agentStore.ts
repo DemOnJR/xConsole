@@ -188,6 +188,8 @@ interface AgentState {
   openConversation: (id: string) => Promise<void>;
   removeConversation: (id: string) => Promise<void>;
   renameConversation: (id: string, title: string) => Promise<void>;
+  /** Export the current conversation as Markdown (clipboard + optional download). */
+  exportConversationMarkdown: () => string;
   subscribeApprovals: () => Promise<UnlistenFn>;
   resolveApproval: (id: string, approved: boolean, remember?: boolean) => Promise<void>;
   answerQuestion: (id: string, answer: string) => Promise<void>;
@@ -670,6 +672,21 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     });
     const list = await api.listAgentConversations().catch(() => get().conversations);
     set({ conversations: list });
+  },
+
+  exportConversationMarkdown: () => {
+    const { messages, conversations, sessionId } = get();
+    const meta = conversations.find((c) => c.id === sessionId);
+    const title = meta?.title || "Conversation";
+    const lines: string[] = [`# ${title}`, "", `<!-- session ${sessionId} -->`, ""];
+    for (const m of messages) {
+      if (m.role === "user") {
+        lines.push("## User", "", m.content, "");
+      } else if (m.role === "assistant") {
+        lines.push("## Assistant", "", m.content, "");
+      }
+    }
+    return lines.join("\n").trim() + "\n";
   },
 
   setSpeaking: (speaking) => set({ speaking }),
