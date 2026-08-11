@@ -798,7 +798,14 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
   });
   const [showKeysHelp, setShowKeysHelp] = useState(false);
   /** Local pane width % when dual-pane is on (18–55). */
-  const [localPanePct, setLocalPanePct] = useState(42);
+  const [localPanePct, setLocalPanePct] = useState(() => {
+    try {
+      const n = Number(localStorage.getItem("xconsole-sftp-pane-pct"));
+      return n >= 18 && n <= 55 ? n : 42;
+    } catch {
+      return 42;
+    }
+  });
   const dualSplitDragging = useRef(false);
   const localBookmarkKey = `xconsole-local-bookmarks`;
   const [localBookmarks, setLocalBookmarks] = useState<string[]>(() => {
@@ -2493,10 +2500,21 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                     if (!parent) return;
                     const w = parent.getBoundingClientRect().width || 1;
                     const delta = ((ev.clientX - startX) / w) * 100;
-                    setLocalPanePct(Math.min(55, Math.max(18, startPct + delta)));
+                    const next = Math.min(55, Math.max(18, startPct + delta));
+                    setLocalPanePct(next);
+                    dualSplitDragging.current = true;
+                    (dualSplitDragging as { lastPct?: number }).lastPct = next;
                   };
                   const onUp = () => {
                     dualSplitDragging.current = false;
+                    try {
+                      const pct =
+                        (dualSplitDragging as { lastPct?: number }).lastPct ??
+                        startPct;
+                      localStorage.setItem("xconsole-sftp-pane-pct", String(pct));
+                    } catch {
+                      /* ignore */
+                    }
                     window.removeEventListener("mousemove", onMove);
                     window.removeEventListener("mouseup", onUp);
                   };
