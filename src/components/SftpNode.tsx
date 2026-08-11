@@ -379,7 +379,13 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       }
       return next;
     });
-  const [localPath, setLocalPath] = useState("");
+  const [localPath, setLocalPath] = useState(() => {
+    try {
+      return localStorage.getItem("xconsole-sftp-local-path") || "";
+    } catch {
+      return "";
+    }
+  });
   const [localEntries, setLocalEntries] = useState<LocalFsEntry[]>([]);
   const [localLoading, setLocalLoading] = useState(false);
   const [localSelection, setLocalSelection] = useState<Set<string>>(() => new Set());
@@ -459,6 +465,11 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       setLocalPath(out.path);
       setLocalEntries(out.entries);
       setLocalSelection(new Set());
+      try {
+        localStorage.setItem("xconsole-sftp-local-path", out.path);
+      } catch {
+        /* ignore */
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -473,8 +484,12 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
         .localFsHome()
         .then((h) => loadLocalDir(h))
         .catch(() => void loadLocalDir());
+    } else if (localEntries.length === 0 && !localLoading) {
+      // Restored path from last session — list it.
+      void loadLocalDir(localPath);
     }
-  }, [dualPane, localPath, loadLocalDir]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only when dual pane opens
+  }, [dualPane]);
 
   const uploadLocalSelection = async () => {
     const sid = sessionRef.current;
