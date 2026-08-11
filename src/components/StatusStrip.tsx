@@ -16,6 +16,7 @@ export function StatusStrip() {
   const sessions = useSessionStore((s) => s.sessions);
   const nodes = useCanvasStore((s) => s.nodes);
   const streaming = useAgentStore((s) => s.streaming);
+  const streamStats = useAgentStore((s) => s.streamStats);
   const pendingApprovals = useAgentStore((s) => s.pendingApprovals.length);
   const pendingQuestions = useAgentStore((s) => s.pendingQuestions.length);
   const hasPlan = useAgentStore((s) => s.pendingPlan !== null);
@@ -88,10 +89,14 @@ export function StatusStrip() {
   const activity = useAgentStore((s) => s.activity);
   const runningTools = activity.filter((a) => a.state === "running").length;
 
+  const tokRate =
+    streamStats && streamStats.tokens_per_sec > 0
+      ? ` · ${streamStats.tokens_per_sec.toFixed(1)} t/s`
+      : "";
   const agentLabel = streaming
     ? runningTools > 1
-      ? `Agent · ${runningTools} tools…`
-      : "Agent working…"
+      ? `Agent · ${runningTools} tools…${tokRate}`
+      : `Agent working…${tokRate}`
     : hasPlan
       ? "Plan awaiting approval"
       : pendingApprovals > 0
