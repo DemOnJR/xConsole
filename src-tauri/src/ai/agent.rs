@@ -620,6 +620,20 @@ pub async fn run_turn(
             .unwrap_or_default();
         // Stable per-session id for provider cache routing (OpenAI prompt_cache_key).
         req.session_id = tc.session_id.clone();
+        // Per-chat model override (set via /model): empty falls back to the
+        // provider's configured model.
+        if let Ok(Some(model)) = tc.db.get_setting("agent.active_model") {
+            if !model.trim().is_empty() {
+                req.model = model.trim().to_string();
+            }
+        }
+        // Reasoning effort (t3code-style capability control): off|low|medium|high.
+        req.reasoning = tc
+            .db
+            .get_setting("agent.reasoning_level")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         // Let the provider's stream loop abort the moment the user presses Stop.
         req.cancel = Some(tc.session_state.cancel_flag(&tc.session_id));
 

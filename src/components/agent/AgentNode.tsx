@@ -23,10 +23,6 @@ import { useCanvasStore, NODE_W, NODE_H, type AgentNode as AgentNodeType } from 
 
 import { useSettingsStore } from "../../stores/settingsStore";
 
-import {
-  StopIcon,
-} from "../icons";
-
 import { AgentMarkdown } from "./AgentMarkdown";
 import { AgentConsole } from "./AgentConsole";
 import { CLIPicker, type CLIPickerOption } from "./CLIPicker";
@@ -39,6 +35,10 @@ import {
   type SlashCommandDef,
 } from "./agentCommands";
 import { notify } from "../../lib/notify";
+import { PROVIDER_CATALOG } from "../../lib/providerCatalog";
+import { InputBar, type ReasoningLevel } from "./InputBar";
+import { useGitBranch } from "../../hooks/useGitBranch";
+import { useWorkspaceStore } from "../../stores/workspaceStore";
 
 import type { AgentApproval, AgentPlan, AgentQuestion } from "../../lib/tauri";
 
@@ -305,8 +305,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
     streaming,
 
-    speaking,
-
     error,
 
     targets,
@@ -353,6 +351,36 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   const providers = useSettingsStore((s) => s.providers);
 
   const activeProviderId = useSettingsStore((s) => s.settings["agent.active_provider"]);
+  const activeModel = useSettingsStore((s) => s.settings["agent.active_model"]);
+
+  // Reasoning effort (t3code-style capability control), persisted.
+  const [reasoning, setReasoning] = useState<ReasoningLevel>(() => {
+    const v = useSettingsStore.getState().settings["agent.reasoning_level"];
+    return v === "low" || v === "medium" || v === "high" || v === "off" ? v : "off";
+  });
+  const setReasoningPersisted = (r: ReasoningLevel) => {
+    setReasoning(r);
+    void useSettingsStore.getState().set("agent.reasoning_level", r);
+  };
+
+  // Git pill: the repo the agent is working on (active workspace project).
+  const activeWsId = useWorkspaceStore((s) => s.activeId);
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  const project = useMemo(() => {
+    const ws = workspaces.find((w) => w.id === activeWsId);
+    if (!ws?.project_json) return null;
+    try {
+      return JSON.parse(ws.project_json) as { kind: "local" | "vps"; path: string; vps_id?: string };
+    } catch {
+      return null;
+    }
+  }, [workspaces, activeWsId]);
+  const gitInfo = useGitBranch({
+    enabled: !!project?.path,
+    path: project?.path,
+    vpsId: project?.kind === "vps" ? project.vps_id : null,
+  });
+  const gitLabel = gitInfo ? `${gitInfo.branch}${gitInfo.dirty ? "*" : ""}` : null;
 
 
 
@@ -395,6 +423,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
       }
       e.preventDefault();
       if (useAgentStore.getState().streaming) {
+        setLoopTask(null);
         void useAgentStore.getState().stop();
         return;
       }
@@ -500,9 +529,42 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     };
   }, []);
 
-  // In-console picker (CLI style): /model, /targets, /history, /ctx, /cost, /help.
-  type PickerKind = "model" | "targets" | "history" | "ctx" | "cost" | "help";
+  // In-console picker (CLI style): /model (two-level), /targets, /history, /ctx, /cost, /help.
+  type PickerKind =
+    | "model"
+    | "model-models"
+    | "targets"
+    | "history"
+    | "ctx"
+    | "cost"
+    | "help";
   const [picker, setPicker] = useState<{ kind: PickerKind } | null>(null);
+  /** Provider id chosen in the first /model level — second level lists its models. */
+  const [pendingProviderId, setPendingProviderId] = useState<string | null>(null);
+
+  // /loop state: re-send the same task until the agent finishes or the user stops.
+  const [loopTask, setLoopTask] = useState<string | null>(null);
+  const [loopCount, setLoopCount] = useState(0);
+  const loopMax = 10;
+  const startLoop = (task: string) => {
+    setLoopTask(task);
+    setLoopCount(1);
+    void send(task);
+  };
+  // When a loop turn completes (streaming stops), re-send unless stopped or capped.
+  useEffect(() => {
+    if (!loopTask || streaming) return;
+    if (loopCount >= loopMax) {
+      setLoopTask(null);
+      return;
+    }
+    const t = setTimeout(() => {
+      setLoopCount((c) => c + 1);
+      void send(loopTask);
+    }, 600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streaming, loopTask]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -583,14 +645,43 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     [],
   );
 
+  /** Options for the /model picker's SECOND level: models of the chosen provider. */
+  const providerModelOptions = useMemo<CLIPickerOption[]>(() => {
+    const p = providers.find((x) => x.id === pendingProviderId);
+    if (!p) return [];
+    const catalog = PROVIDER_CATALOG.find((c) => c.id === p.kind || c.name.toLowerCase() === p.name.toLowerCase());
+    const ids = new Set<string>();
+    const opts: CLIPickerOption[] = [];
+    if (p.model) {
+      ids.add(p.model);
+      opts.push({ id: p.model, label: p.model, detail: "configured", selected: p.model === activeModel });
+    }
+    for (const m of catalog?.models ?? []) {
+      if (ids.has(m)) continue;
+      ids.add(m);
+      opts.push({ id: m, label: m, detail: "catalog" });
+    }
+    return opts;
+  }, [providers, pendingProviderId, activeModel]);
+
   /** Handle a picker selection. */
   const onPickerPick = (opt: CLIPickerOption) => {
     if (!picker) return;
     switch (picker.kind) {
-      case "model":
-        void useSettingsStore.getState().set("agent.active_provider", opt.id);
+      case "model": {
+        // First level: provider chosen → second level lists its models.
+        setPendingProviderId(opt.id);
+        setPicker({ kind: "model-models" });
+        break;
+      }
+      case "model-models": {
+        // Second level: model chosen → set provider + model.
+        void useSettingsStore.getState().set("agent.active_provider", pendingProviderId ?? "");
+        void useSettingsStore.getState().set("agent.active_model", opt.id);
+        setPendingProviderId(null);
         setPicker(null);
         break;
+      }
       case "targets": {
         const ids = opt.id === "__done__" ? undefined : opt.id;
         if (ids !== undefined) {
@@ -657,6 +748,23 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   const submit = () => {
     const trimmed = input.trim();
     if (!trimmed) return;
+    // /loop <task> — loop until the agent finishes (Esc to stop).
+    const loopMatch = trimmed.match(/^\/loop(?:\s+(.+))?$/i);
+    if (loopMatch) {
+      const task = loopMatch[1]?.trim();
+      if (!task) {
+        // Bare /loop: re-loop the last user message.
+        const lastUser = messages.filter((m) => m.role === "user").pop()?.content;
+        if (!lastUser) return;
+        startLoop(lastUser);
+      } else {
+        startLoop(task);
+      }
+      setInput("");
+      history.reset("");
+      recallIdx.current = null;
+      return;
+    }
     const exact = parseExactSlashCommand(trimmed);
     if (exact) {
       void executeSlashAction(exact);
@@ -715,9 +823,14 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
           className="truncate text-gray-300 hover:text-cyan-300"
         >
           {activeProvider?.name ?? "no provider"}
-          {activeProvider?.model ? ` · ${activeProvider.model}` : ""}
+          {activeModel || activeProvider?.model ? ` · ${activeModel || activeProvider?.model}` : ""}
         </button>
         {planMode && <span className="rounded bg-indigo-500/20 px-1 text-[9px] text-indigo-300">plan</span>}
+        {loopTask && (
+          <span className="rounded bg-cyan-500/20 px-1 text-[9px] text-cyan-300">
+            ⟳ loop {loopCount}/{loopMax}
+          </span>
+        )}
         {ttsEnabled && <span className="text-[9px] text-[var(--text-faint)]">🔊</span>}
         <span className="ml-auto flex items-center gap-2 text-[var(--text-faint)]">
           {contextUsage ? <span>{contextUsage.percent}% ctx</span> : null}
@@ -797,11 +910,23 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
         <div className="border-t border-[var(--border)] px-3 pb-2 pt-2">
           {picker.kind === "model" && (
             <CLIPicker
-              title="Model"
+              title="Model — provider"
               options={modelOptions}
               onPick={onPickerPick}
               onCancel={() => setPicker(null)}
               placeholder="Filter providers…"
+            />
+          )}
+          {picker.kind === "model-models" && (
+            <CLIPicker
+              title="Model — choose model"
+              options={providerModelOptions}
+              onPick={onPickerPick}
+              onCancel={() => {
+                setPendingProviderId(null);
+                setPicker(null);
+              }}
+              placeholder="Filter models…"
             />
           )}
           {picker.kind === "targets" && (
@@ -927,7 +1052,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
           )}
 
           <div className="flex items-center gap-2 px-2.5 py-1.5 font-mono">
-            <span className="shrink-0 text-[13px] text-[var(--text-dim)]">agent@xconsole:~$</span>
+            <span className="shrink-0 text-[13px] text-[var(--text-faint)]">›</span>
             <input
               ref={inputRef}
               type="text"
@@ -1057,34 +1182,47 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
             />
           </div>
 
-          {/* Minimal status row: voice status + stop while streaming. */}
-          <div className="flex items-center gap-2 border-t border-[var(--border)]/60 px-2 pb-1.5 pt-1">
-            {voiceStatus && (
-              <span className="truncate text-[10px] text-[var(--text-dim)]" data-tooltip={voiceStatus}>
-                {voiceStatus}
-              </span>
-            )}
-            {voiceError && !voiceStatus && (
-              <span className="truncate text-[10px] text-red-400" data-tooltip={voiceError}>
-                {voiceError}
-              </span>
-            )}
-            {conversation && (
-              <span className="truncate text-[10px] text-emerald-400" data-tooltip="Conversation mode active">
-                listening…
-              </span>
-            )}
-            {(streaming || speaking) && (
-              <button
-                onClick={() => void stop()}
-                data-tooltip={speaking && !streaming ? "Stop speaking" : "Stop the agent"}
-                aria-label="Stop"
-                className="relative z-10 ml-auto flex items-center gap-1 rounded-md bg-red-600/90 px-2 py-0.5 text-[11px] font-medium text-white transition hover:bg-red-600"
-              >
-                <StopIcon size={12} /> {speaking && !streaming ? "Hush" : activity.filter((a) => a.state === "running").length > 1 ? `Stop (${activity.filter((a) => a.state === "running").length})` : "Stop"}
-              </button>
-            )}
-          </div>
+          {/* Voice status line (only when relevant). */}
+          {(voiceStatus || voiceError || conversation) && (
+            <div className="flex items-center gap-2 border-t border-[var(--border)]/60 px-2 pb-1 pt-1">
+              {voiceStatus && (
+                <span className="truncate text-[10px] text-[var(--text-dim)]" data-tooltip={voiceStatus}>
+                  {voiceStatus}
+                </span>
+              )}
+              {voiceError && !voiceStatus && (
+                <span className="truncate text-[10px] text-red-400" data-tooltip={voiceError}>
+                  {voiceError}
+                </span>
+              )}
+              {conversation && (
+                <span className="truncate text-[10px] text-emerald-400" data-tooltip="Conversation mode active">
+                  listening…
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* t3code-style input bar: provider·model · reasoning · plan · ctx · cost · git · send/stop */}
+          <InputBar
+            activeProvider={activeProvider}
+            activeModel={activeModel || undefined}
+            reasoning={reasoning}
+            onReasoning={setReasoningPersisted}
+            planMode={planMode}
+            onTogglePlan={togglePlanMode}
+            contextUsage={contextUsage}
+            streamStats={streamStats}
+            costUsd={conversationCostUsd}
+            gitLabel={gitLabel}
+            streaming={streaming}
+            onSend={submit}
+            onStop={() => {
+              setLoopTask(null);
+              void stop();
+            }}
+            onPickModel={() => setPicker({ kind: "model" })}
+          />
 
         </div>
 

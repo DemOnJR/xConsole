@@ -152,6 +152,10 @@ impl Provider for OpenAiProvider {
                 "stream_options": { "include_usage": true },
                 "messages": Self::build_messages(req),
             });
+            // Reasoning effort → OpenAI reasoning_effort (low/medium/high), off/empty = default.
+            if !req.reasoning.is_empty() && req.reasoning != "off" {
+                body["reasoning_effort"] = json!(req.reasoning);
+            }
             // Stable cache key routes every request of a session to the same cache
             // node, so the growing prefix keeps hitting (required for GPT-5.6+).
             if !req.session_id.is_empty() {

@@ -134,6 +134,21 @@ impl Provider for AnthropicProvider {
             "stream": true,
             "messages": Self::build_messages(&req.messages, true),
         });
+        // Reasoning effort → Anthropic extended thinking budget (only when enabled).
+        // off/empty leaves the provider default; low/medium/high map to token budgets.
+        if !req.reasoning.is_empty() && req.reasoning != "off" {
+            let budget = match req.reasoning.as_str() {
+                "low" => 2048,
+                "high" => 16384,
+                _ => 8192, // medium / anything else
+            };
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": budget,
+            });
+            // Thinking requires temperature 1 (Anthropic constraint).
+            body["temperature"] = json!(1.0);
+        }
         // Prompt caching: mark the static system prefix as ephemeral so multi-turn
         // agent loops reuse Anthropic's server-side cache (up to ~90% latency cut).
         if !req.system.is_empty() {

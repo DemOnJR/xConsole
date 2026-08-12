@@ -86,6 +86,8 @@ pub struct ChatRequest {
     pub cache_retention: String,
     /// Stable session id for provider cache routing (OpenAI prompt_cache_key).
     pub session_id: String,
+    /// Reasoning effort: "off" | "low" | "medium" | "high". Empty = provider default.
+    pub reasoning: String,
 }
 
 impl ChatRequest {
@@ -101,6 +103,7 @@ impl ChatRequest {
             cancel: None,
             cache_retention: String::new(),
             session_id: String::new(),
+            reasoning: String::new(),
         }
     }
 

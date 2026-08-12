@@ -117,8 +117,15 @@ export function CLIPicker({
                 const i = filtered.findIndex((x) => x.id === o.id);
                 if (i >= 0) setIndex(i);
               }}
+              // stopPropagation so React Flow's d3-drag (on the node wrapper) never
+              // sees the mousedown and swallows the mouseup — which made clicking an
+              // option unreliable. Selection happens on click.
               onMouseDown={(e) => {
                 e.preventDefault();
+                e.stopPropagation();
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
                 if (multi) {
                   const next = new Set(selected);
                   if (next.has(o.id)) next.delete(o.id);
@@ -153,6 +160,10 @@ export function CLIPicker({
             type="button"
             onMouseDown={(e) => {
               e.preventDefault();
+              e.stopPropagation();
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
               onPick({ id: "__done__", label: "Done", selected: selected.size > 0 });
             }}
             className="w-full rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-1 text-center text-[10px] text-[var(--text-dim)] hover:text-[var(--text)]"

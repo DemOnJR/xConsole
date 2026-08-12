@@ -15,7 +15,8 @@ export interface SlashCommandDef {
     | "ctx"
     | "cost"
     | "voice"
-    | "conversation";
+    | "conversation"
+    | "loop";
 }
 
 export const SLASH_COMMANDS: SlashCommandDef[] = [
@@ -90,6 +91,12 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     syntax: "/conversation",
     description: "Hands-free conversation mode (listen continuously)",
     actionKey: "conversation",
+  },
+  {
+    name: "loop",
+    syntax: "/loop <task>",
+    description: "Loop the task until the agent finishes (Esc to stop)",
+    actionKey: "loop",
   },
   {
     name: "help",
