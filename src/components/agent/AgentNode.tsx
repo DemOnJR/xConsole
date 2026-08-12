@@ -307,7 +307,14 @@ function ProviderSwitcher() {
   }
 
   return (
-    <div className="relative">
+    <div
+      className="relative"
+      // Keep the mousedown from reaching React Flow's node-drag handler — the
+      // switcher sits inside the cursor-move header, and a drag would swallow
+      // the click that opens this menu.
+      onMouseDown={(e) => e.stopPropagation()}
+      onPointerDownCapture={(e) => e.stopPropagation()}
+    >
       <button
         onClick={() => setOpen((v) => !v)}
         onBlur={() => setTimeout(() => setOpen(false), 150)}
@@ -775,7 +782,14 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
         <ProviderSwitcher />
 
-        <div className="ml-auto flex items-center gap-1">
+        <div
+          className="ml-auto flex items-center gap-1"
+          // Same drag-guard as ProviderSwitcher: these buttons sit in the header
+          // drag surface; without this, a tiny mouse movement starts a node drag
+          // and swallows the click.
+          onMouseDown={(e) => e.stopPropagation()}
+          onPointerDownCapture={(e) => e.stopPropagation()}
+        >
 
           <button
 

@@ -48,6 +48,12 @@ interface SavedTileRow {
   items: { index: number; weight: number }[];
 }
 
+/** A persisted column pane (side-by-side layout). */
+interface SavedTileColumn {
+  weight: number;
+  items: { index: number; weight: number }[];
+}
+
 /**
  * Parse a workspace's persisted `nodes_json`. It is stored as an object
  * `{ nodes, edges }`, but a legacy format stored a bare array — and a corrupt
@@ -56,46 +62,85 @@ interface SavedTileRow {
  */
 export function parseSavedNodes(
   nodesJson: string | null | undefined,
-): { nodes: SavedNode[]; edges: SavedEdge[]; tiles: SavedTileRow[] } {
+): {
+  nodes: SavedNode[];
+  edges: SavedEdge[];
+  tiles: SavedTileRow[];
+  columns?: SavedTileColumn[];
+} {
   if (!nodesJson) return { nodes: [], edges: [], tiles: [] };
   try {
     const raw = JSON.parse(nodesJson);
     if (Array.isArray(raw)) return { nodes: raw, edges: [], tiles: [] };
-    return { nodes: raw.nodes ?? [], edges: raw.edges ?? [], tiles: raw.tiles ?? [] };
+    return {
+      nodes: raw.nodes ?? [],
+      edges: raw.edges ?? [],
+      tiles: raw.tiles ?? [],
+      columns: raw.columns,
+    };
   } catch {
     return { nodes: [], edges: [], tiles: [] };
   }
 }
 
-/** Tile layout → index form, for persistence. */
+/** Tile layout → index form, for persistence. Persists BOTH rows and columns so a
+ *  side-by-side arrangement survives a save/restore (monitor move → autosave →
+ *  reload would otherwise flatten columns into one long row). */
 function serializeTiles(
   layout: TileLayout | null,
   indexOf: (nodeId: string) => number,
-): SavedTileRow[] {
-  if (!layout) return [];
-  return layout.rows
-    .map((row) => ({
-      weight: row.weight,
-      items: row.items
-        .map((it) => ({ index: indexOf(it.id), weight: it.weight }))
-        .filter((it) => it.index >= 0),
-    }))
-    .filter((row) => row.items.length > 0);
+): { rows: SavedTileRow[]; columns?: SavedTileColumn[] } {
+  if (!layout) return { rows: [] };
+  const toSaved = (items: { id: string; weight: number }[]) =>
+    items
+      .map((it) => ({ index: indexOf(it.id), weight: it.weight }))
+      .filter((it) => it.index >= 0);
+  return {
+    rows: layout.rows
+      .map((row) => ({ weight: row.weight, items: toSaved(row.items) }))
+      .filter((row) => row.items.length > 0),
+    columns: layout.columns
+      ?.map((col) => ({ weight: col.weight, items: toSaved(col.items) }))
+      .filter((col) => col.items.length > 0),
+  };
 }
 
 /** Index form → tile layout, against the node ids a restore just produced. */
-function deserializeTiles(rows: SavedTileRow[], ids: string[]): TileLayout | null {
+function deserializeTiles(
+  rows: SavedTileRow[],
+  columns: SavedTileColumn[] | undefined,
+  ids: string[],
+): TileLayout | null {
+  const toItems = (items: { index: number; weight: number }[]) =>
+    items
+      .filter((it) => it && it.index >= 0 && it.index < ids.length)
+      .map((it) => ({
+        id: ids[it.index],
+        weight: typeof it.weight === "number" ? it.weight : 1,
+      }))
+      .filter((it) => ids.includes(it.id));
+
+  // Column layout persisted → rebuild columns and mirror rows from them (same as
+  // layoutFromColumnCounts) so every op stays consistent.
+  if (columns && columns.length > 0) {
+    const cols = columns
+      .map((col) => ({ weight: col.weight ?? 1, items: toItems(col.items) }))
+      .filter((col) => col.items.length > 0);
+    if (cols.length > 0) {
+      const flat = cols.flatMap((c) => c.items);
+      return {
+        rows: flat.length > 0 ? [{ weight: 1, items: flat }] : [],
+        columns: cols,
+      };
+    }
+  }
+
   if (!Array.isArray(rows) || rows.length === 0) return null;
   const layout: TileLayout = {
     rows: rows
       .map((row) => ({
         weight: typeof row.weight === "number" ? row.weight : 1,
-        items: (row.items ?? [])
-          .filter((it) => it && it.index >= 0 && it.index < ids.length)
-          .map((it) => ({
-            id: ids[it.index],
-            weight: typeof it.weight === "number" ? it.weight : 1,
-          })),
+        items: toItems(row.items),
       }))
       .filter((row) => row.items.length > 0),
   };
@@ -205,7 +250,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       name,
       viewport_json: JSON.stringify(viewport),
       layout_mode: layoutMode,
-      nodes_json: JSON.stringify({ nodes: saved, edges: savedEdges, tiles: savedTiles }),
+      nodes_json: JSON.stringify({
+        nodes: saved,
+        edges: savedEdges,
+        tiles: savedTiles.rows,
+        columns: savedTiles.columns,
+      }),
       color: color ?? existing?.color ?? null,
       icon: icon ?? existing?.icon ?? null,
       color_mode: colorMode ?? existing?.color_mode ?? null,
@@ -245,7 +295,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     // no longer exist and silently reset to the balanced default. Re-point it.
     useCanvasStore
       .getState()
-      .setTileLayout(deserializeTiles(savedTiles, rebound.map((n) => n.id)));
+      .setTileLayout(deserializeTiles(savedTiles.rows, savedTiles.columns, rebound.map((n) => n.id)));
 
     await get().load();
     set({ activeId: ws.id });
@@ -311,9 +361,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   restore: async (id) => {
     const ws = get().workspaces.find((w) => w.id === id);
     if (!ws) return null;
-    const { nodes: saved, edges: savedEdges, tiles: savedTiles } = parseSavedNodes(
-      ws.nodes_json,
-    );
+    const {
+      nodes: saved,
+      edges: savedEdges,
+      tiles: savedTiles,
+      columns: savedColumns,
+    } = parseSavedNodes(ws.nodes_json);
     let viewport: Viewport = { x: 0, y: 0, zoom: 1 };
     if (ws.viewport_json) {
       try {
@@ -365,7 +418,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         data: { kind: "sftp-terminal" },
       };
     });
-    const tiles = deserializeTiles(savedTiles, nodes.map((n) => n.id));
+    const tiles = deserializeTiles(savedTiles, savedColumns, nodes.map((n) => n.id));
     set({ activeId: id });
     return { nodes, edges, viewport, layout, tiles };
   },

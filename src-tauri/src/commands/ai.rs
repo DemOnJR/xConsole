@@ -936,3 +936,20 @@ pub async fn ai_cli_models(
 
     cli::list_models(&provider.kind, &bin).await
 }
+
+/// Autodetect models for a cloud provider by probing its `/models` endpoint.
+///
+/// `flavor` is "openai" (Bearer `GET {base}/models`) or "anthropic"
+/// (`GET {base}/v1/models?limit=100` with x-api-key). On any failure returns an empty
+/// list — the frontend falls back to the curated catalog models.
+#[tauri::command]
+pub async fn ai_list_models(
+    flavor: String,
+    base_url: String,
+    api_key: String,
+) -> Result<Vec<String>, String> {
+    if flavor == "anthropic" {
+        return crate::ai::list_models::list_anthropic(&base_url, &api_key).await;
+    }
+    crate::ai::list_models::list_openai_compatible(&base_url, &api_key).await
+}

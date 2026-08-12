@@ -17,6 +17,7 @@ pub mod hooks;
 pub mod host_memory;
 pub mod infra_tools;
 pub mod interaction;
+pub mod list_models;
 pub mod llama;
 pub mod memory;
 pub mod models;

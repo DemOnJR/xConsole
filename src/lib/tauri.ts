@@ -907,6 +907,9 @@ export const api = {
     invoke<string>("ai_cli_login", { providerId }),
   aiCliModels: (providerId: string) =>
     invoke<string[]>("ai_cli_models", { providerId }),
+  /** Probe a cloud provider's /models endpoint (flavor: "openai" | "anthropic"). */
+  listModels: (flavor: string, baseUrl: string, apiKey: string) =>
+    invoke<string[]>("ai_list_models", { flavor, baseUrl, apiKey }),
 
   aiChat: (args: {
     sessionId: string;
