@@ -141,7 +141,7 @@ export function ServerPanel({ width }: { width?: number }) {
             }`}
             data-tooltip="Drag onto another server to reorder, or onto the canvas for an SSH terminal"
           >
-            <div className="flex items-center gap-2">
+            <div className="relative flex items-center gap-2">
               <span className="select-none text-gray-600">⋮⋮</span>
               <button
                 className="min-w-0 flex-1 text-left"
@@ -159,7 +159,8 @@ export function ServerPanel({ width }: { width?: number }) {
                   {v.username}@{v.host}:{v.port}
                 </div>
               </button>
-              <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
+              {/* Icons overlay the row on hover so they never steal text width. */}
+              <div className="absolute right-0 flex items-center gap-1 bg-gradient-to-l from-[var(--surface-2)] via-[var(--surface-2)] to-transparent pl-3 opacity-0 transition group-hover:opacity-100">
                 <button
                   className={`rounded p-1 text-xs hover:bg-[var(--border)] ${
                     pinned.includes(v.id) ? "text-amber-300 opacity-100" : "text-gray-500"

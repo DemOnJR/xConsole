@@ -229,6 +229,12 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
         if (replay) term.write(b64ToBytes(replay));
         if (isReconnect) term.writeln("\r\n\x1b[32m✓ reconnected\x1b[0m");
         reconnectAttemptsRef.current = 0;
+        // Execute button: type/run any queued command once the shell is up.
+        const queued = useCanvasStore.getState().takeTerminalCommand(id);
+        if (queued) {
+          term.write(queued.command);
+          if (queued.send) term.write("\r");
+        }
       } catch (e) {
         if (!mounted || disposed) return;
         const msg = String(e);

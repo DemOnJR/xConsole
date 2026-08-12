@@ -1680,7 +1680,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
         </div>
       </div>
 
-      <div className="nodrag nowheel flex min-h-0 flex-1 flex-col">
+      <div className="nodrag nowheel flex min-h-0 flex-1 cursor-text select-text flex-col">
         <div className="flex items-center gap-1 border-b border-[var(--border)]/80 px-2 py-1">
           {/* Also bound to the mouse's side buttons while the pointer is over this panel. */}
           <button

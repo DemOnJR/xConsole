@@ -39,6 +39,7 @@ import { PROVIDER_CATALOG } from "../../lib/providerCatalog";
 import { InputBar, type ReasoningLevel } from "./InputBar";
 import { useGitBranch } from "../../hooks/useGitBranch";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
+import { effectiveMode, shouldAutoRun } from "../../lib/safety";
 
 import type { AgentApproval, AgentPlan, AgentQuestion } from "../../lib/tauri";
 
@@ -382,6 +383,52 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   });
   const gitLabel = gitInfo ? `${gitInfo.branch}${gitInfo.dirty ? "*" : ""}` : null;
 
+  /** Execute a code-block command: open/reuse a terminal for the target vps and
+   *  auto-run (full perms / allowlisted) or type-and-wait (approve). */
+  const executeCommand = (code: string) => {
+    const canvas = useCanvasStore.getState();
+    const vpsList = useVpsStore.getState().vpsList;
+    // Resolve target: the agent's selected targets first, else the first vps.
+    const targetId = targets[0] ?? vpsList[0]?.id;
+    const vps = vpsList.find((v) => v.id === targetId);
+    if (!vps) {
+      void notify("Execute", "No server selected — pick a target first (/targets).");
+      return;
+    }
+    // Existing terminal for this vps? Reuse it (focus); else open a new one.
+    let nodeId = canvas.nodes.find(
+      (n) => n.type === "terminal" && String(n.data.vpsId) === vps.id,
+    )?.id;
+    if (!nodeId) {
+      nodeId = canvas.addVps(vps);
+    } else {
+      canvas.focus(nodeId);
+    }
+    // Safety: full → run; allowlist → run if read-only; approve → type & wait.
+    const settings = useSettingsStore.getState().settings;
+    const perVps: Record<string, string> = {};
+    for (const [k, v] of Object.entries(settings)) {
+      if (k.startsWith("agent.safety_mode.")) perVps[k.slice("agent.safety_mode.".length)] = v;
+    }
+    const mode = effectiveMode(settings["agent.safety_mode"], vps.id, perVps);
+    const send = shouldAutoRun(mode, code);
+    canvas.queueTerminalCommand(nodeId, code, send);
+    void notify(
+      "Execute",
+      send
+        ? `Running on ${vps.name} (${mode})`
+        : `Opened ${vps.name} — command typed, press Enter to run (${mode})`,
+    );
+  };
+
+  /** VPS context passed to code blocks so Execute can show the target name. */
+  const executeTarget = useMemo(() => {
+    const vpsList = useVpsStore.getState().vpsList;
+    const targetId = targets[0] ?? vpsList[0]?.id;
+    const vps = vpsList.find((v) => v.id === targetId);
+    return vps ? { name: vps.name, host: vps.host } : null;
+  }, [targets]);
+
 
 
   const [input, setInput] = useState("");
@@ -567,7 +614,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   }, [streaming, loopTask]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
 
 
@@ -863,6 +910,8 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
           turnTelemetry={turnTelemetry}
           prefixTelemetry={prefixTelemetry}
           expanded
+          executeTarget={executeTarget}
+          onExecute={executeCommand}
         />
       )}
 
@@ -1051,17 +1100,20 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
             </div>
           )}
 
-          <div className="flex items-center gap-2 px-2.5 py-1.5 font-mono">
-            <span className="shrink-0 text-[13px] text-[var(--text-faint)]">›</span>
-            <input
+          <div className="flex items-start gap-2 px-2.5 py-2 font-mono">
+            <span className="shrink-0 pt-1.5 text-[13px] text-[var(--text-faint)]">›</span>
+            <textarea
               ref={inputRef}
-              type="text"
               value={input}
+              rows={1}
               onChange={(e) => {
                 setInput(e.target.value);
                 history.record(e.target.value);
                 recallIdx.current = null;
                 setSlashIndex(0);
+                // Auto-grow up to 6 lines.
+                e.target.style.height = "auto";
+                e.target.style.height = `${Math.min(e.target.scrollHeight, 132)}px`;
               }}
               onKeyDown={(e) => {
                 const mod = e.ctrlKey || e.metaKey;
@@ -1169,16 +1221,16 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
                   }
                   return;
                 }
-                if (e.key === "Enter") {
+                if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   submit();
                 }
               }}
-              placeholder="Ask anything… (/ for commands · Enter to send)"
+              placeholder="Ask anything… (/ for commands · Enter to send · Shift+Enter for new line)"
               disabled={streaming}
               spellCheck={false}
               autoComplete="off"
-              className="min-w-0 flex-1 border-0 bg-transparent text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--text-faint)] disabled:opacity-50"
+              className="max-h-[132px] min-w-0 flex-1 resize-none border-0 bg-transparent text-[13px] leading-relaxed text-[var(--text)] outline-none placeholder:text-[var(--text-faint)] disabled:opacity-50"
             />
           </div>
 
@@ -1203,7 +1255,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
             </div>
           )}
 
-          {/* t3code-style input bar: provider·model · reasoning · plan · ctx · cost · git · send/stop */}
+          {/* t3code-style input bar: provider·model · reasoning · plan · permissions · ctx · cost · git · send/stop */}
           <InputBar
             activeProvider={activeProvider}
             activeModel={activeModel || undefined}
@@ -1211,6 +1263,13 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
             onReasoning={setReasoningPersisted}
             planMode={planMode}
             onTogglePlan={togglePlanMode}
+            safetyMode={useSettingsStore((s) => s.settings["agent.safety_mode"]) ?? "approve"}
+            onCycleSafety={() => {
+              const settings = useSettingsStore.getState().settings;
+              const cur = settings["agent.safety_mode"] ?? "approve";
+              const next = cur === "full" ? "allowlist" : cur === "allowlist" ? "approve" : "full";
+              void useSettingsStore.getState().set("agent.safety_mode", next);
+            }}
             contextUsage={contextUsage}
             streamStats={streamStats}
             costUsd={conversationCostUsd}

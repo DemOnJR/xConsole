@@ -247,3 +247,26 @@ describe("column tiling (side-by-side panes)", () => {
     expectGapFree();
   });
 });
+
+describe("queued terminal commands (Execute button)", () => {
+  beforeEach(() => {
+    useCanvasStore.getState().clear();
+  });
+
+  it("queues and takes a command once (send=true)", () => {
+    const s = useCanvasStore.getState();
+    const nodeId = s.addVps(vps(1));
+    s.queueTerminalCommand(nodeId, "gh auth login", true);
+    const taken = s.takeTerminalCommand(nodeId);
+    expect(taken).toEqual({ command: "gh auth login", send: true });
+    // Second take is empty (taken once).
+    expect(s.takeTerminalCommand(nodeId)).toBeNull();
+  });
+
+  it("types without sending when send=false", () => {
+    const s = useCanvasStore.getState();
+    const nodeId = s.addVps(vps(1));
+    s.queueTerminalCommand(nodeId, "echo hi", false);
+    expect(s.takeTerminalCommand(nodeId)).toEqual({ command: "echo hi", send: false });
+  });
+});

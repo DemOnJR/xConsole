@@ -101,6 +101,8 @@ interface CanvasState {
   tileLayout: TileLayout | null;
   /** Last known canvas pane size, so layout edits can re-tile without the caller. */
   paneSize: { width: number; height: number } | null;
+  /** Pending terminal commands from the agent chat Execute button. */
+  pendingTerminalCommands: Record<string, { command: string; send: boolean }>;
 
   setNodes: (nodes: CanvasNode[]) => void;
   setEdges: (edges: CanvasEdge[]) => void;
@@ -144,6 +146,14 @@ interface CanvasState {
   /** Give a tile its own full-width row — or merge it back. */
   toggleTileFullWidth: (id: string) => void;
   clear: () => void;
+  /**
+   * Queue a command to be typed into a terminal node once its SSH session is ready.
+   * `send=true` runs it (appends newline); `send=false` types it and waits (the user
+   * presses Enter). Used by the agent chat's Execute button.
+   */
+  queueTerminalCommand: (nodeId: string, command: string, send: boolean) => void;
+  /** Take (and clear) the queued command for a node — called by TerminalNode. */
+  takeTerminalCommand: (nodeId: string) => { command: string; send: boolean } | null;
 }
 
 /** The slice of state `applyTiles` reads — keeps the helper testable and cheap. */
@@ -215,6 +225,8 @@ export const useCanvasStore = create<CanvasState>()(
       webglIds: [],
       tileLayout: null,
       paneSize: null,
+      // Pending terminal commands (Execute button): nodeId → {command, send}.
+      pendingTerminalCommands: {} as Record<string, { command: string; send: boolean }>,
 
       setNodes: (nodes) => set({ nodes }),
       setEdges: (edges) => set({ edges }),
@@ -578,6 +590,25 @@ export const useCanvasStore = create<CanvasState>()(
 
       clear: () =>
         set({ nodes: [], edges: [], webglIds: [], focusedId: null, tileLayout: null }),
+
+      queueTerminalCommand: (nodeId, command, send) =>
+        set((s) => ({
+          pendingTerminalCommands: {
+            ...s.pendingTerminalCommands,
+            [nodeId]: { command, send },
+          },
+        })),
+
+      takeTerminalCommand: (nodeId) => {
+        const pending = get().pendingTerminalCommands[nodeId];
+        if (!pending) return null;
+        set((s) => {
+          const next = { ...s.pendingTerminalCommands };
+          delete next[nodeId];
+          return { pendingTerminalCommands: next };
+        });
+        return pending;
+      },
     }),
     {
       name: "xconsole-canvas",

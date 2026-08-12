@@ -17,8 +17,8 @@ export function reasoningCapable(kind: string | undefined, model: string | undef
   return false;
 }
 
-/** t3code-style composer footer: provider·model · reasoning · plan · ctx gauge ·
- *  cost · git branch · send/stop. */
+/** t3code-style composer footer: provider·model · reasoning · plan · permissions ·
+ *  ctx gauge · cost · git branch · send/stop. */
 export function InputBar({
   activeProvider,
   activeModel,
@@ -26,6 +26,8 @@ export function InputBar({
   onReasoning,
   planMode,
   onTogglePlan,
+  safetyMode,
+  onCycleSafety,
   contextUsage,
   streamStats,
   costUsd,
@@ -41,6 +43,8 @@ export function InputBar({
   onReasoning: (r: ReasoningLevel) => void;
   planMode: boolean;
   onTogglePlan: () => void;
+  safetyMode: string;
+  onCycleSafety: () => void;
   contextUsage: ContextUsage | null;
   streamStats: TokenStats | null;
   costUsd: number;
@@ -93,6 +97,26 @@ export function InputBar({
         data-tooltip="Plan mode (Shift+Tab)"
       >
         plan
+      </button>
+
+      {/* Permissions (safety mode) */}
+      <button
+        type="button"
+        className={pill}
+        onClick={onCycleSafety}
+        data-tooltip="Safety mode — click to cycle (full / allowlist / approve)"
+      >
+        <span
+          className={
+            safetyMode === "full"
+              ? "text-emerald-300"
+              : safetyMode === "allowlist"
+                ? "text-amber-300"
+                : "text-red-300"
+          }
+        >
+          {safetyMode || "approve"}
+        </span>
       </button>
 
       <div className="ml-auto flex items-center gap-1.5">

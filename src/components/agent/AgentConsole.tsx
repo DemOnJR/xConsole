@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentChatMessage } from "../../stores/agentStore";
 import { plainText } from "../../lib/plainText";
+import { AgentMarkdown } from "./AgentMarkdown";
 import { AgentTokenStats } from "./AgentTokenStats";
 import { consoleRows } from "./agentConsoleRows";
 import type { PrefixTelemetry, TurnTelemetry, TokenStats } from "../../lib/streamStats";
@@ -19,6 +20,8 @@ export function AgentConsole({
   turnTelemetry,
   prefixTelemetry,
   expanded,
+  executeTarget,
+  onExecute,
 }: {
   messages: AgentChatMessage[];
   streamingText: string;
@@ -27,6 +30,8 @@ export function AgentConsole({
   turnTelemetry: TurnTelemetry | null;
   prefixTelemetry: PrefixTelemetry | null;
   expanded: boolean;
+  executeTarget?: { name: string; host: string } | null;
+  onExecute?: (code: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
@@ -65,7 +70,7 @@ export function AgentConsole({
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-3 text-[11px] leading-relaxed"
+        className="flex min-h-0 flex-1 cursor-text select-text flex-col gap-2 overflow-y-auto px-3 py-3 text-[11px] leading-relaxed"
       >
         {rows.map((row, index) => {
           if (row.kind === "compaction") {
@@ -108,7 +113,12 @@ export function AgentConsole({
               <div key={index} className="group relative flex gap-2 text-[var(--text)]">
                 <span className="shrink-0 text-emerald-400">•</span>
                 <div className={`min-w-0 ${expanded ? "w-full" : "w-[92%]"}`}>
-                  <div className="whitespace-pre-wrap break-words">{plainText(row.content)}</div>
+                  <AgentMarkdown
+                    content={row.content}
+                    variant="assistant"
+                    executeTarget={executeTarget}
+                    onExecute={onExecute}
+                  />
                   <button
                     type="button"
                     onClick={() => copyContent(row.content, index)}
