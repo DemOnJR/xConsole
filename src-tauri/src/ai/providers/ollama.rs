@@ -329,6 +329,7 @@ fn stats_event(
         completion_tokens: count as u32,
         prompt_tokens: prompt_eval_count.map(|n| n as u32),
         cached_tokens: None,
+        cache_creation_tokens: None,
         duration_ms: (dur_ns / 1_000_000).max(1),
         tokens_per_sec: tps,
     }))

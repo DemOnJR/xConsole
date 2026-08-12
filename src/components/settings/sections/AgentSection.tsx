@@ -57,6 +57,34 @@ export function AgentSection() {
         </Field>
       </Card>
 
+      <Card className="mb-3">
+        <Field
+          label="Tool output limit (chars)"
+          hint="Long command outputs are truncated to this size before they re-enter context. 0 = unlimited."
+        >
+          <input
+            type="number"
+            min={0}
+            step={500}
+            value={settings[SK.toolResultMaxChars] ?? "4000"}
+            onChange={(e) => set(SK.toolResultMaxChars, e.target.value)}
+            className="w-40 rounded border border-[var(--border-strong)] bg-[var(--bg)] px-2 py-1 text-sm text-gray-200 outline-none focus:border-[var(--accent)]"
+          />
+        </Field>
+        <Field
+          label="Cache retention"
+          hint="'Long' keeps the prompt cache alive for 1h (2× write price) so idle gaps don't re-bill. Off = 5-minute cache."
+        >
+          <Select
+            value={settings[SK.cacheRetention] ?? ""}
+            onChange={(e) => set(SK.cacheRetention, e.target.value)}
+          >
+            <option value="">5 minutes (default)</option>
+            <option value="long">1 hour (2× write price)</option>
+          </Select>
+        </Field>
+      </Card>
+
       <Card>
         <div className="mb-2 text-sm text-gray-200">Per-server overrides</div>
         <div className="mb-3 text-xs text-gray-500">

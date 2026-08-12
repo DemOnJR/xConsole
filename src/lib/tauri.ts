@@ -586,8 +586,19 @@ export type StreamEvent =
         completion_tokens: number;
         prompt_tokens?: number | null;
         cached_tokens?: number | null;
+        cache_creation_tokens?: number | null;
         duration_ms: number;
         tokens_per_sec: number;
+      };
+    }
+  | {
+      kind: "Cost";
+      data: {
+        input_tokens: number;
+        output_tokens: number;
+        cache_read_tokens: number;
+        cache_write_tokens: number;
+        usd: number;
       };
     }
   | {

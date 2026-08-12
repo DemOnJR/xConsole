@@ -1,5 +1,5 @@
 import type { ContextUsage, PrefixTelemetry, TokenStats, TurnTelemetry } from "../../lib/streamStats";
-import { formatTokensPerSec } from "../../lib/streamStats";
+import { cacheHitRate, formatTokensPerSec, formatUsd } from "../../lib/streamStats";
 import type { AiProvider } from "../../lib/tauri";
 
 export function AgentConsoleFooter({
@@ -11,6 +11,7 @@ export function AgentConsoleFooter({
   turnTelemetry,
   prefixTelemetry,
   contextUsage,
+  conversationCostUsd,
   onTogglePlanMode,
   onOpenSettings,
   onStop,
@@ -23,18 +24,16 @@ export function AgentConsoleFooter({
   turnTelemetry: TurnTelemetry | null;
   prefixTelemetry: PrefixTelemetry | null;
   contextUsage: ContextUsage | null;
+  conversationCostUsd: number;
   onTogglePlanMode: () => void;
   onOpenSettings: (section: string) => void;
   onStop: () => void;
 }) {
   const modelLabel = activeProvider?.model || activeProvider?.name || "No model";
   const tps = streamStats ? formatTokensPerSec(streamStats.tokensPerSec) : null;
-  const cachePct =
-    streamStats?.cachedTokens != null &&
-    streamStats?.promptTokens != null &&
-    streamStats.promptTokens > 0
-      ? Math.round((streamStats.cachedTokens / streamStats.promptTokens) * 100)
-      : null;
+  const hitRate = streamStats ? cacheHitRate(streamStats) : null;
+  const cost = formatUsd(streamStats?.costUsd);
+  const totalCost = formatUsd(conversationCostUsd > 0 ? conversationCostUsd : undefined);
 
   return (
     <div className="flex select-none items-center justify-between border-t border-[var(--border)] bg-[var(--surface-muted)] px-3 py-1 text-[10px] text-[var(--text-dim)] font-mono">
@@ -86,7 +85,9 @@ export function AgentConsoleFooter({
         {streamStats && (
           <span className="text-emerald-400">
             {tps}
-            {cachePct != null ? ` · ${cachePct}% cached` : ""}
+            {hitRate != null ? ` · ${Math.round(hitRate * 100)}% cached` : ""}
+            {cost ? ` · ${cost}` : ""}
+            {totalCost ? ` · ${totalCost} tot` : ""}
             {turnTelemetry && turnTelemetry.toolCacheLookups > 0
               ? ` · ${Math.round(turnTelemetry.toolCacheHitRate * 100)}% tools`
               : ""}

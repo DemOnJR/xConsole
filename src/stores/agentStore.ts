@@ -183,6 +183,8 @@ interface AgentState {
   pendingPlan: AgentPlan | null;
   planMode: boolean;
   hydrated: boolean;
+  /** Running estimated cost (USD) of the current conversation. */
+  conversationCostUsd: number;
 
   init: () => Promise<void>;
   setTargets: (ids: string[]) => void;
@@ -488,6 +490,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     typeof localStorage !== "undefined" &&
     localStorage.getItem("xconsole-agent-plan-mode") === "1",
   hydrated: false,
+  conversationCostUsd: 0,
 
   init: async () => {
     if (get().hydrated) return;
@@ -629,6 +632,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       contextUsage: null,
       compactFlipCount: 0,
       error: null,
+      conversationCostUsd: 0,
     });
     const list = await api.listAgentConversations().catch(() => get().conversations);
     set({ conversations: list });
@@ -664,6 +668,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       contextUsage: null,
       compactFlipCount: 0,
       error: null,
+      conversationCostUsd: 0,
     });
     const list = await api.listAgentConversations().catch(() => get().conversations);
     set({ conversations: list });
@@ -790,10 +795,23 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           completionTokens: ev.data.completion_tokens,
           promptTokens: ev.data.prompt_tokens ?? undefined,
           cachedTokens: ev.data.cached_tokens ?? undefined,
+          cacheCreationTokens: ev.data.cache_creation_tokens ?? undefined,
           tokensPerSec: ev.data.tokens_per_sec,
           source: "provider",
         };
         if (isCurrent()) set({ streamStats: latestStats });
+        return;
+      }
+      if (ev.kind === "Cost") {
+        // Provider-estimated cost lands on the latest stats so the footer can show
+        // $ + cache economics. Sums into the conversation running total.
+        const costUsd = ev.data.usd ?? 0;
+        if (isCurrent()) {
+          set((s) => ({
+            streamStats: s.streamStats ? { ...s.streamStats, costUsd } : s.streamStats,
+            conversationCostUsd: (s.conversationCostUsd ?? 0) + costUsd,
+          }));
+        }
         return;
       }
       if (ev.kind === "TurnTelemetry") {

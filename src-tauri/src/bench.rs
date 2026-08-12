@@ -380,6 +380,7 @@ async fn one_turn(
                 completion_tokens: 0,
                 prompt_tokens: None,
                 cached_tokens: None,
+                cache_creation_tokens: None,
                 duration_ms: 0,
                 tokens_per_sec: 0.0,
             });

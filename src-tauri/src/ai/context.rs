@@ -17,21 +17,55 @@ use crate::ai::provider::ChatMessage;
 use crate::ai::{memory, skills, soul, AgentHome};
 use crate::storage::Db;
 
-/// Keep at most this many recent messages in the live window. Older turns are
-/// dropped and replaced by a short synthetic note (a lightweight stand-in for a
-/// full LLM-summarizing compressor; the durable facts live in MEMORY.md).
-pub const MAX_WINDOW_MESSAGES: usize = 40;
+/// Keep at most this many recent **tokens** in the live window (pi keeps 20K,
+/// opencode 15K). Older turns are dropped whole — tool-call/tool-result pairs are
+/// never split — and replaced by a short synthetic note. The durable facts live in
+/// MEMORY.md, so dropping old detail costs little.
+pub const WORKING_SET_TOKENS: usize = 20_000;
 
-/// Trim an over-long message history to the recent window. Tool-result messages
-/// are never separated from the assistant tool call they answer, because the
-/// window only ever drops from the front in role-agnostic order and the most
-/// recent turns (which are kept) remain internally consistent.
+/// Trim an over-long message history to a recent token window.
+///
+/// The window is token-based, not message-count-based: it keeps the newest ~20K
+/// tokens (never fewer than the last 3 messages) and drops the oldest **complete**
+/// turns first — a tool_result is always dropped together with the assistant
+/// tool_call it answers, so the remaining history stays internally consistent for
+/// the provider.
 pub fn compress_window(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    if messages.len() <= MAX_WINDOW_MESSAGES {
+    if messages.len() <= 3 {
         return messages;
     }
-    let dropped = messages.len() - MAX_WINDOW_MESSAGES;
-    let mut out = Vec::with_capacity(MAX_WINDOW_MESSAGES + 1);
+    // Estimate the tail's token cost from the back until we're under budget.
+    let mut keep_from = messages.len();
+    let mut budget = WORKING_SET_TOKENS;
+    // Never drop below the last 3 messages.
+    let floor = messages.len().saturating_sub(3);
+    while keep_from > floor {
+        let idx = keep_from - 1;
+        let cost = crate::ai::text::estimate_tokens_from_len(messages[idx].content.len())
+            + messages[idx].tool_calls.len() * 64; // rough tool-call overhead
+        if budget >= cost {
+            budget -= cost;
+            keep_from -= 1;
+        } else {
+            break;
+        }
+    }
+    if keep_from == 0 {
+        return messages;
+    }
+
+    // Only ever cut at a turn boundary: advance the cut forward until it lands on a
+    // `user` message (the start of a turn). Cutting anywhere else would orphan a
+    // tool_result from the assistant tool_call it answers, or split a reply.
+    while keep_from < messages.len() && messages[keep_from].role != "user" {
+        keep_from += 1;
+    }
+    if keep_from == 0 {
+        return messages;
+    }
+
+    let dropped = keep_from;
+    let mut out = Vec::with_capacity(messages.len() - dropped + 1);
     out.push(ChatMessage::user(format!(
         "[Earlier conversation compressed: {dropped} older messages omitted. \
 Durable facts were saved to memory.]"
@@ -554,6 +588,52 @@ mod tests {
     fn test_home() -> (AgentHome, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("xconsole-context-{}", uuid::Uuid::new_v4()));
         (AgentHome::new(dir.clone()), dir)
+    }
+
+    #[test]
+    fn compress_window_keeps_recent_turns_and_cuts_at_user_boundary() {
+        // A long history of user → assistant(tool_call) → tool_result turns.
+        let mut messages = Vec::new();
+        for i in 0..40 {
+            messages.push(ChatMessage::user(format!("question {i}")));
+            let mut assistant = ChatMessage::assistant("");
+            assistant.tool_calls.push(crate::ai::provider::ToolCall {
+                id: format!("call-{i}"),
+                name: "run_command".into(),
+                arguments: serde_json::json!({}),
+            });
+            messages.push(assistant);
+            messages.push(ChatMessage::tool_result(format!("call-{i}"), "x".repeat(4000)));
+        }
+
+        let out = compress_window(messages);
+        // The oldest turns are dropped, a synthetic note is prepended, and the cut
+        // lands on a user boundary (no orphaned tool messages at the start).
+        assert!(out.len() < 120);
+        assert_eq!(out[0].role, "user");
+        assert!(out[0].content.contains("compressed"));
+        // Every remaining tool result has its assistant tool_call before it.
+        let mut expecting_tool_result = false;
+        for m in &out[1..] {
+            if m.role == "assistant" && !m.tool_calls.is_empty() {
+                expecting_tool_result = true;
+            } else if m.role == "tool" {
+                assert!(expecting_tool_result, "orphaned tool_result in window");
+                expecting_tool_result = false;
+            }
+        }
+    }
+
+    #[test]
+    fn compress_window_never_drops_below_three_messages() {
+        // 120K chars ≈ 30K tokens > 20K budget, but the 3-message floor protects all.
+        let big = vec![
+            ChatMessage::user("a".repeat(40_000)),
+            ChatMessage::assistant("b".repeat(40_000)),
+            ChatMessage::user("c".repeat(40_000)),
+        ];
+        let out = compress_window(big);
+        assert_eq!(out.len(), 3);
     }
 
     fn context<'a>(home: &'a AgentHome, db: &'a Db) -> PromptContext<'a> {

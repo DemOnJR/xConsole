@@ -28,11 +28,35 @@ impl AnthropicProvider {
     }
 
     /// Convert our portable messages into Anthropic's content-block format.
-    fn build_messages(messages: &[ChatMessage]) -> Vec<Value> {
+    ///
+    /// When `cache_last_user` is true, the LAST plain user message (no tool_result,
+    /// non-empty content) gets a `cache_control` breakpoint — everything before it
+    /// (the whole history) becomes a single cheap cache read on the next turn.
+    fn build_messages(messages: &[ChatMessage], cache_last_user: bool) -> Vec<Value> {
+        // Find the index of the last cacheable plain user message.
+        let last_user = if cache_last_user {
+            messages.iter().rposition(|m| {
+                m.role == "user" && !m.content.is_empty() && m.tool_call_id.is_none()
+            })
+        } else {
+            None
+        };
+
         let mut out: Vec<Value> = Vec::new();
-        for m in messages {
+        for (i, m) in messages.iter().enumerate() {
             match m.role.as_str() {
-                "user" => out.push(json!({"role": "user", "content": m.content})),
+                "user" => {
+                    let mut content = json!(m.content);
+                    if Some(i) == last_user {
+                        // Breakpoint goes on the text block, never on tool_result.
+                        content = json!([{
+                            "type": "text",
+                            "text": m.content,
+                            "cache_control": { "type": "ephemeral" },
+                        }]);
+                    }
+                    out.push(json!({"role": "user", "content": content}));
+                }
                 "assistant" => {
                     let mut blocks: Vec<Value> = Vec::new();
                     if !m.content.is_empty() {
@@ -71,14 +95,23 @@ impl AnthropicProvider {
     }
 
     fn build_tools(req: &ChatRequest) -> Vec<Value> {
+        let count = req.tools.len();
         req.tools
             .iter()
-            .map(|t| {
-                json!({
+            .enumerate()
+            .map(|(i, t)| {
+                let mut def = json!({
                     "name": t.name,
                     "description": t.description,
                     "input_schema": t.parameters,
-                })
+                });
+                // Cache the tools block: mark the LAST tool def as the breakpoint so
+                // the whole tools+system prefix is one cached unit (Anthropic caches
+                // everything up to the last breakpoint).
+                if i == count - 1 {
+                    def["cache_control"] = json!({"type": "ephemeral"});
+                }
+                def
             })
             .collect()
     }
@@ -92,25 +125,38 @@ impl Provider for AnthropicProvider {
         sink: Option<&EventSink>,
     ) -> Result<ChatResponse, String> {
         let url = join_url(&self.base_url, "v1/messages");
+        // Long retention = 1h cache TTL (2× write price); short/empty = 5 min default.
+        let long_cache = req.cache_retention == "long";
         let mut body = json!({
             "model": req.model,
             "max_tokens": req.max_tokens,
             "temperature": req.temperature,
             "stream": true,
-            "messages": Self::build_messages(&req.messages),
+            "messages": Self::build_messages(&req.messages, true),
         });
         // Prompt caching: mark the static system prefix as ephemeral so multi-turn
         // agent loops reuse Anthropic's server-side cache (up to ~90% latency cut).
         if !req.system.is_empty() {
-            body["system"] = json!([{
+            let mut block = json!({
                 "type": "text",
                 "text": req.system,
                 "cache_control": { "type": "ephemeral" }
-            }]);
+            });
+            if long_cache {
+                block["cache_control"]["ttl"] = json!("1h");
+            }
+            body["system"] = json!([block]);
         }
         let tools = Self::build_tools(req);
         if !tools.is_empty() {
             body["tools"] = json!(tools);
+        }
+
+        let mut beta = "prompt-caching-2024-07-31".to_string();
+        if long_cache {
+            // Extended TTL requires its own beta header; without it the 1h TTL
+            // silently degrades to 5 minutes and re-bills every turn.
+            beta.push_str(",extended-cache-ttl-2025-01-23");
         }
 
         let resp = self
@@ -119,7 +165,7 @@ impl Provider for AnthropicProvider {
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             // Enable prompt-caching beta for cache_control on system blocks.
-            .header("anthropic-beta", "prompt-caching-2024-07-31")
+            .header("anthropic-beta", beta)
             .header("content-type", "application/json")
             .json(&body)
             .send()
@@ -139,6 +185,7 @@ impl Provider for AnthropicProvider {
         let mut input_tokens: Option<u32> = None;
         let mut output_tokens: Option<u32> = None;
         let mut cache_read_tokens: Option<u32> = None;
+        let mut cache_write_tokens: Option<u32> = None;
         let started = std::time::Instant::now();
 
         let mut stream = resp.bytes_stream();
@@ -170,6 +217,11 @@ impl Provider for AnthropicProvider {
                                 .and_then(|v| v.as_u64())
                                 .map(|n| n as u32)
                                 .or(cache_read_tokens);
+                            cache_write_tokens = u
+                                .get("cache_creation_input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .map(|n| n as u32)
+                                .or(cache_write_tokens);
                         }
                     }
                     "content_block_start" => {
@@ -239,9 +291,21 @@ impl Provider for AnthropicProvider {
                     completion_tokens: completion,
                     prompt_tokens: input_tokens,
                     cached_tokens: cache_read_tokens,
+                    cache_creation_tokens: cache_write_tokens,
                     duration_ms: ms.max(1),
                     tokens_per_sec: (completion as f64 / secs) as f32,
                 }),
+            );
+            emit(
+                sink,
+                StreamEvent::Cost(crate::ai::cost::turn_cost(
+                    "anthropic",
+                    &req.model,
+                    input_tokens,
+                    completion,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                )),
             );
         }
 

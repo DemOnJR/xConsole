@@ -10,6 +10,7 @@ pub mod context;
 pub mod context_compact;
 pub mod context_usage;
 pub mod conversations;
+pub mod cost;
 pub mod cron;
 pub mod edits;
 pub mod hooks;

@@ -389,6 +389,8 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
     compactFlipCount,
 
+    conversationCostUsd,
+
     streaming,
 
     speaking,
@@ -1091,6 +1093,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
         turnTelemetry={turnTelemetry}
         prefixTelemetry={prefixTelemetry}
         contextUsage={contextUsage}
+        conversationCostUsd={conversationCostUsd}
         onTogglePlanMode={togglePlanMode}
         onOpenSettings={openSettings}
         onStop={() => void stop()}

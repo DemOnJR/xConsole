@@ -81,6 +81,11 @@ pub struct ChatRequest {
     /// User-pressed-Stop flag. Providers poll this in their streaming loop to abort
     /// an in-flight response immediately. `None` means no cancellation wired.
     pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Cache retention: "short" (5 min) or "long" (1h, 2× write price). Passed to
+    /// providers that support explicit cache TTLs; empty = provider default.
+    pub cache_retention: String,
+    /// Stable session id for provider cache routing (OpenAI prompt_cache_key).
+    pub session_id: String,
 }
 
 impl ChatRequest {
@@ -94,6 +99,8 @@ impl ChatRequest {
             temperature: 0.7,
             xconsole: None,
             cancel: None,
+            cache_retention: String::new(),
+            session_id: String::new(),
         }
     }
 
@@ -174,6 +181,9 @@ pub struct StreamStats {
     /// Tokens served from provider prompt cache (Anthropic / OpenAI when reported).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u32>,
+    /// Tokens written to the provider cache this request (cache misses).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<u32>,
     pub duration_ms: u64,
     pub tokens_per_sec: f32,
 }
@@ -225,6 +235,8 @@ pub enum StreamEvent {
     Text(String),
     /// Final token throughput for this generation leg.
     Stats(StreamStats),
+    /// Estimated per-turn cost + cache economics (provider usage → USD).
+    Cost(crate::ai::cost::TurnCost),
     /// Per-turn tool and cache counters.
     TurnTelemetry(TurnTelemetryEvent),
     /// Privacy-safe provider-prefix fingerprints and stability classification.

@@ -9,6 +9,8 @@ export const SK = {
   activeProvider: "agent.active_provider",
   safetyMode: "agent.safety_mode",
   externalEditor: "sftp.external_editor",
+  toolResultMaxChars: "agent.tool_result_max_chars",
+  cacheRetention: "agent.cache_retention",
 } as const;
 
 export function GeneralSection() {

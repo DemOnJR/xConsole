@@ -97,6 +97,7 @@ struct UsageCounts {
     prompt_tokens: Option<u32>,
     completion_tokens: Option<u32>,
     cached_tokens: Option<u32>,
+    cache_write_tokens: Option<u32>,
 }
 
 fn visible_response_content(content: String, _opaque_reasoning: String) -> String {
@@ -115,6 +116,8 @@ fn usage_counts(event: &Value) -> UsageCounts {
         cached_tokens: count(details.and_then(|v| v.get("cached_tokens")))
             .or_else(|| count(details.and_then(|v| v.get("cache_read_input_tokens"))))
             .or_else(|| count(usage.get("cached_tokens"))),
+        cache_write_tokens: count(usage.get("cache_write_tokens"))
+            .or_else(|| count(details.and_then(|v| v.get("cache_write_tokens")))),
     }
 }
 
@@ -149,6 +152,14 @@ impl Provider for OpenAiProvider {
                 "stream_options": { "include_usage": true },
                 "messages": Self::build_messages(req),
             });
+            // Stable cache key routes every request of a session to the same cache
+            // node, so the growing prefix keeps hitting (required for GPT-5.6+).
+            if !req.session_id.is_empty() {
+                body["prompt_cache_key"] = json!(format!("xc-{}", req.session_id));
+                // Explicit implicit-mode opt-in for GPT-5.6+ caching; harmless on
+                // older models that ignore unknown cache fields.
+                body["prompt_cache_options"] = json!({ "mode": "implicit" });
+            }
             if send_tools {
                 body["tools"] = json!(tools);
             }
@@ -249,6 +260,7 @@ impl Provider for OpenAiProvider {
                 usage.prompt_tokens = counts.prompt_tokens.or(usage.prompt_tokens);
                 usage.completion_tokens = counts.completion_tokens.or(usage.completion_tokens);
                 usage.cached_tokens = counts.cached_tokens.or(usage.cached_tokens);
+                usage.cache_write_tokens = counts.cache_write_tokens.or(usage.cache_write_tokens);
 
                 let choice = match ev["choices"].get(0) {
                     Some(c) => c,
@@ -321,9 +333,21 @@ impl Provider for OpenAiProvider {
                     completion_tokens,
                     prompt_tokens: usage.prompt_tokens,
                     cached_tokens: usage.cached_tokens,
+                    cache_creation_tokens: usage.cache_write_tokens,
                     duration_ms: duration_ms.max(1),
                     tokens_per_sec: (completion_tokens as f64 / seconds) as f32,
                 }),
+            );
+            emit(
+                sink,
+                StreamEvent::Cost(crate::ai::cost::turn_cost(
+                    "openai",
+                    &req.model,
+                    usage.prompt_tokens,
+                    completion_tokens,
+                    usage.cached_tokens,
+                    usage.cache_write_tokens,
+                )),
             );
         }
 
@@ -356,6 +380,7 @@ mod tests {
                 prompt_tokens: Some(42),
                 completion_tokens: Some(7),
                 cached_tokens: Some(19),
+                cache_write_tokens: None,
             }
         );
 

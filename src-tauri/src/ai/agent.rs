@@ -29,6 +29,25 @@ pub async fn run_turn(
     let telemetry = crate::ai::tool_cache::new_turn_telemetry();
     let mut previous_prefix: Option<crate::ai::prefix_telemetry::RequestFingerprint> = None;
 
+    // Tool-result budget: cap what rides back into context so long command outputs
+    // don't blow up every subsequent request. 0 = unlimited (opt out).
+    let tool_result_max_chars: usize = tc
+        .db
+        .get_setting("agent.tool_result_max_chars")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4000);
+    // Truncate a tool result for context, keeping the head and marking the cut.
+    let cap_tool_result = |output: &str| -> String {
+        if tool_result_max_chars == 0 || output.len() <= tool_result_max_chars {
+            return output.to_string();
+        }
+        let mut cut = output[..tool_result_max_chars].to_string();
+        cut.push_str("\n…[output truncated to save context]");
+        cut
+    };
+
     // Per-workspace agent status (working / planning / testing / idle) shown on the
     // workspace row. No-op when the turn isn't tied to a workspace.
     let emit_ws = |status: &str| {
@@ -335,7 +354,6 @@ pub async fn run_turn(
             &system,
             &tool_defs_for_turn,
             context_limit,
-            thread_summary.as_deref(),
             resolved.provider.as_ref(),
             &resolved.model,
             Some(sink),
@@ -592,6 +610,16 @@ pub async fn run_turn(
         req.messages = req_messages;
         req.tools = tool_defs_for_turn.clone();
         req.xconsole = xconsole_exec.clone();
+        // Opt-in extended cache TTL (1h) when the user enables it — 2× write price
+        // but the prefix survives idle gaps that would evict the 5-min cache.
+        req.cache_retention = tc
+            .db
+            .get_setting("agent.cache_retention")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        // Stable per-session id for provider cache routing (OpenAI prompt_cache_key).
+        req.session_id = tc.session_id.clone();
         // Let the provider's stream loop abort the moment the user presses Stop.
         req.cancel = Some(tc.session_state.cancel_flag(&tc.session_id));
 
@@ -684,28 +712,30 @@ pub async fn run_turn(
                 .collect();
             let results = futures_util::future::join_all(futs).await;
             for (id, output) in results {
+                let capped = cap_tool_result(&output);
                 emit(
                     Some(sink),
                     StreamEvent::ToolResult {
                         id: id.clone(),
-                        output: output.clone(),
+                        output: capped.clone(),
                     },
                 );
-                messages.push(ChatMessage::tool_result(id, output));
+                messages.push(ChatMessage::tool_result(id, capped));
             }
         } else {
             for call in &resp.tool_calls {
                 // The provider already streamed StreamEvent::ToolCall for each call;
                 // the single ToolResult is emitted by this loop below. No re-emit here.
                 let output = tools::dispatch_with_telemetry(tc, call, sink, Some(&telemetry)).await;
+                let capped = cap_tool_result(&output);
                 emit(
                     Some(sink),
                     StreamEvent::ToolResult {
                         id: call.id.clone(),
-                        output: output.clone(),
+                        output: capped.clone(),
                     },
                 );
-                messages.push(ChatMessage::tool_result(call.id.clone(), output));
+                messages.push(ChatMessage::tool_result(call.id.clone(), capped));
             }
         }
 

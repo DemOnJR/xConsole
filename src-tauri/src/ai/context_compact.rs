@@ -72,7 +72,6 @@ pub async fn auto_compact_if_needed(
     system: &str,
     tools: &[crate::ai::provider::ToolDef],
     context_limit: u32,
-    previous_summary: Option<&str>,
     provider: &dyn Provider,
     model: &str,
     sink: Option<&EventSink>,
@@ -91,7 +90,6 @@ pub async fn auto_compact_if_needed(
 
     let result = compact_messages(
         std::mem::take(messages),
-        previous_summary,
         context_limit,
         provider,
         model,
@@ -119,7 +117,6 @@ pub async fn auto_compact_if_needed(
 
 pub async fn compact_messages(
     messages: Vec<ChatMessage>,
-    previous_summary: Option<&str>,
     context_limit: u32,
     provider: &dyn Provider,
     model: &str,
@@ -154,8 +151,7 @@ pub async fn compact_messages(
     }
 
     let middle: Vec<ChatMessage> = working[compress_start..compress_end].to_vec();
-    let summary_body = match summarize_middle(middle.clone(), previous_summary, provider, model, sink).await
-    {
+    let summary_body = match summarize_middle(middle.clone(), provider, model, sink).await {
         Ok(s) if !s.trim().is_empty() => s,
         _ => fallback_summary(&middle),
     };
@@ -189,7 +185,6 @@ pub async fn compact_messages(
 
 async fn summarize_middle(
     turns: Vec<ChatMessage>,
-    previous_summary: Option<&str>,
     provider: &dyn Provider,
     model: &str,
     sink: Option<&EventSink>,
@@ -212,17 +207,14 @@ async fn summarize_middle(
          Target ~{budget} tokens. Current date: {today}."
     );
 
-    let prompt = if let Some(prev) = previous_summary.filter(|s| !s.trim().is_empty()) {
-        format!(
-            "Update this context compaction summary with new turns.\n\nPREVIOUS SUMMARY:\n{prev}\n\n\
-             NEW TURNS:\n{serialized}\n\nUse this structure:\n{template}"
-        )
-    } else {
-        format!(
-            "Summarize these conversation turns for context compaction.\n\nTURNS:\n{serialized}\n\n\
-             Use this structure:\n{template}"
-        )
-    };
+    // A previous summary is deliberately NOT fed back: re-summarizing a summary
+    // drifts from the actual turns and re-inflates cost. The conversation summary
+    // (compact thread context) already carries the durable thread state each turn,
+    // so the compaction summary is always a fresh read of the real turns.
+    let prompt = format!(
+        "Summarize these conversation turns for context compaction.\n\nTURNS:\n{serialized}\n\n\
+         Use this structure:\n{template}"
+    );
 
     let mut req = ChatRequest::new(model);
     req.system = "You are a summarization agent. Produce only the structured summary body — \

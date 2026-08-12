@@ -9,8 +9,26 @@ export interface TokenStats {
   promptTokens?: number;
   /** Provider prompt-cache hits (Anthropic cache_read_input_tokens, etc.). */
   cachedTokens?: number;
+  /** Provider prompt-cache writes (cache_creation_input_tokens). */
+  cacheCreationTokens?: number;
+  /** Estimated USD for this turn (from the backend price table). */
+  costUsd?: number;
   tokensPerSec: number;
   source: "estimate" | "provider";
+}
+
+/** Cache hit rate 0..1: reads / (reads + fresh input). */
+export function cacheHitRate(stats: TokenStats): number | null {
+  if (stats.source !== "provider") return null;
+  const total = (stats.cachedTokens ?? 0) + (stats.promptTokens ?? 0);
+  if (total <= 0) return null;
+  return (stats.cachedTokens ?? 0) / total;
+}
+
+export function formatUsd(n: number | undefined): string {
+  if (n === undefined || !Number.isFinite(n) || n <= 0) return "";
+  if (n < 0.01) return `$${n.toFixed(4)}`;
+  return `$${n.toFixed(3)}`;
 }
 
 export interface TurnTelemetry {
