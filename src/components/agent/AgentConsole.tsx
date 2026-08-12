@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentChatMessage } from "../../stores/agentStore";
-import { AgentMarkdown } from "./AgentMarkdown";
+import { plainText } from "../../lib/plainText";
 import { AgentTokenStats } from "./AgentTokenStats";
 import { consoleRows } from "./agentConsoleRows";
 import type { PrefixTelemetry, TurnTelemetry, TokenStats } from "../../lib/streamStats";
@@ -96,8 +96,8 @@ export function AgentConsole({
             return (
               <div key={index} className="flex gap-2 text-[var(--text)]">
                 <span className="shrink-0 font-bold text-cyan-400">›</span>
-                <div className="min-w-0 flex-1 font-sans text-sm">
-                  <AgentMarkdown content={row.content} variant="user" />
+                <div className="min-w-0 flex-1 whitespace-pre-wrap break-words">
+                  {plainText(row.content)}
                 </div>
               </div>
             );
@@ -108,7 +108,7 @@ export function AgentConsole({
               <div key={index} className="group relative flex gap-2 text-[var(--text)]">
                 <span className="shrink-0 text-emerald-400">•</span>
                 <div className={`min-w-0 ${expanded ? "w-full" : "w-[92%]"}`}>
-                  <AgentMarkdown content={row.content} variant="assistant" />
+                  <div className="whitespace-pre-wrap break-words">{plainText(row.content)}</div>
                   <button
                     type="button"
                     onClick={() => copyContent(row.content, index)}
@@ -150,7 +150,7 @@ export function AgentConsole({
             <span className="shrink-0 text-emerald-400">•</span>
             <div className={`min-w-0 ${expanded ? "w-full" : "w-[92%]"}`}>
               {streamingText ? (
-                <AgentMarkdown content={streamingText} variant="assistant" />
+                <div className="whitespace-pre-wrap break-words">{plainText(streamingText)}</div>
               ) : (
                 <span className="text-gray-500">Thinking…</span>
               )}

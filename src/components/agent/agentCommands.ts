@@ -2,10 +2,35 @@ export interface SlashCommandDef {
   name: string;
   description: string;
   syntax: string;
-  actionKey: "new" | "clear" | "history" | "model" | "targets" | "plan" | "export" | "compact" | "help";
+  actionKey:
+    | "new"
+    | "clear"
+    | "history"
+    | "model"
+    | "targets"
+    | "plan"
+    | "export"
+    | "compact"
+    | "help"
+    | "ctx"
+    | "cost"
+    | "voice"
+    | "conversation";
 }
 
 export const SLASH_COMMANDS: SlashCommandDef[] = [
+  {
+    name: "model",
+    syntax: "/model",
+    description: "Pick the active AI provider (arrows + Enter)",
+    actionKey: "model",
+  },
+  {
+    name: "targets",
+    syntax: "/targets",
+    description: "Select target VPS hosts (space toggles, enter done)",
+    actionKey: "targets",
+  },
   {
     name: "new",
     syntax: "/new",
@@ -15,31 +40,19 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
   {
     name: "clear",
     syntax: "/clear",
-    description: "Clear the input composer",
+    description: "Clear the input line",
     actionKey: "clear",
   },
   {
     name: "history",
     syntax: "/history",
-    description: "Open conversation history and previous chats",
+    description: "Browse past conversations (arrows + Enter)",
     actionKey: "history",
-  },
-  {
-    name: "model",
-    syntax: "/model",
-    description: "Configure AI providers and select active model",
-    actionKey: "model",
-  },
-  {
-    name: "targets",
-    syntax: "/targets",
-    description: "Select target VPS hosts or switch to canvas scope",
-    actionKey: "targets",
   },
   {
     name: "plan",
     syntax: "/plan",
-    description: "Toggle Plan Mode (agent researches and proposes plan first)",
+    description: "Toggle Plan Mode (Shift+Tab)",
     actionKey: "plan",
   },
   {
@@ -55,11 +68,47 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     actionKey: "compact",
   },
   {
+    name: "ctx",
+    syntax: "/ctx",
+    description: "Show context usage breakdown",
+    actionKey: "ctx",
+  },
+  {
+    name: "cost",
+    syntax: "/cost",
+    description: "Show running conversation cost",
+    actionKey: "cost",
+  },
+  {
+    name: "voice",
+    syntax: "/voice",
+    description: "Toggle spoken replies (TTS)",
+    actionKey: "voice",
+  },
+  {
+    name: "conversation",
+    syntax: "/conversation",
+    description: "Hands-free conversation mode (listen continuously)",
+    actionKey: "conversation",
+  },
+  {
     name: "help",
     syntax: "/help",
     description: "List all available slash commands and shortcuts",
     actionKey: "help",
   },
+];
+
+/** Claude Code-style keybinds shown in /help. */
+export const KEYBINDS: { keys: string; action: string }[] = [
+  { keys: "Ctrl+K", action: "command palette (/)" },
+  { keys: "Ctrl+L", action: "clear input" },
+  { keys: "Ctrl+Z / Ctrl+Y", action: "undo / redo" },
+  { keys: "Ctrl+R", action: "cycle provider" },
+  { keys: "Shift+Tab", action: "toggle plan mode" },
+  { keys: "↑ / ↓", action: "recall previous input" },
+  { keys: "Tab", action: "complete slash command" },
+  { keys: "Esc", action: "stop agent / close picker" },
 ];
 
 export function isSlashInput(input: string): boolean {

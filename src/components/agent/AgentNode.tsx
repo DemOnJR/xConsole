@@ -8,11 +8,9 @@ import { useInputHistory } from "../../hooks/useInputHistory";
 import { useVoiceStore } from "../../stores/voiceStore";
 
 import {
-  startRecording,
   startConversation,
   cancelSpeech,
   isSpeaking,
-  type Recorder,
   type Conversation,
 } from "../../lib/voice";
 
@@ -26,33 +24,21 @@ import { useCanvasStore, NODE_W, NODE_H, type AgentNode as AgentNodeType } from 
 import { useSettingsStore } from "../../stores/settingsStore";
 
 import {
-  BotIcon,
-  ChevronDownIcon,
-  ConversationIcon,
-  LoaderIcon,
-  MaximizeIcon,
-  MicIcon,
-  PlanIcon,
-  SettingsIcon,
   StopIcon,
-  TrashIcon,
-  VolumeIcon,
-  VolumeOffIcon,
 } from "../icons";
 
 import { AgentMarkdown } from "./AgentMarkdown";
 import { AgentConsole } from "./AgentConsole";
-import { AgentConsoleFooter } from "./AgentConsoleFooter";
-import { AgentContextUsageButton } from "./AgentContextUsage";
+import { CLIPicker, type CLIPickerOption } from "./CLIPicker";
 import {
   filterSlashCommands,
   isSlashInput,
   parseExactSlashCommand,
+  KEYBINDS,
+  SLASH_COMMANDS,
   type SlashCommandDef,
 } from "./agentCommands";
 import { notify } from "../../lib/notify";
-
-import { AgentHistory, AgentLiveStatus, AgentSessionTabs } from "./AgentHistory";
 
 import type { AgentApproval, AgentPlan, AgentQuestion } from "../../lib/tauri";
 
@@ -283,90 +269,11 @@ function PlanCard({
 
 
 
-/** Compact in-chat switcher for the active agent provider/model. Updates the
- *  `agent.active_provider` setting, which the agent reads on the next turn. */
-function ProviderSwitcher() {
-  const providers = useSettingsStore((s) => s.providers);
-  const activeId = useSettingsStore((s) => s.settings["agent.active_provider"]);
-  const setSetting = useSettingsStore((s) => s.set);
-  const openSettings = useUiStore((s) => s.openSettings);
-  const [open, setOpen] = useState(false);
-
-  const enabled = providers.filter((p) => p.enabled);
-  const active = providers.find((p) => p.id === activeId) ?? enabled[0];
-
-  if (enabled.length === 0) {
-    return (
-      <button
-        onClick={() => openSettings("providers")}
-        className="rounded-md px-1.5 py-0.5 text-[11px] text-amber-300 hover:bg-[var(--border)]"
-      >
-        + Add provider
-      </button>
-    );
-  }
-
-  return (
-    <div
-      className="relative"
-      // Keep the mousedown from reaching React Flow's node-drag handler — the
-      // switcher sits inside the cursor-move header, and a drag would swallow
-      // the click that opens this menu.
-      onMouseDown={(e) => e.stopPropagation()}
-      onPointerDownCapture={(e) => e.stopPropagation()}
-    >
-      <button
-        onClick={() => setOpen((v) => !v)}
-        onBlur={() => setTimeout(() => setOpen(false), 150)}
-        data-tooltip="Switch the agent's provider / model"
-        className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
-      >
-        <span className="max-w-[150px] truncate">{active?.name ?? "no provider"}</span>
-        <ChevronDownIcon size={11} />
-      </button>
-      {open && (
-        <div className="absolute left-0 top-full z-30 mt-1 max-h-72 w-60 overflow-auto rounded-md border border-[var(--border)] bg-[var(--surface)] py-1 shadow-xl">
-          {enabled.map((p) => (
-            <button
-              key={p.id}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                void setSetting("agent.active_provider", p.id);
-                setOpen(false);
-              }}
-              className={`flex w-full flex-col items-start px-2.5 py-1.5 text-left hover:bg-[var(--border)] ${
-                p.id === active?.id ? "bg-[var(--border)]/60" : ""
-              }`}
-            >
-              <span className="text-[11px] text-[var(--text)]">{p.name}</span>
-              <span className="truncate text-[10px] text-[var(--text-faint)]">
-                {p.model || p.kind}
-              </span>
-            </button>
-          ))}
-          <div className="my-1 border-t border-[var(--border)]" />
-          <button
-            onMouseDown={(e) => {
-              e.preventDefault();
-              openSettings("providers");
-              setOpen(false);
-            }}
-            className="w-full px-2.5 py-1.5 text-left text-[10px] text-[var(--text-dim)] hover:bg-[var(--border)]"
-          >
-            Manage providers…
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   const openSettings = useUiStore((s) => s.openSettings);
 
   // Node chrome: focus on click, drag by header (React Flow), tile counter-scale.
   const focus = useCanvasStore((s) => s.focus);
-  const removeNode = useCanvasStore((s) => s.removeNode);
   const layoutMode = useCanvasStore((s) => s.layoutMode);
   const freeform = layoutMode === "freeform";
   const tiled = layoutMode === "tile";
@@ -393,8 +300,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     prefixTelemetry,
 
     contextUsage,
-
-    compactFlipCount,
 
     conversationCostUsd,
 
@@ -427,8 +332,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
     openConversation,
 
-    removeConversation,
-    renameConversation,
     exportConversationMarkdown,
 
     resolveApproval,
@@ -503,11 +406,8 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   }, [id]);
 
 
-  // Voice: mic capture + spoken replies.
-  const recording = useVoiceStore((s) => s.recording);
-  const transcribing = useVoiceStore((s) => s.transcribing);
+  // Voice: spoken replies (TTS) + hands-free conversation.
   const ttsEnabled = useVoiceStore((s) => s.ttsEnabled);
-  const recorderRef = useRef<Recorder | null>(null);
   const [voiceError, setVoiceError] = useState("");
   const [voiceStatus, setVoiceStatus] = useState("");
 
@@ -526,47 +426,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
       useVoiceStore.getState().update({ sttModel: model });
       setVoiceStatus("");
       return await api.transcribe(wav, "local", model, vs.sttLang);
-    }
-  };
-
-  const toggleMic = async () => {
-    const vs = useVoiceStore.getState();
-    if (vs.recording) {
-      const rec = recorderRef.current;
-      recorderRef.current = null;
-      vs.setRecording(false);
-      if (!rec) return;
-      vs.setTranscribing(true);
-      try {
-        const wav = await rec.stop();
-        const text = await transcribeAuto(wav);
-        if (text.trim()) {
-          const next = input.trim() ? `${input} ${text}` : text;
-          if (vs.autoSend) {
-            // Spoken turns use the dedicated conversation model when one is set.
-            send(next, { providerId: vs.conversationProvider || undefined });
-            setInput("");
-            history.reset("");
-          } else {
-            setInput(next);
-            history.record(next);
-          }
-        }
-        setVoiceError("");
-      } catch (e) {
-        setVoiceError(String(e));
-      } finally {
-        setVoiceStatus("");
-        vs.setTranscribing(false);
-      }
-    } else {
-      try {
-        recorderRef.current = await startRecording();
-        useVoiceStore.getState().setRecording(true);
-        setVoiceError("");
-      } catch {
-        setVoiceError("Microphone access was blocked. Allow the mic for this app and try again.");
-      }
     }
   };
 
@@ -641,11 +500,9 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     };
   }, []);
 
-  const [showTargets, setShowTargets] = useState(false);
-
-  const [showHistory, setShowHistory] = useState(false);
-
-  const [showContextUsage, setShowContextUsage] = useState(false);
+  // In-console picker (CLI style): /model, /targets, /history, /ctx, /cost, /help.
+  type PickerKind = "model" | "targets" | "history" | "ctx" | "cost" | "help";
+  const [picker, setPicker] = useState<{ kind: PickerKind } | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -677,6 +534,84 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     [providers, activeProviderId],
   );
 
+  /** Options for the /model picker: enabled providers + their configured model. */
+  const modelOptions = useMemo<CLIPickerOption[]>(() => {
+    return providers
+      .filter((p) => p.enabled)
+      .map((p) => ({
+        id: p.id,
+        label: p.name || p.kind,
+        detail: p.model || p.kind,
+        selected: p.id === activeProvider?.id,
+      }));
+  }, [providers, activeProvider]);
+
+  const targetOptions = useMemo<CLIPickerOption[]>(
+    () =>
+      vpsList.map((v) => ({
+        id: v.id,
+        label: v.name,
+        detail: v.host,
+        selected: targets.includes(v.id),
+      })),
+    [vpsList, targets],
+  );
+
+  const historyOptions = useMemo<CLIPickerOption[]>(
+    () =>
+      conversations.map((c) => ({
+        id: c.id,
+        label: c.title || c.id.slice(0, 8),
+        detail: c.id === sessionId ? "current" : undefined,
+      })),
+    [conversations, sessionId],
+  );
+
+  const helpOptions = useMemo<CLIPickerOption[]>(
+    () => [
+      ...SLASH_COMMANDS.map((c) => ({
+        id: c.syntax,
+        label: c.syntax,
+        detail: c.description,
+      })),
+      ...KEYBINDS.map((k) => ({
+        id: k.keys,
+        label: k.keys,
+        detail: k.action,
+      })),
+    ],
+    [],
+  );
+
+  /** Handle a picker selection. */
+  const onPickerPick = (opt: CLIPickerOption) => {
+    if (!picker) return;
+    switch (picker.kind) {
+      case "model":
+        void useSettingsStore.getState().set("agent.active_provider", opt.id);
+        setPicker(null);
+        break;
+      case "targets": {
+        const ids = opt.id === "__done__" ? undefined : opt.id;
+        if (ids !== undefined) {
+          const next = targets.includes(ids)
+            ? targets.filter((t) => t !== ids)
+            : [...targets, ids];
+          setTargets(next);
+          return; // keep picker open for multi-select
+        }
+        setPicker(null);
+        break;
+      }
+      case "history":
+        if (opt.id !== sessionId) void openConversation(opt.id);
+        setPicker(null);
+        break;
+      default:
+        setPicker(null);
+    }
+  };
+
 
 
   const [slashIndex, setSlashIndex] = useState(0);
@@ -693,11 +628,11 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
       setInput("");
       history.reset("");
     } else if (cmd.actionKey === "history") {
-      setShowHistory(true);
+      setPicker({ kind: "history" });
     } else if (cmd.actionKey === "model") {
-      openSettings("providers");
+      setPicker({ kind: "model" });
     } else if (cmd.actionKey === "targets") {
-      setShowTargets((v) => !v);
+      setPicker({ kind: "targets" });
     } else if (cmd.actionKey === "plan") {
       togglePlanMode();
     } else if (cmd.actionKey === "export") {
@@ -706,12 +641,16 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
       void notify("Conversation exported", "Markdown copied to clipboard");
     } else if (cmd.actionKey === "compact") {
       void send("Please summarize our progress and key context so far, compacting the conversation history.");
+    } else if (cmd.actionKey === "ctx") {
+      setPicker({ kind: "ctx" });
+    } else if (cmd.actionKey === "cost") {
+      setPicker({ kind: "cost" });
+    } else if (cmd.actionKey === "voice") {
+      toggleSpeaker();
+    } else if (cmd.actionKey === "conversation") {
+      void toggleConversation();
     } else if (cmd.actionKey === "help") {
-      setInput("");
-      void notify(
-        "Agent Slash Commands",
-        "/new · /clear · /history · /model · /targets · /plan · /export · /compact",
-      );
+      setPicker({ kind: "help" });
     }
   };
 
@@ -729,16 +668,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     recallIdx.current = null;
   };
 
-
-
-  const toggleTarget = (id: string) =>
-
-    setTargets(
-
-      targets.includes(id) ? targets.filter((t) => t !== id) : [...targets, id],
-
-    );
-
   const canvasNodes = useCanvasStore((s) => s.nodes);
   const canvasVpsIds = useMemo(() => {
     const ids = new Set<string>();
@@ -748,9 +677,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     }
     return [...ids];
   }, [canvasNodes]);
-
-  // Fill-pane toggle: maximize the agent window to the whole canvas, or restore.
-  const toggleFillPane = () => toggleAgentFillPane(id);
 
   // If no targets picked yet but the canvas has hosts open, pre-select those.
   useEffect(() => {
@@ -776,273 +702,42 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
         handleClassName="!bg-blue-500"
       />
 
-      <div className="flex cursor-move items-center gap-2 border-b border-[var(--border)] px-3 py-2.5">
-        <BotIcon size={16} />
-        <span className="xc-panel-title text-[var(--text-dim)]">Agent</span>
-
-        <ProviderSwitcher />
-
-        <div
-          className="ml-auto flex items-center gap-1"
-          // Same drag-guard as ProviderSwitcher: these buttons sit in the header
-          // drag surface; without this, a tiny mouse movement starts a node drag
-          // and swallows the click.
-          onMouseDown={(e) => e.stopPropagation()}
-          onPointerDownCapture={(e) => e.stopPropagation()}
-        >
-
-          <button
-
-            className="rounded-md px-1.5 py-1 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 disabled:opacity-40 disabled:pointer-events-none"
-
-            data-tooltip={streaming ? "Finish the current turn first" : "Chat history"}
-
-            disabled={streaming}
-
-            onClick={() => setShowHistory((v) => !v)}
-
-          >
-
-            History{conversations.length > 0 ? ` (${conversations.length})` : ""}
-
-          </button>
-          <button
-            className="rounded-md px-1.5 py-1 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 disabled:opacity-40"
-            data-tooltip="Export conversation as Markdown"
-            disabled={messages.length === 0}
-            onClick={() => {
-              const md = exportConversationMarkdown();
-              void navigator.clipboard.writeText(md);
-              const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement("a");
-              a.href = url;
-              a.download = "xconsole-chat.md";
-              a.click();
-              URL.revokeObjectURL(url);
-            }}
-          >
-            Export
-          </button>
-
-          <button
-
-            className="rounded-md p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 disabled:opacity-40 disabled:pointer-events-none"
-
-            data-tooltip={streaming ? "Finish the current turn first" : "New conversation"}
-
-            disabled={streaming}
-
-            onClick={() => void newConversation()}
-
-          >
-
-            <TrashIcon size={15} />
-
-          </button>
-
-          <button
-
-            className="rounded-md p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
-
-            data-tooltip="Agent settings"
-
-            onClick={() => openSettings("agent")}
-
-          >
-
-            <SettingsIcon size={15} />
-
-          </button>
-
-          <button
-
-            className="rounded-md p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
-
-            data-tooltip="Fill the canvas with the agent window"
-
-            onClick={() => void toggleFillPane()}
-
-          >
-
-            <MaximizeIcon size={15} />
-
-          </button>
-
-          <button
-
-            className="rounded-md p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
-
-            data-tooltip="Close"
-
-            onClick={() => removeNode(id)}
-
-          >
-
-            ✕
-
-          </button>
-
-        </div>
-
-      </div>
-
-
-
-            <AgentSessionTabs
-        conversations={conversations}
-        activeId={sessionId}
-        disabled={streaming}
-        onSelect={(id) => {
-          if (id === sessionId) return;
-          void openConversation(id);
-        }}
-        onNew={() => void newConversation()}
-        onRename={(id, title) => void renameConversation(id, title)}
-      />
-      <AgentLiveStatus
-        streaming={streaming}
-        activity={activity}
-        planMode={planMode}
-      />
-      <AgentHistory
-
-        open={showHistory}
-
-        conversations={conversations}
-
-        activeId={sessionId}
-
-        onSelect={(id) => {
-
-          void openConversation(id);
-
-          setShowHistory(false);
-
-        }}
-
-        onNew={() => {
-
-          void newConversation();
-
-          setShowHistory(false);
-
-        }}
-
-        onDelete={(id) => void removeConversation(id)}
-        onRename={(id, title) => void renameConversation(id, title)}
-
-        onClose={() => setShowHistory(false)}
-
-      />
-
-
-
-      {/* Targets */}
-
-      <div className="border-b border-[var(--border)] px-3 py-1.5">
-
+      {/* Slim terminal status line (no buttons — everything is a command). */}
+      <div className="flex cursor-move select-none items-center gap-2 border-b border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 font-mono text-[11px]">
+        <span className="text-cyan-400">{streaming ? "●" : "❯"}</span>
+        <span className="text-[var(--text-dim)]">agent</span>
+        <span className="text-[var(--text-faint)]">·</span>
         <button
-
-          className="flex w-full items-center gap-2 text-[11px] text-gray-400 hover:text-gray-200"
-
-          onClick={() => setShowTargets((v) => !v)}
-
+          type="button"
+          onClick={() => setPicker({ kind: "model" })}
+          onMouseDown={(e) => e.stopPropagation()}
+          data-tooltip="Switch provider (/model)"
+          className="truncate text-gray-300 hover:text-cyan-300"
         >
-
-          <span>
-
-            VPS targets:{" "}
-
-            <span className="text-gray-200">
-
-              {targets.length === 0 ? "none (infra-only mode)" : `${targets.length} selected`}
-
-            </span>
-
-          </span>
-
-          <span className="ml-auto">{showTargets ? "▲" : "▼"}</span>
-
+          {activeProvider?.name ?? "no provider"}
+          {activeProvider?.model ? ` · ${activeProvider.model}` : ""}
         </button>
-
-        {showTargets && (
-
-          <div className="mt-1.5 flex flex-wrap gap-1 pb-1">
-
-                        <button
-              onClick={() => setTargets(canvasVpsIds)}
-              className="rounded-full border border-[var(--border)] px-2 py-0.5 text-[10px] text-gray-300 hover:bg-[var(--border)]"
-              data-tooltip="Select hosts that are open on the canvas"
-            >
-              Canvas
-            </button>
-            <button
-              onClick={() => setTargets(vpsList.map((v) => v.id))}
-              className="rounded-full border border-[var(--border)] px-2 py-0.5 text-[10px] text-gray-300 hover:bg-[var(--border)]"
-            >
-              All
-            </button>
-            <button
-              onClick={() => setTargets([])}
-              className="rounded-full border border-[var(--border)] px-2 py-0.5 text-[10px] text-gray-300 hover:bg-[var(--border)]"
-            >
-              None
-            </button>
-
-            {vpsList.map((v) => (
-
-              <button
-
-                key={v.id}
-
-                onClick={() => toggleTarget(v.id)}
-
-                className={`rounded-full border px-2 py-0.5 text-[10px] ${
-
-                  targets.includes(v.id)
-
-                    ? "border-blue-500 bg-blue-600/30 text-blue-100"
-
-                    : "border-[var(--border)] text-gray-400 hover:bg-[var(--border)]"
-
-                }`}
-
-              >
-
-                {v.name}
-
-              </button>
-
-            ))}
-
-            {targets.length === 0 && (
-
-              <p className="w-full text-[10px] leading-relaxed text-gray-500">
-
-                No VPS selected — agent can still manage Terraform projects locally or via
-
-                Terraform Cloud. Select VPS for SSH commands and remote terraform runner.
-
-              </p>
-
-            )}
-
-          </div>
-
-        )}
-
+        {planMode && <span className="rounded bg-indigo-500/20 px-1 text-[9px] text-indigo-300">plan</span>}
+        {ttsEnabled && <span className="text-[9px] text-[var(--text-faint)]">🔊</span>}
+        <span className="ml-auto flex items-center gap-2 text-[var(--text-faint)]">
+          {contextUsage ? <span>{contextUsage.percent}% ctx</span> : null}
+          {conversationCostUsd > 0 ? (
+            <span>${conversationCostUsd.toFixed(4)}</span>
+          ) : null}
+          {streaming ? (
+            <span className="animate-pulse text-emerald-400">working…</span>
+          ) : null}
+        </span>
       </div>
-
-
 
       {/* Messages */}
       {messages.length === 0 && !streaming ? (
         <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs text-gray-600">
-          <div className="space-y-2">
-            <p>Ask the agent to inspect, fix, or automate your servers.</p>
+          <div className="space-y-2 font-mono">
+            <p className="text-[var(--text-dim)]">agent@xconsole:~$</p>
             <p className="text-[10px] text-gray-700">
-              Select VPS targets (or open hosts on the canvas), then ask. Read-only tools run in parallel; Escape stops. Plan mode is safer for reviews.
+              Type a task, or /help for commands. /model picks the provider · /targets
+              selects hosts · Shift+Tab toggles plan mode.
             </p>
           </div>
         </div>
@@ -1097,21 +792,98 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
         </div>
       )}
 
-      {/* Sticky Console Telemetry Footer */}
-      <AgentConsoleFooter
-        activeProvider={activeProvider}
-        targetsCount={targets.length}
-        planMode={planMode}
-        streaming={streaming}
-        streamStats={streamStats}
-        turnTelemetry={turnTelemetry}
-        prefixTelemetry={prefixTelemetry}
-        contextUsage={contextUsage}
-        conversationCostUsd={conversationCostUsd}
-        onTogglePlanMode={togglePlanMode}
-        onOpenSettings={openSettings}
-        onStop={() => void stop()}
-      />
+      {/* In-console picker (CLI style) */}
+      {picker && (
+        <div className="border-t border-[var(--border)] px-3 pb-2 pt-2">
+          {picker.kind === "model" && (
+            <CLIPicker
+              title="Model"
+              options={modelOptions}
+              onPick={onPickerPick}
+              onCancel={() => setPicker(null)}
+              placeholder="Filter providers…"
+            />
+          )}
+          {picker.kind === "targets" && (
+            <CLIPicker
+              title="Targets"
+              options={targetOptions}
+              multi
+              onPick={onPickerPick}
+              onCancel={() => setPicker(null)}
+              placeholder="Filter hosts…"
+            />
+          )}
+          {picker.kind === "history" && (
+            <CLIPicker
+              title="History"
+              options={historyOptions}
+              onPick={onPickerPick}
+              onCancel={() => setPicker(null)}
+              placeholder="Filter conversations…"
+            />
+          )}
+          {picker.kind === "ctx" && (
+            <div className="rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-3 py-2 font-mono text-[11px]">
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-dim)]">
+                Context
+              </div>
+              {contextUsage ? (
+                <>
+                  <div className="mb-1 text-[var(--text)]">
+                    {contextUsage.percent}% of {contextUsage.context_limit.toLocaleString()} tokens
+                  </div>
+                  {contextUsage.segments.map((s) => (
+                    <div key={s.key} className="flex justify-between gap-3 text-[var(--text-faint)]">
+                      <span>{s.label}</span>
+                      <span>{s.tokens.toLocaleString()}</span>
+                    </div>
+                  ))}
+                </>
+              ) : (
+                <div className="text-[var(--text-faint)]">No context usage yet.</div>
+              )}
+              <button
+                type="button"
+                onClick={() => setPicker(null)}
+                className="mt-2 w-full rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-1 text-[10px] text-[var(--text-dim)] hover:text-[var(--text)]"
+              >
+                Close
+              </button>
+            </div>
+          )}
+          {picker.kind === "cost" && (
+            <div className="rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-3 py-2 font-mono text-[11px]">
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-dim)]">
+                Cost
+              </div>
+              <div className="text-[var(--text)]">
+                This conversation: ${conversationCostUsd.toFixed(4)}
+              </div>
+              <div className="text-[var(--text-faint)]">
+                {streamStats?.promptTokens
+                  ? `last turn: ${streamStats.promptTokens.toLocaleString()} in · ${streamStats.completionTokens.toLocaleString()} out`
+                  : "No provider usage yet."}
+              </div>
+              <button
+                type="button"
+                onClick={() => setPicker(null)}
+                className="mt-2 w-full rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-1 text-[10px] text-[var(--text-dim)] hover:text-[var(--text)]"
+              >
+                Close
+              </button>
+            </div>
+          )}
+          {picker.kind === "help" && (
+            <CLIPicker
+              title="Help — commands & keybinds"
+              options={helpOptions}
+              onPick={() => setPicker(null)}
+              onCancel={() => setPicker(null)}
+            />
+          )}
+        </div>
+      )}
 
       {/* Composer — terminal prompt line */}
       <div className="border-t border-[var(--border)] px-3 pb-3 pt-2">
@@ -1155,7 +927,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
           )}
 
           <div className="flex items-center gap-2 px-2.5 py-1.5 font-mono">
-            <span className="shrink-0 text-[13px] text-cyan-400">›</span>
+            <span className="shrink-0 text-[13px] text-[var(--text-dim)]">agent@xconsole:~$</span>
             <input
               ref={inputRef}
               type="text"
@@ -1168,6 +940,25 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
               }}
               onKeyDown={(e) => {
                 const mod = e.ctrlKey || e.metaKey;
+                // Ctrl+R — fast provider cycle (Claude Code-style)
+                if (mod && (e.key === "r" || e.key === "R")) {
+                  e.preventDefault();
+                  const enabled = providers.filter((p) => p.enabled);
+                  if (enabled.length > 1) {
+                    const idx = enabled.findIndex((p) => p.id === activeProvider?.id);
+                    const next = enabled[(idx + 1) % enabled.length];
+                    void useSettingsStore.getState().set("agent.active_provider", next.id);
+                  } else if (enabled.length === 1) {
+                    void useSettingsStore.getState().set("agent.active_provider", enabled[0].id);
+                  }
+                  return;
+                }
+                // Shift+Tab — toggle plan mode (Claude Code-style)
+                if (e.key === "Tab" && e.shiftKey) {
+                  e.preventDefault();
+                  togglePlanMode();
+                  return;
+                }
                 // Open command palette with Ctrl/Cmd+K
                 if (mod && (e.key === "k" || e.key === "K")) {
                   e.preventDefault();
@@ -1264,84 +1055,10 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
               autoComplete="off"
               className="min-w-0 flex-1 border-0 bg-transparent text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--text-faint)] disabled:opacity-50"
             />
-
-            {/* Context usage (hourglass) */}
-            <AgentContextUsageButton
-              usage={contextUsage}
-              compactFlipCount={compactFlipCount}
-              open={showContextUsage}
-              onToggle={() => setShowContextUsage((v) => !v)}
-              onClose={() => setShowContextUsage(false)}
-              placement="composer"
-            />
           </div>
 
-          {/* Footer: plan-mode + voice controls */}
-          <div className="flex items-center gap-1.5 border-t border-[var(--border)]/60 px-2 pb-1.5 pt-1">
-
-            <button
-              onClick={togglePlanMode}
-              data-tooltip="Plan mode: the agent investigates and proposes a plan for your approval before changing anything."
-              aria-label="Plan mode"
-              className={`flex items-center justify-center rounded-md p-1 transition ${
-                planMode
-                  ? "bg-indigo-600/30 text-indigo-200 ring-1 ring-indigo-500/50"
-                  : "text-[var(--text-dim)] hover:bg-[var(--border)] hover:text-[var(--text)]"
-              }`}
-            >
-              <PlanIcon size={14} />
-            </button>
-
-            <button
-              onClick={toggleMic}
-              disabled={transcribing}
-              data-tooltip={recording ? "Stop & transcribe" : "Speak (voice input)"}
-              aria-label={recording ? "Stop recording" : "Speak"}
-              className={`flex items-center justify-center rounded-md p-1 transition disabled:opacity-60 ${
-                recording
-                  ? "bg-red-600/30 text-red-300 ring-1 ring-red-500/50"
-                  : "text-[var(--text-dim)] hover:bg-[var(--border)] hover:text-[var(--text)]"
-              }`}
-            >
-              {transcribing ? (
-                <LoaderIcon size={14} className="animate-spin" />
-              ) : recording ? (
-                <StopIcon size={12} className="animate-pulse" />
-              ) : (
-                <MicIcon size={14} />
-              )}
-            </button>
-
-            <button
-              onClick={toggleSpeaker}
-              data-tooltip={ttsEnabled ? "Spoken replies on — click to mute" : "Speak replies aloud"}
-              aria-label={ttsEnabled ? "Mute spoken replies" : "Enable spoken replies"}
-              className={`flex items-center justify-center rounded-md p-1 transition ${
-                ttsEnabled
-                  ? "bg-[var(--border)] text-[var(--text)]"
-                  : "text-[var(--text-dim)] hover:bg-[var(--border)] hover:text-[var(--text)]"
-              }`}
-            >
-              {ttsEnabled ? <VolumeIcon size={14} /> : <VolumeOffIcon size={14} />}
-            </button>
-
-            <button
-              onClick={toggleConversation}
-              data-tooltip={
-                conversation
-                  ? "Conversation mode on — listening continuously. Click to stop."
-                  : "Conversation mode: talk hands-free, it replies aloud and keeps listening."
-              }
-              aria-label="Conversation mode"
-              className={`flex items-center justify-center rounded-md p-1 transition ${
-                conversation
-                  ? "bg-emerald-600/30 text-emerald-300 ring-1 ring-emerald-500/50"
-                  : "text-[var(--text-dim)] hover:bg-[var(--border)] hover:text-[var(--text)]"
-              }`}
-            >
-              <ConversationIcon size={14} className={conversation ? "animate-pulse" : undefined} />
-            </button>
-
+          {/* Minimal status row: voice status + stop while streaming. */}
+          <div className="flex items-center gap-2 border-t border-[var(--border)]/60 px-2 pb-1.5 pt-1">
             {voiceStatus && (
               <span className="truncate text-[10px] text-[var(--text-dim)]" data-tooltip={voiceStatus}>
                 {voiceStatus}
@@ -1352,7 +1069,11 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
                 {voiceError}
               </span>
             )}
-
+            {conversation && (
+              <span className="truncate text-[10px] text-emerald-400" data-tooltip="Conversation mode active">
+                listening…
+              </span>
+            )}
             {(streaming || speaking) && (
               <button
                 onClick={() => void stop()}
@@ -1363,7 +1084,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
                 <StopIcon size={12} /> {speaking && !streaming ? "Hush" : activity.filter((a) => a.state === "running").length > 1 ? `Stop (${activity.filter((a) => a.state === "running").length})` : "Stop"}
               </button>
             )}
-
           </div>
 
         </div>
