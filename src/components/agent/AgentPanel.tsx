@@ -246,12 +246,6 @@ function PlanCard({
   );
 }
 
-const CLI_KINDS = new Set(["cursor", "codex_cli", "opencode_cli"]);
-
-const TOOL_KINDS = new Set(["openai", "anthropic", "ollama"]);
-
-const CURSOR_KIND = "cursor";
-
 
 
 /** Compact in-chat switcher for the active agent provider/model. Updates the
@@ -659,34 +653,9 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
 
   const activeProvider = useMemo(
-
     () => providers.find((p) => p.id === activeProviderId) ?? providers[0],
-
     [providers, activeProviderId],
-
   );
-
-
-
-  const hasToolProvider = useMemo(
-
-    () => providers.some((p) => p.enabled && TOOL_KINDS.has(p.kind)),
-
-    [providers],
-
-  );
-
-
-
-  const cliNeedsApi = useMemo(() => {
-
-    if (!activeProvider || !CLI_KINDS.has(activeProvider.kind)) return false;
-
-    if (activeProvider.kind === CURSOR_KIND) return false;
-
-    return !hasToolProvider;
-
-  }, [activeProvider, hasToolProvider]);
 
 
 
@@ -1126,26 +1095,6 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
             .
           </div>
         )}
-
-        {cliNeedsApi && targets.length > 0 && (
-          <div className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
-            {activeProvider?.name} is chat-only and cannot SSH.{" "}
-            <button className="underline" onClick={() => openSettings("providers")}>
-              Add OpenAI or Anthropic
-            </button>{" "}
-            to run commands on your VPS (Full autonomy applies automatically).
-          </div>
-        )}
-
-        {activeProvider &&
-          CLI_KINDS.has(activeProvider.kind) &&
-          activeProvider.kind !== CURSOR_KIND &&
-          hasToolProvider &&
-          targets.length > 0 && (
-            <div className="mb-2 rounded-md border border-blue-500/20 bg-blue-500/5 px-2 py-1 text-[10px] text-blue-200/80">
-              CLI provider active — xConsole will use your API provider to execute SSH/tools.
-            </div>
-          )}
 
         <div className="relative rounded-xl border border-[var(--border-strong)] bg-[var(--surface)] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] focus-within:border-[var(--accent)]">
           {/* Slash Commands Suggestion Menu */}
