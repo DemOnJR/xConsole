@@ -594,10 +594,16 @@ pub async fn dispatch_with_telemetry(
     emit_skill_activity(ctx, call, sink);
 
     let args = &call.arguments;
+    let scope = crate::ai::tool_cache::CacheScope::new(
+        &ctx.session_id,
+        ctx.workspace_id.as_deref(),
+        &ctx.targets,
+        &ctx.home.0,
+    );
 
-    // Short-TTL cache for read-only tools / web lookups (same args → skip re-exec).
+    // Short-TTL cache for read-only tools / web lookups (same scoped args → skip re-exec).
     let cacheable = crate::ai::tool_cache::is_cacheable(&call.name);
-    if let Some(hit) = crate::ai::tool_cache::get(&call.name, args) {
+    if let Some(hit) = crate::ai::tool_cache::get_scoped(&scope, &call.name, args) {
         if let Some(telemetry) = telemetry {
             crate::ai::tool_cache::record_cache_lookup(telemetry, true);
         }
@@ -705,7 +711,7 @@ pub async fn dispatch_with_telemetry(
         "taste_save" => taste_save(ctx, args),
         "skills_list" => skills_list(ctx),
         "skill_view" => skill_view(ctx, args),
-        "skill_save" => skill_save(ctx, args),
+        "skill_save" => skill_save(ctx, args).await,
         "learn_skill" => learn_skill(ctx, args, sink).await,
         name if web_tools::is_web_tool(name) => {
             // Gate `web_fetch` like a command. Its URL is model-controlled, so with a
@@ -779,7 +785,8 @@ pub async fn dispatch_with_telemetry(
 
     let ok = !result.starts_with("error:");
     if ok {
-        crate::ai::tool_cache::put(&call.name, args, &result);
+        invalidate_cache_after_success(&scope, &call.name, args);
+        crate::ai::tool_cache::put_scoped(&scope, &call.name, args, &result);
         if cacheable {
             if let Some(telemetry) = telemetry {
                 crate::ai::tool_cache::record_cache_write(telemetry);
@@ -794,6 +801,49 @@ pub async fn dispatch_with_telemetry(
         }),
     );
     result
+}
+
+fn invalidate_cache_after_success(scope: &crate::ai::tool_cache::CacheScope, name: &str, args: &Value) {
+    let cache = |invalidation: &crate::ai::tool_cache::Invalidation| {
+        crate::ai::tool_cache::invalidate_scoped(scope, invalidation);
+    };
+    match name {
+        "host_memory_update" => {
+            if let Some(vps_id) = args.get("vps_id").and_then(Value::as_str) {
+                cache(&crate::ai::tool_cache::Invalidation::HostMemory {
+                    vps_id: vps_id.to_string(),
+                });
+            }
+        }
+        "skill_save" | "skill_install" | "learn_skill" => {
+            cache(&crate::ai::tool_cache::Invalidation::Skills);
+        }
+        "local_write_file" | "download_file" => {
+            if let Some(path) = args
+                .get("path")
+                .or_else(|| args.get("local_path"))
+                .and_then(Value::as_str)
+            {
+                cache(&crate::ai::tool_cache::Invalidation::LocalFile {
+                    path: path.to_string(),
+                });
+            }
+        }
+        "write_file" | "upload_file" => {
+            let vps_id = args.get("vps_id").and_then(Value::as_str);
+            let path = args
+                .get("path")
+                .or_else(|| args.get("remote_path"))
+                .and_then(Value::as_str);
+            if let (Some(vps_id), Some(path)) = (vps_id, path) {
+                cache(&crate::ai::tool_cache::Invalidation::RemoteFile {
+                    vps_id: vps_id.to_string(),
+                    path: path.to_string(),
+                });
+            }
+        }
+        _ => {}
+    }
 }
 
 fn tool_activity_label(ctx: &ToolContext, call: &ToolCall) -> String {
@@ -991,7 +1041,7 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
         // Read-only inspection, agent-local notes/skills, interactive prompts, and
         // non-destructive canvas/UI actions.
         "read_file" | "local_read_file" | "local_list_dir" | "list_vps_targets"
-        | "ssh_key_status" | "memory_save" | "skills_list" | "skill_view" | "skill_save"
+        | "ssh_key_status" | "memory_save" | "skills_list" | "skill_view"
         | "learn_skill" | "ask_user" | "present_plan" | "terminal_capture" | "canvas_open_terminal"
         | "canvas_open_sftp" | "canvas_tile" | "canvas_close" | "canvas_refresh" => false,
         // Typing into a live shell runs commands → mutating.
@@ -1497,17 +1547,15 @@ async fn skill_install_tool(ctx: &ToolContext, args: &Value) -> String {
         Err(e) => return e,
     };
 
-    // Stage to a temp dir so the scanner sees the file on disk.
-    let tmp = std::env::temp_dir().join(format!("xconsole_skill_{}", Uuid::new_v4()));
-    if let Err(e) = std::fs::create_dir_all(&tmp) {
-        return format!("error: staging skill: {e}");
-    }
-    if let Err(e) = std::fs::write(tmp.join("SKILL.md"), &skill_md) {
-        let _ = std::fs::remove_dir_all(&tmp);
-        return format!("error: staging skill: {e}");
-    }
-    let report = skill_scan::scan_skill_with(&tmp, &skill_scan::scan_options_from_db(&ctx.db)).await;
-    let _ = std::fs::remove_dir_all(&tmp);
+    let report = match skill_scan::scan_skill_content(
+        &skill_md,
+        &skill_scan::scan_options_from_db(&ctx.db),
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(e) => return format!("error: scanning skill: {e}"),
+    };
 
     if report.is_blocking() {
         return format!(
@@ -1713,12 +1761,34 @@ fn skill_view(ctx: &ToolContext, args: &Value) -> String {
     }
 }
 
-fn skill_save(ctx: &ToolContext, args: &Value) -> String {
+async fn skill_save(ctx: &ToolContext, args: &Value) -> String {
     let category = args.get("category").and_then(|v| v.as_str()).unwrap_or("");
     let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-    match skills::save_skill(&ctx.home, category, name, content) {
-        Ok(()) => format!("saved skill {category}/{name}"),
+    if category.trim().is_empty() || name.trim().is_empty() || content.trim().is_empty() {
+        return "error: category, name, and non-empty content are required".into();
+    }
+    let report = match skill_scan::scan_skill_content(
+        content,
+        &skill_scan::scan_options_from_db(&ctx.db),
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(e) => return format!("error: scanning skill: {e}"),
+    };
+    if report.is_blocking() {
+        return format!("BLOCKED: skill was not saved.\n{}", report.summary());
+    }
+    let gate = format!(
+        "save unverified skill '{category}/{name}' (scan: {} risk {}/100, scanner {})",
+        report.severity, report.risk_score, report.scanner
+    );
+    if let Err(e) = authorize_local(ctx, &gate).await {
+        return format!("error: {e}");
+    }
+    match skills::save_unverified(&ctx.home, name, content) {
+        Ok(saved) => format!("saved unverified skill unverified/{saved}; promote it after review.\n{}", report.summary()),
         Err(e) => format!("error: {e}"),
     }
 }

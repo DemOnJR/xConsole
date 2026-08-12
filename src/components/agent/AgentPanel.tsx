@@ -44,6 +44,7 @@ import { AgentMarkdown } from "./AgentMarkdown";
 
 import { AgentActivityFeed, AgentThinking } from "./AgentActivity";
 import { AgentTokenStats } from "./AgentTokenStats";
+import { AgentConsole } from "./AgentConsole";
 import { AgentContextUsageButton } from "./AgentContextUsage";
 
 import { AgentHistory, AgentLiveStatus, AgentSessionTabs } from "./AgentHistory";
@@ -438,6 +439,8 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
     streamStats,
 
     turnTelemetry,
+
+    prefixTelemetry,
 
     contextUsage,
 
@@ -1086,97 +1089,48 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
 
       {/* Messages */}
-
-      <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3">
-
-        {messages.length === 0 && !streaming && (
-
-          <div className="mt-6 space-y-2 text-center text-xs text-gray-600">
-
+      {messages.length === 0 && !streaming ? (
+        <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs text-gray-600">
+          <div className="space-y-2">
             <p>Ask the agent to inspect, fix, or automate your servers.</p>
-
             <p className="text-[10px] text-gray-700">
-
               Select VPS targets (or open hosts on the canvas), then ask. Read-only tools run in parallel; Escape stops. Plan mode is safer for reviews.
-
             </p>
-
           </div>
+        </div>
+      ) : (
+        <AgentConsole
+          messages={messages}
+          streamingText={streamingText}
+          streaming={streaming}
+          streamStats={streamStats}
+          turnTelemetry={turnTelemetry}
+          prefixTelemetry={prefixTelemetry}
+          expanded={expanded}
+        />
+      )}
 
-        )}
-
-        {messages.map((m, i) => (
-
-          <MessageBubble
-
-            key={i}
-
-            role={m.role}
-
-            content={m.content}
-
-            activity={m.activity}
-
-            tokenStats={m.tokenStats}
-
-            wide={expanded}
-
-          />
-
-        ))}
-
-
-
-        {streaming && (
-
-          <div className={`flex flex-col gap-2 ${expanded ? "w-full" : "w-[88%]"}`}>
-
-            {!streamingText && activity.length === 0 && <AgentThinking />}
-
-            {activity.length > 0 && (
-              <div className="w-full">
-                <AgentActivityFeed items={activity} live />
-              </div>
-            )}
-
-            {streamingText && (
-              <>
-                <MessageBubble role="assistant" content={streamingText} wide={expanded} />
-                {streamStats && (
-                  <div className={`pl-1 ${expanded ? "w-full" : "w-[88%]"}`}>
-                    <AgentTokenStats stats={streamStats} telemetry={turnTelemetry} live />
-                  </div>
-                )}
-              </>
-            )}
-
-          </div>
-
-        )}
-
-        {error && (
-          <div className="flex items-start gap-2 text-xs text-red-400">
-            <span className="min-w-0 flex-1">{error}</span>
-            <button
-              type="button"
-              className="shrink-0 rounded border border-red-800/50 px-1.5 py-0.5 text-[10px] text-red-200 hover:bg-red-950/50"
-              onClick={() => void retryLast()}
-              data-tooltip="Re-send the last message"
-            >
-              Retry
-            </button>
-            <button
-              type="button"
-              className="shrink-0 rounded px-1 text-[10px] text-red-400/70 hover:text-red-200"
-              onClick={() => clearError()}
-              data-tooltip="Dismiss"
-            >
-              ?
-            </button>
-          </div>
-        )}
-
-      </div>
+      {error && (
+        <div className="flex items-start gap-2 border-t border-red-900/30 px-3 py-2 text-xs text-red-400">
+          <span className="min-w-0 flex-1">{error}</span>
+          <button
+            type="button"
+            className="shrink-0 rounded border border-red-800/50 px-1.5 py-0.5 text-[10px] text-red-200 hover:bg-red-950/50"
+            onClick={() => void retryLast()}
+            data-tooltip="Re-send the last message"
+          >
+            Retry
+          </button>
+          <button
+            type="button"
+            className="shrink-0 rounded px-1 text-[10px] text-red-400/70 hover:text-red-200"
+            onClick={() => clearError()}
+            data-tooltip="Dismiss"
+          >
+            ?
+          </button>
+        </div>
+      )}
 
 
 

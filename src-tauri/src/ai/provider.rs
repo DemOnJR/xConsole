@@ -190,6 +190,19 @@ pub struct TurnTelemetryEvent {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PrefixTelemetryEvent {
+    pub request_index: u32,
+    pub system_hash: String,
+    pub schema_hash: String,
+    pub message_prefix_hash: String,
+    pub system_bytes: u64,
+    pub schema_bytes: u64,
+    pub message_bytes: u64,
+    pub classification: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ContextUsageEvent {
     pub segments: Vec<ContextUsageSegment>,
     pub total_tokens: u32,
@@ -214,6 +227,8 @@ pub enum StreamEvent {
     Stats(StreamStats),
     /// Per-turn tool and cache counters.
     TurnTelemetry(TurnTelemetryEvent),
+    /// Privacy-safe provider-prefix fingerprints and stability classification.
+    PrefixTelemetry(PrefixTelemetryEvent),
     /// Estimated prompt context breakdown for this turn.
     ContextUsage(ContextUsageEvent),
     /// Conversation history replaced after auto-compaction (Hermes-style).

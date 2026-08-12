@@ -439,11 +439,28 @@ impl McpSession {
                 }
             }
             "skill_save" => {
-                let cat = args.get("category").and_then(|v| v.as_str()).unwrap_or("");
                 let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                match skills::save_skill(&self.home, cat, name, content) {
-                    Ok(()) => (format!("saved skill {cat}/{name}"), false),
+                if name.trim().is_empty() || content.trim().is_empty() {
+                    return ("error: name and non-empty content are required".into(), true);
+                }
+                let report = match crate::ai::skill_scan::scan_skill_content(
+                    content,
+                    &crate::ai::skill_scan::scan_options_from_db(&self.db),
+                )
+                .await
+                {
+                    Ok(report) => report,
+                    Err(e) => return (format!("error: scanning skill: {e}"), true),
+                };
+                if report.is_blocking() {
+                    return (format!("BLOCKED: skill was not saved.\n{}", report.summary()), true);
+                }
+                if self.effective_safety(None) != "full" {
+                    return ("error: skill_save requires Full autonomy in xConsole MCP; review and save skills from Settings or the in-app agent".into(), true);
+                }
+                match skills::save_unverified(&self.home, name, content) {
+                    Ok(saved) => (format!("saved unverified skill unverified/{saved}; promote it after review.\n{}", report.summary()), false),
                     Err(e) => (format!("error: {e}"), true),
                 }
             }

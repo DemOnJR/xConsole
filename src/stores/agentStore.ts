@@ -14,11 +14,12 @@ import {
   type StreamEvent,
 } from "../lib/tauri";
 import { notify } from "../lib/notify";
+import { exportConversationMarkdown as renderConversationMarkdown } from "../lib/agentExport";
 import { useWorkspaceStore } from "./workspaceStore";
 import { useCanvasStore } from "./canvasStore";
 import { useSessionStore } from "./sessionStore";
 import { useVoiceStore } from "./voiceStore";
-import type { TurnTelemetry } from "../lib/streamStats";
+import type { PrefixTelemetry, TurnTelemetry } from "../lib/streamStats";
 import {
   cancelSpeech,
   currentSpeechEpoch,
@@ -166,6 +167,7 @@ interface AgentState {
   speaking: boolean;
   streamStats: TokenStats | null;
   turnTelemetry: TurnTelemetry | null;
+  prefixTelemetry: PrefixTelemetry | null;
   contextUsage: ContextUsage | null;
   /** Increments when conversation is auto-compacted — drives hourglass flip. */
   compactFlipCount: number;
@@ -460,6 +462,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   speaking: false,
   streamStats: null,
   turnTelemetry: null,
+  prefixTelemetry: null,
   contextUsage: null,
   compactFlipCount: 0,
   error: null,
@@ -617,6 +620,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       streaming: false,
       streamStats: null,
       turnTelemetry: null,
+      prefixTelemetry: null,
       contextUsage: null,
       compactFlipCount: 0,
       error: null,
@@ -651,6 +655,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       streaming: false,
       streamStats: null,
       turnTelemetry: null,
+      prefixTelemetry: null,
       contextUsage: null,
       compactFlipCount: 0,
       error: null,
@@ -698,30 +703,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   exportConversationMarkdown: () => {
     const { messages, conversations, sessionId } = get();
     const meta = conversations.find((c) => c.id === sessionId);
-    const title = meta?.title || "Conversation";
-    const lines: string[] = [`# ${title}`, "", `<!-- session ${sessionId} -->`, ""];
-    for (const m of messages) {
-      if (m.role === "user") {
-        lines.push("## User", "", m.content, "");
-      } else if (m.role === "assistant") {
-        if (m.activity && m.activity.length > 0) {
-          lines.push("### Activity");
-          for (const a of m.activity) {
-            if (a.kind === "status" || a.id === "collapsed-meta") continue;
-            const bit =
-              a.kind === "command"
-                ? `$ ${a.detail || a.label}`
-                : a.kind === "file_edit"
-                  ? `edit ${a.path || a.label}`
-                  : a.label;
-            lines.push(`- ${bit}`);
-          }
-          lines.push("");
-        }
-        lines.push("## Assistant", "", m.content, "");
-      }
-    }
-    return lines.join("\n").trim() + "\n";
+    return renderConversationMarkdown({ title: meta?.title, messages });
   },
 
   setSpeaking: (speaking) => set({ speaking }),
@@ -818,6 +800,21 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           toolCacheHitRate: ev.data.tool_cache_hit_rate,
         };
         if (isCurrent()) set({ turnTelemetry });
+        return;
+      }
+      if (ev.kind === "PrefixTelemetry") {
+        const prefixTelemetry: PrefixTelemetry = {
+          requestIndex: ev.data.request_index,
+          systemHash: ev.data.system_hash,
+          schemaHash: ev.data.schema_hash,
+          messagePrefixHash: ev.data.message_prefix_hash,
+          systemBytes: ev.data.system_bytes,
+          schemaBytes: ev.data.schema_bytes,
+          messageBytes: ev.data.message_bytes,
+          classification: ev.data.classification,
+          source: ev.data.source,
+        };
+        if (isCurrent()) set({ prefixTelemetry });
         return;
       }
       if (ev.kind === "ContextUsage") {

@@ -27,6 +27,7 @@ pub async fn run_turn(
 ) -> Result<ChatMessage, String> {
     let mut messages = context::compress_window(messages);
     let telemetry = crate::ai::tool_cache::new_turn_telemetry();
+    let mut previous_prefix: Option<crate::ai::prefix_telemetry::RequestFingerprint> = None;
 
     // Per-workspace agent status (working / planning / testing / idle) shown on the
     // workspace row. No-op when the turn isn't tied to a workspace.
@@ -593,6 +594,27 @@ pub async fn run_turn(
         req.xconsole = xconsole_exec.clone();
         // Let the provider's stream loop abort the moment the user presses Stop.
         req.cancel = Some(tc.session_state.cancel_flag(&tc.session_id));
+
+        let current_prefix = crate::ai::prefix_telemetry::fingerprint_request(&req);
+        let classification = crate::ai::prefix_telemetry::classify(
+            previous_prefix.as_ref(),
+            &current_prefix,
+        );
+        emit(
+            Some(sink),
+            StreamEvent::PrefixTelemetry(crate::ai::provider::PrefixTelemetryEvent {
+                request_index: iter as u32,
+                system_hash: current_prefix.system.hash.clone(),
+                schema_hash: current_prefix.schema.hash.clone(),
+                message_prefix_hash: current_prefix.messages.hash.clone(),
+                system_bytes: current_prefix.system.bytes as u64,
+                schema_bytes: current_prefix.schema.bytes as u64,
+                message_bytes: current_prefix.messages.bytes as u64,
+                classification: classification.as_str().into(),
+                source: resolved.kind.clone(),
+            }),
+        );
+        previous_prefix = Some(current_prefix);
 
         let resp = match resolved.provider.chat(&req, Some(sink)).await {
             Ok(r) => r,

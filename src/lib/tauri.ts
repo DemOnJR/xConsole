@@ -601,6 +601,20 @@ export type StreamEvent =
       };
     }
   | {
+      kind: "PrefixTelemetry";
+      data: {
+        request_index: number;
+        system_hash: string;
+        schema_hash: string;
+        message_prefix_hash: string;
+        system_bytes: number;
+        schema_bytes: number;
+        message_bytes: number;
+        classification: string;
+        source: string;
+      };
+    }
+  | {
       kind: "ContextUsage";
       data: {
         segments: { key: string; label: string; tokens: number }[];

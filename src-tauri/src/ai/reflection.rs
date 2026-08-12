@@ -150,7 +150,7 @@ pub fn analyze_turn(messages: &[ChatMessage], iters_used: usize, max_iters: usiz
         }
         let (tool, args_brief) =
             call_for_result(messages, idx).unwrap_or_else(|| ("a tool".to_string(), String::new()));
-        let error = take_chars(&m.content, 200);
+        let error = take_chars(&crate::ai::redaction::redact_text(&m.content), 200);
         let dedup_key = format!("{}\u{0}{}", tool, first_line(&error).to_lowercase());
         if seen.insert(dedup_key) {
             out.failures.push(ToolFailure { tool, args_brief, error });
@@ -429,6 +429,63 @@ mod tests {
         assert_eq!(first.len(), 1, "first reflection should save one lesson");
         let second = reflect_and_save(&home, &msgs, 1, 12);
         assert!(second.is_empty(), "identical mistake should not be saved twice");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reflection_redacts_secret_bearing_tool_errors() {
+        let dir = std::env::temp_dir().join(format!("xc-reflect-secret-{}", std::process::id()));
+        let home = AgentHome::new(dir.clone());
+        let msgs = vec![
+            assistant_call("t1", "run_command", json!({"command": "mysql"})),
+            tool_result(
+                "t1",
+                "error: command failed: mysql -u root -pHUNTER2 --token sk-test-abc123",
+            ),
+        ];
+        let saved = reflect_and_save(&home, &msgs, 1, 12);
+        let memory = memory::load_memory(&home);
+        assert_eq!(saved.len(), 1);
+        assert!(!memory.contains("HUNTER2"));
+        assert!(!memory.contains("sk-test-abc123"));
+        assert!(!memory.contains("mysql -u root"));
+        assert!(memory.contains("run_command"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reflection_preserves_safe_failure_learning() {
+        let dir = std::env::temp_dir().join(format!("xc-reflect-safe-{}", std::process::id()));
+        let home = AgentHome::new(dir.clone());
+        let msgs = vec![
+            assistant_call("t1", "run_command", json!({"command": "systemctl"})),
+            tool_result("t1", "error: command not found: systemctl"),
+        ];
+        reflect_and_save(&home, &msgs, 1, 12);
+        let memory = memory::load_memory(&home);
+        assert!(memory.contains("command not found"));
+        assert!(memory.contains("installed") || memory.contains("alternative"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reflection_redacts_other_secret_shapes_and_dedupes() {
+        let dir = std::env::temp_dir().join(format!("xc-reflect-shapes-{}", std::process::id()));
+        let home = AgentHome::new(dir.clone());
+        let msgs = vec![
+            assistant_call("t1", "run_command", json!({"command": "curl"})),
+            tool_result(
+                "t1",
+                "error: Authorization: Bearer fixture-token postgres://admin:fixture-password@example.invalid/db {\"password\":\"fixture-password\"}",
+            ),
+        ];
+        let first = reflect_and_save(&home, &msgs, 1, 12);
+        let second = reflect_and_save(&home, &msgs, 1, 12);
+        let memory = memory::load_memory(&home);
+        assert_eq!(first.len(), 1);
+        assert!(second.is_empty());
+        assert!(!memory.contains("fixture-token"));
+        assert!(!memory.contains("fixture-password"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

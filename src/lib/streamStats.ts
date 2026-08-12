@@ -22,6 +22,18 @@ export interface TurnTelemetry {
   toolCacheHitRate: number;
 }
 
+export interface PrefixTelemetry {
+  requestIndex: number;
+  systemHash: string;
+  schemaHash: string;
+  messagePrefixHash: string;
+  systemBytes: number;
+  schemaBytes: number;
+  messageBytes: number;
+  classification: string;
+  source: string;
+}
+
 export interface ContextUsageSegment {
   key: string;
   label: string;

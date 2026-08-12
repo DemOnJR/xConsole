@@ -811,6 +811,10 @@ pub fn save_skill(
     name: String,
     content: String,
 ) -> Result<(), String> {
+    let report = crate::ai::skill_scan::scan_skill_content_builtin(&content);
+    if report.is_blocking() {
+        return Err(format!("skill blocked by security scan:\n{}", report.summary()));
+    }
     crate::ai::skills::save_skill(&home, &category, &name, &content)
 }
 
