@@ -50,4 +50,28 @@ describe("Agent Console rows", () => {
     const rows = consoleRows([assistant([])]);
     expect(rows).toEqual([{ kind: "assistant", content: "Done" }]);
   });
+
+  it("renders compaction divider row with token reduction metrics", () => {
+    const rows = consoleRows([
+      { role: "user", content: "Inspect cluster" },
+      {
+        role: "system",
+        content: "Context compacted",
+        isCompaction: true,
+        compactionTokensBefore: 45000,
+        compactionTokensAfter: 6200,
+        compactionPrunedTools: 14,
+      },
+      assistant([]),
+    ]);
+
+    expect(rows.map((r) => r.kind)).toEqual(["user", "compaction", "assistant"]);
+    expect(rows[1]).toMatchObject({
+      kind: "compaction",
+      label: "Context compacted",
+      tokensBefore: 45000,
+      tokensAfter: 6200,
+      prunedTools: 14,
+    });
+  });
 });

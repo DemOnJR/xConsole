@@ -154,6 +154,11 @@ export type { TokenStats, ContextUsage, TurnTelemetry } from "../lib/streamStats
 export interface AgentChatMessage extends ChatMessage {
   activity?: AgentActivityItem[];
   tokenStats?: TokenStats;
+  isCompaction?: boolean;
+  compactionTokensBefore?: number;
+  compactionTokensAfter?: number;
+  compactionPrunedTools?: number;
+  compactionSummary?: string;
 }
 
 interface AgentState {
@@ -744,7 +749,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     // store state, and every shared set() is gated on still being the live session.
     let turnText = "";
     let turnActivity: AgentActivityItem[] = [];
-    let turnMessages: AgentChatMessage[] = history;
 
     const { sessionId, targets, planMode } = get();
     const mySession = sessionId;
@@ -768,6 +772,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         speechChain = speechChain.then(() => speakSentenceQueued(s));
       }
     };
+
+    let compactionMarker: AgentChatMessage | null = null;
 
     const unlisten = await onAiChatOutput(mySession, (ev) => {
       if (ev.kind === "Text") {
@@ -822,16 +828,21 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         return;
       }
       if (ev.kind === "ConversationCompacted") {
-        // Preserve tool_calls / tool_call_id so the next request's history keeps
-        // valid tool_use ids (dropping them 400s the Anthropic Messages API).
-        turnMessages = ev.data.messages.map((m) => ({
-          role: m.role as "user" | "assistant" | "system" | "tool",
-          content: m.content,
-          tool_calls: m.tool_calls,
-          tool_call_id: m.tool_call_id,
-        }));
+        // Dual-path history replay: preserve full transcript history in `messages`,
+        // and append a visual compaction divider marker to the timeline.
+        compactionMarker = {
+          role: "system",
+          content: "Context compacted",
+          isCompaction: true,
+          compactionTokensBefore: (ev.data as any)?.tokens_before,
+          compactionTokensAfter: (ev.data as any)?.tokens_after,
+          compactionPrunedTools: (ev.data as any)?.pruned_tools,
+        };
         if (isCurrent()) {
-          set((s) => ({ messages: turnMessages, compactFlipCount: s.compactFlipCount + 1 }));
+          set((s) => ({
+            messages: [...history, compactionMarker!],
+            compactFlipCount: s.compactFlipCount + 1,
+          }));
         }
         return;
       }
@@ -857,8 +868,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       const tokenStats =
         latestStats ??
         (turnText && streamStartedAt ? liveTokenStats(turnText, streamStartedAt) : undefined);
-      const messages = [
-        ...turnMessages,
+      const messages: AgentChatMessage[] = [
+        ...history,
+        ...(compactionMarker ? [compactionMarker] : []),
         {
           ...assistant,
           activity: turnActivity.length > 0 ? [...turnActivity] : undefined,
@@ -879,16 +891,19 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       const list = await api.listAgentConversations().catch(() => get().conversations);
       set({ conversations: list });
     } catch (e) {
-      const messages = turnText
+      const messages: AgentChatMessage[] = turnText
         ? [
-            ...turnMessages,
+            ...history,
+            ...(compactionMarker ? [compactionMarker] : []),
             {
               role: "assistant" as const,
               content: turnText,
               activity: turnActivity.length > 0 ? [...turnActivity] : undefined,
             },
           ]
-        : turnMessages;
+        : compactionMarker
+          ? [...history, compactionMarker]
+          : history;
       if (isCurrent()) {
         set({
           streaming: false,

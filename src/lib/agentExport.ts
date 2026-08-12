@@ -99,6 +99,15 @@ export function exportConversationMarkdown(input: {
   const lines = [`# ${title}`, ""];
 
   for (const message of input.messages) {
+    if (message.isCompaction) {
+      lines.push(
+        "---",
+        `*⚡ Context compacted (~${message.compactionTokensBefore ?? "?"} → ~${message.compactionTokensAfter ?? "?"} tokens)*`,
+        "---",
+        "",
+      );
+      continue;
+    }
     if (message.role !== "user" && message.role !== "assistant") continue;
     const heading = message.role === "user" ? "User" : "Assistant";
     lines.push(`## ${heading}`, "", redactExportText(message.content), "");
