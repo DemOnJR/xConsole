@@ -183,8 +183,9 @@ pub async fn ai_chat(
         }
     }
 
-    // Fresh turn — clear any leftover Stop request from a previous turn.
+    // Fresh turn — clear state left over from the previous turn.
     tc.session_state.clear_cancel(&tc.session_id);
+    tc.session_state.clear_plan_approved(&tc.session_id);
     let result = agent::run_turn(
         &tc,
         provider_id.filter(|s| !s.is_empty()),

@@ -1,5 +1,9 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import {
+  clampDrawerWidth,
+  DRAWER_WIDTH_DEFAULT,
+} from "../lib/uiLayout";
 
 /** App-level UI chrome state (modals/panels) kept in one place. */
 interface UiState {
@@ -10,6 +14,10 @@ interface UiState {
   bottomOpen: boolean;
   agentOpen: boolean;
   agentExpanded: boolean;
+  /** Persisted width of the expanded workspace drawer. */
+  leftWidth: number;
+  /** Persisted width of the server drawer. */
+  rightWidth: number;
   /** Console drawer expanded height (vs collapsed header only). */
   consoleExpanded: boolean;
   /** Broadcast keystrokes to all open console panes. */
@@ -25,6 +33,8 @@ interface UiState {
   setAgentOpen: (open: boolean) => void;
   setAgentExpanded: (expanded: boolean) => void;
   toggleAgentExpanded: () => void;
+  setLeftWidth: (width: number) => void;
+  setRightWidth: (width: number) => void;
   toggleConsoleExpanded: () => void;
   setConsoleBroadcast: (on: boolean) => void;
   toggleConsoleBroadcast: () => void;
@@ -37,6 +47,8 @@ type PersistedUi = Pick<
   | "bottomOpen"
   | "agentOpen"
   | "agentExpanded"
+  | "leftWidth"
+  | "rightWidth"
   | "consoleExpanded"
   | "consoleBroadcast"
   | "settingsSection"
@@ -48,6 +60,8 @@ const PERSIST_DEFAULTS: PersistedUi = {
   bottomOpen: false,
   agentOpen: false,
   agentExpanded: false,
+  leftWidth: DRAWER_WIDTH_DEFAULT,
+  rightWidth: DRAWER_WIDTH_DEFAULT,
   consoleExpanded: true,
   consoleBroadcast: true,
   settingsSection: "general",
@@ -85,6 +99,8 @@ export const useUiStore = create<UiState>()(
           agentExpanded: s.agentOpen ? !s.agentExpanded : s.agentExpanded,
           agentOpen: true,
         })),
+      setLeftWidth: (width) => set({ leftWidth: clampDrawerWidth(width) }),
+      setRightWidth: (width) => set({ rightWidth: clampDrawerWidth(width) }),
       toggleConsoleExpanded: () =>
         set((s) => ({ consoleExpanded: !s.consoleExpanded })),
       setConsoleBroadcast: (on) => set({ consoleBroadcast: on }),
@@ -100,6 +116,8 @@ export const useUiStore = create<UiState>()(
         bottomOpen: state.bottomOpen,
         agentOpen: state.agentOpen,
         agentExpanded: state.agentExpanded,
+        leftWidth: state.leftWidth,
+        rightWidth: state.rightWidth,
         consoleExpanded: state.consoleExpanded,
         consoleBroadcast: state.consoleBroadcast,
         settingsSection: state.settingsSection,

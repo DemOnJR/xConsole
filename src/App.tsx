@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { WorkspacePanel } from "./components/WorkspacePanel";
 import { ServerPanel } from "./components/ServerPanel";
@@ -30,6 +30,75 @@ import { useWorkspaceAutosave } from "./hooks/useWorkspaceAutosave";
 import { DragGhost } from "./components/DragGhost";
 import { SplashScreen, UnlockScreen } from "./components/lock/UnlockScreen";
 import { useTileShortcuts } from "./hooks/useTileShortcuts";
+import {
+  DRAWER_WIDTH_MAX,
+  DRAWER_WIDTH_MIN,
+  drawerWidthFromDrag,
+  drawerWidthFromKey,
+  type DrawerSide,
+} from "./lib/uiLayout";
+
+function DrawerSplitter({
+  side,
+  width,
+  onWidthChange,
+}: {
+  side: DrawerSide;
+  width: number;
+  onWidthChange: (width: number) => void;
+}) {
+  const drag = useRef<{ startX: number; startWidth: number } | null>(null);
+  const previousUserSelect = useRef("");
+
+  const stopDragging = (event: React.PointerEvent<HTMLDivElement>) => {
+    drag.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    document.body.style.userSelect = previousUserSelect.current;
+  };
+
+  return (
+    <div
+      className="xc-splitter"
+      data-side={side}
+      role="separator"
+      aria-label={side === "left" ? "Resize workspace drawer" : "Resize server drawer"}
+      aria-orientation="vertical"
+      aria-valuemin={DRAWER_WIDTH_MIN}
+      aria-valuemax={DRAWER_WIDTH_MAX}
+      aria-valuenow={width}
+      tabIndex={0}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        drag.current = { startX: event.clientX, startWidth: width };
+        previousUserSelect.current = document.body.style.userSelect;
+        document.body.style.userSelect = "none";
+        event.currentTarget.setPointerCapture(event.pointerId);
+      }}
+      onPointerMove={(event) => {
+        if (!drag.current) return;
+        onWidthChange(
+          drawerWidthFromDrag(
+            side,
+            drag.current.startWidth,
+            drag.current.startX,
+            event.clientX,
+          ),
+        );
+      }}
+      onPointerUp={stopDragging}
+      onPointerCancel={stopDragging}
+      onKeyDown={(event) => {
+        const next = drawerWidthFromKey(width, event.key);
+        if (next === null) return;
+        event.preventDefault();
+        onWidthChange(next);
+      }}
+    />
+  );
+}
 
 /** Restores the workspace as it was left and keeps saving it. A component rather than a
  *  hook call in UnlockedApp because it needs React Flow's viewport, and UnlockedApp's own
@@ -53,6 +122,10 @@ function UnlockedApp() {
   const bottomOpen = useUiStore((s) => s.bottomOpen);
   const agentOpen = useUiStore((s) => s.agentOpen);
   const agentExpanded = useUiStore((s) => s.agentExpanded);
+  const leftWidth = useUiStore((s) => s.leftWidth);
+  const rightWidth = useUiStore((s) => s.rightWidth);
+  const setLeftWidth = useUiStore((s) => s.setLeftWidth);
+  const setRightWidth = useUiStore((s) => s.setRightWidth);
   const setAgentOpen = useUiStore((s) => s.setAgentOpen);
 
   const loadTheme = useThemeStore((s) => s.load);
@@ -148,7 +221,16 @@ function UnlockedApp() {
             <AgentPanel expanded />
           ) : (
             <>
-              {leftOpen ? <WorkspacePanel /> : null}
+              {leftOpen ? (
+                <>
+                  <WorkspacePanel width={leftWidth} />
+                  <DrawerSplitter
+                    side="left"
+                    width={leftWidth}
+                    onWidthChange={setLeftWidth}
+                  />
+                </>
+              ) : null}
 
               <main className="relative min-w-0 flex-1">
                 <CanvasFlow />
@@ -166,7 +248,16 @@ function UnlockedApp() {
                 )}
               </main>
 
-              {rightOpen ? <ServerPanel /> : null}
+              {rightOpen ? (
+                <>
+                  <DrawerSplitter
+                    side="right"
+                    width={rightWidth}
+                    onWidthChange={setRightWidth}
+                  />
+                  <ServerPanel width={rightWidth} />
+                </>
+              ) : null}
               {agentOpen ? <AgentPanel /> : null}
             </>
           )}
