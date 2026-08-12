@@ -42,7 +42,15 @@ import {
 
 import { AgentMarkdown } from "./AgentMarkdown";
 import { AgentConsole } from "./AgentConsole";
+import { AgentConsoleFooter } from "./AgentConsoleFooter";
 import { AgentContextUsageButton } from "./AgentContextUsage";
+import {
+  filterSlashCommands,
+  isSlashInput,
+  parseExactSlashCommand,
+  type SlashCommandDef,
+} from "./agentCommands";
+import { notify } from "../../lib/notify";
 
 import { AgentHistory, AgentLiveStatus, AgentSessionTabs } from "./AgentHistory";
 
@@ -682,18 +690,52 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
 
 
-  const submit = () => {
+  const [slashIndex, setSlashIndex] = useState(0);
+  const slashSuggestions = useMemo(() => {
+    return isSlashInput(input) ? filterSlashCommands(input) : [];
+  }, [input]);
 
-    if (!input.trim()) return;
-
-    send(input);
-
+  const executeSlashAction = async (cmd: SlashCommandDef) => {
     setInput("");
-
     history.reset("");
+    if (cmd.actionKey === "new") {
+      await newConversation();
+    } else if (cmd.actionKey === "clear") {
+      setInput("");
+      history.reset("");
+    } else if (cmd.actionKey === "history") {
+      setShowHistory(true);
+    } else if (cmd.actionKey === "model") {
+      openSettings("providers");
+    } else if (cmd.actionKey === "targets") {
+      setShowTargets((v) => !v);
+    } else if (cmd.actionKey === "plan") {
+      togglePlanMode();
+    } else if (cmd.actionKey === "export") {
+      const md = exportConversationMarkdown();
+      void navigator.clipboard.writeText(md);
+      void notify("Conversation exported", "Markdown copied to clipboard");
+    } else if (cmd.actionKey === "help") {
+      setInput("");
+      void notify(
+        "Agent Slash Commands",
+        "/new · /clear · /history · /model · /targets · /plan · /export",
+      );
+    }
+  };
 
+  const submit = () => {
+    const trimmed = input.trim();
+    if (!trimmed) return;
+    const exact = parseExactSlashCommand(trimmed);
+    if (exact) {
+      void executeSlashAction(exact);
+      return;
+    }
+    send(input);
+    setInput("");
+    history.reset("");
     recallIdx.current = null;
-
   };
 
 
@@ -1034,113 +1076,122 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
             onClick={() => clearError()}
             data-tooltip="Dismiss"
           >
-            ?
+            ✕
           </button>
         </div>
       )}
 
-
-
       {/* Interactive prompts: approvals, questions, plan review */}
-
       {(pendingApprovals.length > 0 ||
         pendingQuestions.length > 0 ||
         pendingPlan) && (
-
         <div className="border-t border-[var(--border)] bg-[var(--bg)] px-3 py-2">
-
           {pendingApprovals.map((a) => (
             <ApprovalCard key={a.id} approval={a} onResolve={resolveApproval} />
           ))}
-
           {pendingQuestions.map((q) => (
             <QuestionCard key={q.id} question={q} onAnswer={answerQuestion} />
           ))}
-
           {pendingPlan && (
             <PlanCard plan={pendingPlan} onResolve={resolvePlan} />
           )}
-
         </div>
-
       )}
 
-
+      {/* Sticky Console Telemetry Footer */}
+      <AgentConsoleFooter
+        activeProvider={activeProvider}
+        targetsCount={targets.length}
+        planMode={planMode}
+        streaming={streaming}
+        streamStats={streamStats}
+        turnTelemetry={turnTelemetry}
+        prefixTelemetry={prefixTelemetry}
+        contextUsage={contextUsage}
+        onTogglePlanMode={togglePlanMode}
+        onOpenSettings={openSettings}
+        onStop={() => void stop()}
+      />
 
       {/* Composer */}
-
       <div className="border-t border-[var(--border)] p-3">
-
         {!activeProvider && (
-
           <div className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
-
             No provider configured.{" "}
-
             <button className="underline" onClick={() => openSettings("providers")}>
-
               Add one
-
             </button>
-
             .
-
           </div>
-
         )}
 
         {cliNeedsApi && targets.length > 0 && (
-
           <div className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
-
             {activeProvider?.name} is chat-only and cannot SSH.{" "}
-
             <button className="underline" onClick={() => openSettings("providers")}>
-
               Add OpenAI or Anthropic
-
             </button>{" "}
-
             to run commands on your VPS (Full autonomy applies automatically).
-
           </div>
-
         )}
 
         {activeProvider &&
-
           CLI_KINDS.has(activeProvider.kind) &&
-
           activeProvider.kind !== CURSOR_KIND &&
-
           hasToolProvider &&
-
           targets.length > 0 && (
-
             <div className="mb-2 rounded-md border border-blue-500/20 bg-blue-500/5 px-2 py-1 text-[10px] text-blue-200/80">
-
               CLI provider active — xConsole will use your API provider to execute SSH/tools.
-
             </div>
-
           )}
 
         <div className="relative rounded-xl border border-[var(--border-strong)] bg-[var(--surface)] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] focus-within:border-[var(--accent)]">
+          {/* Slash Commands Suggestion Menu */}
+          {slashSuggestions.length > 0 && (
+            <div className="absolute bottom-full left-0 right-0 z-30 mb-1.5 max-h-52 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1.5 shadow-2xl font-mono">
+              <div className="flex items-center justify-between px-2 py-1 text-[10px] uppercase tracking-wider text-gray-500 font-sans">
+                <span>Commands</span>
+                <span>Tab / Enter to run</span>
+              </div>
+              {slashSuggestions.map((cmd, idx) => (
+                <button
+                  key={cmd.name}
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    void executeSlashAction(cmd);
+                  }}
+                  className={`flex w-full items-center justify-between rounded px-2 py-1 text-left text-[11px] transition ${
+                    idx === slashIndex
+                      ? "bg-[var(--border)] text-cyan-300 font-semibold"
+                      : "text-gray-300 hover:bg-[var(--border)]/50"
+                  }`}
+                >
+                  <span className="text-cyan-400">{cmd.syntax}</span>
+                  <span className="truncate text-[10px] text-gray-400 font-sans">{cmd.description}</span>
+                </button>
+              ))}
+            </div>
+          )}
 
           <textarea
-
             ref={inputRef}
-
             value={input}
-
             onChange={(e) => {
               setInput(e.target.value);
               history.record(e.target.value);
               recallIdx.current = null;
+              setSlashIndex(0);
             }}
-
             onKeyDown={(e) => {
               const mod = e.ctrlKey || e.metaKey;
+              // Clear composer with Ctrl+L
+              if (mod && (e.key === "l" || e.key === "L")) {
+                e.preventDefault();
+                setInput("");
+                history.reset("");
+                return;
+              }
               // Undo / redo
               if (mod && (e.key === "z" || e.key === "Z")) {
                 e.preventDefault();
@@ -1152,6 +1203,32 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
                 e.preventDefault();
                 history.redo();
                 return;
+              }
+              // Slash commands keyboard navigation
+              if (slashSuggestions.length > 0) {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setSlashIndex((i) => (i + 1) % slashSuggestions.length);
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setSlashIndex((i) => (i - 1 + slashSuggestions.length) % slashSuggestions.length);
+                  return;
+                }
+                if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+                  e.preventDefault();
+                  const picked = slashSuggestions[slashIndex] || slashSuggestions[0];
+                  if (picked) {
+                    void executeSlashAction(picked);
+                    return;
+                  }
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setInput("");
+                  return;
+                }
               }
               // Recall previously sent messages with Up/Down (shell-style)
               const userMsgs = messages
@@ -1191,17 +1268,11 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
                 submit();
               }
             }}
-
             rows={1}
-
-            placeholder="Ask anything…  (Enter to send · Shift+Enter for a new line)"
-
+            placeholder="Ask anything… (/ for commands · Enter to send · Shift+Enter for new line)"
             disabled={streaming}
-
-            className="block w-full resize-none border-0 bg-transparent pl-3.5 pr-10 pb-1.5 pt-3 text-[13px] leading-relaxed text-[var(--text)] outline-none placeholder:text-[var(--text-faint)] disabled:opacity-50"
-
+            className="block w-full resize-none border-0 bg-transparent pl-3.5 pr-10 pb-1.5 pt-3 text-[13px] leading-relaxed text-[var(--text)] outline-none placeholder:text-[var(--text-faint)] disabled:opacity-50 font-sans"
             style={{ minHeight: "44px", maxHeight: "160px" }}
-
           />
 
           {/* Footer: plan-mode + voice controls on the left (Enter sends) */}
