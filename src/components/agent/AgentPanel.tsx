@@ -41,105 +41,12 @@ import {
 } from "../icons";
 
 import { AgentMarkdown } from "./AgentMarkdown";
-
-import { AgentActivityFeed, AgentThinking } from "./AgentActivity";
-import { AgentTokenStats } from "./AgentTokenStats";
 import { AgentConsole } from "./AgentConsole";
 import { AgentContextUsageButton } from "./AgentContextUsage";
 
 import { AgentHistory, AgentLiveStatus, AgentSessionTabs } from "./AgentHistory";
 
-import type { AgentChatMessage } from "../../stores/agentStore";
-
 import type { AgentApproval, AgentPlan, AgentQuestion } from "../../lib/tauri";
-
-
-
-function MessageBubble({
-
-  role,
-
-  content,
-
-  activity,
-
-  tokenStats,
-
-  wide,
-
-}: {
-
-  role: string;
-
-  content: string;
-
-  activity?: AgentChatMessage["activity"];
-
-  tokenStats?: AgentChatMessage["tokenStats"];
-
-  wide?: boolean;
-
-}) {
-
-  const isUser = role === "user";
-
-  return (
-
-    <div className={`flex flex-col gap-2 ${isUser ? "items-end" : "items-start"}`}>
-
-      {!isUser && activity && activity.length > 0 && (
-        <div className={wide ? "w-full max-w-full" : "w-[88%] max-w-[88%]"}>
-          <AgentActivityFeed items={activity} />
-        </div>
-      )}
-
-      <div className={`flex ${isUser ? "justify-end" : "justify-start"} w-full`}>
-
-        <div
-
-          className={`rounded-lg px-3 py-2 text-sm leading-relaxed ${
-
-            wide ? "max-w-full" : "max-w-[88%]"
-
-          } ${
-
-            isUser
-
-              ? "bg-blue-600 text-white"
-
-              : "border border-[var(--border)] bg-[var(--surface)] text-gray-200"
-
-          }`}
-
-        >
-
-          <AgentMarkdown content={content} variant={isUser ? "user" : "assistant"} />
-          <button
-            type="button"
-            className={`mt-1.5 text-[10px] opacity-60 transition hover:opacity-100 ${
-              isUser ? "text-blue-100" : "text-gray-500"
-            }`}
-            onClick={() => void navigator.clipboard.writeText(content)}
-            data-tooltip="Copy message"
-          >
-            Copy
-          </button>
-
-        </div>
-
-      </div>
-
-      {!isUser && tokenStats && (
-        <div className={wide ? "w-full pl-1" : "w-[88%] pl-1"}>
-          <AgentTokenStats stats={tokenStats} />
-        </div>
-      )}
-
-    </div>
-
-  );
-
-}
 
 
 
