@@ -153,10 +153,10 @@ export function CanvasFlow() {
   // Tile mode is a fixed full-canvas grid: lock zoom/pan and free the corners.
   const tiled = layoutMode === "tile";
 
-  /** Windows-style snap preview: while a node is dragged in freeform mode, track the
-   *  cursor in pane fractions so the overlay can highlight the zone under it. */
+  /** Windows-style snap preview: while a node is dragged (freeform OR tile mode),
+   *  track the cursor in pane fractions so the overlay can highlight the zone under
+   *  it. The preview only arms when the cursor is near a zone (see snapDrag). */
   const onNodeDrag = (_: MouseEvent | TouchEvent, node: Node) => {
-    if (layoutMode !== "freeform") return;
     const state = useSnapDragStore.getState();
     if (!state.nodeId) state.begin(node.id);
     const pane = document.querySelector<HTMLElement>(".react-flow__pane");

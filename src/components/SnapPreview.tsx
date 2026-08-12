@@ -3,14 +3,16 @@ import { snapZones } from "../lib/snapLayout";
 
 /**
  * Windows-style snap-layout preview. Rendered inside the React Flow viewport (so it
- * inherits the pane coordinate system and zoom), it draws the translucent zones while
- * a node is being dragged in freeform mode, highlighting the one under the cursor.
+ * inherits the pane coordinate system and zoom). While a node is being dragged, it
+ * draws the translucent zones — but only once the cursor has entered a zone's trigger
+ * band (Windows only shows the layout when you get close to a snap position), and it
+ * highlights the zone currently under the cursor.
  */
 export function SnapPreview() {
-  const dragging = useSnapDragStore((s) => s.nodeId !== null);
+  const armed = useSnapDragStore((s) => s.armed);
   const count = useSnapDragStore((s) => s.count);
 
-  if (!dragging) return null;
+  if (!armed) return null;
   const zones = snapZones(count);
   const active = activeSnapZone();
 
