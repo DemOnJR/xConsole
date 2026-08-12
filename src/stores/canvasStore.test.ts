@@ -190,11 +190,15 @@ describe("column tiling (side-by-side panes)", () => {
     const ids = [s.addVps(vps(1)), s.addVps(vps(2)), s.addVps(vps(3))];
     useCanvasStore.getState().setPaneSize(PANE);
     useCanvasStore.getState().setTileColumns([2, 1]);
+    const layoutBefore = useCanvasStore.getState().tileLayout;
+    expect(layoutBefore?.columns).toBeTruthy();
 
-    const node = useCanvasStore.getState().nodes.find((n) => n.id === ids[0])!;
+    // Resize the agent-ish third node (the one alone in the right column) — the
+    // reported bug: this used to drop the columns and revert to row layout.
+    const node = useCanvasStore.getState().nodes.find((n) => n.id === ids[2])!;
     useCanvasStore.getState().onNodesChange([
       {
-        id: ids[0],
+        id: ids[2],
         type: "dimensions",
         resizing: true,
         dimensions: {
@@ -203,6 +207,29 @@ describe("column tiling (side-by-side panes)", () => {
         },
       },
     ]);
+    const layoutAfter = useCanvasStore.getState().tileLayout;
+    expect(layoutAfter?.columns).toBeTruthy();
+    expect(layoutAfter?.columns?.length).toBe(2);
+    // Left column still stacks the first two, right column still has the third.
+    expect(layoutAfter?.columns?.[0].items.map((i) => i.id)).toEqual([ids[0], ids[1]]);
+    expect(layoutAfter?.columns?.[1].items.map((i) => i.id)).toEqual([ids[2]]);
+    expectColumnsGapFree();
+  });
+
+  it("re-tiling from positions preserves a column arrangement", () => {
+    const s = useCanvasStore.getState();
+    const ids = [s.addVps(vps(1)), s.addVps(vps(2)), s.addVps(vps(3))];
+    useCanvasStore.getState().setPaneSize(PANE);
+    useCanvasStore.getState().setTileColumns([2, 1]);
+    expect(useCanvasStore.getState().tileLayout?.columns).toBeTruthy();
+
+    // The Tile button path: retileFromPositions re-derives from where nodes sit.
+    useCanvasStore.getState().retileFromPositions(PANE);
+    const layout = useCanvasStore.getState().tileLayout;
+    expect(layout?.columns).toBeTruthy();
+    expect(layout?.columns?.length).toBe(2);
+    expect(layout?.columns?.[0].items.map((i) => i.id)).toEqual([ids[0], ids[1]]);
+    expect(layout?.columns?.[1].items.map((i) => i.id)).toEqual([ids[2]]);
     expectColumnsGapFree();
   });
 

@@ -192,19 +192,67 @@ export interface PlacedNode {
 export function rowsFromPositions(nodes: PlacedNode[]): TileLayout {
   if (nodes.length === 0) return { rows: [] };
 
+  // Detect a column arrangement first: nodes grouped into distinct x-bands (each band
+  // is a vertical stack sharing roughly the same x). A column layout looks like
+  // [2 on left, 1 tall on right] — the x-centres cluster into groups. Only treat it as
+  // columns when there is more than one x-band AND the bands are clearly separated
+  // (each band's x-range doesn't overlap the next), so a normal row layout (all nodes
+  // sharing one band) stays rows.
+  const byX = [...nodes].sort((a, b) => a.x - b.x);
+  const bands: PlacedNode[][] = [];
+  let current: PlacedNode[] = [];
+  let bandRight = 0;
+  for (const node of byX) {
+    if (current.length === 0) {
+      current = [node];
+      bandRight = node.x + node.width;
+      continue;
+    }
+    // Overlap test: the node starts before the current band ends (with a little slack).
+    if (node.x < bandRight - 1) {
+      current.push(node);
+      bandRight = Math.max(bandRight, node.x + node.width);
+    } else {
+      bands.push(current);
+      current = [node];
+      bandRight = node.x + node.width;
+    }
+  }
+  if (current.length > 0) bands.push(current);
+
+  // Only column when there are 2+ separated bands AND each band stacks 1+ nodes.
+  if (bands.length >= 2) {
+    const columns = bands.map((band) => {
+      const ordered = [...band].sort(
+        (a, b) => a.y + a.height / 2 - (b.y + b.height / 2),
+      );
+      const meanHeight = ordered.reduce((s, n) => s + n.height, 0) / ordered.length || 1;
+      return {
+        weight: 1,
+        items: ordered.map((n) => ({ id: n.id, weight: n.height / meanHeight })),
+      };
+    });
+    // Mirror rows so the row-based helpers (rowCounts, etc.) stay consistent.
+    const flat = columns.flatMap((c) => c.items);
+    return normalize({
+      rows: flat.length > 0 ? [{ weight: 1, items: flat }] : [],
+      columns,
+    });
+  }
+
   const byTop = [...nodes].sort(
     (a, b) => a.y + a.height / 2 - (b.y + b.height / 2) || a.x - b.x,
   );
 
-  const bands: PlacedNode[][] = [];
-  let current: PlacedNode[] = [];
+  const bandsY: PlacedNode[][] = [];
+  let cur: PlacedNode[] = [];
   let meanCentre = 0;
   let meanHeight = 0;
 
   for (const node of byTop) {
     const centre = node.y + node.height / 2;
-    if (current.length === 0) {
-      current = [node];
+    if (cur.length === 0) {
+      cur = [node];
       meanCentre = centre;
       meanHeight = node.height;
       continue;
@@ -212,24 +260,24 @@ export function rowsFromPositions(nodes: PlacedNode[]): TileLayout {
     // Half the mean height is forgiving enough for hand-dragged tiles that are a little
     // off, and tight enough that a deliberately separate row stays separate.
     if (Math.abs(centre - meanCentre) <= Math.max(meanHeight, 1) / 2) {
-      current.push(node);
-      meanCentre = current.reduce((s, n) => s + n.y + n.height / 2, 0) / current.length;
-      meanHeight = current.reduce((s, n) => s + n.height, 0) / current.length;
+      cur.push(node);
+      meanCentre = cur.reduce((s, n) => s + n.y + n.height / 2, 0) / cur.length;
+      meanHeight = cur.reduce((s, n) => s + n.height, 0) / cur.length;
     } else {
-      bands.push(current);
-      current = [node];
+      bandsY.push(cur);
+      cur = [node];
       meanCentre = centre;
       meanHeight = node.height;
     }
   }
-  if (current.length > 0) bands.push(current);
+  if (cur.length > 0) bandsY.push(cur);
 
   const meanRowHeight =
-    bands.reduce((s, r) => s + r.reduce((m, n) => Math.max(m, n.height), 0), 0) /
-    Math.max(bands.length, 1);
+    bandsY.reduce((s, r) => s + r.reduce((m, n) => Math.max(m, n.height), 0), 0) /
+    Math.max(bandsY.length, 1);
 
   return normalize({
-    rows: bands.map((band) => {
+    rows: bandsY.map((band) => {
       const ordered = [...band].sort(
         (a, b) => a.x + a.width / 2 - (b.x + b.width / 2),
       );
@@ -432,7 +480,10 @@ function computeColumnBoxes(
 const cloneRows = (layout: TileLayout): TileRow[] =>
   layout.rows.map((r) => ({ weight: r.weight, items: r.items.map((it) => ({ ...it })) }));
 
-/** Swap a tile with its neighbour in the same row. */
+const cloneColumns = (layout: TileLayout): TileColumn[] =>
+  layout.columns!.map((c) => ({ weight: c.weight, items: c.items.map((it) => ({ ...it })) }));
+
+/** Swap a tile with its neighbour in the same row (or column, in a column layout). */
 export function moveWithinRow(
   layout: TileLayout,
   id: string,
@@ -440,6 +491,19 @@ export function moveWithinRow(
 ): TileLayout {
   const at = findTile(layout, id);
   if (!at) return layout;
+
+  if (layout.columns) {
+    // In a column layout "within row" means: move within the same COLUMN (up/down),
+    // since the visual rows are the column stacks. `at.row` is the item index, `at.col`
+    // the column.
+    const columns = cloneColumns(layout);
+    const items = columns[at.col].items;
+    const to = at.row + dir;
+    if (to < 0 || to >= items.length) return layout;
+    [items[at.row], items[to]] = [items[to], items[at.row]];
+    return { ...layout, columns };
+  }
+
   const rows = cloneRows(layout);
   const items = rows[at.row].items;
   const to = at.col + dir;
@@ -449,13 +513,35 @@ export function moveWithinRow(
 }
 
 /**
- * Move a tile to the row above/below, keeping roughly its horizontal position. Moving
- * past the first/last row creates a new row, so a user can always peel a tile off into
- * its own full-width row.
+ * Move a tile to the row above/below (or column left/right in a column layout),
+ * keeping roughly its position. Moving past the first/last creates a new one.
  */
 export function moveToRow(layout: TileLayout, id: string, dir: -1 | 1): TileLayout {
   const at = findTile(layout, id);
   if (!at) return layout;
+
+  if (layout.columns) {
+    // Column layout: "vertical move" is really a move BETWEEN columns (left/right).
+    const columns = cloneColumns(layout);
+    const from = columns[at.col];
+    // Refuse to empty a column by moving its only tile into a brand-new one.
+    const target = at.col + dir;
+    const creating = target < 0 || target >= columns.length;
+    if (creating && from.items.length === 1) return layout;
+
+    const [tile] = from.items.splice(at.row, 1);
+    if (creating) {
+      const col: TileColumn = { weight: 1, items: [tile] };
+      if (target < 0) columns.unshift(col);
+      else columns.push(col);
+    } else {
+      const dest = columns[target];
+      const pos = Math.min(at.row, dest.items.length);
+      dest.items.splice(pos, 0, tile);
+    }
+    return normalize({ ...layout, columns });
+  }
+
   const rows = cloneRows(layout);
   const from = rows[at.row];
   // Refuse to empty a row by moving its only tile into a brand-new row — that would
@@ -494,6 +580,26 @@ export function moveToRow(layout: TileLayout, id: string, dir: -1 | 1): TileLayo
 export function resizeTile(layout: TileLayout, id: string, delta: number): TileLayout {
   const at = findTile(layout, id);
   if (!at) return layout;
+
+  if (layout.columns) {
+    // Column layout: a horizontal edge is BETWEEN columns, so the drag changes the
+    // column's width weight, trading with the adjacent column.
+    const columns = cloneColumns(layout);
+    if (columns.length < 2) return layout;
+    const neighbourCol = at.col + 1 < columns.length ? at.col + 1 : at.col - 1;
+    const col = columns[at.col];
+    const neighbour = columns[neighbourCol];
+
+    const before = col.weight;
+    col.weight = clampWeight(col.weight + delta);
+    const applied = col.weight - before;
+    const neighbourAfter = clampWeight(neighbour.weight - applied);
+    const absorbed = neighbour.weight - neighbourAfter;
+    col.weight = before + absorbed;
+    neighbour.weight = neighbourAfter;
+    return { ...layout, columns };
+  }
+
   const rows = cloneRows(layout);
   const items = rows[at.row].items;
   if (items.length < 2) return layout;
@@ -524,6 +630,28 @@ export function resizeTile(layout: TileLayout, id: string, delta: number): TileL
 export function resizeRow(layout: TileLayout, id: string, delta: number): TileLayout {
   const at = findTile(layout, id);
   if (!at) return layout;
+
+  if (layout.columns) {
+    // Column layout: a vertical edge is between two items INSIDE the same column, so
+    // the drag changes the item's height weight, trading with its neighbor in-stack.
+    const columns = cloneColumns(layout);
+    const items = columns[at.col].items;
+    if (items.length < 2) return layout;
+
+    const neighbourRow = at.row + 1 < items.length ? at.row + 1 : at.row - 1;
+    const item = items[at.row];
+    const neighbour = items[neighbourRow];
+
+    const before = item.weight;
+    item.weight = clampWeight(item.weight + delta);
+    const applied = item.weight - before;
+    const neighbourAfter = clampWeight(neighbour.weight - applied);
+    const absorbed = neighbour.weight - neighbourAfter;
+    item.weight = before + absorbed;
+    neighbour.weight = neighbourAfter;
+    return { ...layout, columns };
+  }
+
   const rows = cloneRows(layout);
   if (rows.length < 2) return layout;
 
@@ -551,6 +679,23 @@ export function resizeRow(layout: TileLayout, id: string, delta: number): TileLa
 export function toggleFullWidth(layout: TileLayout, id: string): TileLayout {
   const at = findTile(layout, id);
   if (!at) return layout;
+
+  if (layout.columns) {
+    // Column layout: "full width" means its own full-height column.
+    const columns = cloneColumns(layout);
+    if (columns[at.col].items.length === 1) {
+      // Already alone in its column — merge back into an adjacent column.
+      if (columns.length === 1) return layout;
+      const [tile] = columns[at.col].items.splice(0, 1);
+      const into = at.col > 0 ? at.col - 1 : 1;
+      columns[into].items.push(tile);
+      return normalize({ ...layout, columns });
+    }
+    const [tile] = columns[at.col].items.splice(at.row, 1);
+    columns.splice(at.col + 1, 0, { weight: 1, items: [tile] });
+    return normalize({ ...layout, columns });
+  }
+
   const rows = cloneRows(layout);
 
   if (rows[at.row].items.length === 1) {
