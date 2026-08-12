@@ -616,6 +616,27 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
+  // Agent console font size (A−/A+ in the status line), persisted like terminals.
+  const [consoleFontSize, setConsoleFontSize] = useState<number>(() => {
+    try {
+      const n = Number(localStorage.getItem("xconsole-agent-font"));
+      return n >= 9 && n <= 18 ? n : 11;
+    } catch {
+      return 11;
+    }
+  });
+  const bumpFont = (delta: number) => {
+    setConsoleFontSize((s) => {
+      const next = Math.min(18, Math.max(9, s + delta));
+      try {
+        localStorage.setItem("xconsole-agent-font", String(next));
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  };
+
 
 
   useEffect(() => {
@@ -879,7 +900,27 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
           </span>
         )}
         {ttsEnabled && <span className="text-[9px] text-[var(--text-faint)]">🔊</span>}
-        <span className="ml-auto flex items-center gap-2 text-[var(--text-faint)]">
+        <span className="ml-auto flex items-center gap-1">
+          <button
+            type="button"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={() => bumpFont(-1)}
+            data-tooltip="Smaller font"
+            className="rounded px-1 py-0.5 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+          >
+            A−
+          </button>
+          <button
+            type="button"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={() => bumpFont(1)}
+            data-tooltip="Larger font"
+            className="rounded px-1 py-0.5 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+          >
+            A+
+          </button>
+        </span>
+        <span className="flex items-center gap-2 text-[var(--text-faint)]">
           {contextUsage ? <span>{contextUsage.percent}% ctx</span> : null}
           {conversationCostUsd > 0 ? (
             <span>${conversationCostUsd.toFixed(4)}</span>
@@ -890,6 +931,9 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
         </span>
       </div>
 
+      {/* Body: nodrag so only the header starts a node drag (like TerminalNode) —
+          text selection inside the console/composer works normally. */}
+      <div className="nodrag flex min-h-0 flex-1 flex-col">
       {/* Messages */}
       {messages.length === 0 && !streaming ? (
         <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs text-gray-600">
@@ -912,6 +956,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
           expanded
           executeTarget={executeTarget}
           onExecute={executeCommand}
+          fontSize={consoleFontSize}
         />
       )}
 
@@ -1285,6 +1330,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
         </div>
 
+      </div>
       </div>
 
     </div>

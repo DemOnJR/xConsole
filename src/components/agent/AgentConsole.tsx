@@ -22,6 +22,7 @@ export function AgentConsole({
   expanded,
   executeTarget,
   onExecute,
+  fontSize = 11,
 }: {
   messages: AgentChatMessage[];
   streamingText: string;
@@ -32,10 +33,11 @@ export function AgentConsole({
   expanded: boolean;
   executeTarget?: { name: string; host: string } | null;
   onExecute?: (code: string) => void;
+  /** Console font size in px (A−/A+ in the status line). */
+  fontSize?: number;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
-  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
 
   const rows = consoleRows(messages);
 
@@ -59,18 +61,13 @@ export function AgentConsole({
     }
   }, [rows.length, streamingText, userScrolledUp]);
 
-  const copyContent = (text: string, index: number) => {
-    void navigator.clipboard.writeText(text);
-    setCopiedIndex(index);
-    setTimeout(() => setCopiedIndex(null), 2000);
-  };
-
   return (
     <div className="relative flex min-h-0 flex-1 flex-col bg-[var(--bg)] font-mono">
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="flex min-h-0 flex-1 cursor-text select-text flex-col gap-2 overflow-y-auto px-3 py-3 text-[11px] leading-relaxed"
+        style={{ fontSize }}
+        className="nowheel flex min-h-0 flex-1 cursor-text select-text flex-col gap-2 overflow-y-auto px-3 py-3 leading-relaxed"
       >
         {rows.map((row, index) => {
           if (row.kind === "compaction") {
@@ -110,7 +107,7 @@ export function AgentConsole({
 
           if (row.kind === "assistant") {
             return (
-              <div key={index} className="group relative flex gap-2 text-[var(--text)]">
+              <div key={index} className="flex gap-2 text-[var(--text)]">
                 <span className="shrink-0 text-emerald-400">•</span>
                 <div className={`min-w-0 ${expanded ? "w-full" : "w-[92%]"}`}>
                   <AgentMarkdown
@@ -119,13 +116,6 @@ export function AgentConsole({
                     executeTarget={executeTarget}
                     onExecute={onExecute}
                   />
-                  <button
-                    type="button"
-                    onClick={() => copyContent(row.content, index)}
-                    className="mt-1 hidden rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.5 text-[10px] text-gray-400 transition hover:text-gray-200 group-hover:inline-block"
-                  >
-                    {copiedIndex === index ? "Copied ✓" : "Copy"}
-                  </button>
                 </div>
               </div>
             );
