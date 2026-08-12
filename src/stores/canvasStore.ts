@@ -16,6 +16,7 @@ import {
   autoLayout,
   computeBoxes,
   isSolo,
+  layoutFromColumnCounts,
   moveToRow,
   moveWithinRow,
   reconcile,
@@ -132,6 +133,8 @@ interface CanvasState {
   setTileLayout: (layout: TileLayout | null) => void;
   /** Re-flow into rows of the given sizes, e.g. `[3, 2]` for 3 on top, 2 below. */
   setTileRows: (counts: number[]) => void;
+  /** Re-flow into side-by-side columns, e.g. `[2, 1]` for 2 stacked left, 1 right. */
+  setTileColumns: (counts: number[]) => void;
   /** Discard any hand-tuned arrangement and go back to the balanced default. */
   resetTileLayout: () => void;
   /** Move a tile within its row (`horizontal`) or between rows (`vertical`). */
@@ -537,6 +540,15 @@ export const useCanvasStore = create<CanvasState>()(
         set((s) => {
           const base = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
           return applyTiles({ ...s, tileLayout: applyRowCounts(base, counts) }, s.paneSize ?? undefined);
+        }),
+
+      setTileColumns: (counts) =>
+        set((s) => {
+          const ids = s.nodes.map((n) => n.id);
+          return applyTiles(
+            { ...s, tileLayout: layoutFromColumnCounts(ids, counts) },
+            s.paneSize ?? undefined,
+          );
         }),
 
       resetTileLayout: () =>

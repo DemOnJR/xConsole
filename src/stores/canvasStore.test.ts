@@ -47,6 +47,31 @@ function expectGapFree() {
   }
 }
 
+/** Columns fill the pane side by side, and each column's stack meets edge to edge. */
+function expectColumnsGapFree() {
+  const byCol = new Map<number, ReturnType<typeof tiles>>();
+  for (const t of tiles()) {
+    byCol.set(t.x, [...(byCol.get(t.x) ?? []), t]);
+  }
+  const xs = [...byCol.keys()].sort((a, b) => a - b);
+  for (const x of xs) {
+    const col = byCol.get(x)!;
+    expect(col[0].y).toBe(0);
+    for (let i = 1; i < col.length; i += 1) {
+      expect(col[i].y).toBe(col[i - 1].y + col[i - 1].h);
+    }
+    expect(col[col.length - 1].y + col[col.length - 1].h).toBe(PANE.height);
+  }
+  // Columns touch left-to-right.
+  for (let i = 1; i < xs.length; i += 1) {
+    const prev = byCol.get(xs[i - 1])!;
+    const prevRight = Math.max(...prev.map((t) => t.x + t.w));
+    expect(xs[i]).toBe(prevRight);
+  }
+  const last = byCol.get(xs[xs.length - 1])!;
+  expect(Math.max(...last.map((t) => t.x + t.w))).toBe(PANE.width);
+}
+
 describe("tile mode keeps windows edge to edge", () => {
   beforeEach(() => {
     useCanvasStore.getState().clear();
@@ -128,6 +153,70 @@ describe("tile mode keeps windows edge to edge", () => {
     expect(after.get(ids[1])!.w).toBeLessThan(before.get(ids[1])!.w);
     // The third window must not have moved or changed size.
     expect(after.get(ids[2])!.w).toBe(before.get(ids[2])!.w);
+    expectGapFree();
+  });
+});
+
+describe("column tiling (side-by-side panes)", () => {
+  beforeEach(() => {
+    useCanvasStore.getState().clear();
+    useCanvasStore.setState({ layoutMode: "tile", paneSize: null });
+  });
+
+  it("splits into two balanced columns: 2 stacked left, 1 tall right", () => {
+    const s = useCanvasStore.getState();
+    const ids = [s.addVps(vps(1)), s.addVps(vps(2)), s.addVps(vps(3))];
+    useCanvasStore.getState().setPaneSize(PANE);
+    useCanvasStore.getState().setTileColumns([2, 1]);
+    expectColumnsGapFree();
+
+    const byId = new Map(tiles().map((t) => [t.id, t]));
+    // Left column: the first two stack, same x, full height split.
+    const a = byId.get(ids[0])!;
+    const b = byId.get(ids[1])!;
+    const c = byId.get(ids[2])!;
+    expect(a.x).toBe(0);
+    expect(b.x).toBe(0);
+    expect(c.x).toBe(PANE.width / 2);
+    expect(a.w).toBe(PANE.width / 2);
+    expect(c.w).toBe(PANE.width / 2);
+    expect(a.h).toBe(PANE.height / 2);
+    expect(b.h).toBe(PANE.height / 2);
+    expect(c.h).toBe(PANE.height);
+  });
+
+  it("keeps the arrangement after a resize drag (columns stay gap-free)", () => {
+    const s = useCanvasStore.getState();
+    const ids = [s.addVps(vps(1)), s.addVps(vps(2)), s.addVps(vps(3))];
+    useCanvasStore.getState().setPaneSize(PANE);
+    useCanvasStore.getState().setTileColumns([2, 1]);
+
+    const node = useCanvasStore.getState().nodes.find((n) => n.id === ids[0])!;
+    useCanvasStore.getState().onNodesChange([
+      {
+        id: ids[0],
+        type: "dimensions",
+        resizing: true,
+        dimensions: {
+          width: ((node.width as number) ?? 0) + 120,
+          height: ((node.height as number) ?? 0) + 100,
+        },
+      },
+    ]);
+    expectColumnsGapFree();
+  });
+
+  it("returns to row layout when the column view is dropped", () => {
+    const s = useCanvasStore.getState();
+    s.addVps(vps(1));
+    s.addVps(vps(2));
+    s.addVps(vps(3));
+    useCanvasStore.getState().setPaneSize(PANE);
+    useCanvasStore.getState().setTileColumns([2, 1]);
+    expect(useCanvasStore.getState().tileLayout?.columns).toBeTruthy();
+
+    useCanvasStore.getState().setTileRows([3]);
+    expect(useCanvasStore.getState().tileLayout?.columns).toBeUndefined();
     expectGapFree();
   });
 });

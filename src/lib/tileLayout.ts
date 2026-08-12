@@ -31,6 +31,18 @@ export interface TileRow {
 export interface TileLayout {
   rows: TileRow[];
   /**
+   * When set, the layout is **column-based** (side-by-side panes) instead of the
+   * row-based model: `columns[c]` is one vertical pane whose items stack top-to-bottom,
+   * and the panes share the width of the grid. `rows` is still maintained (it mirrors
+   * the same node order) so all the row-based edit operations keep working — they just
+   * re-arrange the order the columns then split.
+   *
+   * A column's items use the same `TileItem` type: the item weight is the height share
+   * within the column, and the column weight is the width share against the other
+   * columns.
+   */
+  columns?: TileColumn[];
+  /**
    * What fraction of the pane the whole grid occupies, 0.2–1.
    *
    * Resizing normally trades space between two neighbours, so the grid always fills the
@@ -41,6 +53,13 @@ export interface TileLayout {
    */
   fillW?: number;
   fillH?: number;
+}
+
+/** One column of the layout: a vertical pane with a width share and stacked items. */
+export interface TileColumn {
+  /** Relative width against the other columns. 1 = an equal share. */
+  weight: number;
+  items: TileItem[];
 }
 
 /** A computed pixel box for one node. */
@@ -73,6 +92,11 @@ export const fillOf = (layout: TileLayout) => ({
 
 /** True when the layout holds exactly one window, i.e. nothing to trade space with. */
 export function isSolo(layout: TileLayout): boolean {
+  if (layout.columns) {
+    return (
+      layout.columns.length === 1 && layout.columns[0].items.length === 1
+    );
+  }
   return layout.rows.length === 1 && layout.rows[0].items.length === 1;
 }
 
@@ -219,8 +243,12 @@ export function rowsFromPositions(nodes: PlacedNode[]): TileLayout {
   });
 }
 
-/** Every node id in a layout, top-to-bottom then left-to-right. */
+/** Every node id in a layout, top-to-bottom then left-to-right (columns), or
+ *  top-to-bottom then left-to-right (rows). */
 export function layoutIds(layout: TileLayout): string[] {
+  if (layout.columns) {
+    return layout.columns.flatMap((c) => c.items.map((it) => it.id));
+  }
   return layout.rows.flatMap((r) => r.items.map((it) => it.id));
 }
 
@@ -229,6 +257,13 @@ export function findTile(
   layout: TileLayout,
   id: string,
 ): { row: number; col: number } | null {
+  if (layout.columns) {
+    for (let c = 0; c < layout.columns.length; c++) {
+      const idx = layout.columns[c].items.findIndex((it) => it.id === id);
+      if (idx !== -1) return { row: idx, col: c };
+    }
+    return null;
+  }
   for (let row = 0; row < layout.rows.length; row++) {
     const col = layout.rows[row].items.findIndex((it) => it.id === id);
     if (col !== -1) return { row, col };
@@ -236,9 +271,9 @@ export function findTile(
   return null;
 }
 
-/** Drop empty rows and normalise weights that drifted out of range. */
+/** Drop empty rows (and columns) and normalise weights that drifted out of range. */
 export function normalize(layout: TileLayout): TileLayout {
-  return {
+  const next: TileLayout = {
     ...layout,
     rows: layout.rows
       .filter((r) => r.items.length > 0)
@@ -247,6 +282,15 @@ export function normalize(layout: TileLayout): TileLayout {
         items: r.items.map((it) => ({ id: it.id, weight: clampWeight(it.weight) })),
       })),
   };
+  if (layout.columns) {
+    next.columns = layout.columns
+      .filter((c) => c.items.length > 0)
+      .map((c) => ({
+        weight: clampWeight(c.weight),
+        items: c.items.map((it) => ({ id: it.id, weight: clampWeight(it.weight) })),
+      }));
+  }
+  return next;
 }
 
 /**
@@ -292,8 +336,14 @@ export function computeBoxes(
   paneWidth: number,
   paneHeight: number,
 ): TileBox[] {
+  if (paneWidth <= 0 || paneHeight <= 0) return [];
+
+  if (layout.columns) {
+    return computeColumnBoxes(layout, paneWidth, paneHeight);
+  }
+
   const rows = layout.rows.filter((r) => r.items.length > 0);
-  if (rows.length === 0 || paneWidth <= 0 || paneHeight <= 0) return [];
+  if (rows.length === 0) return [];
 
   // A lone window may occupy less than the whole pane; everything else fills it. The
   // stored fraction is kept rather than reset, so closing back down to one window
@@ -324,6 +374,50 @@ export function computeBoxes(
     });
 
     y += h;
+  });
+
+  return boxes;
+}
+
+/**
+ * Column-based boxes: each column is a vertical pane sharing the grid width, and the
+ * column's items stack top-to-bottom inside it. Mirrors `computeBoxes`' row math, one
+ * axis over, so columns meet edge-to-edge and each stack ends flush with the pane.
+ */
+function computeColumnBoxes(
+  layout: TileLayout,
+  paneWidth: number,
+  paneHeight: number,
+): TileBox[] {
+  const columns = layout.columns!.filter((c) => c.items.length > 0);
+  if (columns.length === 0) return [];
+
+  const fill = isSolo(layout) ? fillOf(layout) : { w: 1, h: 1 };
+  const width = Math.max(1, Math.round(paneWidth * fill.w));
+  const height = Math.max(1, Math.round(paneHeight * fill.h));
+
+  const boxes: TileBox[] = [];
+  const totalColWeight = columns.reduce((sum, c) => sum + clampWeight(c.weight), 0);
+
+  let x = 0;
+  columns.forEach((col, cIdx) => {
+    const last = cIdx === columns.length - 1;
+    const w = last
+      ? width - x
+      : Math.max(1, Math.floor((width * clampWeight(col.weight)) / totalColWeight));
+
+    const totalItemWeight = col.items.reduce((sum, it) => sum + clampWeight(it.weight), 0);
+    let y = 0;
+    col.items.forEach((item, rIdx) => {
+      const lastRow = rIdx === col.items.length - 1;
+      const h = lastRow
+        ? height - y
+        : Math.max(1, Math.floor((height * clampWeight(item.weight)) / totalItemWeight));
+      boxes.push({ id: item.id, x, y, width: w, height: h });
+      y += h;
+    });
+
+    x += w;
   });
 
   return boxes;
@@ -481,6 +575,63 @@ export function applyRowCounts(layout: TileLayout, counts: number[]): TileLayout
 /** The current shape, e.g. `[3, 2]` — used by the UI and to round-trip a preset. */
 export function rowCounts(layout: TileLayout): number[] {
   return layout.rows.map((r) => r.items.length);
+}
+
+/**
+ * Build a column layout: `counts` are the number of tiles stacked in each column,
+ * left to right, so `[2, 1]` is two stacked on the left and one full-height on the
+ * right — a sidebar arrangement. `rows` is derived to mirror the same node order, so
+ * the row-based edit operations stay meaningful on a column layout.
+ */
+export function layoutFromColumnCounts(
+  ids: string[],
+  counts: number[],
+): TileLayout {
+  const columns: TileColumn[] = [];
+  let i = 0;
+  for (const count of counts) {
+    if (count <= 0) continue;
+    const items = ids.slice(i, i + count).map((id) => ({ id, weight: 1 }));
+    i += count;
+    if (items.length > 0) columns.push({ weight: 1, items });
+  }
+  // Anything left over joins the last column rather than vanishing.
+  if (i < ids.length) {
+    const rest = ids.slice(i).map((id) => ({ id, weight: 1 }));
+    if (columns.length > 0) columns[columns.length - 1].items.push(...rest);
+    else columns.push({ weight: 1, items: rest });
+  }
+  const rows = columns.flatMap((c) => c.items);
+  return normalize({
+    rows: rows.length > 0 ? [{ weight: 1, items: rows }] : [],
+    columns,
+  });
+}
+
+/** The current column shape, e.g. `[2, 1]` — empty when the layout is row-based. */
+export function columnCounts(layout: TileLayout): number[] {
+  return layout.columns ? layout.columns.map((c) => c.items.length) : [];
+}
+
+/**
+ * Parse a user-typed shape such as `"2|1"` or `"2 / 1"` for columns (the `|` separates
+ * columns; a plain `,` is also accepted since a column of one tile is just a stack).
+ * Returns null when the text isn't a usable shape.
+ */
+export function parseColumnCounts(text: string): number[] | null {
+  const parts = text
+    .split(/[|/]+/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (parts.length === 0) return null;
+  const counts: number[] = [];
+  for (const p of parts) {
+    if (!/^\d+$/.test(p)) return null;
+    const n = Number(p);
+    if (n <= 0 || n > 64) return null;
+    counts.push(n);
+  }
+  return counts;
 }
 
 /**

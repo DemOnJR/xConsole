@@ -10,6 +10,7 @@ import {
   useStore,
   useStoreApi,
   type NodeTypes,
+  type Node,
 } from "@xyflow/react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { NODE_W, useCanvasStore } from "../stores/canvasStore";
@@ -22,6 +23,8 @@ import { AgentNodeView } from "./agent/AgentNode";
 import { FloatingEdge } from "./FloatingEdge";
 import { LockIcon, LockOpenIcon, RadarIcon } from "./icons";
 import { onInternalDrop } from "../stores/dragStore";
+import { useSnapDragStore, endSnapDrag } from "../lib/snapDrag";
+import { SnapPreview } from "./SnapPreview";
 
 const nodeTypes: NodeTypes = {
   terminal: TerminalNode,
@@ -150,6 +153,27 @@ export function CanvasFlow() {
   // Tile mode is a fixed full-canvas grid: lock zoom/pan and free the corners.
   const tiled = layoutMode === "tile";
 
+  /** Windows-style snap preview: while a node is dragged in freeform mode, track the
+   *  cursor in pane fractions so the overlay can highlight the zone under it. */
+  const onNodeDrag = (_: MouseEvent | TouchEvent, node: Node) => {
+    if (layoutMode !== "freeform") return;
+    const state = useSnapDragStore.getState();
+    if (!state.nodeId) state.begin(node.id);
+    const pane = document.querySelector<HTMLElement>(".react-flow__pane");
+    if (!pane) return;
+    const rect = pane.getBoundingClientRect();
+    const clientX = "clientX" in _ ? _.clientX : 0;
+    const clientY = "clientY" in _ ? _.clientY : 0;
+    useSnapDragStore.getState().move(
+      (clientX - rect.left) / rect.width,
+      (clientY - rect.top) / rect.height,
+    );
+  };
+
+  const onNodeDragStop = () => {
+    endSnapDrag();
+  };
+
   // A server dropped on the canvas becomes a terminal. The drag is delivered by the
   // pointer-event system (see dragStore) rather than HTML5 DnD, which the webview stops
   // firing once Tauri intercepts native drags to receive files.
@@ -172,6 +196,8 @@ export function CanvasFlow() {
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
       onConnect={onConnect}
+      onNodeDrag={onNodeDrag}
+      onNodeDragStop={onNodeDragStop}
       nodeTypes={nodeTypes}
       edgeTypes={edgeTypes}
       minZoom={0.05}
@@ -202,6 +228,7 @@ export function CanvasFlow() {
       {!tiled && (
         <CanvasControls miniMap={showMiniMap} onToggleMiniMap={() => setShowMiniMap((v) => !v)} />
       )}
+      <SnapPreview />
       <CanvasCommandBridge />
     </ReactFlow>
     </div>
