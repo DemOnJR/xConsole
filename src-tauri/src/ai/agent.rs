@@ -733,8 +733,13 @@ pub async fn run_turn(
         .map(|v| v != "false")
         .unwrap_or(true);
     if self_improve && registry::is_tool_capable_kind(&resolved.kind) && !cli_mode {
-        let lessons =
-            crate::ai::reflection::reflect_and_save(&tc.home, &messages, iters_used, MAX_ITERS);
+        let lessons = crate::ai::reflection::reflect_and_save_with_targets(
+            &tc.home,
+            &messages,
+            &tc.targets,
+            iters_used,
+            MAX_ITERS,
+        );
         if !lessons.is_empty() {
             emit(
                 Some(sink),

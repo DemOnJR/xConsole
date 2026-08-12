@@ -250,6 +250,45 @@ fn is_duplicate(existing_normalized: &str, lesson: &str) -> bool {
     !key.is_empty() && existing_normalized.contains(&key)
 }
 
+/// Record host-scoped events for touched targets into EVENTS.jsonl.
+pub fn record_host_activity(
+    home: &AgentHome,
+    messages: &[ChatMessage],
+    targets: &[String],
+) {
+    if targets.is_empty() && messages.is_empty() {
+        return;
+    }
+
+    for m in messages {
+        if m.role != "assistant" {
+            continue;
+        }
+        for tc in &m.tool_calls {
+            let target_host = tc
+                .arguments
+                .get("vps")
+                .or_else(|| tc.arguments.get("vps_id"))
+                .or_else(|| tc.arguments.get("target"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| targets.first().cloned());
+
+            if let Some(host_id) = target_host {
+                if !host_id.is_empty() {
+                    let ts = chrono::Utc::now().to_rfc3339();
+                    let evt = serde_json::json!({
+                        "timestamp": ts,
+                        "tool": tc.name,
+                        "args_shape": arg_shape(&tc.arguments),
+                    });
+                    crate::ai::host_memory::append_event(home, &host_id, &evt);
+                }
+            }
+        }
+    }
+}
+
 /// The full self-improvement step, called once at the end of a turn. Analyzes the
 /// transcript, distills lessons, and appends the new (non-duplicate) ones to memory.
 /// Returns the lessons actually saved (empty when the turn went fine). Side-effect:
@@ -260,6 +299,19 @@ pub fn reflect_and_save(
     iters_used: usize,
     max_iters: usize,
 ) -> Vec<String> {
+    reflect_and_save_with_targets(home, messages, &[], iters_used, max_iters)
+}
+
+/// Self-improvement step with target-specific dossier writebacks.
+pub fn reflect_and_save_with_targets(
+    home: &AgentHome,
+    messages: &[ChatMessage],
+    targets: &[String],
+    iters_used: usize,
+    max_iters: usize,
+) -> Vec<String> {
+    record_host_activity(home, messages, targets);
+
     let outcome = analyze_turn(messages, iters_used, max_iters);
     if !outcome.had_trouble() {
         return Vec::new();
@@ -274,7 +326,14 @@ pub fn reflect_and_save(
         if memory::append_memory(home, &lesson).is_ok() {
             running.push(' ');
             running.push_str(&normalize(&lesson));
-            saved.push(lesson);
+            saved.push(lesson.clone());
+
+            // If targets are active, also mirror into per-host memory
+            for target_id in targets {
+                if !target_id.is_empty() {
+                    let _ = crate::ai::host_memory::append_memory(home, target_id, &lesson);
+                }
+            }
         }
     }
     saved
