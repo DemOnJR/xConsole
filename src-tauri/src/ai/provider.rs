@@ -180,6 +180,16 @@ pub struct StreamStats {
 
 /// Estimated context window fill before the model call (~4 chars/token).
 #[derive(Debug, Clone, Serialize)]
+pub struct TurnTelemetryEvent {
+    pub tool_calls: u64,
+    pub tool_cache_lookups: u64,
+    pub tool_cache_hits: u64,
+    pub tool_cache_misses: u64,
+    pub tool_cache_writes: u64,
+    pub tool_cache_hit_rate: f32,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ContextUsageEvent {
     pub segments: Vec<ContextUsageSegment>,
     pub total_tokens: u32,
@@ -202,6 +212,8 @@ pub enum StreamEvent {
     Text(String),
     /// Final token throughput for this generation leg.
     Stats(StreamStats),
+    /// Per-turn tool and cache counters.
+    TurnTelemetry(TurnTelemetryEvent),
     /// Estimated prompt context breakdown for this turn.
     ContextUsage(ContextUsageEvent),
     /// Conversation history replaced after auto-compaction (Hermes-style).

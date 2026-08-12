@@ -590,6 +590,17 @@ export type StreamEvent =
       };
     }
   | {
+      kind: "TurnTelemetry";
+      data: {
+        tool_calls: number;
+        tool_cache_lookups: number;
+        tool_cache_hits: number;
+        tool_cache_misses: number;
+        tool_cache_writes: number;
+        tool_cache_hit_rate: number;
+      };
+    }
+  | {
       kind: "ContextUsage";
       data: {
         segments: { key: string; label: string; tokens: number }[];

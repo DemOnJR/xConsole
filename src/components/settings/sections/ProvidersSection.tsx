@@ -59,7 +59,7 @@ const KIND_DEFAULTS: Record<ProviderKind, Partial<AiProviderInput>> = {
 // One-click presets for popular providers. Most are OpenAI-compatible, so they
 // use the `openai` kind with a base URL; Anthropic uses its own kind. Model ids
 // are sensible defaults the user can edit.
-const PROVIDER_PRESETS: {
+export const PROVIDER_PRESETS: {
   id: string;
   label: string;
   kind: ProviderKind;
@@ -81,6 +81,13 @@ const PROVIDER_PRESETS: {
     kind: "anthropic",
     base_url: "https://api.commandcode.ai/provider",
     model: "claude-sonnet-4-5",
+  },
+  {
+    id: "commandcode-deepseek-v4-flash",
+    label: "Command Code · DeepSeek V4 Flash",
+    kind: "openai",
+    base_url: "https://api.commandcode.ai/provider/v1",
+    model: "deepseek/deepseek-v4-flash",
   },
   { id: "openrouter", label: "OpenRouter", kind: "openai", base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4o" },
   { id: "xai", label: "xAI (Grok)", kind: "openai", base_url: "https://api.x.ai/v1", model: "grok-4" },

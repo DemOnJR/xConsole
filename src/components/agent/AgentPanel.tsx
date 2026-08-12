@@ -437,6 +437,8 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
     streamStats,
 
+    turnTelemetry,
+
     contextUsage,
 
     compactFlipCount,
@@ -1142,7 +1144,7 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
                 <MessageBubble role="assistant" content={streamingText} wide={expanded} />
                 {streamStats && (
                   <div className={`pl-1 ${expanded ? "w-full" : "w-[88%]"}`}>
-                    <AgentTokenStats stats={streamStats} live />
+                    <AgentTokenStats stats={streamStats} telemetry={turnTelemetry} live />
                   </div>
                 )}
               </>

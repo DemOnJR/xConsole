@@ -16,6 +16,7 @@
 //!   xconsole-bench llm      [--model ...] [--ctx ...]
 //!   xconsole-bench all
 //!   xconsole-bench hooks    [--out results.json]   # hooks dispatch overhead (no model)
+//!   xconsole-bench cache    [--out results.json]   # tool-result cache smoke test (no model)
 //!   xconsole-bench selftest                        # pure-logic + live-hook checks (no model)
 //!
 //! These are REGRESSION benchmarks: run them, change a feature, run them again,
@@ -92,6 +93,11 @@ async fn run_async(args: &[String]) -> i32 {
         return bench_hooks(out).await;
     }
 
+    // Tool-result cache smoke test — deterministic and needs no model.
+    if mode == "cache" {
+        return bench_cache(out);
+    }
+
     // Regenerate the history HTML dashboard + OKF bundle from the existing history log
     // (no model needed). Useful after editing the renderer or to rebuild on a new machine.
     if mode == "report" {
@@ -160,7 +166,7 @@ async fn run_async(args: &[String]) -> i32 {
         }
         other => {
             eprintln!(
-                "bench: unknown mode '{other}' (use: agent | hard | recall | learnloop | ablation | learn | llm | all | report | hooks | scanner | selftest)"
+                "bench: unknown mode '{other}' (use: agent | hard | recall | learnloop | ablation | learn | llm | cache | all | report | hooks | scanner | selftest)"
             );
             return 1;
         }
@@ -2069,6 +2075,79 @@ fn merge_reports(into: &mut Value, other: Value) {
     if let (Some(obj), Value::Object(o2)) = (into.as_object_mut(), other) {
         obj.insert("agent".to_string(), Value::Object(o2));
     }
+}
+
+// ---- Tool-result cache benchmark (no model needed) ------------------------
+
+fn bench_cache(out: Option<String>) -> i32 {
+    use crate::ai::tool_cache;
+
+    println!("\n=== TOOL CACHE ===");
+    tool_cache::clear();
+
+    let telemetry = tool_cache::new_turn_telemetry();
+    let args = json!({ "path": "bench/cache-fixture.txt" });
+    let different_args = json!({ "path": "bench/other-fixture.txt" });
+    let tool = "local_read_file";
+    let value = "cached fixture result";
+
+    tool_cache::record_cache_write(&telemetry);
+    tool_cache::put(tool, &args, value);
+    let same_args_hit = tool_cache::get(tool, &args).is_some();
+    tool_cache::record_cache_lookup(&telemetry, same_args_hit);
+
+    let different_args_miss = tool_cache::get(tool, &different_args).is_none();
+    tool_cache::record_cache_lookup(&telemetry, !different_args_miss);
+
+    let non_cacheable_bypassed = tool_cache::get("local_write_file", &args).is_none();
+    tool_cache::put(tool, &args, "");
+    let invalid_values_rejected = tool_cache::get(tool, &args).as_deref() == Some(value);
+
+    let stats = telemetry.snapshot();
+    let checks_ok = same_args_hit
+        && different_args_miss
+        && non_cacheable_bypassed
+        && invalid_values_rejected
+        && stats.tool_cache_lookups == 2
+        && stats.tool_cache_hits == 1
+        && stats.tool_cache_misses == 1;
+    let report = json!({
+        "mode": "cache",
+        "cache": "tool_result",
+        "lookups": stats.tool_cache_lookups,
+        "hits": stats.tool_cache_hits,
+        "misses": stats.tool_cache_misses,
+        "writes": stats.tool_cache_writes,
+        "hit_rate": stats.tool_cache_hit_rate,
+        "checks": {
+            "same_args_hit": same_args_hit,
+            "different_args_miss": different_args_miss,
+            "non_cacheable_bypassed": non_cacheable_bypassed,
+            "invalid_values_rejected": invalid_values_rejected
+        },
+        "pass": checks_ok,
+    });
+
+    println!(
+        "lookups={} hits={} misses={} writes={} hit_rate={:.1}%",
+        stats.tool_cache_lookups,
+        stats.tool_cache_hits,
+        stats.tool_cache_misses,
+        stats.tool_cache_writes,
+        stats.tool_cache_hit_rate * 100.0
+    );
+    tool_cache::clear();
+
+    if let Some(path) = out {
+        match std::fs::write(&path, serde_json::to_string_pretty(&report).unwrap_or_default()) {
+            Ok(()) => println!("Wrote results → {path}"),
+            Err(e) => {
+                eprintln!("bench: could not write {path}: {e}");
+                return 1;
+            }
+        }
+    }
+    if checks_ok { 0 } else { 1 }
 }
 
 // ---- Hooks overhead benchmark (no model needed) --------------------------

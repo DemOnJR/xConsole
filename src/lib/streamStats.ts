@@ -13,6 +13,15 @@ export interface TokenStats {
   source: "estimate" | "provider";
 }
 
+export interface TurnTelemetry {
+  toolCalls: number;
+  toolCacheLookups: number;
+  toolCacheHits: number;
+  toolCacheMisses: number;
+  toolCacheWrites: number;
+  toolCacheHitRate: number;
+}
+
 export interface ContextUsageSegment {
   key: string;
   label: string;

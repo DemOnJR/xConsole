@@ -26,6 +26,7 @@ pub async fn run_turn(
     sink: &EventSink,
 ) -> Result<ChatMessage, String> {
     let mut messages = context::compress_window(messages);
+    let telemetry = crate::ai::tool_cache::new_turn_telemetry();
 
     // Per-workspace agent status (working / planning / testing / idle) shown on the
     // workspace row. No-op when the turn isn't tied to a workspace.
@@ -249,7 +250,7 @@ pub async fn run_turn(
                 base.push_str(
                     "\n\nYou have xConsole MCP tools for the user's VPS: run_command, read_file, \
                      write_file, list_vps_targets, skills_list, skill_view, skill_save, memory_save, \
-                     set_project_brief. \
+                     host_memory_get, host_memory_update, set_project_brief. \
                      You ALSO control the user's canvas: canvas_open_terminal and canvas_open_sftp open \
                      a live panel for a server, canvas_close removes a panel (node_id or vps_id), \
                      canvas_refresh reconnects a terminal, and canvas_tile arranges them. So when the \
@@ -268,6 +269,13 @@ pub async fn run_turn(
             }
             if let Some(cv) = &canvas_block {
                 dynamic.push_str(cv);
+                dynamic.push_str("\n\n");
+            }
+            if !casual_turn && !tc.targets.is_empty() {
+                let host_dossiers = crate::ai::host_memory::format_for_prompt(&tc.home, &tc.db, &tc.targets);
+                if !host_dossiers.is_empty() {
+                    dynamic.push_str(&host_dossiers);
+                }
             }
             if !dynamic.is_empty() {
                 base.push_str("\n\n");
@@ -574,7 +582,12 @@ pub async fn run_turn(
         // Request-only copy: inject runtime context into last user message so the
         // system prefix stays cache-stable across multi-turn / multi-iter calls.
         let mut req_messages = messages.clone();
-        context::inject_dynamic_into_last_user(&mut req_messages, &dynamic_block);
+        if !context::inject_dynamic_into_last_user(&mut req_messages, &dynamic_block) {
+            emit(
+                Some(sink),
+                StreamEvent::Status("Runtime context was not attached: no user message.".into()),
+            );
+        }
         req.messages = req_messages;
         req.tools = tool_defs_for_turn.clone();
         req.xconsole = xconsole_exec.clone();
@@ -640,8 +653,9 @@ pub async fn run_turn(
                 .iter()
                 .map(|call| {
                     let call = call.clone();
+                    let telemetry = telemetry.clone();
                     async move {
-                        let output = tools::dispatch(tc, &call, sink).await;
+                        let output = tools::dispatch_with_telemetry(tc, &call, sink, Some(&telemetry)).await;
                         (call.id, output)
                     }
                 })
@@ -661,7 +675,7 @@ pub async fn run_turn(
             for call in &resp.tool_calls {
                 // The provider already streamed StreamEvent::ToolCall for each call;
                 // the single ToolResult is emitted by this loop below. No re-emit here.
-                let output = tools::dispatch(tc, call, sink).await;
+                let output = tools::dispatch_with_telemetry(tc, call, sink, Some(&telemetry)).await;
                 emit(
                     Some(sink),
                     StreamEvent::ToolResult {
@@ -759,6 +773,18 @@ pub async fn run_turn(
         }
     }
 
+    let telemetry = telemetry.snapshot();
+    emit(
+        Some(sink),
+        StreamEvent::TurnTelemetry(crate::ai::provider::TurnTelemetryEvent {
+            tool_calls: telemetry.tool_calls,
+            tool_cache_lookups: telemetry.tool_cache_lookups,
+            tool_cache_hits: telemetry.tool_cache_hits,
+            tool_cache_misses: telemetry.tool_cache_misses,
+            tool_cache_writes: telemetry.tool_cache_writes,
+            tool_cache_hit_rate: telemetry.tool_cache_hit_rate,
+        }),
+    );
     emit(Some(sink), StreamEvent::Done);
     emit_ws("idle");
 

@@ -33,6 +33,9 @@ Run:
 # Hooks dispatch overhead — what a PreToolUse hook adds per tool call (no Ollama)
 ./src-tauri/target/release/xconsole-bench.exe hooks --out bench/results/hooks.json
 
+# In-process tool-result cache smoke test — no Ollama or network required
+./src-tauri/target/release/xconsole-bench.exe cache --out bench/results/cache.json
+
 # Both eval + latency
 ./src-tauri/target/release/xconsole-bench.exe all   --model qwen3.5:9b --out bench/results/all.json
 ```
@@ -72,6 +75,8 @@ system (see [`HOOKS.md`](../HOOKS.md)):
 With **no hooks configured the loop skips the hook path entirely (0 ms)** — hooks are
 opt-in, so they cost nothing until you add one. The `live_hook_ms` figure is dominated
 by process-spawn latency (lower on Unix `sh -c`); a hook that does real work adds its own time.
+
+**Tool-result cache** (`cache` mode) measures the in-process read-only result cache, not provider prompt/KV caching. It reports cacheable lookups, hits, misses, writes, and `hit_rate`; use a later model-backed repeated-prefix probe for provider cache tokens and latency.
 
 ## 1a. Harder suites — `hard` and `recall`
 

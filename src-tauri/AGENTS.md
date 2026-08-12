@@ -27,8 +27,8 @@ Run this from **`src-tauri/`**:
 
 xConsole is **not** shipped as a signed Tauri bundle. It's distributed via the
 clone+compile installer in `../installer/`, and the in-app updater
-(`src/commands/update.rs`) rebuilds from `origin/main`. So there's no version tag/bump and
-no signing step — releases are commit-based off `main`:
+(`src/commands/update.rs`) rebuilds from the selected `main` or `dev` channel. So there's no
+version tag/bump and no signing step — releases are commit-based:
 
 1. Merge your changes to `main`.
 2. The **Build installer** workflow (`../.github/workflows/installer-release.yml`) builds
@@ -37,8 +37,8 @@ no signing step — releases are commit-based off `main`:
    serves the newest installer. No secrets needed (preinstalled `rustup` + `gh` +
    automatic `GITHUB_TOKEN`).
 
-Existing users get an "Update available" prompt (their checkout is behind `origin/main`)
-and rebuild in one click. See `../RELEASING.md` for the full picture.
+Existing users get an "Update available" prompt when their checkout is behind the selected
+`main` or `dev` channel, then rebuild in one click. See `../RELEASING.md` for the full picture.
 
 ## Data safety — never break this
 

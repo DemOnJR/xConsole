@@ -18,6 +18,7 @@ import { useWorkspaceStore } from "./workspaceStore";
 import { useCanvasStore } from "./canvasStore";
 import { useSessionStore } from "./sessionStore";
 import { useVoiceStore } from "./voiceStore";
+import type { TurnTelemetry } from "../lib/streamStats";
 import {
   cancelSpeech,
   currentSpeechEpoch,
@@ -147,7 +148,7 @@ export interface AgentActivityItem {
 }
 
 /** Token throughput for a completed or streaming assistant message. */
-export type { TokenStats, ContextUsage } from "../lib/streamStats";
+export type { TokenStats, ContextUsage, TurnTelemetry } from "../lib/streamStats";
 
 export interface AgentChatMessage extends ChatMessage {
   activity?: AgentActivityItem[];
@@ -164,6 +165,7 @@ interface AgentState {
   /** TTS is currently reading a reply aloud (so the user can press Stop to hush it). */
   speaking: boolean;
   streamStats: TokenStats | null;
+  turnTelemetry: TurnTelemetry | null;
   contextUsage: ContextUsage | null;
   /** Increments when conversation is auto-compacted — drives hourglass flip. */
   compactFlipCount: number;
@@ -457,6 +459,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   streaming: false,
   speaking: false,
   streamStats: null,
+  turnTelemetry: null,
   contextUsage: null,
   compactFlipCount: 0,
   error: null,
@@ -613,6 +616,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       activity: [],
       streaming: false,
       streamStats: null,
+      turnTelemetry: null,
       contextUsage: null,
       compactFlipCount: 0,
       error: null,
@@ -646,6 +650,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       activity: [],
       streaming: false,
       streamStats: null,
+      turnTelemetry: null,
       contextUsage: null,
       compactFlipCount: 0,
       error: null,
@@ -745,6 +750,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       streamingText: "",
       activity: [],
       streamStats: null,
+      turnTelemetry: null,
       error: null,
     });
 
@@ -800,6 +806,18 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           source: "provider",
         };
         if (isCurrent()) set({ streamStats: latestStats });
+        return;
+      }
+      if (ev.kind === "TurnTelemetry") {
+        const turnTelemetry: TurnTelemetry = {
+          toolCalls: ev.data.tool_calls,
+          toolCacheLookups: ev.data.tool_cache_lookups,
+          toolCacheHits: ev.data.tool_cache_hits,
+          toolCacheMisses: ev.data.tool_cache_misses,
+          toolCacheWrites: ev.data.tool_cache_writes,
+          toolCacheHitRate: ev.data.tool_cache_hit_rate,
+        };
+        if (isCurrent()) set({ turnTelemetry });
         return;
       }
       if (ev.kind === "ContextUsage") {

@@ -572,8 +572,15 @@ pub fn format_targets_catalog(db: &Db, target_ids: &[String]) -> String {
     lines.join("\n")
 }
 
-/// Run a single tool call, returning a text result for the model.
-pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> String {
+pub async fn dispatch_with_telemetry(
+    ctx: &ToolContext,
+    call: &ToolCall,
+    sink: &EventSink,
+    telemetry: Option<&crate::ai::tool_cache::TurnTelemetryHandle>,
+) -> String {
+    if let Some(telemetry) = telemetry {
+        crate::ai::tool_cache::record_tool_call(telemetry);
+    }
     let label = tool_activity_label(ctx, call);
     emit(
         Some(sink),
@@ -589,7 +596,11 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
     let args = &call.arguments;
 
     // Short-TTL cache for read-only tools / web lookups (same args → skip re-exec).
+    let cacheable = crate::ai::tool_cache::is_cacheable(&call.name);
     if let Some(hit) = crate::ai::tool_cache::get(&call.name, args) {
+        if let Some(telemetry) = telemetry {
+            crate::ai::tool_cache::record_cache_lookup(telemetry, true);
+        }
         emit(
             Some(sink),
             StreamEvent::Status(format!("Cache hit · {}", call.name)),
@@ -602,6 +613,11 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
             }),
         );
         return hit;
+    }
+    if cacheable {
+        if let Some(telemetry) = telemetry {
+            crate::ai::tool_cache::record_cache_lookup(telemetry, false);
+        }
     }
 
     // PreToolUse hooks: a user-configured command can block this tool before it runs
@@ -764,6 +780,11 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
     let ok = !result.starts_with("error:");
     if ok {
         crate::ai::tool_cache::put(&call.name, args, &result);
+        if cacheable {
+            if let Some(telemetry) = telemetry {
+                crate::ai::tool_cache::record_cache_write(telemetry);
+            }
+        }
     }
     emit(
         Some(sink),
@@ -1383,8 +1404,11 @@ fn host_memory_get(ctx: &ToolContext, args: &Value) -> String {
     if vps_id.is_empty() {
         return "error: missing 'vps_id'".into();
     }
-    if !ctx.targets.is_empty() && !ctx.targets.iter().any(|t| t == vps_id) {
+    if !ctx.targets.iter().any(|t| t == vps_id) {
         return "error: vps_id is not in the selected targets for this turn".into();
+    }
+    if !ctx.db.get_vps(vps_id).ok().flatten().is_some() {
+        return "error: VPS target was not found".into();
     }
     let profile = crate::ai::host_memory::load_profile(&ctx.home, vps_id);
     let mem = crate::ai::host_memory::load_memory(&ctx.home, vps_id);
@@ -1414,8 +1438,11 @@ fn host_memory_update(ctx: &ToolContext, args: &Value) -> String {
     if content.trim().is_empty() {
         return "error: missing 'content'".into();
     }
-    if !ctx.targets.is_empty() && !ctx.targets.iter().any(|t| t == vps_id) {
+    if !ctx.targets.iter().any(|t| t == vps_id) {
         return "error: vps_id is not in the selected targets for this turn".into();
+    }
+    if !ctx.db.get_vps(vps_id).ok().flatten().is_some() {
+        return "error: VPS target was not found".into();
     }
     match kind {
         "profile" => match crate::ai::host_memory::save_profile(&ctx.home, vps_id, content) {

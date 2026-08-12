@@ -137,3 +137,38 @@ pub fn format_for_prompt(home: &AgentHome, db: &Db, target_ids: &[String]) -> St
         sections.join("\n\n")
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn home() -> (AgentHome, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("xconsole-host-memory-{}", uuid::Uuid::new_v4()));
+        (AgentHome::new(dir.clone()), dir)
+    }
+
+    #[test]
+    fn profile_and_memory_round_trip() {
+        let (home, dir) = home();
+        save_profile(&home, "host/a", "role: web").unwrap();
+        assert_eq!(load_profile(&home, "host/a"), "role: web");
+        assert_eq!(append_memory(&home, "host/a", "- rebooted\nafter kernel update").unwrap(), "- rebooted after kernel update\n");
+        assert_eq!(load_memory(&home, "host/a"), "- rebooted after kernel update\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn empty_memory_entry_is_rejected() {
+        let (home, dir) = home();
+        assert_eq!(append_memory(&home, "host-a", "  -  \n").unwrap_err(), "host memory entry is empty");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unsafe_ids_stay_inside_hosts_directory() {
+        let (home, dir) = home();
+        let path = ensure_host_dir(&home, "../../outside").unwrap();
+        assert!(path.starts_with(home.hosts_dir()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

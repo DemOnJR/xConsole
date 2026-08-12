@@ -1,9 +1,10 @@
 //! System-prompt assembly, mirroring Hermes' three-tier design
 //! (`agent/system_prompt.py`) with **cache-stable** prefix rules (2025–2026):
 //!
-//! - **static_system** — soul, tool/safety guidance, skills index, static infra.
-//!   Byte-stable across turns so Ollama KV reuse and Anthropic prompt caching hit.
-//! - **dynamic_block** — date, canvas, snapshots, memory, conversation summary,
+//! - **static_system** — soul and tool/safety guidance for the active prompt mode.
+//!   Stable while those configuration inputs remain unchanged so Ollama KV reuse and
+//!   Anthropic prompt caching can hit.
+//! - **dynamic_block** — date, canvas, snapshots, memory, mutable indexes, conversation summary,
 //!   selected targets, host dossiers. Injected into the *last user message* of
 //!   the request only (not stored in conversation history).
 //!
@@ -240,11 +241,12 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
 }
 
 /// Prepend the dynamic context block to the last user message of a *request* copy.
-/// Conversation history on disk stays clean (no runtime pollution).
-pub fn inject_dynamic_into_last_user(messages: &mut [ChatMessage], dynamic: &str) {
+/// Conversation history on disk stays clean (no runtime pollution). Returns false when
+/// there is no user message to receive the request-local context.
+pub fn inject_dynamic_into_last_user(messages: &mut [ChatMessage], dynamic: &str) -> bool {
     let dynamic = dynamic.trim();
     if dynamic.is_empty() {
-        return;
+        return true;
     }
     if let Some(m) = messages.iter_mut().rev().find(|m| m.role == "user") {
         if m.content.starts_with("# Runtime context") || m.content.contains("# Runtime context\n") {
@@ -257,6 +259,9 @@ pub fn inject_dynamic_into_last_user(messages: &mut [ChatMessage], dynamic: &str
         } else {
             m.content = format!("# Runtime context\n{dynamic}\n\n---\n\n{}", m.content);
         }
+        true
+    } else {
+        false
     }
 }
 
@@ -330,15 +335,7 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
         }
     }
 
-    let skills_text = if !minimal {
-        if ctx.force_minimal_prompt {
-            skills::system_index_minimal(ctx.home)
-        } else {
-            skills::system_index(ctx.home)
-        }
-    } else {
-        String::new()
-    };
+    let (_, skills_text, mutable_infra) = mutable_context_parts(ctx, minimal);
 
     let mut infra_parts: Vec<String> = Vec::new();
     if let Some(ws) = ctx.workspace_context.as_ref().filter(|s| !s.trim().is_empty()) {
@@ -353,11 +350,8 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
             infra_parts.push(catalog);
         }
     }
-    if !minimal {
-        let infra = crate::infra::summary::format_infra_summary(ctx.db);
-        if !infra.is_empty() {
-            infra_parts.push(infra);
-        }
+    if !mutable_infra.is_empty() {
+        infra_parts.push(mutable_infra.clone());
     }
 
     let mem = if !minimal {
@@ -374,7 +368,8 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
         .unwrap_or_default();
 
     PromptParts {
-        rules_tokens: count_tokens(&rules.join("\n\n")),
+        rules_tokens: count_tokens(&rules.join("\n\n"))
+            + count_tokens(&mutable_context_parts(ctx, minimal).0),
         skills_tokens: count_tokens(&skills_text),
         memory_tokens: count_tokens(&mem),
         infra_tokens: count_tokens(&infra_parts.join("\n\n")),
@@ -430,6 +425,20 @@ fn voice_tiers(ctx: &PromptContext) -> [Vec<String>; 3] {
     [stable, context, volatile]
 }
 
+fn mutable_context_parts(ctx: &PromptContext, minimal: bool) -> (String, String, String) {
+    if minimal {
+        return (String::new(), String::new(), String::new());
+    }
+    let taste = crate::ai::taste::format_for_prompt(ctx.home);
+    let skills = if ctx.force_minimal_prompt {
+        skills::system_index_minimal(ctx.home)
+    } else {
+        skills::system_index(ctx.home)
+    };
+    let infra = crate::infra::summary::format_infra_summary(ctx.db);
+    (taste, skills, infra)
+}
+
 fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
     // All spoken turns use the compact voice prompt: ultra-light for pure chat, and
     // a forceful-but-compact tool prompt when targets are selected (see voice_tiers).
@@ -463,33 +472,15 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
         stable.push(PONYTAIL_COMPACT_GUIDANCE.to_string());
     }
 
-    // Taste preferences change rarely — keep in static prefix for cache + style consistency.
-    if !minimal {
-        let taste = crate::ai::taste::format_for_prompt(ctx.home);
-        if !taste.is_empty() {
-            stable.push(taste);
-        }
-    }
-
-    if !minimal {
-        let skills_index = if ctx.force_minimal_prompt {
-            skills::system_index_minimal(ctx.home)
-        } else {
-            skills::system_index(ctx.home)
-        };
-        if !skills_index.is_empty() {
-            stable.push(skills_index);
-        }
-        // Static infra inventory (project/account labels) — not live SSH data.
-        let infra = crate::infra::summary::format_infra_summary(ctx.db);
-        if !infra.is_empty() {
-            stable.push(infra);
-        }
-    }
-
     // ---- DYNAMIC (context + volatile): never put these in the system prefix ----
     // Workspace brief, live canvas, selected targets, memory body, date, plan mode.
     let mut context: Vec<String> = Vec::new();
+    let (taste, skills_index, infra) = mutable_context_parts(ctx, minimal);
+    for part in [taste, skills_index, infra] {
+        if !part.is_empty() {
+            context.push(part);
+        }
+    }
     if let Some(ws) = ctx.workspace_context.as_ref().filter(|s| !s.trim().is_empty()) {
         context.push(ws.clone());
     }
@@ -553,4 +544,81 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
     volatile.push(runtime);
 
     ([stable, context, volatile], minimal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn test_home() -> (AgentHome, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("xconsole-context-{}", uuid::Uuid::new_v4()));
+        (AgentHome::new(dir.clone()), dir)
+    }
+
+    fn context<'a>(home: &'a AgentHome, db: &'a Db) -> PromptContext<'a> {
+        PromptContext {
+            home,
+            db,
+            model_label: "test-model",
+            provider_label: "test-provider",
+            safety: "approve",
+            target_count: 0,
+            conversation_summary: None,
+            has_tools: false,
+            vps_tools_only: false,
+            ollama_num_ctx: None,
+            target_ids: &[],
+            casual_turn: false,
+            target_selection_note: None,
+            force_minimal_prompt: false,
+            plan_mode: false,
+            workspace_context: None,
+            canvas_context: None,
+            conversation: false,
+        }
+    }
+
+    #[test]
+    fn mutable_prompt_sources_stay_out_of_static_prefix() {
+        let (home, dir) = test_home();
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        fs::write(home.taste(), "- Prefer concise output").unwrap();
+        fs::create_dir_all(home.skills_dir().join("ops").join("restart")).unwrap();
+        fs::write(
+            home.skills_dir().join("ops").join("restart").join("SKILL.md"),
+            "---\ndescription: Restart services safely\n---\n",
+        )
+        .unwrap();
+
+        let first = assemble_prompt(&context(&home, &db));
+        fs::write(home.taste(), "- Prefer detailed output").unwrap();
+        let second = assemble_prompt(&context(&home, &db));
+
+        assert_eq!(first.static_system, second.static_system);
+        assert_ne!(first.dynamic_block, second.dynamic_block);
+        assert!(second.dynamic_block.contains("Prefer detailed output"));
+        assert!(second.dynamic_block.contains("restart"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dynamic_injection_replaces_previous_block_and_preserves_user_text() {
+        let mut messages = vec![ChatMessage::assistant("prior"), ChatMessage::user("check status")];
+        assert!(inject_dynamic_into_last_user(&mut messages, "Date: today"));
+        assert!(inject_dynamic_into_last_user(&mut messages, "Date: tomorrow"));
+        let content = &messages[1].content;
+        assert_eq!(content.matches("# Runtime context").count(), 1);
+        assert!(content.contains("Date: tomorrow"));
+        assert!(!content.contains("Date: today"));
+        assert!(content.ends_with("check status"));
+    }
+
+    #[test]
+    fn dynamic_injection_reports_missing_user_message() {
+        let mut messages = vec![ChatMessage::assistant("tool setup")];
+        assert!(!inject_dynamic_into_last_user(&mut messages, "runtime"));
+        assert_eq!(messages[0].content, "tool setup");
+        assert!(inject_dynamic_into_last_user(&mut messages, ""));
+    }
 }

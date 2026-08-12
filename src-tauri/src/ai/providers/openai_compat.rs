@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use super::{join_url, SseBuffer};
 use crate::ai::provider::{
-    emit, ChatRequest, ChatResponse, EventSink, Provider, StreamEvent, ToolCall,
+    emit, ChatRequest, ChatResponse, EventSink, Provider, StreamEvent, StreamStats, ToolCall,
 };
 
 const DEFAULT_BASE: &str = "https://api.openai.com/v1";
@@ -92,6 +92,32 @@ impl OpenAiProvider {
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct UsageCounts {
+    prompt_tokens: Option<u32>,
+    completion_tokens: Option<u32>,
+    cached_tokens: Option<u32>,
+}
+
+fn visible_response_content(content: String, _opaque_reasoning: String) -> String {
+    content
+}
+
+fn usage_counts(event: &Value) -> UsageCounts {
+    let Some(usage) = event.get("usage") else {
+        return UsageCounts::default();
+    };
+    let count = |value: Option<&Value>| value.and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
+    let details = usage.get("prompt_tokens_details");
+    UsageCounts {
+        prompt_tokens: count(usage.get("prompt_tokens")),
+        completion_tokens: count(usage.get("completion_tokens")),
+        cached_tokens: count(details.and_then(|v| v.get("cached_tokens")))
+            .or_else(|| count(details.and_then(|v| v.get("cache_read_input_tokens"))))
+            .or_else(|| count(usage.get("cached_tokens"))),
+    }
+}
+
 /// Accumulator for one streamed tool call (arguments arrive as string fragments).
 #[derive(Default)]
 struct ToolAcc {
@@ -120,6 +146,7 @@ impl Provider for OpenAiProvider {
                 "max_tokens": req.max_tokens,
                 "temperature": req.temperature,
                 "stream": true,
+                "stream_options": { "include_usage": true },
                 "messages": Self::build_messages(req),
             });
             if send_tools {
@@ -198,6 +225,8 @@ impl Provider for OpenAiProvider {
         // Reasoning models (gpt-oss, qwen3, … on Groq) stream their text in a
         // separate `reasoning` field and may leave `content` empty.
         let mut reasoning = String::new();
+        let started = std::time::Instant::now();
+        let mut usage = UsageCounts::default();
 
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
@@ -216,6 +245,11 @@ impl Provider for OpenAiProvider {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
+                let counts = usage_counts(&ev);
+                usage.prompt_tokens = counts.prompt_tokens.or(usage.prompt_tokens);
+                usage.completion_tokens = counts.completion_tokens.or(usage.completion_tokens);
+                usage.cached_tokens = counts.cached_tokens.or(usage.cached_tokens);
+
                 let choice = match ev["choices"].get(0) {
                     Some(c) => c,
                     None => continue,
@@ -274,13 +308,105 @@ impl Provider for OpenAiProvider {
             out.tool_calls.push(tc);
         }
 
-        // Reasoning model emitted only `reasoning` (no content, no tools) — surface
-        // it so the reply isn't blank.
-        if out.content.trim().is_empty() && out.tool_calls.is_empty() && !reasoning.trim().is_empty() {
-            emit(sink, StreamEvent::Text(reasoning.clone()));
-            out.content = reasoning;
+        // Provider reasoning is opaque continuation state, not user-visible content.
+        // Never promote it into ChatResponse.content, persistence, compaction, or export.
+        out.content = visible_response_content(out.content, reasoning);
+
+        if let Some(completion_tokens) = usage.completion_tokens {
+            let duration_ms = started.elapsed().as_millis() as u64;
+            let seconds = (duration_ms as f64 / 1000.0).max(0.05);
+            emit(
+                sink,
+                StreamEvent::Stats(StreamStats {
+                    completion_tokens,
+                    prompt_tokens: usage.prompt_tokens,
+                    cached_tokens: usage.cached_tokens,
+                    duration_ms: duration_ms.max(1),
+                    tokens_per_sec: (completion_tokens as f64 / seconds) as f32,
+                }),
+            );
         }
 
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opaque_reasoning_is_never_promoted_to_visible_content() {
+        assert_eq!(visible_response_content(String::new(), "private reasoning".into()), "");
+        assert_eq!(visible_response_content("visible answer".into(), "private reasoning".into()), "visible answer");
+    }
+
+    #[test]
+    fn extracts_standard_and_compatibility_cache_fields() {
+        let standard: Value = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 42,
+                "completion_tokens": 7,
+                "prompt_tokens_details": { "cached_tokens": 19 }
+            }
+        });
+        assert_eq!(
+            usage_counts(&standard),
+            UsageCounts {
+                prompt_tokens: Some(42),
+                completion_tokens: Some(7),
+                cached_tokens: Some(19),
+            }
+        );
+
+        let alias: Value = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 42,
+                "completion_tokens": 7,
+                "prompt_tokens_details": { "cache_read_input_tokens": 19 }
+            }
+        });
+        assert_eq!(usage_counts(&alias).cached_tokens, Some(19));
+
+        let top_level: Value = serde_json::json!({
+            "usage": { "prompt_tokens": 42, "completion_tokens": 7, "cached_tokens": 19 }
+        });
+        assert_eq!(usage_counts(&top_level).cached_tokens, Some(19));
+    }
+
+    #[test]
+    fn usage_only_event_is_parsed_without_choices() {
+        let event: Value = serde_json::json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 5,
+                "prompt_tokens_details": { "cached_tokens": 80 }
+            }
+        });
+        let counts = usage_counts(&event);
+        assert_eq!(counts.prompt_tokens, Some(100));
+        assert_eq!(counts.completion_tokens, Some(5));
+        assert_eq!(counts.cached_tokens, Some(80));
+    }
+
+    #[test]
+    fn malformed_or_missing_cache_is_optional() {
+        let event: Value = serde_json::json!({
+            "usage": { "prompt_tokens": 4, "completion_tokens": 1, "cached_tokens": "unknown" }
+        });
+        assert_eq!(usage_counts(&event).cached_tokens, None);
+        assert_eq!(usage_counts(&serde_json::json!({})), UsageCounts::default());
+    }
+
+    #[test]
+    fn sse_buffer_handles_split_usage_event_and_done() {
+        let mut sse = SseBuffer::new();
+        assert!(sse.push("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":").is_empty());
+        let payloads = sse.push("4,\"completion_tokens\":1}}\r\n\r\ndata: [DONE]\r\n\r\n");
+        assert_eq!(payloads.len(), 2);
+        let event: Value = serde_json::from_str(&payloads[0]).unwrap();
+        assert_eq!(usage_counts(&event).completion_tokens, Some(1));
+        assert_eq!(payloads[1], "[DONE]");
     }
 }

@@ -1,11 +1,13 @@
-import type { TokenStats } from "../../lib/streamStats";
+import type { TokenStats, TurnTelemetry } from "../../lib/streamStats";
 import { formatTokensPerSec } from "../../lib/streamStats";
 
 export function AgentTokenStats({
   stats,
+  telemetry,
   live = false,
 }: {
   stats: TokenStats;
+  telemetry?: TurnTelemetry | null;
   live?: boolean;
 }) {
   const approx = stats.source === "estimate";
@@ -38,6 +40,9 @@ export function AgentTokenStats({
         {tps}
         {tokens ? ` · ${tokens}` : ""}
         {cachePct != null ? ` · cache ${cachePct}%` : ""}
+        {telemetry && telemetry.toolCacheLookups > 0
+          ? ` · tools cache ${Math.round(telemetry.toolCacheHitRate * 100)}%`
+          : ""}
       </span>
     </div>
   );
