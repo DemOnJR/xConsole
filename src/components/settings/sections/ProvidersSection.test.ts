@@ -23,4 +23,14 @@ describe("Command Code provider presets", () => {
       model: "anthropic/claude-sonnet-4-5",
     });
   });
+
+  it("defines the Antigravity CLI preset", () => {
+    expect(PROVIDER_PRESETS.find((item) => item.id === "antigravity")).toEqual({
+      id: "antigravity",
+      label: "Antigravity CLI (agy)",
+      kind: "antigravity_cli",
+      base_url: "",
+      model: "agent",
+    });
+  });
 });

@@ -128,13 +128,13 @@ pub struct WorkspaceInput {
 pub struct AiProvider {
     pub id: String,
     pub name: String,
-    /// "anthropic" | "openai" | "ollama" | "cursor" | "codex_cli" | "opencode_cli"
+    /// "anthropic" | "openai" | "ollama" | "cursor" | "codex_cli" | "opencode_cli" | "antigravity_cli"
     pub kind: String,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
-    /// Path to the CLI binary (for codex_cli / opencode_cli).
+    /// Path to the CLI binary (for codex_cli / opencode_cli / antigravity_cli).
     #[serde(default)]
     pub bin_path: Option<String>,
     /// Free-form JSON for provider-specific options.

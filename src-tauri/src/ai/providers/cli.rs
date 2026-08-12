@@ -37,6 +37,18 @@ impl CliProvider {
     pub fn default_bin(kind: &str) -> String {
         match kind {
             "opencode_cli" => "opencode".into(),
+            "antigravity_cli" => {
+                #[cfg(windows)]
+                {
+                    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+                        let cmd = format!(r"{local}\Programs\Antigravity IDE\bin\antigravity-ide.cmd");
+                        if Path::new(&cmd).exists() {
+                            return cmd;
+                        }
+                    }
+                }
+                "antigravity-ide".into()
+            }
             "cursor" => {
                 #[cfg(windows)]
                 {
@@ -60,6 +72,14 @@ impl CliProvider {
                 let mut a = vec!["run".to_string()];
                 if let Some(m) = &self.model {
                     a.push("--model".into());
+                    a.push(m.clone());
+                }
+                a
+            }
+            "antigravity_cli" => {
+                let mut a = vec!["chat".to_string(), "-".to_string()];
+                if let Some(m) = &self.model {
+                    a.push("--mode".into());
                     a.push(m.clone());
                 }
                 a
@@ -1004,7 +1024,7 @@ fn login_args(kind: &str) -> Vec<String> {
 }
 
 pub fn is_cli_kind(kind: &str) -> bool {
-    matches!(kind, "codex_cli" | "opencode_cli" | "cursor")
+    matches!(kind, "codex_cli" | "opencode_cli" | "cursor" | "antigravity_cli")
 }
 
 /// Run `opencode models` (or the equivalent for other CLIs) and return the

@@ -59,7 +59,7 @@ pub fn default_context_limit(provider_kind: &str, ollama_num_ctx: Option<u32>) -
     match provider_kind {
         "ollama" => ollama_num_ctx.unwrap_or(65_536),
         "anthropic" => 200_000,
-        "cursor" | "codex_cli" | "opencode_cli" => 200_000,
+        "cursor" | "codex_cli" | "opencode_cli" | "antigravity_cli" => 200_000,
         _ => 128_000,
     }
 }

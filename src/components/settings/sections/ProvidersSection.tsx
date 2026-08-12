@@ -15,6 +15,7 @@ const KIND_LABELS: Record<ProviderKind, string> = {
   cursor: "Cursor (Agent CLI)",
   codex_cli: "Codex CLI",
   opencode_cli: "OpenCode CLI",
+  antigravity_cli: "Antigravity CLI (agy)",
 };
 
 const OLLAMA_CTX_PRESETS: { value: number; label: string }[] = [
@@ -54,6 +55,7 @@ const KIND_DEFAULTS: Record<ProviderKind, Partial<AiProviderInput>> = {
   cursor: { model: "auto", bin_path: "agent" },
   codex_cli: { bin_path: "codex" },
   opencode_cli: { bin_path: "opencode" },
+  antigravity_cli: { bin_path: "antigravity-ide", model: "agent" },
 };
 
 // One-click presets for popular providers. Most are OpenAI-compatible, so they
@@ -98,6 +100,13 @@ export const PROVIDER_PRESETS: {
   { id: "fireworks", label: "Fireworks AI", kind: "openai", base_url: "https://api.fireworks.ai/inference/v1", model: "accounts/fireworks/models/llama-v3p3-70b-instruct" },
   { id: "perplexity", label: "Perplexity", kind: "openai", base_url: "https://api.perplexity.ai", model: "sonar" },
   { id: "gemini", label: "Google Gemini", kind: "openai", base_url: "https://generativelanguage.googleapis.com/v1beta/openai/", model: "gemini-2.5-flash" },
+  {
+    id: "antigravity",
+    label: "Antigravity CLI (agy)",
+    kind: "antigravity_cli",
+    base_url: "",
+    model: "agent",
+  },
 ];
 
 const isHttpApi = (kind: ProviderKind) =>
@@ -106,7 +115,7 @@ const isHttpApi = (kind: ProviderKind) =>
 const isOllama = (kind: ProviderKind) => kind === "ollama";
 
 const isCli = (kind: ProviderKind) =>
-  kind === "codex_cli" || kind === "opencode_cli" || kind === "cursor";
+  kind === "codex_cli" || kind === "opencode_cli" || kind === "cursor" || kind === "antigravity_cli";
 
 function parseOllamaExtra(raw?: string | null) {
   if (!raw?.trim()) return { ...OLLAMA_EXTRA_DEFAULT };
@@ -564,7 +573,13 @@ function ProviderForm({
               <TextInput
                 value={form.bin_path ?? ""}
                 onChange={(e) => patch({ bin_path: e.target.value })}
-                placeholder={form.kind === "codex_cli" ? "codex" : "opencode"}
+                placeholder={
+                  form.kind === "antigravity_cli"
+                    ? "antigravity-ide"
+                    : form.kind === "codex_cli"
+                    ? "codex"
+                    : "opencode"
+                }
               />
             </Field>
             <Field
@@ -590,7 +605,7 @@ function ProviderForm({
                 <TextInput
                   value={form.model ?? ""}
                   onChange={(e) => patch({ model: e.target.value })}
-                  placeholder="default"
+                  placeholder={form.kind === "antigravity_cli" ? "agent (or ask / edit)" : "default"}
                 />
               )}
             </Field>

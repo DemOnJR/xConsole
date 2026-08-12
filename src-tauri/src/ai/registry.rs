@@ -92,14 +92,14 @@ pub fn build(db: &Db, provider_id: &str) -> Result<ResolvedProvider, String> {
             p.model.clone(),
             secret,
         )),
-        "codex_cli" | "opencode_cli" => Box::new(CliProvider::new(
+        "codex_cli" | "opencode_cli" | "antigravity_cli" => Box::new(CliProvider::new(
             p.kind.clone(),
             p.bin_path
                 .clone()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| CliProvider::default_bin(&p.kind)),
             p.model.clone(),
-            None,
+            secret,
         )),
         other => return Err(format!("unknown provider kind: {other}")),
     };

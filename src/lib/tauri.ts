@@ -345,7 +345,8 @@ export type ProviderKind =
   | "llamacpp"
   | "cursor"
   | "codex_cli"
-  | "opencode_cli";
+  | "opencode_cli"
+  | "antigravity_cli";
 
 export interface AiProvider {
   id: string;
