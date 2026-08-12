@@ -120,6 +120,100 @@ workspace/project is active this saves to that workspace's memory; otherwise to 
                 "required": ["entry"]
             }),
         },
+        // ---- Goal-driven autonomous mode (/goal) ----
+        ToolDef {
+            name: "goal_propose_spec".into(),
+            description: "Intake phase for a goal session: submit the drafted GoalSpec (objective, \
+success criteria, check method/tooling, hard constraints, max cycles) for the user to review and \
+lock. Only callable while the goal is in 'intake' status.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "objective": {"type": "string"},
+                    "success_criteria": {"type": "array", "items": {"type": "string"}},
+                    "check_method": {"type": "string"},
+                    "check_tooling": {"type": "array", "items": {"type": "string"}},
+                    "hard_constraints": {"type": "array", "items": {"type": "string"}},
+                    "max_cycles": {"type": "integer"}
+                },
+                "required": ["objective", "success_criteria", "check_method"]
+            }),
+        },
+        ToolDef {
+            name: "goal_add_task".into(),
+            description: "Add a kanban card to the goal board. Columns: backlog, in_progress, \
+waiting, testing, blocked, done. kind: edit, test, bug, research, check.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "column": {"type": "string"},
+                    "title": {"type": "string"},
+                    "kind": {"type": "string"},
+                    "detail": {"type": "string"},
+                    "files": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["column", "title"]
+            }),
+        },
+        ToolDef {
+            name: "goal_update_task".into(),
+            description: "Move or annotate an existing kanban card (column, result, error, files). \
+The task id is returned by goal_add_task.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "column": {"type": "string"},
+                    "result": {"type": "string"},
+                    "error": {"type": "string"},
+                    "files": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["task_id"]
+            }),
+        },
+        ToolDef {
+            name: "goal_record_constraint".into(),
+            description: "Write a learned fact to the goal's constraint memory (e.g. how long \
+Google takes to reindex). Provide the key, value, and the evidence you observed.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                    "value": {"type": "string"},
+                    "evidence": {"type": "string"},
+                    "confidence": {"type": "string"}
+                },
+                "required": ["key", "value", "evidence"]
+            }),
+        },
+        ToolDef {
+            name: "goal_check_criteria".into(),
+            description: "THE verification gate. Answer whether the goal's success criteria are \
+met: 'met' (with cited evidence), 'not_yet' (more work now), or 'too_early_to_tell' (a change was \
+made but needs time — the loop will wait and re-check). This is the only way the loop may conclude \
+the goal is done.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "verdict": {"type": "string", "enum": ["met", "not_yet", "too_early_to_tell"]},
+                    "evidence": {"type": "string"}
+                },
+                "required": ["verdict", "evidence"]
+            }),
+        },
+        ToolDef {
+            name: "goal_schedule_wait".into(),
+            description: "Explicitly pause the goal until a time (RFC3339) with a reason — e.g. \
+waiting for Google to reindex. Writes next_check_at; the loop resumes then.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "until": {"type": "string"},
+                    "reason": {"type": "string"}
+                },
+                "required": ["until", "reason"]
+            }),
+        },
         ToolDef {
             name: "host_memory_get".into(),
             description: "Read the institutional dossier (PROFILE + MEMORY) for one VPS. \
@@ -706,6 +800,12 @@ pub async fn dispatch_with_telemetry(
         "canvas_close" => canvas_node_command(ctx, args, "close"),
         "canvas_refresh" => canvas_node_command(ctx, args, "reconnect"),
         "memory_save" => memory_save(ctx, args),
+        "goal_propose_spec" => goal_propose_spec(ctx, args).await,
+        "goal_add_task" => goal_add_task(ctx, args).await,
+        "goal_update_task" => goal_update_task(ctx, args).await,
+        "goal_record_constraint" => goal_record_constraint(ctx, args).await,
+        "goal_check_criteria" => goal_check_criteria(ctx, args).await,
+        "goal_schedule_wait" => goal_schedule_wait(ctx, args).await,
         "host_memory_get" => host_memory_get(ctx, args),
         "host_memory_update" => host_memory_update(ctx, args),
         "taste_save" => taste_save(ctx, args),
@@ -2211,4 +2311,222 @@ async fn present_plan(ctx: &ToolContext, args: &Value) -> String {
             "error: the user did not respond to the plan in time".into()
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Goal-driven autonomous mode (/goal) tool handlers. The goal id is embedded in
+// the session id ("goal:<id>"), mirroring how cron jobs use "cron:<id>".
+// ---------------------------------------------------------------------------
+
+fn goal_session_mut(
+    ctx: &ToolContext,
+) -> Result<(String, crate::storage::models::GoalSession), String> {
+    let goal_id = crate::ai::goal::goal_id_from_session(&ctx.session_id)
+        .ok_or_else(|| "goal tools are only available inside a goal session".to_string())?;
+    let goal = ctx
+        .db
+        .get_goal(&goal_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "goal session not found".to_string())?;
+    Ok((goal_id, goal))
+}
+
+fn emit_goal_event(app: &tauri::AppHandle, goal_id: &str, event: StreamEvent) {
+    let _ = app.emit(&crate::ai::goal::goal_event(goal_id), event);
+}
+
+async fn goal_propose_spec(ctx: &ToolContext, args: &Value) -> String {
+    let (goal_id, mut goal) = match goal_session_mut(ctx) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {e}"),
+    };
+    if goal.status != "intake" {
+        return format!("error: goal is in '{}' status, not intake", goal.status);
+    }
+    let spec = crate::storage::models::GoalSpec {
+        objective: args.get("objective").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        success_criteria: args
+            .get("success_criteria")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        check_method: args.get("check_method").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        check_tooling: args
+            .get("check_tooling")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        hard_constraints: args
+            .get("hard_constraints")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        max_cycles: args.get("max_cycles").and_then(|v| v.as_i64()),
+    };
+    goal.spec_json = serde_json::to_string(&spec).unwrap_or_default();
+    if let Err(e) = ctx.db.update_goal(&goal) {
+        return format!("error: {e}");
+    }
+    emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("spec_proposed".into()));
+    "Goal spec proposed. The user must review and click 'Lock goal & start' to activate it.".into()
+}
+
+async fn goal_add_task(ctx: &ToolContext, args: &Value) -> String {
+    let (goal_id, mut goal) = match goal_session_mut(ctx) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {e}"),
+    };
+    let mut tasks = crate::ai::goal::parse_kanban(&goal);
+    let task = crate::storage::models::GoalTask {
+        id: Uuid::new_v4().to_string(),
+        column: args.get("column").and_then(|v| v.as_str()).unwrap_or("backlog").to_string(),
+        title: args.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        detail: args.get("detail").and_then(|v| v.as_str()).map(String::from),
+        kind: args.get("kind").and_then(|v| v.as_str()).unwrap_or("task").to_string(),
+        files: args
+            .get("files")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        result: None,
+        error: None,
+        created_at: Some(chrono::Utc::now().to_rfc3339()),
+        updated_at: Some(chrono::Utc::now().to_rfc3339()),
+    };
+    let id = task.id.clone();
+    tasks.push(task);
+    crate::ai::goal::set_kanban(&mut goal, tasks);
+    if let Err(e) = ctx.db.update_goal(&goal) {
+        return format!("error: {e}");
+    }
+    emit_goal_event(
+        &ctx.app,
+        &goal_id,
+        StreamEvent::ToolResult { id: id.clone(), output: "task added".into() },
+    );
+    id
+}
+
+async fn goal_update_task(ctx: &ToolContext, args: &Value) -> String {
+    let (goal_id, mut goal) = match goal_session_mut(ctx) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {e}"),
+    };
+    let task_id = args.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+    if task_id.is_empty() {
+        return "error: task_id required".into();
+    }
+    let mut tasks = crate::ai::goal::parse_kanban(&goal);
+    let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) else {
+        return format!("error: task '{task_id}' not found");
+    };
+    if let Some(col) = args.get("column").and_then(|v| v.as_str()) {
+        task.column = col.to_string();
+    }
+    if let Some(r) = args.get("result").and_then(|v| v.as_str()) {
+        task.result = Some(r.to_string());
+    }
+    if let Some(e) = args.get("error").and_then(|v| v.as_str()) {
+        task.error = Some(e.to_string());
+    }
+    if let Some(f) = args.get("files").and_then(|v| v.as_array()) {
+        task.files = f.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+    }
+    task.updated_at = Some(chrono::Utc::now().to_rfc3339());
+    crate::ai::goal::set_kanban(&mut goal, tasks);
+    if let Err(e) = ctx.db.update_goal(&goal) {
+        return format!("error: {e}");
+    }
+    emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("task_updated".into()));
+    "ok".into()
+}
+
+async fn goal_record_constraint(ctx: &ToolContext, args: &Value) -> String {
+    let (goal_id, mut goal) = match goal_session_mut(ctx) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {e}"),
+    };
+    let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let value = args.get("value").and_then(|v| v.as_str()).unwrap_or("");
+    let evidence = args.get("evidence").and_then(|v| v.as_str()).unwrap_or("");
+    let confidence = args.get("confidence").and_then(|v| v.as_str()).unwrap_or("observed");
+    if key.is_empty() || value.is_empty() {
+        return "error: key and value required".into();
+    }
+    // Constraint memory: {"learned":[{key,value,evidence,confidence}], "history":[]}.
+    let mut mem: serde_json::Value =
+        serde_json::from_str(&goal.memory_json).unwrap_or_else(|_| serde_json::json!({}));
+    if mem.get("learned").and_then(|l| l.as_array()).is_none() {
+        mem["learned"] = serde_json::json!([]);
+    }
+    let learned = mem["learned"].as_array_mut().unwrap();
+    // Replace an existing entry with the same key.
+    learned.retain(|e| e.get("key").and_then(|k| k.as_str()) != Some(key));
+    learned.push(serde_json::json!({
+        "key": key,
+        "value": value,
+        "evidence": evidence,
+        "confidence": confidence,
+    }));
+    goal.memory_json = serde_json::to_string(&mem).unwrap_or_default();
+    if let Err(e) = ctx.db.update_goal(&goal) {
+        return format!("error: {e}");
+    }
+    emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("memory_updated".into()));
+    "ok".into()
+}
+
+async fn goal_check_criteria(ctx: &ToolContext, args: &Value) -> String {
+    let (goal_id, mut goal) = match goal_session_mut(ctx) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {e}"),
+    };
+    let verdict = args.get("verdict").and_then(|v| v.as_str()).unwrap_or("");
+    let evidence = args.get("evidence").and_then(|v| v.as_str()).unwrap_or("");
+    match verdict {
+        "met" => {
+            goal.status = "done".to_string();
+            goal.finished_at = Some(chrono::Utc::now().to_rfc3339());
+            if let Err(e) = ctx.db.update_goal(&goal) {
+                return format!("error: {e}");
+            }
+            emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("done".into()));
+            format!("Goal marked done. Evidence: {evidence}")
+        }
+        "not_yet" => {
+            emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("active".into()));
+            "Not yet met — continue working.".into()
+        }
+        "too_early_to_tell" => {
+            goal.status = "waiting".to_string();
+            goal.next_check_at = Some(
+                (chrono::Utc::now() + chrono::Duration::seconds(3 * 24 * 3600)).to_rfc3339(),
+            );
+            if let Err(e) = ctx.db.update_goal(&goal) {
+                return format!("error: {e}");
+            }
+            emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("waiting".into()));
+            format!("Too early to tell — scheduled a re-check. Evidence: {evidence}")
+        }
+        other => format!("error: unknown verdict '{other}' (use met|not_yet|too_early_to_tell)"),
+    }
+}
+
+async fn goal_schedule_wait(ctx: &ToolContext, args: &Value) -> String {
+    let (goal_id, mut goal) = match goal_session_mut(ctx) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {e}"),
+    };
+    let until = args.get("until").and_then(|v| v.as_str()).unwrap_or("");
+    if chrono::DateTime::parse_from_rfc3339(until).is_err() {
+        return format!("error: 'until' must be RFC3339, got '{until}'");
+    }
+    let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+    goal.status = "waiting".to_string();
+    goal.next_check_at = Some(until.to_string());
+    if let Err(e) = ctx.db.update_goal(&goal) {
+        return format!("error: {e}");
+    }
+    emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("waiting".into()));
+    format!("Goal paused until {until}. Reason: {reason}")
 }

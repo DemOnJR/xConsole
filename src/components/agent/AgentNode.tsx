@@ -39,6 +39,7 @@ import { PROVIDER_CATALOG } from "../../lib/providerCatalog";
 import { InputBar, type ReasoningLevel } from "./InputBar";
 import { useGitBranch } from "../../hooks/useGitBranch";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
+import { useGoalStore } from "../../stores/goalStore";
 import { effectiveMode, shouldAutoRun } from "../../lib/safety";
 
 import type { AgentApproval, AgentPlan, AgentQuestion } from "../../lib/tauri";
@@ -462,8 +463,8 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   // can see whether a picker is open.
   const pickerOpenRef = useRef(false);
 
-  // Escape closes whatever is open first (picker → stop → window), never jumps
-  // straight to closing the whole agent window.
+  // Escape closes pickers, then stops the agent. It never closes the window —
+  // that's only via the ✕ button or removing the node.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -486,8 +487,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
         void useAgentStore.getState().stop();
         return;
       }
-      // 3. Nothing else open → close the agent window.
-      useCanvasStore.getState().removeNode(id);
+      // 3. Otherwise: nothing — Escape does not close the window.
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -833,6 +833,27 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   const submit = () => {
     const trimmed = input.trim();
     if (!trimmed) return;
+    // /goal <objective> — start an autonomous goal session + open its kanban board.
+    const goalMatch = trimmed.match(/^\/goal(?:\s+(.+))?$/i);
+    if (goalMatch) {
+      const objective = goalMatch[1]?.trim();
+      if (!objective) {
+        void notify("Goal", "Usage: /goal <objective> — e.g. /goal rank my site #1 for 'vps ssh manager'");
+        return;
+      }
+      setInput("");
+      history.reset("");
+      recallIdx.current = null;
+      void useGoalStore
+        .getState()
+        .start(objective)
+        .then((goalId) => {
+          useCanvasStore.getState().addGoal(goalId);
+          void notify("Goal", "Intake started — answer the agent's questions, then lock the goal.");
+        })
+        .catch((e) => notify("Goal", String(e)));
+      return;
+    }
     // /loop <task> — loop until the agent finishes (Esc to stop).
     const loopMatch = trimmed.match(/^\/loop(?:\s+(.+))?$/i);
     if (loopMatch) {

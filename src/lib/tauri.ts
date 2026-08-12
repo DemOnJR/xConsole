@@ -470,6 +470,52 @@ export interface CronJobInput {
   enabled: boolean;
 }
 
+/** A persistent autonomous goal session (/goal). */
+export interface GoalSession {
+  id: string;
+  title: string;
+  raw_request: string;
+  spec_json: string;
+  status: "intake" | "active" | "waiting" | "blocked" | "done" | "stopped" | string;
+  kanban_json: string;
+  memory_json: string;
+  next_check_at?: string | null;
+  cycles: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+  finished_at?: string | null;
+}
+
+/** The locked-in definition of "done" for a goal. */
+export interface GoalSpec {
+  objective: string;
+  success_criteria: string[];
+  check_method: string;
+  check_tooling?: string[];
+  hard_constraints?: string[];
+  max_cycles?: number | null;
+}
+
+/** One kanban card. */
+export interface GoalTask {
+  id: string;
+  column: string;
+  title: string;
+  detail?: string | null;
+  kind?: string;
+  files?: string[];
+  result?: string | null;
+  error?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+/** Constraint memory: learned facts + history. */
+export interface GoalMemory {
+  learned: { key: string; value: string; evidence: string; confidence: string }[];
+  history?: { at: string; action: string; next_check: string }[];
+}
+
 export interface InfraProject {
   id: string;
   name: string;
@@ -1051,6 +1097,13 @@ export const api = {
   deleteCronJob: (id: string) => invoke<void>("delete_cron_job", { id }),
   runCronJob: (id: string) => invoke<void>("run_cron_job", { id }),
 
+  startGoal: (text: string) => invoke<string>("start_goal", { text }),
+  confirmGoal: (goalId: string) => invoke<void>("confirm_goal", { goalId }),
+  stopGoal: (goalId: string) => invoke<void>("stop_goal", { goalId }),
+  getGoal: (goalId: string) => invoke<GoalSession>("get_goal", { goalId }),
+  listGoals: () => invoke<GoalSession[]>("list_goals"),
+  deleteGoal: (goalId: string) => invoke<void>("delete_goal", { goalId }),
+
   listInfraProjects: () => invoke<InfraProject[]>("list_infra_projects"),
   saveInfraProject: (input: InfraProjectInput) =>
     invoke<InfraProject>("save_infra_project", { input }),
@@ -1143,6 +1196,14 @@ export function onCanvasCommand(
   cb: (cmd: CanvasCommand) => void,
 ): Promise<UnlistenFn> {
   return listen<CanvasCommand>("canvas://command", (e) => cb(e.payload));
+}
+
+/** Subscribe to live goal-session events (kanban/status/memory updates). */
+export function onGoalEvent(
+  goalId: string,
+  cb: (ev: StreamEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<StreamEvent>(`goal://${goalId}`, (e) => cb(e.payload));
 }
 
 /** One file the agent edited this session (before/after captured for the diff panel). */

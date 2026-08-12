@@ -20,6 +20,7 @@ import { TerminalNode } from "./TerminalNode";
 import { SftpNode } from "./SftpNode";
 import { DatabaseNode } from "./DatabaseNode";
 import { AgentNodeView } from "./agent/AgentNode";
+import { GoalNode } from "./GoalNode";
 import { FloatingEdge } from "./FloatingEdge";
 import { LockIcon, LockOpenIcon, RadarIcon } from "./icons";
 import { onInternalDrop } from "../stores/dragStore";
@@ -31,6 +32,7 @@ const nodeTypes: NodeTypes = {
   sftp: SftpNode,
   db: DatabaseNode,
   agent: AgentNodeView,
+  goal: GoalNode,
 };
 const edgeTypes = { floating: FloatingEdge };
 

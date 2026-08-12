@@ -192,6 +192,7 @@ pub fn run() {
             let session_state = SessionState::new();
             let llama_server = ai::llama::LlamaServer::default();
             let cron_running = ai::cron::CronRunning::default();
+            let goal_running = ai::goal::GoalRunning::default();
 
             // Background cron scheduler. Reuses the same exec/agent/safety paths.
             ai::cron::spawn(ai::cron::CronContext {
@@ -201,6 +202,16 @@ pub fn run() {
                 home: agent_home.clone(),
                 approvals: approvals.clone(),
                 running: cron_running.clone(),
+            });
+
+            // Goal-resume ticker: wakes "waiting" /goal sessions when due.
+            ai::goal::spawn_tick(ai::goal::GoalContext {
+                app: app.handle().clone(),
+                db: db.clone(),
+                sessions: sessions.clone(),
+                home: agent_home.clone(),
+                approvals: approvals.clone(),
+                running: goal_running.clone(),
             });
 
             app.manage(commands::lock::DataKey(std::sync::Mutex::new(initial_data_key)));
@@ -446,6 +457,12 @@ pub fn run() {
             commands::ai::save_cron_job,
             commands::ai::delete_cron_job,
             commands::ai::run_cron_job,
+            commands::goal::start_goal,
+            commands::goal::confirm_goal,
+            commands::goal::stop_goal,
+            commands::goal::get_goal,
+            commands::goal::list_goals,
+            commands::goal::delete_goal,
             commands::infra::list_infra_projects,
             commands::infra::save_infra_project,
             commands::infra::delete_infra_project,

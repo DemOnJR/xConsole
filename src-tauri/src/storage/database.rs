@@ -7,8 +7,8 @@ use uuid::Uuid;
 use super::models::{
     AgentApproval, AgentConversation, AgentConversationInput, AgentConversationMeta,
     AiProvider, AiProviderInput, AuthType, CloudAccount, CloudAccountInput,
-    CronJob, CronJobInput, InfraProject, InfraProjectInput, KnownHost, Vps, VpsInput, Workspace,
-    WorkspaceInput,
+    CronJob, CronJobInput, GoalSession, InfraProject, InfraProjectInput, KnownHost, Vps, VpsInput,
+    Workspace, WorkspaceInput,
 };
 use crate::ai::conversations;
 use crate::ai::provider::ChatMessage;
@@ -421,6 +421,22 @@ impl Db {
                 last_run     TEXT,
                 last_status  TEXT,
                 created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Persistent autonomous goal sessions (/goal).
+            CREATE TABLE IF NOT EXISTS goal_sessions (
+                id            TEXT PRIMARY KEY,
+                title         TEXT NOT NULL,
+                raw_request   TEXT NOT NULL,
+                spec_json     TEXT NOT NULL,
+                status        TEXT NOT NULL DEFAULT 'intake',
+                kanban_json   TEXT NOT NULL DEFAULT '[]',
+                memory_json   TEXT NOT NULL DEFAULT '{}',
+                next_check_at TEXT,
+                cycles        INTEGER NOT NULL DEFAULT 0,
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                finished_at   TEXT
             );
 
             -- Pending/!resolved approvals for agent commands (approve safety mode).
@@ -919,6 +935,117 @@ impl Db {
             "UPDATE cron_job SET last_run = datetime('now'), last_status = ?2 WHERE id = ?1",
             params![id, status],
         )?;
+        Ok(())
+    }
+
+    // ----- Goal sessions (/goal) -----
+
+    fn row_to_goal(r: &rusqlite::Row) -> rusqlite::Result<GoalSession> {
+        Ok(GoalSession {
+            id: r.get(0)?,
+            title: r.get(1)?,
+            raw_request: r.get(2)?,
+            spec_json: r.get(3)?,
+            status: r.get(4)?,
+            kanban_json: r.get(5)?,
+            memory_json: r.get(6)?,
+            next_check_at: r.get(7)?,
+            cycles: r.get(8)?,
+            created_at: r.get(9)?,
+            updated_at: r.get(10)?,
+            finished_at: r.get(11)?,
+        })
+    }
+
+    pub fn list_goals(&self) -> Result<Vec<GoalSession>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
+                    next_check_at, cycles, created_at, updated_at, finished_at
+             FROM goal_sessions ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_goal)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_goal(&self, id: &str) -> Result<Option<GoalSession>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
+                    next_check_at, cycles, created_at, updated_at, finished_at
+             FROM goal_sessions WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query([id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::row_to_goal(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Insert a new goal session in "intake" status.
+    pub fn insert_goal(&self, goal: &GoalSession) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO goal_sessions
+               (id, title, raw_request, spec_json, status, kanban_json, memory_json, next_check_at, cycles)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                goal.id,
+                goal.title,
+                goal.raw_request,
+                goal.spec_json,
+                goal.status,
+                goal.kanban_json,
+                goal.memory_json,
+                goal.next_check_at,
+                goal.cycles,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_goal(&self, goal: &GoalSession) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE goal_sessions SET
+                title = ?2, raw_request = ?3, spec_json = ?4, status = ?5,
+                kanban_json = ?6, memory_json = ?7, next_check_at = ?8, cycles = ?9,
+                updated_at = datetime('now'), finished_at = ?10
+             WHERE id = ?1",
+            params![
+                goal.id,
+                goal.title,
+                goal.raw_request,
+                goal.spec_json,
+                goal.status,
+                goal.kanban_json,
+                goal.memory_json,
+                goal.next_check_at,
+                goal.cycles,
+                goal.finished_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Goals that are due to resume (status "waiting" with next_check_at <= now).
+    pub fn list_due_goals(&self) -> Result<Vec<GoalSession>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
+                    next_check_at, cycles, created_at, updated_at, finished_at
+             FROM goal_sessions
+             WHERE status = 'waiting' AND next_check_at IS NOT NULL
+               AND next_check_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now')
+             ORDER BY next_check_at",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_goal)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn delete_goal(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM goal_sessions WHERE id = ?1", [id])?;
         Ok(())
     }
 

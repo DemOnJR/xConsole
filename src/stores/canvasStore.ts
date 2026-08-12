@@ -70,13 +70,21 @@ export interface AgentData {
   [key: string]: unknown;
 }
 
+/** A kanban board node for a /goal session (one node per active goal). */
+export interface GoalData {
+  goalId: string;
+  name: string;
+  [key: string]: unknown;
+}
+
 export type CanvasEdge = Edge<{ kind: "sftp-terminal" }>;
 
 export type TermNode = Node<TermData, "terminal">;
 export type SftpNode = Node<SftpData, "sftp">;
 export type DbNode = Node<DbData, "db">;
 export type AgentNode = Node<AgentData, "agent">;
-export type CanvasNode = TermNode | SftpNode | DbNode | AgentNode;
+export type GoalNode = Node<GoalData, "goal">;
+export type CanvasNode = TermNode | SftpNode | DbNode | AgentNode | GoalNode;
 
 export const NODE_W = 460;
 export const NODE_H = 320;
@@ -116,6 +124,8 @@ interface CanvasState {
   addDb: (vps: Vps, position?: { x: number; y: number }) => string;
   /** Open the agent window (single instance — focuses it if one is open). */
   addAgent: (position?: { x: number; y: number }) => string;
+  /** Open a kanban board node for a goal session (multiple allowed). */
+  addGoal: (goalId: string, position?: { x: number; y: number }) => string;
   removeNode: (id: string) => void;
   setLayout: (mode: LayoutMode) => void;
   focus: (id: string | null) => void;
@@ -466,6 +476,37 @@ export const useCanvasStore = create<CanvasState>()(
           width: NODE_W,
           height: NODE_H,
           data: { name: "Agent" },
+        };
+        set((s) => ({ nodes: [...s.nodes, node] }));
+        if (get().layoutMode === "tile") get().arrangeTiles();
+        get().focus(id);
+        return id;
+      },
+
+      addGoal: (goalId, position) => {
+        // One board per goal session; focus it if already open.
+        const existing = get().nodes.find(
+          (n) => n.type === "goal" && String(n.data.goalId) === goalId,
+        );
+        if (existing) {
+          get().focus(existing.id);
+          return existing.id;
+        }
+        const id = crypto.randomUUID();
+        const count = get().nodes.length;
+        const pos =
+          position ?? {
+            x: 80 + (count % 4) * (NODE_W + GAP),
+            y: 80 + Math.floor(count / 4) * (NODE_H + GAP),
+          };
+        const node: GoalNode = {
+          id,
+          type: "goal",
+          position: pos,
+          // Kanban board: wider than the default node.
+          width: Math.round(NODE_W * 1.6),
+          height: NODE_H + 60,
+          data: { goalId, name: "Goal" },
         };
         set((s) => ({ nodes: [...s.nodes, node] }));
         if (get().layoutMode === "tile") get().arrangeTiles();

@@ -16,7 +16,8 @@ export interface SlashCommandDef {
     | "cost"
     | "voice"
     | "conversation"
-    | "loop";
+    | "loop"
+    | "goal";
 }
 
 export const SLASH_COMMANDS: SlashCommandDef[] = [
@@ -97,6 +98,12 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     syntax: "/loop <task>",
     description: "Loop the task until the agent finishes (Esc to stop)",
     actionKey: "loop",
+  },
+  {
+    name: "goal",
+    syntax: "/goal <objective>",
+    description: "Set an autonomous goal — the agent asks what it needs once, then works until it's done",
+    actionKey: "goal",
   },
   {
     name: "help",

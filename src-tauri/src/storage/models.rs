@@ -208,6 +208,82 @@ pub struct CronJobInput {
     pub enabled: bool,
 }
 
+/// A persistent goal session (the /goal autonomous mode). The loop controller in
+/// `ai::goal` drives plan → act → verify cycles against a GoalSpec; kanban cards
+/// and constraint memory live as JSON blobs so the schema stays stable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalSession {
+    pub id: String,
+    /// Short label for the kanban node header.
+    pub title: String,
+    /// The user's original "/goal ..." text.
+    pub raw_request: String,
+    /// Serialized GoalSpec.
+    pub spec_json: String,
+    /// "intake" | "active" | "waiting" | "blocked" | "done" | "stopped"
+    pub status: String,
+    /// Serialized Vec<GoalTask>.
+    pub kanban_json: String,
+    /// Serialized constraint memory (facts learned during the run).
+    pub memory_json: String,
+    /// RFC3339; when "waiting", when to resume.
+    #[serde(default)]
+    pub next_check_at: Option<String>,
+    /// How many plan→act→verify cycles have run.
+    pub cycles: i64,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+}
+
+/// The locked-in definition of "done" for a goal session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalSpec {
+    pub objective: String,
+    pub success_criteria: Vec<String>,
+    /// How the agent verifies progress (tool names + procedure).
+    pub check_method: String,
+    /// Tool names allowed for verification, e.g. ["web_search", "run_command"].
+    #[serde(default)]
+    pub check_tooling: Vec<String>,
+    /// Things the agent must never do.
+    #[serde(default)]
+    pub hard_constraints: Vec<String>,
+    /// Safety valve; None = unbounded but still stoppable.
+    #[serde(default)]
+    pub max_cycles: Option<i64>,
+}
+
+/// One kanban card for a goal session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalTask {
+    pub id: String,
+    /// "backlog" | "in_progress" | "waiting" | "testing" | "blocked" | "done"
+    pub column: String,
+    pub title: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// "edit" | "test" | "bug" | "research" | "check"
+    #[serde(default)]
+    pub kind: String,
+    /// Touched file paths.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// Outcome once resolved.
+    #[serde(default)]
+    pub result: Option<String>,
+    /// Populated when kind="bug" or a test failed.
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
 /// A pending or resolved approval for an agent command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentApproval {
