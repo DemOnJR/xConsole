@@ -26,7 +26,7 @@ interface SavedNode {
   y: number;
   width: number;
   height: number;
-  nodeType?: "terminal" | "sftp" | "db";
+  nodeType?: "terminal" | "sftp" | "db" | "agent";
   linkedTerminalIndex?: number;
   followTerminal?: boolean;
 }
@@ -165,9 +165,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const saved: SavedNode[] = nodes.map((n) => {
       const base: SavedNode = {
         id: n.id,
-        vpsId: n.data.vpsId,
-        name: n.data.name,
-        host: n.data.host,
+        vpsId: String(n.data.vpsId ?? ""),
+        name: String(n.data.name ?? ""),
+        host: String(n.data.host ?? ""),
         x: n.position.x,
         y: n.position.y,
         width: (n.width as number) ?? 460,
@@ -175,7 +175,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         // Explicit per type, not a two-way ternary: the old
         // `n.type === "sftp" ? "sftp" : "terminal"` silently turned any third node type
         // into a terminal on save, losing it on the next restore.
-        nodeType: n.type === "sftp" ? "sftp" : n.type === "db" ? "db" : "terminal",
+        nodeType:
+          n.type === "sftp" ? "sftp" : n.type === "db" ? "db" : n.type === "agent" ? "agent" : "terminal",
       };
       if (n.type === "sftp" && n.data.linkedTerminalId) {
         const idx = nodes.findIndex((x) => x.id === n.data.linkedTerminalId);
@@ -337,7 +338,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       };
       return {
         id: nodeId,
-        type: s.nodeType === "sftp" ? "sftp" : s.nodeType === "db" ? "db" : "terminal",
+        type:
+          s.nodeType === "sftp"
+            ? "sftp"
+            : s.nodeType === "db"
+              ? "db"
+              : s.nodeType === "agent"
+                ? "agent"
+                : "terminal",
         position: { x: s.x, y: s.y },
         width: s.width,
         height: s.height,

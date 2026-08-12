@@ -7,7 +7,6 @@ import { BottomBar } from "./components/BottomBar";
 import { SettingsModal } from "./components/settings/SettingsModal";
 import { DialogHost } from "./components/Dialog";
 import { TooltipHost } from "./components/Tooltip";
-import { AgentPanel } from "./components/agent/AgentPanel";
 import { AppToolbar } from "./components/AppToolbar";
 import { NavRail } from "./components/NavRail";
 import { StatusStrip } from "./components/StatusStrip";
@@ -120,13 +119,10 @@ function UnlockedApp() {
   const leftOpen = useUiStore((s) => s.leftOpen);
   const rightOpen = useUiStore((s) => s.rightOpen);
   const bottomOpen = useUiStore((s) => s.bottomOpen);
-  const agentOpen = useUiStore((s) => s.agentOpen);
-  const agentExpanded = useUiStore((s) => s.agentExpanded);
   const leftWidth = useUiStore((s) => s.leftWidth);
   const rightWidth = useUiStore((s) => s.rightWidth);
   const setLeftWidth = useUiStore((s) => s.setLeftWidth);
   const setRightWidth = useUiStore((s) => s.setRightWidth);
-  const setAgentOpen = useUiStore((s) => s.setAgentOpen);
 
   const loadTheme = useThemeStore((s) => s.load);
   const agentSessionId = useAgentStore((s) => s.sessionId);
@@ -185,11 +181,11 @@ function UnlockedApp() {
   }, []);
 
   useEffect(() => {
-    // Surface the agent panel whenever it needs the user (approval/question/plan).
+    // Surface the agent window whenever it needs the user (approval/question/plan).
     if (pendingApprovalsCount > 0 || pendingQuestionsCount > 0 || hasPendingPlan) {
-      setAgentOpen(true);
+      useCanvasStore.getState().addAgent();
     }
-  }, [pendingApprovalsCount, pendingQuestionsCount, hasPendingPlan, setAgentOpen]);
+  }, [pendingApprovalsCount, pendingQuestionsCount, hasPendingPlan]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -207,8 +203,6 @@ function UnlockedApp() {
     return () => window.removeEventListener("keydown", onKey);
   }, [focus]);
 
-  const agentOnly = agentOpen && agentExpanded;
-
   return (
     <ReactFlowProvider>
       <div className="flex h-screen w-screen flex-col overflow-hidden bg-[var(--bg)]">
@@ -217,53 +211,46 @@ function UnlockedApp() {
         <div className="flex min-h-0 flex-1 overflow-hidden">
           <NavRail />
 
-          {agentOnly ? (
-            <AgentPanel expanded />
-          ) : (
+          {leftOpen ? (
             <>
-              {leftOpen ? (
-                <>
-                  <WorkspacePanel width={leftWidth} />
-                  <DrawerSplitter
-                    side="left"
-                    width={leftWidth}
-                    onWidthChange={setLeftWidth}
-                  />
-                </>
-              ) : null}
-
-              <main className="relative min-w-0 flex-1">
-                <CanvasFlow />
-                {nodes.length === 0 && (
-                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                    <div className="max-w-sm px-6 text-center">
-                      <p className="text-base text-[var(--text-dim)]">
-                        Drag a server from the hosts panel onto the canvas, or click it.
-                      </p>
-                      <p className="mt-2 text-sm text-[var(--text-faint)]">
-                        Use the left rail for workspaces, servers, agent, and console.
-                      </p>
-                    </div>
-                  </div>
-                )}
-              </main>
-
-              {rightOpen ? (
-                <>
-                  <DrawerSplitter
-                    side="right"
-                    width={rightWidth}
-                    onWidthChange={setRightWidth}
-                  />
-                  <ServerPanel width={rightWidth} />
-                </>
-              ) : null}
-              {agentOpen ? <AgentPanel /> : null}
+              <WorkspacePanel width={leftWidth} />
+              <DrawerSplitter
+                side="left"
+                width={leftWidth}
+                onWidthChange={setLeftWidth}
+              />
             </>
-          )}
+          ) : null}
+
+          <main className="relative min-w-0 flex-1">
+            <CanvasFlow />
+            {nodes.length === 0 && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                <div className="max-w-sm px-6 text-center">
+                  <p className="text-base text-[var(--text-dim)]">
+                    Drag a server from the hosts panel onto the canvas, or click it.
+                  </p>
+                  <p className="mt-2 text-sm text-[var(--text-faint)]">
+                    Use the left rail for workspaces, servers, agent, and console.
+                  </p>
+                </div>
+              </div>
+            )}
+          </main>
+
+          {rightOpen ? (
+            <>
+              <DrawerSplitter
+                side="right"
+                width={rightWidth}
+                onWidthChange={setRightWidth}
+              />
+              <ServerPanel width={rightWidth} />
+            </>
+          ) : null}
         </div>
 
-        {bottomOpen && !agentOnly ? <BottomBar /> : null}
+        {bottomOpen ? <BottomBar /> : null}
         <StatusStrip />
       </div>
       <SettingsModal />

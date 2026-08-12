@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { NodeResizer, useStore, type NodeProps } from "@xyflow/react";
 
 import { useAgentStore } from "../../stores/agentStore";
 
@@ -20,7 +21,7 @@ import { api } from "../../lib/tauri";
 import { useUiStore } from "../../stores/uiStore";
 
 import { useVpsStore } from "../../stores/vpsStore";
-import { useCanvasStore } from "../../stores/canvasStore";
+import { useCanvasStore, NODE_W, NODE_H, type AgentNode as AgentNodeType } from "../../stores/canvasStore";
 
 import { useSettingsStore } from "../../stores/settingsStore";
 
@@ -31,7 +32,6 @@ import {
   LoaderIcon,
   MaximizeIcon,
   MicIcon,
-  MinimizeIcon,
   PlanIcon,
   SettingsIcon,
   StopIcon,
@@ -55,6 +55,41 @@ import { notify } from "../../lib/notify";
 import { AgentHistory, AgentLiveStatus, AgentSessionTabs } from "./AgentHistory";
 
 import type { AgentApproval, AgentPlan, AgentQuestion } from "../../lib/tauri";
+
+/** Maximize the agent node to the whole canvas pane, or restore its default size.
+ *  Shared with the NavRail double-click, which has no React access to the node. */
+export function toggleAgentFillPane(id: string) {
+  const canvas = useCanvasStore.getState();
+  const node = canvas.nodes.find((n) => n.id === id);
+  if (!node) return;
+  const pane = canvas.paneSize;
+  const w = Number(node.width) || NODE_W;
+  const h = Number(node.height) || NODE_H;
+  const fillsPane =
+    pane && w >= pane.width - 4 && h >= pane.height - 4 && node.position.x <= 4 && node.position.y <= 4;
+  if (fillsPane) {
+    useCanvasStore.setState((s) => ({
+      nodes: s.nodes.map((n) =>
+        n.id === id
+          ? { ...n, position: { x: 80, y: 80 }, width: NODE_W, height: NODE_H }
+          : n,
+      ),
+    }));
+    if (canvas.layoutMode === "tile") useCanvasStore.getState().arrangeTiles();
+    return;
+  }
+  if (canvas.layoutMode === "tile") {
+    useCanvasStore.getState().toggleTileFullWidth(id);
+    return;
+  }
+  if (pane) {
+    useCanvasStore.setState((s) => ({
+      nodes: s.nodes.map((n) =>
+        n.id === id ? { ...n, position: { x: 0, y: 0 }, width: pane.width, height: pane.height } : n,
+      ),
+    }));
+  }
+}
 
 
 
@@ -319,17 +354,16 @@ function ProviderSwitcher() {
   );
 }
 
-export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
-
-  const open = useUiStore((s) => s.agentOpen);
-
-  const setAgentOpen = useUiStore((s) => s.setAgentOpen);
-
-  const toggleAgentExpanded = useUiStore((s) => s.toggleAgentExpanded);
-
-  const setAgentExpanded = useUiStore((s) => s.setAgentExpanded);
-
+export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   const openSettings = useUiStore((s) => s.openSettings);
+
+  // Node chrome: focus on click, drag by header (React Flow), tile counter-scale.
+  const focus = useCanvasStore((s) => s.focus);
+  const removeNode = useCanvasStore((s) => s.removeNode);
+  const layoutMode = useCanvasStore((s) => s.layoutMode);
+  const freeform = layoutMode === "freeform";
+  const tiled = layoutMode === "tile";
+  const zoom = useStore((s) => s.transform[2]);
 
 
 
@@ -438,11 +472,10 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
   // Up/Down recalls previously sent user messages (shell-style). null = not recalling.
   const recallIdx = useRef<number | null>(null);
 
-  // Escape stops the running agent when the agent panel is open.
+  // Escape stops the running agent when the agent window is open.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (!open && !expanded) return;
       // Don't steal Escape from dialogs/inputs that handle it.
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
@@ -453,16 +486,12 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
         void useAgentStore.getState().stop();
         return;
       }
-      // Not streaming: collapse fullscreen, or close the panel.
-      if (expanded) {
-        useUiStore.getState().setAgentExpanded(false);
-      } else {
-        useUiStore.getState().setAgentOpen(false);
-      }
+      // Not streaming: close the agent window (the node itself).
+      useCanvasStore.getState().removeNode(id);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, expanded]);
+  }, [id]);
 
 
   // Voice: mic capture + spoken replies.
@@ -610,13 +639,11 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
   const [showContextUsage, setShowContextUsage] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
 
 
   useEffect(() => {
-
-    if (open) {
 
       loadVps();
 
@@ -624,9 +651,7 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
       void init();
 
-    }
-
-  }, [open, loadVps, loadSettings, init]);
+  }, [loadVps, loadSettings, init]);
 
 
 
@@ -635,20 +660,6 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
 
   }, [messages, streamingText, activity]);
-
-
-
-  useEffect(() => {
-
-    const el = inputRef.current;
-
-    if (!el) return;
-
-    el.style.height = "auto";
-
-    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
-
-  }, [input]);
 
 
 
@@ -729,6 +740,9 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
     return [...ids];
   }, [canvasNodes]);
 
+  // Fill-pane toggle: maximize the agent window to the whole canvas, or restore.
+  const toggleFillPane = () => toggleAgentFillPane(id);
+
   // If no targets picked yet but the canvas has hosts open, pre-select those.
   useEffect(() => {
     if (targets.length > 0 || canvasVpsIds.length === 0) return;
@@ -737,21 +751,23 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
 
 
-  if (!open && !expanded) return null;
-
-
-
   return (
-
-    <aside
-      className={`flex shrink-0 flex-col border-[var(--border)] bg-[var(--surface-2)] ${
-        expanded
-          ? "h-full min-w-0 flex-1 border-0"
-          : "h-full border-l"
-      }`}
-      style={expanded ? undefined : { width: "var(--agent-w)" }}
+    <div
+      className={`group flex h-full w-full flex-col overflow-hidden border bg-[var(--bg)] shadow-lg ${
+        tiled ? "rounded-none" : "rounded-lg"
+      } ${selected ? "border-blue-500" : "border-[var(--border)]"}`}
+      style={freeform ? undefined : { transform: `scale(${1 / zoom})`, transformOrigin: "top left" }}
+      onMouseDown={() => focus(id)}
     >
-      <div className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-2.5">
+      <NodeResizer
+        minWidth={340}
+        minHeight={240}
+        isVisible
+        lineClassName="!border-blue-500"
+        handleClassName="!bg-blue-500"
+      />
+
+      <div className="flex cursor-move items-center gap-2 border-b border-[var(--border)] px-3 py-2.5">
         <BotIcon size={16} />
         <span className="xc-panel-title text-[var(--text-dim)]">Agent</span>
 
@@ -827,33 +843,29 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
             className="rounded-md p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
 
-            data-tooltip={expanded ? "Exit fullscreen" : "Expand to full window"}
+            data-tooltip="Fill the canvas with the agent window"
 
-            onClick={() => expanded ? setAgentExpanded(false) : toggleAgentExpanded()}
+            onClick={() => void toggleFillPane()}
 
           >
 
-            {expanded ? <MinimizeIcon size={15} /> : <MaximizeIcon size={15} />}
+            <MaximizeIcon size={15} />
 
           </button>
 
-          {!expanded && (
+          <button
 
-            <button
+            className="rounded-md p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
 
-              className="rounded-md p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+            data-tooltip="Close"
 
-              data-tooltip="Close"
+            onClick={() => removeNode(id)}
 
-              onClick={() => setAgentOpen(false)}
+          >
 
-            >
+            ✕
 
-              ✕
-
-            </button>
-
-          )}
+          </button>
 
         </div>
 
@@ -1026,7 +1038,7 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
           streamStats={streamStats}
           turnTelemetry={turnTelemetry}
           prefixTelemetry={prefixTelemetry}
-          expanded={expanded}
+          expanded
         />
       )}
 
@@ -1084,8 +1096,8 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
         onStop={() => void stop()}
       />
 
-      {/* Composer */}
-      <div className="border-t border-[var(--border)] p-3">
+      {/* Composer — terminal prompt line */}
+      <div className="border-t border-[var(--border)] px-3 pb-3 pt-2">
         {!activeProvider && (
           <div className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
             No provider configured.{" "}
@@ -1096,7 +1108,7 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
           </div>
         )}
 
-        <div className="relative rounded-xl border border-[var(--border-strong)] bg-[var(--surface)] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] focus-within:border-[var(--accent)]">
+        <div className="relative rounded-md border border-[var(--border-strong)] bg-[var(--surface)] focus-within:border-[var(--accent)]">
           {/* Slash Commands Suggestion Menu */}
           {slashSuggestions.length > 0 && (
             <div className="absolute bottom-full left-0 right-0 z-30 mb-1.5 max-h-52 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1.5 shadow-2xl font-mono">
@@ -1125,128 +1137,142 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
             </div>
           )}
 
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={(e) => {
-              setInput(e.target.value);
-              history.record(e.target.value);
-              recallIdx.current = null;
-              setSlashIndex(0);
-            }}
-            onKeyDown={(e) => {
-              const mod = e.ctrlKey || e.metaKey;
-              // Open command palette with Ctrl/Cmd+K
-              if (mod && (e.key === "k" || e.key === "K")) {
-                e.preventDefault();
-                setInput("/");
+          <div className="flex items-center gap-2 px-2.5 py-1.5 font-mono">
+            <span className="shrink-0 text-[13px] text-cyan-400">›</span>
+            <input
+              ref={inputRef}
+              type="text"
+              value={input}
+              onChange={(e) => {
+                setInput(e.target.value);
+                history.record(e.target.value);
+                recallIdx.current = null;
                 setSlashIndex(0);
-                return;
-              }
-              // Clear composer with Ctrl+L
-              if (mod && (e.key === "l" || e.key === "L")) {
-                e.preventDefault();
-                setInput("");
-                history.reset("");
-                return;
-              }
-              // Undo / redo
-              if (mod && (e.key === "z" || e.key === "Z")) {
-                e.preventDefault();
-                if (e.shiftKey) history.redo();
-                else history.undo();
-                return;
-              }
-              if (mod && (e.key === "y" || e.key === "Y")) {
-                e.preventDefault();
-                history.redo();
-                return;
-              }
-              // Slash commands keyboard navigation
-              if (slashSuggestions.length > 0) {
-                if (e.key === "ArrowDown") {
+              }}
+              onKeyDown={(e) => {
+                const mod = e.ctrlKey || e.metaKey;
+                // Open command palette with Ctrl/Cmd+K
+                if (mod && (e.key === "k" || e.key === "K")) {
                   e.preventDefault();
-                  setSlashIndex((i) => (i + 1) % slashSuggestions.length);
+                  setInput("/");
+                  setSlashIndex(0);
                   return;
                 }
-                if (e.key === "ArrowUp") {
+                // Clear composer with Ctrl+L
+                if (mod && (e.key === "l" || e.key === "L")) {
                   e.preventDefault();
-                  setSlashIndex((i) => (i - 1 + slashSuggestions.length) % slashSuggestions.length);
+                  setInput("");
+                  history.reset("");
                   return;
                 }
-                if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+                // Undo / redo
+                if (mod && (e.key === "z" || e.key === "Z")) {
                   e.preventDefault();
-                  const picked = slashSuggestions[slashIndex] || slashSuggestions[0];
-                  if (picked) {
-                    void executeSlashAction(picked);
+                  if (e.shiftKey) history.redo();
+                  else history.undo();
+                  return;
+                }
+                if (mod && (e.key === "y" || e.key === "Y")) {
+                  e.preventDefault();
+                  history.redo();
+                  return;
+                }
+                // Slash commands keyboard navigation
+                if (slashSuggestions.length > 0) {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setSlashIndex((i) => (i + 1) % slashSuggestions.length);
+                    return;
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setSlashIndex((i) => (i - 1 + slashSuggestions.length) % slashSuggestions.length);
+                    return;
+                  }
+                  if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+                    e.preventDefault();
+                    const picked = slashSuggestions[slashIndex] || slashSuggestions[0];
+                    if (picked) {
+                      void executeSlashAction(picked);
+                      return;
+                    }
+                  }
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setInput("");
                     return;
                   }
                 }
-                if (e.key === "Escape") {
+                // Recall previously sent messages with Up/Down (shell-style)
+                const userMsgs = messages
+                  .filter((m) => m.role === "user")
+                  .map((m) => m.content);
+                if (
+                  e.key === "ArrowUp" &&
+                  !e.shiftKey &&
+                  !mod &&
+                  userMsgs.length > 0 &&
+                  (input === "" || recallIdx.current !== null)
+                ) {
                   e.preventDefault();
-                  setInput("");
-                  return;
-                }
-              }
-              // Recall previously sent messages with Up/Down (shell-style)
-              const userMsgs = messages
-                .filter((m) => m.role === "user")
-                .map((m) => m.content);
-              if (
-                e.key === "ArrowUp" &&
-                !e.shiftKey &&
-                !mod &&
-                userMsgs.length > 0 &&
-                (input === "" || recallIdx.current !== null)
-              ) {
-                e.preventDefault();
-                const cur = recallIdx.current ?? userMsgs.length;
-                const next = Math.max(0, cur - 1);
-                recallIdx.current = next;
-                setInput(userMsgs[next]);
-                history.record(userMsgs[next]);
-                return;
-              }
-              if (e.key === "ArrowDown" && !e.shiftKey && !mod && recallIdx.current !== null) {
-                e.preventDefault();
-                const next = recallIdx.current + 1;
-                if (next >= userMsgs.length) {
-                  recallIdx.current = null;
-                  setInput("");
-                  history.record("");
-                } else {
+                  const cur = recallIdx.current ?? userMsgs.length;
+                  const next = Math.max(0, cur - 1);
                   recallIdx.current = next;
                   setInput(userMsgs[next]);
                   history.record(userMsgs[next]);
+                  return;
                 }
-                return;
-              }
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                submit();
-              }
-            }}
-            rows={1}
-            placeholder="Ask anything… (/ for commands · Enter to send · Shift+Enter for new line)"
-            disabled={streaming}
-            className="block w-full resize-none border-0 bg-transparent pl-3.5 pr-10 pb-1.5 pt-3 text-[13px] leading-relaxed text-[var(--text)] outline-none placeholder:text-[var(--text-faint)] disabled:opacity-50 font-sans"
-            style={{ minHeight: "44px", maxHeight: "160px" }}
-          />
+                if (e.key === "ArrowDown" && !e.shiftKey && !mod && recallIdx.current !== null) {
+                  e.preventDefault();
+                  const next = recallIdx.current + 1;
+                  if (next >= userMsgs.length) {
+                    recallIdx.current = null;
+                    setInput("");
+                    history.record("");
+                  } else {
+                    recallIdx.current = next;
+                    setInput(userMsgs[next]);
+                    history.record(userMsgs[next]);
+                  }
+                  return;
+                }
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+              placeholder="Ask anything… (/ for commands · Enter to send)"
+              disabled={streaming}
+              spellCheck={false}
+              autoComplete="off"
+              className="min-w-0 flex-1 border-0 bg-transparent text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--text-faint)] disabled:opacity-50"
+            />
 
-          {/* Footer: plan-mode + voice controls on the left (Enter sends) */}
-          <div className="flex items-center gap-1.5 px-2 pb-2 pt-0.5">
+            {/* Context usage (hourglass) */}
+            <AgentContextUsageButton
+              usage={contextUsage}
+              compactFlipCount={compactFlipCount}
+              open={showContextUsage}
+              onToggle={() => setShowContextUsage((v) => !v)}
+              onClose={() => setShowContextUsage(false)}
+              placement="composer"
+            />
+          </div>
+
+          {/* Footer: plan-mode + voice controls */}
+          <div className="flex items-center gap-1.5 border-t border-[var(--border)]/60 px-2 pb-1.5 pt-1">
 
             <button
               onClick={togglePlanMode}
               data-tooltip="Plan mode: the agent investigates and proposes a plan for your approval before changing anything."
               aria-label="Plan mode"
-              className={`flex items-center justify-center rounded-md p-1.5 transition ${
+              className={`flex items-center justify-center rounded-md p-1 transition ${
                 planMode
                   ? "bg-indigo-600/30 text-indigo-200 ring-1 ring-indigo-500/50"
                   : "text-[var(--text-dim)] hover:bg-[var(--border)] hover:text-[var(--text)]"
               }`}
             >
-              <PlanIcon size={16} />
+              <PlanIcon size={14} />
             </button>
 
             <button
@@ -1254,18 +1280,18 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
               disabled={transcribing}
               data-tooltip={recording ? "Stop & transcribe" : "Speak (voice input)"}
               aria-label={recording ? "Stop recording" : "Speak"}
-              className={`flex items-center justify-center rounded-md p-1.5 transition disabled:opacity-60 ${
+              className={`flex items-center justify-center rounded-md p-1 transition disabled:opacity-60 ${
                 recording
                   ? "bg-red-600/30 text-red-300 ring-1 ring-red-500/50"
                   : "text-[var(--text-dim)] hover:bg-[var(--border)] hover:text-[var(--text)]"
               }`}
             >
               {transcribing ? (
-                <LoaderIcon size={16} className="animate-spin" />
+                <LoaderIcon size={14} className="animate-spin" />
               ) : recording ? (
-                <StopIcon size={14} className="animate-pulse" />
+                <StopIcon size={12} className="animate-pulse" />
               ) : (
-                <MicIcon size={16} />
+                <MicIcon size={14} />
               )}
             </button>
 
@@ -1273,13 +1299,13 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
               onClick={toggleSpeaker}
               data-tooltip={ttsEnabled ? "Spoken replies on — click to mute" : "Speak replies aloud"}
               aria-label={ttsEnabled ? "Mute spoken replies" : "Enable spoken replies"}
-              className={`flex items-center justify-center rounded-md p-1.5 transition ${
+              className={`flex items-center justify-center rounded-md p-1 transition ${
                 ttsEnabled
                   ? "bg-[var(--border)] text-[var(--text)]"
                   : "text-[var(--text-dim)] hover:bg-[var(--border)] hover:text-[var(--text)]"
               }`}
             >
-              {ttsEnabled ? <VolumeIcon size={16} /> : <VolumeOffIcon size={16} />}
+              {ttsEnabled ? <VolumeIcon size={14} /> : <VolumeOffIcon size={14} />}
             </button>
 
             <button
@@ -1290,13 +1316,13 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
                   : "Conversation mode: talk hands-free, it replies aloud and keeps listening."
               }
               aria-label="Conversation mode"
-              className={`flex items-center justify-center rounded-md p-1.5 transition ${
+              className={`flex items-center justify-center rounded-md p-1 transition ${
                 conversation
                   ? "bg-emerald-600/30 text-emerald-300 ring-1 ring-emerald-500/50"
                   : "text-[var(--text-dim)] hover:bg-[var(--border)] hover:text-[var(--text)]"
               }`}
             >
-              <ConversationIcon size={16} className={conversation ? "animate-pulse" : undefined} />
+              <ConversationIcon size={14} className={conversation ? "animate-pulse" : undefined} />
             </button>
 
             {voiceStatus && (
@@ -1315,7 +1341,7 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
                 onClick={() => void stop()}
                 data-tooltip={speaking && !streaming ? "Stop speaking" : "Stop the agent"}
                 aria-label="Stop"
-                className="relative z-10 ml-auto mr-7 flex items-center gap-1 rounded-md bg-red-600/90 px-2 py-1 text-[11px] font-medium text-white transition hover:bg-red-600"
+                className="relative z-10 ml-auto flex items-center gap-1 rounded-md bg-red-600/90 px-2 py-0.5 text-[11px] font-medium text-white transition hover:bg-red-600"
               >
                 <StopIcon size={12} /> {speaking && !streaming ? "Hush" : activity.filter((a) => a.state === "running").length > 1 ? `Stop (${activity.filter((a) => a.state === "running").length})` : "Stop"}
               </button>
@@ -1323,25 +1349,11 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
 
           </div>
 
-          {/* Context usage (hourglass) — centered on the right edge of the box */}
-          <div className="absolute right-2 top-1/2 -translate-y-1/2">
-
-            <AgentContextUsageButton
-              usage={contextUsage}
-              compactFlipCount={compactFlipCount}
-              open={showContextUsage}
-              onToggle={() => setShowContextUsage((v) => !v)}
-              onClose={() => setShowContextUsage(false)}
-              placement="composer"
-            />
-
-          </div>
-
         </div>
 
       </div>
 
-    </aside>
+    </div>
 
   );
 

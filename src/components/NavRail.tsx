@@ -7,8 +7,10 @@ import {
 } from "./icons";
 import { useUiStore } from "../stores/uiStore";
 import { useAgentStore } from "../stores/agentStore";
+import { useCanvasStore } from "../stores/canvasStore";
 import { useTransferStore } from "../stores/transferStore";
 import { useEditsStore } from "../stores/editsStore";
+import { toggleAgentFillPane } from "./agent/AgentNode";
 
 function RailBtn({
   active,
@@ -90,13 +92,15 @@ export function NavRail() {
   const leftOpen = useUiStore((s) => s.leftOpen);
   const rightOpen = useUiStore((s) => s.rightOpen);
   const bottomOpen = useUiStore((s) => s.bottomOpen);
-  const agentOpen = useUiStore((s) => s.agentOpen);
   const toggleLeft = useUiStore((s) => s.toggleLeft);
   const toggleRight = useUiStore((s) => s.toggleRight);
   const toggleBottom = useUiStore((s) => s.toggleBottom);
-  const toggleAgent = useUiStore((s) => s.toggleAgent);
-  const toggleAgentExpanded = useUiStore((s) => s.toggleAgentExpanded);
   const openSettings = useUiStore((s) => s.openSettings);
+
+  const agentNodeId = useCanvasStore((s) =>
+    s.nodes.find((n) => n.type === "agent")?.id ?? null,
+  );
+  const agentOpen = agentNodeId !== null;
 
   const pendingApprovals = useAgentStore((s) => s.pendingApprovals.length);
   const pendingQuestions = useAgentStore((s) => s.pendingQuestions.length);
@@ -143,11 +147,17 @@ export function NavRail() {
             : agentBusy
               ? "Agent working…"
               : agentOpen
-                ? "Hide agent (double-click fullscreen)"
-                : "Agent (double-click fullscreen)"
+                ? "Hide agent (double-click fills the canvas)"
+                : "Agent (double-click fills the canvas)"
         }
-        onClick={toggleAgent}
-        onDoubleClick={toggleAgentExpanded}
+        onClick={() => useCanvasStore.getState().addAgent()}
+        onDoubleClick={() => {
+          const node = useCanvasStore.getState().nodes.find((n) => n.type === "agent");
+          if (node) {
+            useCanvasStore.getState().focus(node.id);
+            toggleAgentFillPane(node.id);
+          }
+        }}
         badge={agentNeedsYou > 0 ? agentNeedsYou : undefined}
       >
         <BotIcon size={18} />

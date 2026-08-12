@@ -61,12 +61,21 @@ export interface DbData {
   [key: string]: unknown;
 }
 
+/** The AI agent window node. Binds to the global agent session (Phase 1); a
+ *  per-node `sessionId` becomes the binding once multi-agent lands. */
+export interface AgentData {
+  name: string;
+  sessionId?: string;
+  [key: string]: unknown;
+}
+
 export type CanvasEdge = Edge<{ kind: "sftp-terminal" }>;
 
 export type TermNode = Node<TermData, "terminal">;
 export type SftpNode = Node<SftpData, "sftp">;
 export type DbNode = Node<DbData, "db">;
-export type CanvasNode = TermNode | SftpNode | DbNode;
+export type AgentNode = Node<AgentData, "agent">;
+export type CanvasNode = TermNode | SftpNode | DbNode | AgentNode;
 
 export const NODE_W = 460;
 export const NODE_H = 320;
@@ -102,6 +111,8 @@ interface CanvasState {
   addSftp: (vps: Vps, position?: { x: number; y: number }) => string;
   /** Drop a database browser for this server onto the canvas. */
   addDb: (vps: Vps, position?: { x: number; y: number }) => string;
+  /** Open the agent window (single instance — focuses it if one is open). */
+  addAgent: (position?: { x: number; y: number }) => string;
   removeNode: (id: string) => void;
   setLayout: (mode: LayoutMode) => void;
   focus: (id: string | null) => void;
@@ -337,7 +348,7 @@ export const useCanvasStore = create<CanvasState>()(
                   },
                 }
               : n,
-          ),
+          ) as CanvasNode[],
         }));
       },
 
@@ -345,7 +356,7 @@ export const useCanvasStore = create<CanvasState>()(
         set((s) => ({
           nodes: s.nodes.map((n) =>
             n.id === id ? { ...n, data: { ...n.data, ...partial } } : n,
-          ),
+          ) as CanvasNode[],
         })),
 
       addVps: (vps, position) => {
@@ -411,6 +422,35 @@ export const useCanvasStore = create<CanvasState>()(
           width: Math.round(NODE_W * 1.4),
           height: NODE_H,
           data: { vpsId: vps.id, name: vps.name, host: vps.host },
+        };
+        set((s) => ({ nodes: [...s.nodes, node] }));
+        if (get().layoutMode === "tile") get().arrangeTiles();
+        get().focus(id);
+        return id;
+      },
+
+      addAgent: (position) => {
+        // One agent window at a time (Phase 1): the store is a single session, so
+        // a second node would just be a mirror. Focus the existing one instead.
+        const existing = get().nodes.find((n) => n.type === "agent");
+        if (existing) {
+          get().focus(existing.id);
+          return existing.id;
+        }
+        const id = crypto.randomUUID();
+        const count = get().nodes.length;
+        const pos =
+          position ?? {
+            x: 80 + (count % 4) * (NODE_W + GAP),
+            y: 80 + Math.floor(count / 4) * (NODE_H + GAP),
+          };
+        const node: AgentNode = {
+          id,
+          type: "agent",
+          position: pos,
+          width: NODE_W,
+          height: NODE_H,
+          data: { name: "Agent" },
         };
         set((s) => ({ nodes: [...s.nodes, node] }));
         if (get().layoutMode === "tile") get().arrangeTiles();

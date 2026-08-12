@@ -18,6 +18,7 @@ import { onCanvasCommand } from "../lib/tauri";
 import { TerminalNode } from "./TerminalNode";
 import { SftpNode } from "./SftpNode";
 import { DatabaseNode } from "./DatabaseNode";
+import { AgentNodeView } from "./agent/AgentNode";
 import { FloatingEdge } from "./FloatingEdge";
 import { LockIcon, LockOpenIcon, RadarIcon } from "./icons";
 import { onInternalDrop } from "../stores/dragStore";
@@ -26,6 +27,7 @@ const nodeTypes: NodeTypes = {
   terminal: TerminalNode,
   sftp: SftpNode,
   db: DatabaseNode,
+  agent: AgentNodeView,
 };
 const edgeTypes = { floating: FloatingEdge };
 

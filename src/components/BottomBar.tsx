@@ -287,9 +287,10 @@ export function BottomBar() {
       const seen = new Set<string>();
       const out: Target[] = [];
       for (const n of canvasNodes) {
-        if (seen.has(n.data.vpsId)) continue;
-        seen.add(n.data.vpsId);
-        out.push({ vpsId: n.data.vpsId, name: n.data.name, host: n.data.host });
+        const vpsId = String(n.data.vpsId ?? "");
+        if (seen.has(vpsId)) continue;
+        seen.add(vpsId);
+        out.push({ vpsId, name: String(n.data.name ?? ""), host: String(n.data.host ?? "") });
       }
       return out;
     }

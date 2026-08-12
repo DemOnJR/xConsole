@@ -25,7 +25,6 @@ export function StatusStrip() {
   const vpsCount = useVpsStore((s) => s.vpsList.length);
   const activeWs = useWorkspaceStore((s) => s.activeId);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
-  const setAgentOpen = useUiStore((s) => s.setAgentOpen);
   const leftOpen = useUiStore((s) => s.leftOpen);
   const toggleLeft = useUiStore((s) => s.toggleLeft);
   const toggleBottom = useUiStore((s) => s.toggleBottom);
@@ -248,7 +247,7 @@ export function StatusStrip() {
           type="button"
           className="inline-flex items-center gap-1.5 transition hover:opacity-90"
           style={{ color: agentTone }}
-          onClick={() => setAgentOpen(true)}
+          onClick={() => useCanvasStore.getState().addAgent()}
         >
           <span
             className="inline-block h-1.5 w-1.5 rounded-full"

@@ -12,8 +12,6 @@ interface UiState {
   leftOpen: boolean;
   rightOpen: boolean;
   bottomOpen: boolean;
-  agentOpen: boolean;
-  agentExpanded: boolean;
   /** Persisted width of the expanded workspace drawer. */
   leftWidth: number;
   /** Persisted width of the server drawer. */
@@ -29,10 +27,6 @@ interface UiState {
   toggleLeft: () => void;
   toggleRight: () => void;
   toggleBottom: () => void;
-  toggleAgent: () => void;
-  setAgentOpen: (open: boolean) => void;
-  setAgentExpanded: (expanded: boolean) => void;
-  toggleAgentExpanded: () => void;
   setLeftWidth: (width: number) => void;
   setRightWidth: (width: number) => void;
   toggleConsoleExpanded: () => void;
@@ -45,8 +39,6 @@ type PersistedUi = Pick<
   | "leftOpen"
   | "rightOpen"
   | "bottomOpen"
-  | "agentOpen"
-  | "agentExpanded"
   | "leftWidth"
   | "rightWidth"
   | "consoleExpanded"
@@ -58,8 +50,6 @@ const PERSIST_DEFAULTS: PersistedUi = {
   leftOpen: true,
   rightOpen: true,
   bottomOpen: false,
-  agentOpen: false,
-  agentExpanded: false,
   leftWidth: DRAWER_WIDTH_DEFAULT,
   rightWidth: DRAWER_WIDTH_DEFAULT,
   consoleExpanded: true,
@@ -83,22 +73,6 @@ export const useUiStore = create<UiState>()(
       toggleLeft: () => set((s) => ({ leftOpen: !s.leftOpen })),
       toggleRight: () => set((s) => ({ rightOpen: !s.rightOpen })),
       toggleBottom: () => set((s) => ({ bottomOpen: !s.bottomOpen })),
-      toggleAgent: () =>
-        set((s) => ({
-          agentOpen: !s.agentOpen,
-          agentExpanded: s.agentOpen ? false : s.agentExpanded,
-        })),
-      setAgentOpen: (open) =>
-        set((s) => ({
-          agentOpen: open,
-          agentExpanded: open ? s.agentExpanded : false,
-        })),
-      setAgentExpanded: (expanded) => set({ agentExpanded: expanded }),
-      toggleAgentExpanded: () =>
-        set((s) => ({
-          agentExpanded: s.agentOpen ? !s.agentExpanded : s.agentExpanded,
-          agentOpen: true,
-        })),
       setLeftWidth: (width) => set({ leftWidth: clampDrawerWidth(width) }),
       setRightWidth: (width) => set({ rightWidth: clampDrawerWidth(width) }),
       toggleConsoleExpanded: () =>
@@ -114,8 +88,6 @@ export const useUiStore = create<UiState>()(
         leftOpen: state.leftOpen,
         rightOpen: state.rightOpen,
         bottomOpen: state.bottomOpen,
-        agentOpen: state.agentOpen,
-        agentExpanded: state.agentExpanded,
         leftWidth: state.leftWidth,
         rightWidth: state.rightWidth,
         consoleExpanded: state.consoleExpanded,

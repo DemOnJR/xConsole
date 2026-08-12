@@ -4,7 +4,6 @@ import type { AgentActivityItem } from "../../stores/agentStore";
 import { CodeHighlight, ConsoleOutput, langFromPath, ShellCommand } from "./SyntaxHighlight";
 import { useVpsStore } from "../../stores/vpsStore";
 import { useCanvasStore } from "../../stores/canvasStore";
-import { useUiStore } from "../../stores/uiStore";
 
 function truncate(s: string, max: number): string {
   const flat = s.replace(/\s+/g, " ").trim();
@@ -255,8 +254,6 @@ function CommandCard({ item }: { item: AgentActivityItem }) {
       const id = addVps(vps);
       focus(id);
     }
-    // Keep agent visible; user can still see the canvas terminal.
-    useUiStore.getState().setAgentExpanded(false);
   };
 
   return (
