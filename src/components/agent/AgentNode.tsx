@@ -458,27 +458,40 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
   // Up/Down recalls previously sent user messages (shell-style). null = not recalling.
   const recallIdx = useRef<number | null>(null);
+  // Mirrors the picker state so the Escape handler (declared before the state)
+  // can see whether a picker is open.
+  const pickerOpenRef = useRef(false);
 
-  // Escape stops the running agent when the agent window is open.
+  // Escape closes whatever is open first (picker → stop → window), never jumps
+  // straight to closing the whole agent window.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      // Don't steal Escape from dialogs/inputs that handle it.
+      // Don't steal Escape from dialogs/inputs that handle it (the picker input
+      // handles its own Escape via onCancel).
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
         return;
       }
       e.preventDefault();
+      // 1. A picker (model/targets/history/…) is open → close it first.
+      if (pickerOpenRef.current) {
+        setPicker(null);
+        setPendingProviderId(null);
+        return;
+      }
+      // 2. Streaming → stop the agent.
       if (useAgentStore.getState().streaming) {
         setLoopTask(null);
         void useAgentStore.getState().stop();
         return;
       }
-      // Not streaming: close the agent window (the node itself).
+      // 3. Nothing else open → close the agent window.
       useCanvasStore.getState().removeNode(id);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
 
@@ -588,6 +601,10 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   const [picker, setPicker] = useState<{ kind: PickerKind } | null>(null);
   /** Provider id chosen in the first /model level — second level lists its models. */
   const [pendingProviderId, setPendingProviderId] = useState<string | null>(null);
+  // Keep the Escape handler's ref in sync with the picker state.
+  useEffect(() => {
+    pickerOpenRef.current = picker !== null;
+  }, [picker]);
 
   // /loop state: re-send the same task until the agent finishes or the user stops.
   const [loopTask, setLoopTask] = useState<string | null>(null);
