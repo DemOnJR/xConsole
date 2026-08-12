@@ -34,6 +34,7 @@ describe("Agent Slash Commands", () => {
   it("parses exact slash commands", () => {
     expect(parseExactSlashCommand("/new")?.actionKey).toBe("new");
     expect(parseExactSlashCommand("/plan")?.actionKey).toBe("plan");
+    expect(parseExactSlashCommand("/compact")?.actionKey).toBe("compact");
     expect(parseExactSlashCommand("/unknown")).toBeNull();
   });
 });

@@ -2,7 +2,7 @@ export interface SlashCommandDef {
   name: string;
   description: string;
   syntax: string;
-  actionKey: "new" | "clear" | "history" | "model" | "targets" | "plan" | "export" | "help";
+  actionKey: "new" | "clear" | "history" | "model" | "targets" | "plan" | "export" | "compact" | "help";
 }
 
 export const SLASH_COMMANDS: SlashCommandDef[] = [
@@ -47,6 +47,12 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     syntax: "/export",
     description: "Export conversation transcript to Markdown",
     actionKey: "export",
+  },
+  {
+    name: "compact",
+    syntax: "/compact",
+    description: "Compact context window and summarize earlier conversation",
+    actionKey: "compact",
   },
   {
     name: "help",

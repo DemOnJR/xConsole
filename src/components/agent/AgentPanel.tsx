@@ -715,11 +715,13 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
       const md = exportConversationMarkdown();
       void navigator.clipboard.writeText(md);
       void notify("Conversation exported", "Markdown copied to clipboard");
+    } else if (cmd.actionKey === "compact") {
+      void send("Please summarize our progress and key context so far, compacting the conversation history.");
     } else if (cmd.actionKey === "help") {
       setInput("");
       void notify(
         "Agent Slash Commands",
-        "/new · /clear · /history · /model · /targets · /plan · /export",
+        "/new · /clear · /history · /model · /targets · /plan · /export · /compact",
       );
     }
   };
@@ -1185,6 +1187,13 @@ export function AgentPanel({ expanded = false }: { expanded?: boolean }) {
             }}
             onKeyDown={(e) => {
               const mod = e.ctrlKey || e.metaKey;
+              // Open command palette with Ctrl/Cmd+K
+              if (mod && (e.key === "k" || e.key === "K")) {
+                e.preventDefault();
+                setInput("/");
+                setSlashIndex(0);
+                return;
+              }
               // Clear composer with Ctrl+L
               if (mod && (e.key === "l" || e.key === "L")) {
                 e.preventDefault();
