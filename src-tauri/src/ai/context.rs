@@ -333,6 +333,49 @@ pub fn inject_dynamic_into_last_user(messages: &mut Vec<ChatMessage>, dynamic: &
     true
 }
 
+/// History with ephemeral runtime blocks removed (what we persist to disk / show in the UI).
+pub fn strip_runtime_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    messages
+        .iter()
+        .filter(|m| !is_runtime_message(m))
+        .cloned()
+        .collect()
+}
+
+/// Replay the last provider-visible prefix so the next turn is a true append.
+///
+/// Each request ends with a trailing `# Runtime context` block that is **not**
+/// stored in the conversation. The next turn then sends `assistant` in that
+/// slot — the provider prefix breaks right after the previous user message
+/// (installed-app log: turn 2 was 1536/8277 = 18.5% hit). Re-inserting the
+/// frozen runtime blocks in their original positions makes turn N+1 start
+/// with the exact bytes of turn N.
+///
+/// Returns `None` when history was compacted or rewritten (cannot reuse).
+pub fn continue_cached_prefix(
+    last_sent: &[ChatMessage],
+    incoming: &[ChatMessage],
+) -> Option<Vec<ChatMessage>> {
+    if last_sent.is_empty() {
+        return None;
+    }
+    let last_core = strip_runtime_messages(last_sent);
+    let incoming_core = strip_runtime_messages(incoming);
+    if incoming_core.len() < last_core.len() {
+        return None;
+    }
+    if last_core
+        .iter()
+        .zip(&incoming_core)
+        .any(|(before, after)| before != after)
+    {
+        return None;
+    }
+    let mut out = last_sent.to_vec();
+    out.extend(incoming_core.into_iter().skip(last_core.len()));
+    Some(out)
+}
+
 fn join_parts(parts: Vec<String>) -> String {
     parts
         .into_iter()
@@ -621,14 +664,16 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
             volatile.push(truncate_chars(&mem, DYNAMIC_MEMORY_CHARS));
         }
     }
-    // Date/time MUST stay out of the static system prefix (kills KV/prompt cache).
-    let mut runtime = format!("Date: {}", Local::now().format("%A, %B %d, %Y"));
+    // Model/provider are session-stable — keep them out of the uncached tail.
     if !ctx.model_label.is_empty() {
-        runtime.push_str(&format!("\nModel: {}", ctx.model_label));
+        stable.push(format!("Model: {}", ctx.model_label));
     }
     if !ctx.provider_label.is_empty() {
-        runtime.push_str(&format!("\nProvider: {}", ctx.provider_label));
+        stable.push(format!("Provider: {}", ctx.provider_label));
     }
+
+    // Date/time MUST stay out of the static system prefix (kills KV/prompt cache).
+    let mut runtime = format!("Date: {}", Local::now().format("%A, %B %d, %Y"));
     if !ctx.casual_turn {
         runtime.push_str(&format!(
             "\nReachable VPS targets this session: {}",
@@ -922,5 +967,35 @@ mod tests {
         inject_dynamic_into_last_user(&mut messages, "Date: 3");
         assert_eq!(messages.len(), 2);
         assert_eq!(messages.iter().filter(|m| is_runtime_message(m)).count(), 1);
+    }
+
+    #[test]
+    fn cache10_replaying_last_runtime_makes_the_next_turn_append_only() {
+        // Installed-app miss: turn 1 sent [hi, RT1]; turn 2 sent [hi, asst, next, RT2]
+        // so the provider prefix broke after "hi". Replaying RT1 keeps it.
+        let turn1 = sent(&[ChatMessage::user("hi")], "canvas A");
+        let incoming = vec![
+            ChatMessage::user("hi"),
+            ChatMessage::assistant("hello"),
+            ChatMessage::user("how are you"),
+        ];
+        let continued = continue_cached_prefix(&turn1, &incoming).unwrap();
+        assert_eq!(&continued[..turn1.len()], turn1.as_slice());
+        let turn2 = sent(&continued, "canvas B");
+        assert_eq!(&turn2[..turn1.len()], turn1.as_slice());
+        assert!(is_runtime_message(turn2.last().unwrap()));
+        assert!(turn2.last().unwrap().content.contains("canvas B"));
+        // Two runtime blocks: frozen turn-1 canvas, plus this turn's tail.
+        assert_eq!(turn2.iter().filter(|m| is_runtime_message(m)).count(), 2);
+    }
+
+    #[test]
+    fn cache11_rewritten_history_does_not_reuse_the_cached_prefix() {
+        let turn1 = sent(&[ChatMessage::user("hi")], "canvas A");
+        let compacted = vec![
+            ChatMessage::user("[Earlier conversation compressed]"),
+            ChatMessage::user("how are you"),
+        ];
+        assert!(continue_cached_prefix(&turn1, &compacted).is_none());
     }
 }

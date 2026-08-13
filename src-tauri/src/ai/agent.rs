@@ -16,6 +16,41 @@ use tauri::{Emitter, Manager};
 /// Raised for multi-host infra tasks; UI/status still surfaces when the cap is hit.
 const MAX_ITERS: usize = 20;
 
+/// Write cache hit/miss to `xconsole.log` + `cache.jsonl`.
+///
+/// Release builds set `windows_subsystem = "windows"`, so `eprintln!` is discarded.
+/// The installed app's "hi / how are you" session left no cache lines in the log
+/// for that reason — the numbers only survived on the assistant `tokenStats`.
+fn log_prompt_cache(
+    session_id: &str,
+    iter: u32,
+    prompt: u32,
+    cached: u32,
+    classification: &str,
+    reason: Option<&str>,
+) {
+    let report = crate::ai::cost::cache_report(prompt, cached);
+    let line = crate::ai::cost::format_cache_line(prompt, cached);
+    crate::diag(&format!(
+        "cache session={session_id} iter={iter} {line} · prefix={classification}"
+    ));
+    if let Some(why) = reason {
+        crate::diag(why);
+    }
+    let payload = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "session": session_id,
+        "iter": iter,
+        "prompt": prompt,
+        "hit": report.hit,
+        "miss": report.miss,
+        "pct": (report.rate * 100.0).round() as i32,
+        "prefix": classification,
+        "reason": reason,
+    });
+    crate::diag_jsonl("cache.jsonl", &payload.to_string());
+}
+
 /// Run one full agent turn, streaming events to `sink`. Returns the final
 /// assistant message (with any tool calls it issued).
 pub async fn run_turn(
@@ -26,7 +61,7 @@ pub async fn run_turn(
     sink: &EventSink,
 ) -> Result<ChatMessage, String> {
     let telemetry = crate::ai::tool_cache::new_turn_telemetry();
-    let mut previous_prefix: Option<crate::ai::prefix_telemetry::RequestFingerprint> = None;
+    let mut previous_prefix = tc.session_state.last_prefix(&tc.session_id);
 
     // Tool-result budget: cap what rides back into context so long command outputs
     // don't blow up every subsequent request. 0 = unlimited (opt out).
@@ -609,6 +644,21 @@ pub async fn run_turn(
     let mut last = ChatMessage::assistant("");
     let mut iters_used = 0usize;
 
+    // Replay the last provider-visible prefix (frozen runtime blocks included)
+    // so this turn is a true append. Dropping last turn's `# Runtime context`
+    // and putting the new assistant in that slot was the installed-app miss:
+    // turn 2 hit only 1536/8277 (system+tools+first user).
+    if let Some(prev) = tc.session_state.last_request_messages(&tc.session_id) {
+        if let Some(continued) = context::continue_cached_prefix(&prev, &messages) {
+            messages = continued;
+        }
+    }
+    // Freeze runtime once per user turn. Tool-loop iters must not move or
+    // replace it — that would bust the prefix we just paid to write.
+    if !messages.last().is_some_and(context::is_runtime_message) {
+        context::inject_dynamic_into_last_user(&mut messages, &dynamic_block);
+    }
+
     for iter in 0..MAX_ITERS {
         // User pressed Stop — halt before the next model call.
         if tc.session_state.is_cancelled(&tc.session_id) {
@@ -618,11 +668,7 @@ pub async fn run_turn(
         iters_used = iter + 1;
         let mut req = ChatRequest::new(&resolved.model);
         req.system = system.clone();
-        // Request-only copy: inject runtime context into last user message so the
-        // system prefix stays cache-stable across multi-turn / multi-iter calls.
-        let mut req_messages = messages.clone();
-        context::inject_dynamic_into_last_user(&mut req_messages, &dynamic_block);
-        req.messages = req_messages;
+        req.messages = messages.clone();
         req.tools = tool_defs_for_turn.clone();
         req.xconsole = xconsole_exec.clone();
         // Opt-in extended cache TTL (1h) when the user enables it — 2× write price
@@ -671,7 +717,11 @@ pub async fn run_turn(
                 source: resolved.kind.clone(),
             }),
         );
-        previous_prefix = Some(current_prefix);
+        previous_prefix = Some(current_prefix.clone());
+        tc.session_state
+            .store_prefix(&tc.session_id, current_prefix);
+        tc.session_state
+            .store_request_messages(&tc.session_id, req.messages.clone());
 
         let resp = match resolved.provider.chat(&req, Some(sink)).await {
             Ok(r) => r,
@@ -685,17 +735,24 @@ pub async fn run_turn(
         if let Some(prompt) = resp.prompt_tokens {
             let cached = resp.cached_tokens.unwrap_or(0);
             let line = crate::ai::cost::format_cache_line(prompt, cached);
-            eprintln!("[xconsole] {line} · prefix={}", classification.as_str());
-            emit(Some(sink), StreamEvent::Status(line));
-            if let Some(why) = crate::ai::cost::cache_miss_reason(
+            emit(Some(sink), StreamEvent::Status(line.clone()));
+            let why = crate::ai::cost::cache_miss_reason(
                 prompt,
                 cached,
                 classification.as_str(),
                 iter as u32,
-            ) {
-                eprintln!("[xconsole] {why}");
-                emit(Some(sink), StreamEvent::Status(why));
+            );
+            if let Some(reason) = &why {
+                emit(Some(sink), StreamEvent::Status(reason.clone()));
             }
+            log_prompt_cache(
+                &tc.session_id,
+                iter as u32,
+                prompt,
+                cached,
+                classification.as_str(),
+                why.as_deref(),
+            );
         }
 
         let assistant = ChatMessage {

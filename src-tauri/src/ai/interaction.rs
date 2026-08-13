@@ -12,6 +12,9 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::oneshot;
 
+use crate::ai::prefix_telemetry::RequestFingerprint;
+use crate::ai::provider::ChatMessage;
+
 /// Tracks in-flight `ask_user` / `present_plan` prompts so the UI can resolve
 /// them with the user's answer. Managed Tauri state.
 #[derive(Clone, Default)]
@@ -128,6 +131,12 @@ struct SessionFlags {
     /// clone can be handed to the provider's streaming loop, letting Stop interrupt
     /// an in-flight model response immediately — not just between tool steps.
     cancelled: Arc<AtomicBool>,
+    /// Last provider-visible message list (includes frozen `# Runtime context`
+    /// blocks). Replayed on the next user turn so the prefix stays append-only.
+    last_request_messages: Option<Vec<ChatMessage>>,
+    /// Fingerprint of that last request, so classification is not `first_request`
+    /// on every new `run_turn`.
+    last_prefix: Option<RequestFingerprint>,
 }
 
 impl SessionState {
@@ -201,6 +210,31 @@ impl SessionState {
             .cancelled
             .clone()
     }
+
+    /// Last messages actually sent to the provider for this session.
+    pub fn last_request_messages(&self, session_id: &str) -> Option<Vec<ChatMessage>> {
+        self.map
+            .get(session_id)
+            .and_then(|f| f.last_request_messages.clone())
+    }
+
+    pub fn store_request_messages(&self, session_id: &str, messages: Vec<ChatMessage>) {
+        self.map
+            .entry(session_id.to_string())
+            .or_default()
+            .last_request_messages = Some(messages);
+    }
+
+    pub fn last_prefix(&self, session_id: &str) -> Option<RequestFingerprint> {
+        self.map.get(session_id).and_then(|f| f.last_prefix.clone())
+    }
+
+    pub fn store_prefix(&self, session_id: &str, prefix: RequestFingerprint) {
+        self.map
+            .entry(session_id.to_string())
+            .or_default()
+            .last_prefix = Some(prefix);
+    }
 }
 
 #[cfg(test)]
@@ -218,6 +252,17 @@ mod tests {
         assert!(s.plan_approved("a"));
         // Untouched session stays default.
         assert_eq!(s.safety_override("b"), None);
+    }
+
+    #[test]
+    fn request_prefix_survives_across_lookups() {
+        let s = SessionState::new();
+        assert!(s.last_request_messages("chat").is_none());
+        s.store_request_messages("chat", vec![ChatMessage::user("hi")]);
+        let got = s.last_request_messages("chat").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].content, "hi");
+        assert!(s.last_request_messages("other").is_none());
     }
 
     #[test]

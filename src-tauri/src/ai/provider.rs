@@ -17,7 +17,7 @@ pub struct ToolDef {
 }
 
 /// A model-issued tool call.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -25,7 +25,7 @@ pub struct ToolCall {
 }
 
 /// One message in a conversation. `role` is "system" | "user" | "assistant" | "tool".
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     #[serde(default)]

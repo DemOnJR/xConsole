@@ -199,6 +199,14 @@ pub fn cache_miss_reason(
     if r.rate >= 0.95 {
         return None;
     }
+    // Append-only growth: miss is previous assistant + new user + this turn's
+    // runtime. Short sessions land at 80–90% and that is healthy — the installed
+    // "hi / how are you" chat logged 80% as a false alarm. Only warn when the
+    // tail is still eating most of the prompt.
+    if classification == "append_only" && (r.rate >= 0.70 || (r.miss <= 4_096 && r.rate >= 0.50))
+    {
+        return None;
+    }
     let why = match classification {
         "system" => "system prefix changed (soul / taste / skills / tools / safety)",
         "schema" => "tool schema changed",
@@ -327,6 +335,11 @@ mod tests {
         let sys = cache_miss_reason(20_000, 1000, "system", 1).unwrap();
         assert!(sys.contains("system prefix changed"));
         assert!(cache_miss_reason(1732, 1664, "append_only", 2).is_none());
+        // Installed-app turn 3: 80% / 2372 miss is healthy append-only growth.
+        assert!(cache_miss_reason(11_844, 9_472, "append_only", 0).is_none());
+        // A real fat tail (20% hit) is still logged.
+        let fat = cache_miss_reason(10_000, 2_000, "append_only", 1).unwrap();
+        assert!(fat.contains("uncached tail"));
     }
 
     #[test]

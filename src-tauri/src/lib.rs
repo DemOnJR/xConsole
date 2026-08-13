@@ -45,6 +45,24 @@ pub(crate) fn diag(msg: &str) {
     }
 }
 
+/// Append one JSON line to a file in the app data dir (prompt-cache traces, etc.).
+///
+/// Release builds have no console, so `eprintln!` never reaches the user. Structured
+/// lines here survive so we can see hit/miss after a real session.
+pub(crate) fn diag_jsonl(filename: &str, json_line: &str) {
+    let Some(dir) = dirs_next_app_data() else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(filename);
+    // Rotate at 2 MiB — a long weekend of agent turns, not an audit archive.
+    if std::fs::metadata(&path).map(|m| m.len() > 2 * 1024 * 1024).unwrap_or(false) {
+        let _ = std::fs::remove_file(&path);
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{json_line}");
+    }
+}
+
 /// The app data dir, resolved without an AppHandle so the panic hook can use it.
 fn dirs_next_app_data() -> Option<std::path::PathBuf> {
     std::env::var_os("APPDATA").map(|p| std::path::PathBuf::from(p).join("com.xconsole.app"))

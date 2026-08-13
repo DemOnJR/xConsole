@@ -3336,6 +3336,36 @@ fn selftest() -> i32 {
             assembled.dynamic_block.contains("Canvas")
                 && !assembled.static_system.contains("$ uptime"),
         );
+        check(
+            "75 model/provider sit in the static prefix not the tail",
+            assembled.static_system.contains("deepseek/deepseek-v4-flash")
+                && assembled.static_system.contains("command-code")
+                && !assembled.dynamic_block.contains("Model:"),
+        );
+        let turn1 = send(&[ChatMessage::user("hi")], "canvas A");
+        let incoming = vec![
+            ChatMessage::user("hi"),
+            ChatMessage::assistant("hello"),
+            ChatMessage::user("how are you"),
+        ];
+        let replayed = crate::ai::context::continue_cached_prefix(&turn1, &incoming);
+        check(
+            "76 replaying last runtime keeps turn 1 as an exact prefix",
+            replayed
+                .as_ref()
+                .is_some_and(|next| next.starts_with(turn1.as_slice())),
+        );
+        check(
+            "77 compacted history does not reuse the cached prefix",
+            crate::ai::context::continue_cached_prefix(
+                &turn1,
+                &[
+                    ChatMessage::user("[Earlier conversation compressed]"),
+                    ChatMessage::user("next"),
+                ],
+            )
+            .is_none(),
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

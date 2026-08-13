@@ -141,12 +141,6 @@ mod tests {
 
 fn estimate_runtime(ctx: &PromptContext<'_>) -> u32 {
     let mut runtime = format!("Date: {}", chrono::Local::now().format("%A, %B %d, %Y"));
-    if !ctx.model_label.is_empty() {
-        runtime.push_str(&format!("\nModel: {}", ctx.model_label));
-    }
-    if !ctx.provider_label.is_empty() {
-        runtime.push_str(&format!("\nProvider: {}", ctx.provider_label));
-    }
     if !ctx.casual_turn {
         runtime.push_str(&format!(
             "\nReachable VPS targets this session: {}",
