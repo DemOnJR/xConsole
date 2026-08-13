@@ -50,6 +50,23 @@ pub struct Vps {
     pub created_at: Option<String>,
 }
 
+/// Public-only login fields the agent may change. Never includes a password or key bytes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VpsLoginPatch {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub auth_type: Option<AuthType>,
+    #[serde(default)]
+    pub key_path: Option<String>,
+}
+
 /// Payload to create or update a VPS (id optional on create).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpsInput {

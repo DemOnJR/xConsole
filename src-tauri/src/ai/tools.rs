@@ -3,7 +3,7 @@
 
 use base64::Engine;
 use serde_json::{json, Value};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::ai::infra_tools;
 use crate::ai::web_tools;
@@ -429,11 +429,53 @@ Parent directories are created automatically. Subject to the safety mode.".into(
             name: "ssh_setup_key_auth".into(),
             description: "Switch a server from password login to a secure app-managed SSH key: \
 generate an Ed25519 keypair, install the public key in the server's authorized_keys, store the \
-private key in the OS keychain, and verify key login works. Password login on the server is left \
-enabled (no lockout). Use this when the user wants key-based auth instead of passwords.".into(),
+private key in the OS keychain AND a verified backup file on this PC, point the xConsole VPS \
+record at that key, and verify key login works. Password login on the server is left enabled \
+(no lockout). The private key is NEVER returned to you — only the path, fingerprint, and SHA-256. \
+Use this before disabling password SSH.".into(),
             parameters: json!({
                 "type": "object",
-                "properties": {"vps_id": {"type": "string"}},
+                "properties": {
+                    "vps_id": {"type": "string"},
+                    "backup_dir": {
+                        "type": "string",
+                        "description": "Optional folder on this PC for the key backup. Default: xConsole artifacts/ssh/<server>/"
+                    },
+                    "save_backup": {
+                        "type": "boolean",
+                        "description": "Write a verified local backup (default true). Set false only if the user refuses a file backup."
+                    }
+                },
+                "required": []
+            }),
+        },
+        ToolDef {
+            name: "vps_update_login".into(),
+            description: "Update how xConsole connects to a saved server: host, port, username, \
+auth_type (key/password), or key_path. Use this after changing sshd port or switching to a key \
+file. You CANNOT read or set the password, and you NEVER receive key material. After changing \
+the remote sshd port, call this so xConsole uses the new port.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "vps_id": {"type": "string"},
+                    "host": {"type": "string"},
+                    "port": {"type": "integer"},
+                    "username": {"type": "string"},
+                    "auth_type": {"type": "string", "description": "key or password"},
+                    "key_path": {"type": "string"},
+                    "name": {"type": "string"}
+                },
+                "required": []
+            }),
+        },
+        ToolDef {
+            name: "artifact_list".into(),
+            description: "List files this agent created on the user's PC (SSH key backups, \
+downloads, writes). Returns name, path, kind, size, sha256 — never private-key contents.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
                 "required": []
             }),
         },
@@ -591,6 +633,8 @@ const OLLAMA_VPS_TOOLS: &[&str] = &[
     "download_file",
     "ssh_setup_key_auth",
     "ssh_key_status",
+    "vps_update_login",
+    "artifact_list",
     "local_run_command",
     "local_read_file",
     "local_write_file",
@@ -802,6 +846,8 @@ pub async fn dispatch_with_telemetry(
         "download_file" => download_file(ctx, args, sink, &call.id).await,
         "ssh_setup_key_auth" => ssh_setup_key_auth(ctx, args).await,
         "ssh_key_status" => ssh_key_status(ctx, args),
+        "vps_update_login" => vps_update_login(ctx, args),
+        "artifact_list" => artifact_list(ctx, args),
         "ask_user" => ask_user(ctx, args).await,
         "present_plan" => present_plan(ctx, args).await,
         "set_project_brief" => set_project_brief(ctx, args),
@@ -1016,6 +1062,8 @@ fn tool_activity_label(ctx: &ToolContext, call: &ToolCall) -> String {
             format!("Download {rp} from {} → {lp}", vps_label(ctx, args))
         }
         "ssh_setup_key_auth" => format!("Set up SSH key auth on {}", vps_label(ctx, args)),
+        "vps_update_login" => format!("Update xConsole login for {}", vps_label(ctx, args)),
+        "artifact_list" => "List local artifacts".into(),
         "ssh_key_status" => format!("SSH key status for {}", vps_label(ctx, args)),
         "ask_user" => "Ask the user".into(),
         "present_plan" => {
@@ -1161,7 +1209,7 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
         // Read-only inspection, agent-local notes/skills, interactive prompts, and
         // non-destructive canvas/UI actions.
         "read_file" | "local_read_file" | "local_list_dir" | "list_vps_targets"
-        | "ssh_key_status" | "memory_save" | "skills_list" | "skill_view"
+        | "artifact_list" | "ssh_key_status" | "memory_save" | "skills_list" | "skill_view"
         | "learn_skill" | "ask_user" | "present_plan" | "terminal_capture" | "canvas_open_terminal"
         | "canvas_open_sftp" | "canvas_tile" | "canvas_close" | "canvas_refresh" | "vision" => false,
         // Typing into a live shell runs commands → mutating.
@@ -1173,7 +1221,7 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
         }
         // Always change a server or the local PC.
         "write_file" | "local_write_file" | "upload_file" | "download_file"
-        | "ssh_setup_key_auth" => true,
+        | "ssh_setup_key_auth" | "vps_update_login" => true,
         // `web_fetch` reads nothing locally, but its URL is entirely model-chosen, so a
         // GET is an outbound channel: paired with a file read it can carry data off the
         // machine. Treating it as mutating is what makes plan mode — where the user has
@@ -1298,6 +1346,8 @@ mod tests {
         assert!(tool_is_mutating("local_write_file", &json!({})));
         assert!(tool_is_mutating("upload_file", &json!({})));
         assert!(tool_is_mutating("ssh_setup_key_auth", &json!({})));
+        assert!(tool_is_mutating("vps_update_login", &json!({})));
+        assert!(!tool_is_mutating("artifact_list", &json!({})));
         // Infra: plan is read-only, apply mutates.
         assert!(!tool_is_mutating("terraform_plan", &json!({})));
         assert!(tool_is_mutating("terraform_apply", &json!({})));
@@ -2065,8 +2115,21 @@ async fn local_read_file(ctx: &ToolContext, args: &Value) -> String {
     if let Err(e) = authorize_local(ctx, &format!("cat -- {}", shell_quote(path))).await {
         return format!("error: {e}");
     }
+    if crate::artifacts::looks_like_secret_path(path) {
+        return "error: refused — that path looks like a private key or app secret. \
+I cannot read passwords or private keys. Use artifact_list for the backup path/hash."
+            .into();
+    }
     match crate::local::read_local_file(path) {
-        Ok(s) => s,
+        Ok(s) => {
+            if crate::artifacts::looks_like_private_key_content(s.as_bytes()) {
+                "error: refused — file is a private key. I cannot read key material. \
+The user can open it from Settings → Artifacts or the saved path."
+                    .into()
+            } else {
+                s
+            }
+        }
         Err(e) => format!("error: {e}"),
     }
 }
@@ -2081,8 +2144,8 @@ async fn local_write_file(ctx: &ToolContext, args: &Value) -> String {
         return format!("error: {e}");
     }
     let before = crate::local::read_local_file(path).ok();
-    match crate::local::write_local_file(path, content) {
-        Ok(()) => {
+    match crate::artifacts::write_verified(std::path::Path::new(path), content.as_bytes()) {
+        Ok(written) => {
             ctx.edits.record(
                 &ctx.app,
                 &ctx.session_id,
@@ -2094,7 +2157,23 @@ async fn local_write_file(ctx: &ToolContext, args: &Value) -> String {
                 before.as_deref().unwrap_or(""),
                 content,
             );
-            format!("wrote {} bytes to {path}", content.len())
+            record_artifact(
+                ctx,
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path),
+                &written.path.to_string_lossy(),
+                "file",
+                &written.sha256,
+                written.size,
+                crate::artifacts::looks_like_private_key_content(content.as_bytes()),
+                None,
+            );
+            format!(
+                "wrote {} bytes to {path} (sha256 {} — verified)",
+                written.size, written.sha256
+            )
         }
         Err(e) => format!("error: {e}"),
     }
@@ -2232,8 +2311,26 @@ async fn download_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &
             }
         }
     }
-    let result = match std::fs::write(local_path, &bytes) {
-        Ok(()) => format!("downloaded {} bytes to {local_path}", bytes.len()),
+    let result = match crate::artifacts::write_verified(std::path::Path::new(local_path), &bytes) {
+        Ok(written) => {
+            record_artifact(
+                ctx,
+                std::path::Path::new(local_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(local_path),
+                &written.path.to_string_lossy(),
+                "download",
+                &written.sha256,
+                written.size,
+                crate::artifacts::looks_like_private_key_content(&bytes),
+                Some(vps_id.clone()),
+            );
+            format!(
+                "downloaded {} bytes to {local_path} (sha256 {} — verified)",
+                written.size, written.sha256
+            )
+        }
         Err(e) => format!("error: writing local file: {e}"),
     };
     emit_command_result(sink, &activity_id, &result);
@@ -2253,14 +2350,140 @@ async fn ssh_setup_key_auth(ctx: &ToolContext, args: &Value) -> String {
     if let Err(e) = authorize_vps(ctx, &vps_id, gate).await {
         return format!("error: {e}");
     }
-    match keygen::setup_key_auth(&ctx.db, &ctx.sessions, &vps_id).await {
-        Ok(r) => format!(
-            "Key authentication is set up.\nFingerprint: {}\nInstalled public key: {}\n\
-             The private key is stored only in your OS keychain (never on disk or in the database). \
-             Password login on the server was left enabled as a fallback.",
-            r.fingerprint, r.public_openssh
-        ),
+    let save_backup = args
+        .get("save_backup")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let backup_dir = if !save_backup {
+        None
+    } else if let Some(custom) = args.get("backup_dir").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        Some(std::path::PathBuf::from(custom))
+    } else {
+        ctx.app.path().app_data_dir().ok().and_then(|d| {
+            let vps = ctx.db.get_vps(&vps_id).ok().flatten()?;
+            Some(crate::artifacts::ssh_backup_dir(&d, &vps_id, &vps.name))
+        })
+    };
+    match keygen::setup_key_auth(&ctx.db, &ctx.sessions, &vps_id, backup_dir.as_deref()).await {
+        Ok(r) => {
+            let _ = ctx.app.emit("vps://updated", &vps_id);
+            let _ = ctx.app.emit("artifacts://changed", ());
+            let mut out = format!(
+                "Key authentication is set up.\nFingerprint: {}\nInstalled public key: {}\n\
+                 Password login on the server was left enabled as a fallback.\n\
+                 The private key is in the OS keychain (never returned here).",
+                r.fingerprint, r.public_openssh
+            );
+            if r.backup_verified {
+                out.push_str(&format!(
+                    "\nVerified local backup: {}\nPublic key file: {}\nSHA-256: {}\n\
+                     xConsole now uses this key file for this server. Open Settings → Artifacts to find it.",
+                    r.backup_private_path.unwrap_or_default(),
+                    r.backup_public_path.unwrap_or_default(),
+                    r.backup_sha256.unwrap_or_default()
+                ));
+            } else if let Some(msg) = r.backup_private_path {
+                out.push_str(&format!("\nLocal backup: {msg}"));
+            }
+            out
+        }
         Err(e) => format!("error: {e}"),
+    }
+}
+
+fn vps_update_login(ctx: &ToolContext, args: &Value) -> String {
+    let vps_id = match resolve_target(ctx, args) {
+        Ok(id) => id,
+        Err(e) => return format!("error: {e}"),
+    };
+    if args.get("password").is_some() || args.get("secret").is_some() || args.get("private_key").is_some()
+    {
+        return "error: refused — I cannot set or read passwords or private keys. \
+Use ssh_setup_key_auth to create a key, then vps_update_login for host/port/username/key_path."
+            .into();
+    }
+    let auth_type = args.get("auth_type").and_then(|v| v.as_str()).map(|s| {
+        crate::storage::models::AuthType::from_str(s)
+    });
+    let port = args.get("port").and_then(|v| {
+        v.as_u64()
+            .or_else(|| v.as_i64().map(|n| n as u64))
+            .and_then(|n| u16::try_from(n).ok())
+    });
+    let patch = crate::storage::models::VpsLoginPatch {
+        name: args.get("name").and_then(|v| v.as_str()).map(String::from),
+        host: args.get("host").and_then(|v| v.as_str()).map(String::from),
+        port,
+        username: args.get("username").and_then(|v| v.as_str()).map(String::from),
+        auth_type,
+        key_path: args.get("key_path").and_then(|v| v.as_str()).map(String::from),
+    };
+    match ctx.db.patch_vps_login(&vps_id, &patch) {
+        Ok(v) => {
+            let _ = ctx.app.emit("vps://updated", &v.id);
+            format!(
+                "Updated xConsole login (no secrets exposed).\n\
+                 vps_id: {}\nname: {}\nhost: {}\nport: {}\nusername: {}\nauth_type: {}\nkey_path: {}",
+                v.id,
+                v.name,
+                v.host,
+                v.port,
+                v.username,
+                v.auth_type.as_str(),
+                v.key_path.unwrap_or_else(|| "(managed key / none)".into())
+            )
+        }
+        Err(e) => format!("error: {e}"),
+    }
+}
+
+fn artifact_list(ctx: &ToolContext, args: &Value) -> String {
+    let query = args.get("query").and_then(|v| v.as_str());
+    match ctx.db.list_artifacts(query) {
+        Ok(list) if list.is_empty() => "(no artifacts yet)".into(),
+        Ok(list) => list
+            .into_iter()
+            .map(|a| {
+                format!(
+                    "- [{}] {}  {} bytes  sha256={}  path={}{}",
+                    a.kind,
+                    a.name,
+                    a.size,
+                    a.sha256,
+                    a.path,
+                    if a.secret { "  (secret — contents hidden)" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(e) => format!("error: {e}"),
+    }
+}
+
+fn record_artifact(
+    ctx: &ToolContext,
+    name: &str,
+    path: &str,
+    kind: &str,
+    sha256: &str,
+    size: u64,
+    secret: bool,
+    vps_id: Option<String>,
+) {
+    let art = crate::artifacts::Artifact {
+        id: Uuid::new_v4().to_string(),
+        name: name.to_string(),
+        path: path.to_string(),
+        kind: kind.to_string(),
+        sha256: sha256.to_string(),
+        size,
+        secret,
+        session_id: Some(ctx.session_id.clone()),
+        vps_id,
+        created_at: None,
+    };
+    if ctx.db.insert_artifact(&art).is_ok() {
+        let _ = ctx.app.emit("artifacts://changed", ());
     }
 }
 

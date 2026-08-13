@@ -8,8 +8,9 @@ use super::models::{
     AgentApproval, AgentConversation, AgentConversationInput, AgentConversationMeta,
     AgentPlan, AgentPlanMeta, AiProvider, AiProviderInput, AuthType, CloudAccount,
     CloudAccountInput, CronJob, CronJobInput, GoalSession, InfraProject, InfraProjectInput,
-    KnownHost, Vps, VpsInput, Workspace, WorkspaceInput,
+    KnownHost, Vps, VpsInput, VpsLoginPatch, Workspace, WorkspaceInput,
 };
+use crate::artifacts::Artifact;
 use crate::ai::conversations;
 use crate::ai::edits::EditRecord;
 use crate::ai::provider::ChatMessage;
@@ -532,6 +533,21 @@ impl Db {
                 reverted     INTEGER NOT NULL DEFAULT 0,
                 ts           INTEGER NOT NULL
             );
+
+            -- Local files the agent created (SSH key backups, downloads, writes).
+            -- Secret rows are listed by path/hash only; contents are never served to tools.
+            CREATE TABLE IF NOT EXISTS artifact (
+                id          TEXT PRIMARY KEY,
+                name        TEXT NOT NULL,
+                path        TEXT NOT NULL,
+                kind        TEXT NOT NULL,
+                sha256      TEXT NOT NULL,
+                size        INTEGER NOT NULL DEFAULT 0,
+                secret      INTEGER NOT NULL DEFAULT 0,
+                session_id  TEXT,
+                vps_id      TEXT,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
             "#,
         )?;
 
@@ -663,6 +679,98 @@ impl Db {
             )?;
         }
         Ok(self.get_vps(&id)?.expect("vps just upserted"))
+    }
+
+    /// Update only the public login fields. Passwords / private keys are never read or written.
+    pub fn patch_vps_login(&self, id: &str, patch: &VpsLoginPatch) -> Result<Vps> {
+        let current = self
+            .get_vps(id)?
+            .ok_or_else(|| anyhow::anyhow!("VPS not found"))?;
+        let input = VpsInput {
+            id: Some(current.id),
+            name: patch.name.clone().unwrap_or(current.name),
+            host: patch.host.clone().unwrap_or(current.host),
+            port: patch.port.unwrap_or(current.port),
+            username: patch.username.clone().unwrap_or(current.username),
+            auth_type: patch.auth_type.clone().unwrap_or(current.auth_type),
+            key_path: match &patch.key_path {
+                Some(p) if p.is_empty() => None,
+                Some(p) => Some(p.clone()),
+                None => current.key_path,
+            },
+            tags: current.tags,
+            secret: None,
+        };
+        self.upsert_vps(&input)
+    }
+
+    pub fn insert_artifact(&self, art: &Artifact) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO artifact (id, name, path, kind, sha256, size, secret, session_id, vps_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                art.id,
+                art.name,
+                art.path,
+                art.kind,
+                art.sha256,
+                art.size as i64,
+                if art.secret { 1 } else { 0 },
+                art.session_id,
+                art.vps_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_artifacts(&self, query: Option<&str>) -> Result<Vec<Artifact>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, path, kind, sha256, size, secret, session_id, vps_id, created_at
+             FROM artifact ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Artifact {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                path: r.get(2)?,
+                kind: r.get(3)?,
+                sha256: r.get(4)?,
+                size: r.get::<_, i64>(5)? as u64,
+                secret: r.get::<_, i64>(6)? != 0,
+                session_id: r.get(7)?,
+                vps_id: r.get(8)?,
+                created_at: r.get(9)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        let q = query.unwrap_or("").trim().to_ascii_lowercase();
+        for row in rows {
+            let a = row?;
+            if q.is_empty()
+                || a.name.to_ascii_lowercase().contains(&q)
+                || a.path.to_ascii_lowercase().contains(&q)
+                || a.kind.to_ascii_lowercase().contains(&q)
+                || a.sha256.to_ascii_lowercase().contains(&q)
+            {
+                out.push(a);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn get_artifact(&self, id: &str) -> Result<Option<Artifact>> {
+        Ok(self.list_artifacts(None)?.into_iter().find(|a| a.id == id))
+    }
+
+    pub fn delete_artifact(&self, id: &str) -> Result<Option<Artifact>> {
+        let existing = self.get_artifact(id)?;
+        if existing.is_some() {
+            let conn = self.conn.lock().unwrap();
+            conn.execute("DELETE FROM artifact WHERE id = ?1", [id])?;
+        }
+        Ok(existing)
     }
 
     pub fn delete_vps(&self, id: &str) -> Result<()> {

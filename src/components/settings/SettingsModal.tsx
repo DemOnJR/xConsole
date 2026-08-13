@@ -4,6 +4,7 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import {
   BotIcon,
   BrainIcon,
+  FolderIcon,
   PaletteIcon,
   PlugIcon,
   SettingsIcon,
@@ -16,6 +17,7 @@ import { ModelsSection } from "./sections/ModelsSection";
 import { ProvidersSection } from "./sections/ProvidersSection";
 import { AgentSection } from "./sections/AgentSection";
 import { KnowledgeSection } from "./sections/KnowledgeSection";
+import { ArtifactsSection } from "./sections/ArtifactsSection";
 import { SecuritySection } from "./sections/SecuritySection";
 import { AdvancedSection } from "./sections/AdvancedSection";
 
@@ -38,6 +40,7 @@ const CATEGORIES: Category[] = [
   { id: "models", label: "Models", icon: BrainIcon, Component: ModelsSection, group: "ai" },
   { id: "agent", label: "Agent & Safety", icon: BotIcon, Component: AgentSection, group: "ai" },
   { id: "knowledge", label: "Knowledge", icon: SparkIcon, Component: KnowledgeSection, group: "ai" },
+  { id: "artifacts", label: "Artifacts", icon: FolderIcon, Component: ArtifactsSection, group: "ai" },
   { id: "security", label: "Security", icon: ShieldIcon, Component: SecuritySection, group: "more" },
   { id: "advanced", label: "Advanced", icon: SettingsIcon, Component: AdvancedSection, group: "more" },
 ];

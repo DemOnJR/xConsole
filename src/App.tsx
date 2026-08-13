@@ -22,7 +22,8 @@ import { useUiStore } from "./stores/uiStore";
 import { useThemeStore } from "./stores/themeStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { useAgentStatusStore } from "./stores/agentStatusStore";
-import { onAgentWorkspaceStatus, onFileChange, onFileChangeReverted } from "./lib/tauri";
+import { onAgentWorkspaceStatus, onFileChange, onFileChangeReverted, onVpsUpdated } from "./lib/tauri";
+import { useVpsStore } from "./stores/vpsStore";
 import { useLockStore } from "./stores/lockStore";
 import { useAutoLock } from "./hooks/useAutoLock";
 import { useOsFileDrop } from "./hooks/useOsFileDrop";
@@ -179,6 +180,16 @@ function UnlockedApp() {
       unlisteners.push(u),
     );
     return () => unlisteners.forEach((u) => u());
+  }, []);
+
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    onVpsUpdated(() => {
+      void useVpsStore.getState().load();
+    }).then((u) => {
+      un = u;
+    });
+    return () => un?.();
   }, []);
 
   useEffect(() => {

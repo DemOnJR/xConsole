@@ -1,3 +1,4 @@
+pub mod artifacts;
 pub mod ai;
 pub mod cloud;
 pub mod db;

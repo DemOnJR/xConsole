@@ -9,6 +9,7 @@ pub mod crypto;
 /// The `db.lock.json` manifest (salt + wrapped data key) for the app lock.
 pub mod lock;
 mod infra;
+mod artifacts;
 mod local;
 pub mod mcp;
 mod proc;
@@ -367,6 +368,11 @@ pub fn run() {
             commands::vps::delete_vps,
             commands::vps::reorder_vps,
             commands::vps::setup_vps_key_auth,
+            commands::artifacts::list_artifacts,
+            commands::artifacts::verify_artifact,
+            commands::artifacts::reveal_artifact,
+            commands::artifacts::delete_artifact,
+            commands::artifacts::artifacts_dir,
             commands::session::ssh_connect,
             commands::session::remote_git_branch,
             commands::session::ssh_write,

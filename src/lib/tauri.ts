@@ -15,6 +15,20 @@ export interface Vps {
   created_at?: string | null;
 }
 
+/** A file the agent created on this PC (SSH key backup, download, write). */
+export interface Artifact {
+  id: string;
+  name: string;
+  path: string;
+  kind: string;
+  sha256: string;
+  size: number;
+  secret: boolean;
+  session_id?: string | null;
+  vps_id?: string | null;
+  created_at?: string | null;
+}
+
 export interface VpsInput {
   id?: string;
   name: string;
@@ -731,6 +745,13 @@ export const api = {
   saveVps: (input: VpsInput) => invoke<Vps>("save_vps", { input }),
   deleteVps: (id: string) => invoke<void>("delete_vps", { id }),
 
+  listArtifacts: (query?: string | null) =>
+    invoke<Artifact[]>("list_artifacts", { query: query ?? null }),
+  verifyArtifact: (id: string) => invoke<boolean>("verify_artifact", { id }),
+  revealArtifact: (id: string) => invoke<void>("reveal_artifact", { id }),
+  deleteArtifact: (id: string) => invoke<void>("delete_artifact", { id }),
+  artifactsDir: () => invoke<string>("artifacts_dir"),
+
   sshConnect: (vpsId: string, cols: number, rows: number) =>
     invoke<ConnectOutcome>("ssh_connect", { vpsId, cols, rows }),
   sshWrite: (sessionId: string, dataB64: string) =>
@@ -1250,6 +1271,14 @@ export function onCanvasCommand(
   cb: (cmd: CanvasCommand) => void,
 ): Promise<UnlistenFn> {
   return listen<CanvasCommand>("canvas://command", (e) => cb(e.payload));
+}
+
+export function onVpsUpdated(cb: () => void): Promise<UnlistenFn> {
+  return listen("vps://updated", () => cb());
+}
+
+export function onArtifactsChanged(cb: () => void): Promise<UnlistenFn> {
+  return listen("artifacts://changed", () => cb());
 }
 
 /** Subscribe to live goal-session events (kanban/status/memory updates). */

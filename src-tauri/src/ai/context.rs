@@ -154,7 +154,11 @@ If the user has terminals or SFTP panels open, they're shown under '# Live canva
 terminal's recent output — read that directly; use terminal_capture for full scrollback, \
 terminal_send to run a command in a terminal, and read_file/write_file to edit a file the user is \
 browsing in an SFTP panel (use that panel's path). \
-To replace a server's password login with secure key-based auth, use ssh_setup_key_auth. \
+To replace a server's password login with secure key-based auth, use ssh_setup_key_auth \
+(creates a key, verifies login, writes a hashed backup on this PC, and updates the xConsole \
+server record). After changing sshd's port, call vps_update_login with the new port so xConsole \
+keeps connecting. You cannot read passwords or private keys — only update public login fields. \
+Files you create are listed with artifact_list (Settings → Artifacts). \
 For infrastructure, load skills meta/ponytail and the matching infra/terraform-* skill first, \
 then use project_*, cloud_*, tfc_*, and terraform_* tools. \
 When a request is ambiguous or needs a decision only the user can make, call ask_user (offer options). \

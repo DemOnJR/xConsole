@@ -8,6 +8,7 @@ use russh::keys::ssh_key::LineEnding;
 use russh::keys::{HashAlg, PrivateKey};
 use zeroize::Zeroizing;
 
+use crate::artifacts::{self, Artifact};
 use crate::secrets;
 use crate::storage::models::{AuthType, VpsInput};
 use crate::storage::Db;
@@ -55,6 +56,14 @@ pub struct SetupReport {
     pub vps_id: String,
     pub fingerprint: String,
     pub public_openssh: String,
+    #[serde(default)]
+    pub backup_private_path: Option<String>,
+    #[serde(default)]
+    pub backup_public_path: Option<String>,
+    #[serde(default)]
+    pub backup_sha256: Option<String>,
+    #[serde(default)]
+    pub backup_verified: bool,
 }
 
 /// Switch a VPS from its current auth to an app-managed SSH key:
@@ -66,6 +75,7 @@ pub async fn setup_key_auth(
     db: &Db,
     sessions: &SessionManager,
     vps_id: &str,
+    backup_dir: Option<&std::path::Path>,
 ) -> Result<SetupReport, String> {
     let vps = db
         .get_vps(vps_id)
@@ -125,11 +135,81 @@ pub async fn setup_key_auth(
         return Err(format!("key auth verification failed, rolled back: {detail}"));
     }
 
-    Ok(SetupReport {
-        vps_id: vps.id,
-        fingerprint: key.fingerprint,
-        public_openssh: key.public_openssh,
-    })
+    let mut report = SetupReport {
+        vps_id: vps.id.clone(),
+        fingerprint: key.fingerprint.clone(),
+        public_openssh: key.public_openssh.clone(),
+        backup_private_path: None,
+        backup_public_path: None,
+        backup_sha256: None,
+        backup_verified: false,
+    };
+
+    if let Some(dir) = backup_dir {
+        match export_key_backup(db, vps_id, &vps.name, dir, &key) {
+            Ok((priv_path, pub_path, sha)) => {
+                let to_file = vps_input_from(&vps, AuthType::Key, Some(priv_path.clone()));
+                if db.upsert_vps(&to_file).is_ok() {
+                    report.backup_private_path = Some(priv_path);
+                    report.backup_public_path = Some(pub_path);
+                    report.backup_sha256 = Some(sha);
+                    report.backup_verified = true;
+                }
+            }
+            Err(e) => {
+                // Keychain login already works — keep that, surface the backup miss.
+                report.backup_private_path = Some(format!("backup failed: {e}"));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+fn export_key_backup(
+    db: &Db,
+    vps_id: &str,
+    vps_name: &str,
+    dir: &std::path::Path,
+    key: &GeneratedKey,
+) -> Result<(String, String, String), String> {
+    let _ = vps_name;
+    let priv_path = dir.join("id_ed25519");
+    let pub_path = dir.join("id_ed25519.pub");
+    let pub_line = format!("{} xconsole-{vps_id}\n", key.public_openssh.trim());
+    let priv_written = artifacts::write_verified(&priv_path, key.private_pem.as_bytes())?;
+    let pub_written = artifacts::write_verified(&pub_path, pub_line.as_bytes())?;
+    let priv_str = priv_written.path.to_string_lossy().into_owned();
+    let pub_str = pub_written.path.to_string_lossy().into_owned();
+    let rec = |name: &str, path: &str, kind: &str, sha: &str, size: u64, secret: bool| Artifact {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: name.to_string(),
+        path: path.to_string(),
+        kind: kind.to_string(),
+        sha256: sha.to_string(),
+        size,
+        secret,
+        session_id: None,
+        vps_id: Some(vps_id.to_string()),
+        created_at: None,
+    };
+    let _ = db.insert_artifact(&rec(
+        &format!("{vps_name} private key"),
+        &priv_str,
+        "ssh_key",
+        &priv_written.sha256,
+        priv_written.size,
+        true,
+    ));
+    let _ = db.insert_artifact(&rec(
+        &format!("{vps_name} public key"),
+        &pub_str,
+        "ssh_pub",
+        &pub_written.sha256,
+        pub_written.size,
+        false,
+    ));
+    Ok((priv_str, pub_str, priv_written.sha256))
 }
 
 /// Build a `VpsInput` from an existing row, overriding only the auth fields.
