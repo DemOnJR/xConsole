@@ -3369,7 +3369,7 @@ fn selftest() -> i32 {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    println!("\n=== SELFTEST: RTK-style output compression (50 unique cases) ===");
+    println!("\n=== SELFTEST: command-output compression (50 unique cases) ===");
     {
         let cases = crate::ai::output_compress::selftest();
         check("00 fifty named cases", cases.len() == 50);

@@ -1,20 +1,18 @@
-//! RTK-style command-output compression before a tool result re-enters context.
+//! Command-output compression before a tool result re-enters context.
 //!
-//! [rtk](https://github.com/rtk-ai/rtk) sits between an agent and the shell and
-//! applies four strategies per command type:
+//! Four strategies per command type:
 //!
 //! 1. Smart filtering — drop hints, boilerplate, progress noise
 //! 2. Grouping — files by extension, grep hits by file, tests by result
 //! 3. Truncation — keep signal (errors, hunk headers), cut redundancy
 //! 4. Deduplication — collapse repeated log lines with a count
 //!
-//! xConsole cannot re-run the remote command with `--porcelain`, so we compress
-//! the **already-captured** output. If compression is longer or empty-while-raw
-//! is not, we keep the original (`never_worse`).
+//! We compress the already-captured output. If compression is longer or empty
+//! while raw is not, we keep the original (`never_worse`).
 
 use serde_json::Value;
 
-/// Estimated tokens the way RTK does: `bytes / 4`. Percentages are reliable;
+/// Estimated tokens as `bytes / 4`. Percentages are reliable;
 /// absolute token numbers are approximate.
 pub fn estimate_tokens(bytes: usize) -> usize {
     bytes.div_ceil(4)
@@ -511,7 +509,7 @@ fn compress_git_diff(raw: &str) -> String {
                 hunk_skip += 1;
             }
         }
-        // drop context lines — RTK keeps a few; we drop them to save tokens
+        // drop context lines to save tokens
     }
     if hunk_skip > 0 {
         out.push(format!("  … ({hunk_skip} lines truncated)"));
@@ -1007,7 +1005,7 @@ fn truncate_line(s: &str, max: usize) -> String {
     format!("{}…", &s[..cut])
 }
 
-/// 50 unique cases proving RTK-style compression saves tokens without dropping errors.
+/// 50 unique cases proving output compression saves tokens without dropping errors.
 pub fn selftest() -> Vec<(&'static str, bool)> {
     let noisy_status = "\
 On branch main
@@ -1243,7 +1241,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_fifty_rtk_cases_pass() {
+    fn all_fifty_output_compress_cases_pass() {
         let results = selftest();
         assert_eq!(results.len(), 50);
         let failed: Vec<_> = results.iter().filter(|(_, ok)| !ok).map(|(n, _)| *n).collect();

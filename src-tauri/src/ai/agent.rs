@@ -72,7 +72,7 @@ pub async fn run_turn(
         .flatten()
         .and_then(|s| s.parse().ok())
         .unwrap_or(4000);
-    // RTK-style: compress by command type first (failures, not cargo progress;
+    // Compress by command type first (failures, not cargo progress;
     // git hints dropped; logs deduped), then apply the hard char cap.
     let cap_tool_result = |call: &crate::ai::provider::ToolCall, output: &str| -> String {
         let cmd = crate::ai::output_compress::command_from_call(&call.name, &call.arguments);
