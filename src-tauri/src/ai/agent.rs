@@ -265,6 +265,10 @@ pub async fn run_turn(
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir().join("xconsole"));
+    tc.session_state.load_prefix_cache(&data_dir, &tc.session_id);
+    if previous_prefix.is_none() {
+        previous_prefix = tc.session_state.last_prefix(&tc.session_id);
+    }
 
     let xconsole_exec = if resolved.kind == "cursor" && !tc.targets.is_empty() {
         Some(crate::ai::provider::XConsoleExec {
@@ -763,6 +767,11 @@ pub async fn run_turn(
         if tc.session_state.is_cancelled(&tc.session_id) {
             emit(Some(sink), StreamEvent::Status("Stopped.".into()));
             crate::ai::provider::close_unanswered_tool_calls(&mut messages);
+            tc.session_state.store_request_messages(
+                &tc.session_id,
+                crate::ai::vision::strip_all_images(messages.clone()),
+            );
+            tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
             break;
         }
         iters_used = iter + 1;
@@ -820,11 +829,6 @@ pub async fn run_turn(
         previous_prefix = Some(current_prefix.clone());
         tc.session_state
             .store_prefix(&tc.session_id, current_prefix);
-        tc.session_state
-            .store_request_messages(
-                &tc.session_id,
-                crate::ai::vision::strip_all_images(req.messages.clone()),
-            );
 
         let resp = match resolved.provider.chat(&req, Some(sink)).await {
             Ok(r) => r,
@@ -867,6 +871,14 @@ pub async fn run_turn(
         };
         messages.push(assistant.clone());
         last = assistant;
+
+        // Persist the full provider-visible list (including this assistant /
+        // tool rows) so the next user turn can replay an append-only prefix.
+        tc.session_state.store_request_messages(
+            &tc.session_id,
+            crate::ai::vision::strip_all_images(messages.clone()),
+        );
+        tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
 
         // No tools to run, or an autonomous CLI that does its own tool use.
         if resp.tool_calls.is_empty() || cli_mode {
@@ -945,9 +957,20 @@ pub async fn run_turn(
             }
         }
 
+        tc.session_state.store_request_messages(
+            &tc.session_id,
+            crate::ai::vision::strip_all_images(messages.clone()),
+        );
+        tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
+
         iter += 1;
     }
     crate::ai::provider::close_unanswered_tool_calls(&mut messages);
+    tc.session_state.store_request_messages(
+        &tc.session_id,
+        crate::ai::vision::strip_all_images(messages.clone()),
+    );
+    tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
 
     // Self-improvement loop (ETAPA 29): before finishing, look at what went wrong this
     // turn (failed/retried tool calls, hitting the iteration cap), distill a short

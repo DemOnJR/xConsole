@@ -235,6 +235,70 @@ impl SessionState {
             .or_default()
             .last_prefix = Some(prefix);
     }
+
+    /// Replay last provider request from disk after an app restart.
+    pub fn load_prefix_cache(&self, data_dir: &std::path::Path, session_id: &str) {
+        if self.last_request_messages(session_id).is_some() {
+            return;
+        }
+        let Some(saved) = read_prefix_cache(data_dir, session_id) else {
+            return;
+        };
+        if let Some(prefix) = saved.prefix {
+            self.store_prefix(session_id, prefix);
+        }
+        self.store_request_messages(session_id, saved.messages);
+    }
+
+    pub fn persist_prefix_cache(&self, data_dir: &std::path::Path, session_id: &str) {
+        let Some(messages) = self.last_request_messages(session_id) else {
+            return;
+        };
+        write_prefix_cache(
+            data_dir,
+            session_id,
+            &PrefixCacheFile {
+                messages,
+                prefix: self.last_prefix(session_id),
+            },
+        );
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PrefixCacheFile {
+    messages: Vec<ChatMessage>,
+    prefix: Option<RequestFingerprint>,
+}
+
+fn prefix_cache_path(data_dir: &std::path::Path, session_id: &str) -> std::path::PathBuf {
+    let safe: String = session_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == ':' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    data_dir.join("prompt-cache").join(format!("{safe}.json"))
+}
+
+fn read_prefix_cache(data_dir: &std::path::Path, session_id: &str) -> Option<PrefixCacheFile> {
+    let path = prefix_cache_path(data_dir, session_id);
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_prefix_cache(data_dir: &std::path::Path, session_id: &str, saved: &PrefixCacheFile) {
+    let path = prefix_cache_path(data_dir, session_id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = serde_json::to_vec(saved) {
+        let _ = std::fs::write(path, bytes);
+    }
 }
 
 #[cfg(test)]

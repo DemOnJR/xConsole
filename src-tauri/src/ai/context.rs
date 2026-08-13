@@ -371,12 +371,45 @@ pub fn continue_cached_prefix(
     if last_core
         .iter()
         .zip(&incoming_core)
-        .any(|(before, after)| before != after)
+        .all(|(before, after)| before == after)
     {
+        let mut out = last_sent.to_vec();
+        out.extend(incoming_core.into_iter().skip(last_core.len()));
+        return Some(out);
+    }
+    // The UI persists a flattened transcript (final assistant text only — no
+    // tool_call / tool_result rows). That used to make this function return
+    // None, so every new user turn rewrote the prefix (6–13K miss, 17–33% hit).
+    // Reuse the exact last provider request and append only the new user turn.
+    append_flattened_user_turn(last_sent, &last_core, &incoming_core)
+}
+
+fn append_flattened_user_turn(
+    last_sent: &[ChatMessage],
+    last_core: &[ChatMessage],
+    incoming_core: &[ChatMessage],
+) -> Option<Vec<ChatMessage>> {
+    let prev_user = last_core.iter().rev().find(|m| m.role == "user")?;
+    let pos = incoming_core
+        .iter()
+        .rposition(|m| m.role == "user" && m.content == prev_user.content)?;
+    let mut rest = incoming_core[pos + 1..].to_vec();
+    if rest.is_empty() {
+        return None;
+    }
+    if let (Some(last_asst), Some(first)) = (
+        last_core.iter().rev().find(|m| m.role == "assistant"),
+        rest.first(),
+    ) {
+        if first.role == "assistant" && first.content == last_asst.content {
+            rest.remove(0);
+        }
+    }
+    if rest.is_empty() {
         return None;
     }
     let mut out = last_sent.to_vec();
-    out.extend(incoming_core.into_iter().skip(last_core.len()));
+    out.extend(rest);
     Some(out)
 }
 
@@ -1001,5 +1034,30 @@ mod tests {
             ChatMessage::user("how are you"),
         ];
         assert!(continue_cached_prefix(&turn1, &compacted).is_none());
+    }
+
+    #[test]
+    fn cache12_flattened_ui_history_still_reuses_the_provider_prefix() {
+        // What the UI actually persists: final assistant text, no tool rows.
+        let mut last_sent = vec![ChatMessage::user("harden ssh")];
+        inject_dynamic_into_last_user(&mut last_sent, "canvas A");
+        let mut asst = ChatMessage::assistant("");
+        asst.tool_calls.push(crate::ai::provider::ToolCall {
+            id: "c1".into(),
+            name: "run_command".into(),
+            arguments: serde_json::json!({"command": "sshd -T"}),
+        });
+        last_sent.push(asst);
+        last_sent.push(ChatMessage::tool_result("c1", "port 2222"));
+        last_sent.push(ChatMessage::assistant("key login works"));
+
+        let incoming = vec![
+            ChatMessage::user("harden ssh"),
+            ChatMessage::assistant("key login works"),
+            ChatMessage::user("re check the vps"),
+        ];
+        let continued = continue_cached_prefix(&last_sent, &incoming).unwrap();
+        assert_eq!(&continued[..last_sent.len()], last_sent.as_slice());
+        assert_eq!(continued.last().unwrap().content, "re check the vps");
     }
 }

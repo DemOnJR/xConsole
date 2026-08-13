@@ -3,13 +3,13 @@ use sha2::{Digest, Sha256};
 
 use super::provider::{ChatMessage, ChatRequest, ToolDef};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrefixFingerprint {
     pub hash: String,
     pub bytes: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RequestFingerprint {
     pub system: PrefixFingerprint,
     pub schema: PrefixFingerprint,
