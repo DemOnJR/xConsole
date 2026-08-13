@@ -16,6 +16,11 @@ import {
 
 import { api, onGoalEvent, type ChatImage, type GoalSession, type GoalSpec } from "../../lib/tauri";
 import { parseGoalSpec } from "../../lib/goalParse";
+import {
+  displayTurnStats,
+  formatSessionCache,
+  sessionCacheFromMessages,
+} from "../../lib/streamStats";
 import { clipboardImagePng } from "../../lib/terminalClipboard";
 import { onOsFilesDropped } from "../../hooks/useOsFileDrop";
 import {
@@ -383,6 +388,15 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     const vps = vpsList.find((v) => v.id === targetId);
     return vps ? { name: vps.name, host: vps.host } : null;
   }, [targets, vpsList]);
+
+  const sessionCache = useMemo(() => sessionCacheFromMessages(messages), [messages]);
+  const lastAssistantStats = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].tokenStats) return messages[i].tokenStats!;
+    }
+    return null;
+  }, [messages]);
+  const displayStats = displayTurnStats(streamStats, lastAssistantStats);
 
   // Effective safety mode for the current target (global + per-VPS override),
   // so the permissions pill shows the truth, not just the global setting.
@@ -1265,6 +1279,11 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
         </span>
         <span className="flex items-center gap-2 text-[var(--text-faint)]">
           {contextUsage ? <span>{contextUsage.percent}% ctx</span> : null}
+          {sessionCache.turns > 0 ? (
+            <span data-tooltip={formatSessionCache(sessionCache)}>
+              cache {Math.round(sessionCache.rate * 100)}% avg
+            </span>
+          ) : null}
           {conversationCostUsd > 0 ? (
             <span>${conversationCostUsd.toFixed(4)}</span>
           ) : null}
@@ -1300,6 +1319,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
           messages={messages}
           streamingSegments={streaming ? streamingSegments : []}
           streaming={streaming}
+          liveStats={streaming ? streamStats : null}
           expanded
           executeTarget={executeTarget}
           onExecute={executeCommand}
@@ -1449,9 +1469,12 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
               <div className="text-[var(--text)]">
                 This conversation: ${conversationCostUsd.toFixed(4)}
               </div>
+              {sessionCache.turns > 0 ? (
+                <div className="text-[var(--text-faint)]">{formatSessionCache(sessionCache)}</div>
+              ) : null}
               <div className="text-[var(--text-faint)]">
-                {streamStats?.promptTokens
-                  ? `last turn: ${streamStats.promptTokens.toLocaleString()} in · ${streamStats.completionTokens.toLocaleString()} out`
+                {displayStats?.promptTokens
+                  ? `last turn: ${displayStats.promptTokens.toLocaleString()} in · ${displayStats.completionTokens.toLocaleString()} out`
                   : "No provider usage yet."}
               </div>
               <button
@@ -1797,7 +1820,8 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
               void useSettingsStore.getState().set("agent.safety_mode", next);
             }}
             contextUsage={contextUsage}
-            streamStats={streamStats}
+            streamStats={displayStats}
+            sessionCache={sessionCache}
             costUsd={conversationCostUsd}
             gitLabel={gitLabel}
             streaming={streaming}

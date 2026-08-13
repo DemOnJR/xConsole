@@ -1,7 +1,12 @@
 import type { MouseEvent, PointerEvent } from "react";
 import type { AiProvider } from "../../lib/tauri";
-import type { ContextUsage, TokenStats } from "../../lib/streamStats";
-import { cacheBreakdown, formatTokenCount, formatTokensPerSec } from "../../lib/streamStats";
+import type { ContextUsage, SessionCacheTotals, TokenStats } from "../../lib/streamStats";
+import {
+  cacheBreakdown,
+  formatSessionCache,
+  formatTokenCount,
+  formatTokensPerSec,
+} from "../../lib/streamStats";
 import { ContextGauge } from "./ContextGauge";
 
 export type ReasoningLevel = "off" | "low" | "medium" | "high";
@@ -31,6 +36,7 @@ export function InputBar({
   onCycleSafety,
   contextUsage,
   streamStats,
+  sessionCache,
   costUsd,
   gitLabel,
   streaming,
@@ -51,6 +57,7 @@ export function InputBar({
   onCycleSafety: () => void;
   contextUsage: ContextUsage | null;
   streamStats: TokenStats | null;
+  sessionCache?: SessionCacheTotals | null;
   costUsd: number;
   gitLabel: string | null;
   streaming: boolean;
@@ -65,6 +72,9 @@ export function InputBar({
   const canReason = reasoningCapable(activeProvider?.kind, model ?? undefined);
   const cache = streamStats ? cacheBreakdown(streamStats) : null;
   const hitRate = cache != null ? Math.round(cache.rate * 100) : null;
+  const sessionLine = sessionCache ? formatSessionCache(sessionCache) : "";
+  const sessionRate =
+    sessionCache && sessionCache.turns > 0 ? Math.round(sessionCache.rate * 100) : null;
   const tps =
     streamStats && streamStats.tokensPerSec > 0
       ? formatTokensPerSec(streamStats.tokensPerSec)
@@ -74,12 +84,13 @@ export function InputBar({
       ? `${streamStats.source === "estimate" ? "~" : ""}${streamStats.completionTokens} tok`
       : null;
   const stopNode = (e: PointerEvent | MouseEvent) => e.stopPropagation();
+  const shownRate = hitRate ?? sessionRate;
   const cacheTone =
-    hitRate == null
+    shownRate == null
       ? "text-[var(--text-faint)]"
-      : hitRate >= 95
+      : shownRate >= 95
         ? "text-emerald-300"
-        : hitRate >= 80
+        : shownRate >= 80
           ? "text-amber-300"
           : "text-red-300";
 
@@ -169,11 +180,21 @@ export function InputBar({
           </span>
         )}
 
-        {/* Speed · tokens · cost · cache — lives here, not in the transcript */}
-        {(tps || toks || costUsd > 0 || cache) && (
+        {/* Last reply + session cache — stays after the answer, does not reset */}
+        {(tps || toks || costUsd > 0 || cache || sessionLine) && (
           <span
-            className={`max-w-[280px] truncate text-[10px] tabular-nums ${cacheTone}`}
-            data-tooltip="Last request: speed, tokens, prompt-cache hit / miss"
+            className={`max-w-[420px] text-right text-[10px] leading-tight tabular-nums ${cacheTone}`}
+            data-tooltip={
+              [
+                cache && hitRate != null
+                  ? `This reply: ${formatTokenCount(cache.hit)} hit · ${formatTokenCount(cache.miss)} miss · ${hitRate}%`
+                  : null,
+                sessionLine || null,
+                "Each reply is counted; session is the sum and average of every provider turn.",
+              ]
+                .filter(Boolean)
+                .join("\n")
+            }
           >
             {[
               tps,
@@ -185,6 +206,9 @@ export function InputBar({
             ]
               .filter(Boolean)
               .join(" · ")}
+            {sessionLine ? (
+              <span className="mt-0.5 block text-[9px] text-[var(--text-faint)]">{sessionLine}</span>
+            ) : null}
           </span>
         )}
 

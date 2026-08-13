@@ -146,6 +146,7 @@ async function speakSentenceQueued(raw: string) {
 }
 import {
   liveTokenStats,
+  sessionCostFromMessages,
   type ContextUsage,
   type TokenStats,
 } from "../lib/streamStats";
@@ -614,13 +615,13 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       activity: [],
       streamingSegments: [],
       streaming: false,
-      streamStats: null,
+      streamStats: [...messages].reverse().find((m) => m.tokenStats)?.tokenStats ?? null,
       turnTelemetry: null,
       prefixTelemetry: null,
       contextUsage: null,
       compactFlipCount: 0,
       error: null,
-      conversationCostUsd: 0,
+      conversationCostUsd: sessionCostFromMessages(messages),
       queued: [],
       holdQueue: false,
       activeIntakeGoalId: null,
@@ -778,11 +779,21 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         turnSegments = appendTextDelta(turnSegments, ev.data);
         feedSpeech(ev.data);
         if (isCurrent()) {
-          set({
+          const live = liveTokenStats(turnText, streamStartedAt);
+          set((s) => ({
             streamingText: turnText,
             streamingSegments: turnSegments,
-            streamStats: liveTokenStats(turnText, streamStartedAt),
-          });
+            // Keep provider cache fields if Stats already landed — a later
+            // token delta must not wipe hit/miss back to an estimate.
+            streamStats:
+              s.streamStats?.source === "provider"
+                ? {
+                    ...s.streamStats,
+                    completionTokens: live.completionTokens,
+                    tokensPerSec: live.tokensPerSec,
+                  }
+                : live,
+          }));
         }
         return;
       }
@@ -802,6 +813,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         // Provider-estimated cost lands on the latest stats so the footer can show
         // $ + cache economics. Sums into the conversation running total.
         const costUsd = ev.data.usd ?? 0;
+        if (latestStats) latestStats = { ...latestStats, costUsd };
         if (isCurrent()) {
           set((s) => ({
             streamStats: s.streamStats ? { ...s.streamStats, costUsd } : s.streamStats,
@@ -902,7 +914,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           activity: [],
           streamingSegments: [],
           streaming: false,
-          streamStats: null,
+          // Keep the last reply's usage so cache rates do not vanish after the turn.
+          streamStats: tokenStats ?? null,
         });
         if (streamVoice && streamingSpoke) {
           // Speak whatever's left after the last sentence boundary.
@@ -932,6 +945,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
               content: turnText,
               activity: turnActivity.length > 0 ? [...turnActivity] : undefined,
               segments: turnSegments.length > 0 ? [...turnSegments] : undefined,
+              tokenStats: latestStats ?? undefined,
             },
           ]
         : compactionMarker
@@ -945,7 +959,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           streamingText: "",
           activity: [],
           streamingSegments: [],
-          streamStats: null,
+          streamStats: latestStats,
         });
       }
       if (messages.length > 0) {

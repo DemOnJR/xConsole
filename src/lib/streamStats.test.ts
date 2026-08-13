@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { cacheBreakdown, cacheHitRate, formatCacheLine, formatUsd, formatTokenCount } from "./streamStats";
+import {
+  addTurnToSessionCache,
+  cacheBreakdown,
+  cacheHitRate,
+  displayTurnStats,
+  emptySessionCache,
+  formatCacheLine,
+  formatSessionCache,
+  formatUsd,
+  formatTokenCount,
+  sessionCacheFromMessages,
+  sessionCostFromMessages,
+} from "./streamStats";
 
 describe("cacheHitRate", () => {
   it("uses exclusive (Anthropic) math when cached > prompt", () => {
@@ -63,6 +75,58 @@ describe("formatUsd", () => {
     expect(formatUsd(undefined)).toBe("");
     expect(formatUsd(0)).toBe("");
     expect(formatUsd(NaN)).toBe("");
+  });
+});
+
+describe("session cache totals", () => {
+  const turn = (prompt: number, cached: number, costUsd = 0) => ({
+    completionTokens: 10,
+    promptTokens: prompt,
+    cachedTokens: cached,
+    costUsd,
+    tokensPerSec: 1,
+    source: "provider" as const,
+  });
+
+  it("sums hit/miss across replies and averages the rate", () => {
+    const acc = sessionCacheFromMessages([
+      { tokenStats: turn(1732, 1664) },
+      { tokenStats: turn(50_000, 48_000) },
+      {},
+    ]);
+    expect(acc.turns).toBe(2);
+    expect(acc.hit).toBe(1664 + 48_000);
+    expect(acc.miss).toBe(68 + 2000);
+    expect(acc.rate).toBeCloseTo((1664 + 48_000) / (1732 + 50_000));
+    expect(formatSessionCache(acc)).toBe("session 50K hit · 2.1K miss · 96% avg · 2 turns");
+  });
+
+  it("ignores estimate-only turns so a live stream does not reset the session", () => {
+    const first = addTurnToSessionCache(emptySessionCache(), turn(1732, 1664));
+    const still = addTurnToSessionCache(first, {
+      completionTokens: 40,
+      tokensPerSec: 12,
+      source: "estimate",
+    });
+    expect(still).toEqual(first);
+  });
+
+  it("keeps the last reply's cache while the next stream is still an estimate", () => {
+    const last = turn(1732, 1664);
+    const live = { completionTokens: 40, tokensPerSec: 22, source: "estimate" as const };
+    const shown = displayTurnStats(live, last);
+    expect(cacheBreakdown(shown!)?.hit).toBe(1664);
+    expect(shown?.tokensPerSec).toBe(22);
+    expect(displayTurnStats(turn(50_000, 48_000), last)?.cachedTokens).toBe(48_000);
+  });
+
+  it("sums stored per-reply cost", () => {
+    expect(
+      sessionCostFromMessages([
+        { tokenStats: turn(100, 80, 0.0012) },
+        { tokenStats: turn(200, 180, 0.003) },
+      ]),
+    ).toBeCloseTo(0.0042);
   });
 });
 

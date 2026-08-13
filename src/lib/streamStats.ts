@@ -52,6 +52,66 @@ export function formatCacheLine(stats: TokenStats): string {
   return `cache ${formatTokenCount(b.hit)} hit · ${formatTokenCount(b.miss)} miss · ${Math.round(b.rate * 100)}%`;
 }
 
+/** Running prompt-cache totals for a conversation (sum of every provider turn). */
+export interface SessionCacheTotals {
+  hit: number;
+  miss: number;
+  turns: number;
+  rate: number;
+}
+
+export function emptySessionCache(): SessionCacheTotals {
+  return { hit: 0, miss: 0, turns: 0, rate: 0 };
+}
+
+export function addTurnToSessionCache(
+  acc: SessionCacheTotals,
+  stats: TokenStats | null | undefined,
+): SessionCacheTotals {
+  const b = stats ? cacheBreakdown(stats) : null;
+  if (!b) return acc;
+  const hit = acc.hit + b.hit;
+  const miss = acc.miss + b.miss;
+  const turns = acc.turns + 1;
+  const total = hit + miss;
+  return { hit, miss, turns, rate: total > 0 ? hit / total : 0 };
+}
+
+export function sessionCacheFromMessages(
+  messages: { tokenStats?: TokenStats }[],
+): SessionCacheTotals {
+  return messages.reduce(
+    (acc, message) => addTurnToSessionCache(acc, message.tokenStats),
+    emptySessionCache(),
+  );
+}
+
+export function sessionCostFromMessages(messages: { tokenStats?: TokenStats }[]): number {
+  return messages.reduce((sum, message) => sum + (message.tokenStats?.costUsd ?? 0), 0);
+}
+
+/** Prefer live provider usage; if the stream is still an estimate, keep the last reply's cache. */
+export function displayTurnStats(
+  live: TokenStats | null | undefined,
+  last: TokenStats | null | undefined,
+): TokenStats | null {
+  if (live?.source === "provider") return live;
+  if (live && last && cacheBreakdown(last)) {
+    return {
+      ...last,
+      completionTokens: live.completionTokens,
+      tokensPerSec: live.tokensPerSec,
+    };
+  }
+  return live ?? last ?? null;
+}
+
+export function formatSessionCache(acc: SessionCacheTotals): string {
+  if (acc.turns <= 0) return "";
+  const turns = acc.turns === 1 ? "1 turn" : `${acc.turns} turns`;
+  return `session ${formatTokenCount(acc.hit)} hit · ${formatTokenCount(acc.miss)} miss · ${Math.round(acc.rate * 100)}% avg · ${turns}`;
+}
+
 export function formatUsd(n: number | undefined): string {
   if (n === undefined || !Number.isFinite(n) || n <= 0) return "";
   if (n < 0.01) return `$${n.toFixed(4)}`;
