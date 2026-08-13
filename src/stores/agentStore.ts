@@ -16,6 +16,7 @@ import {
 import { appendImageMarkers } from "../lib/vision";
 import { notify } from "../lib/notify";
 import { exportConversationMarkdown as renderConversationMarkdown } from "../lib/agentExport";
+import { classifyChat } from "../lib/consent";
 import { useWorkspaceStore } from "./workspaceStore";
 import { useCanvasStore } from "./canvasStore";
 import { useSessionStore } from "./sessionStore";
@@ -237,6 +238,11 @@ interface AgentState {
   ) => Promise<void>;
   /** Queue a follow-up if a turn is running; otherwise send now. */
   enqueueOrSend: (text: string, images?: import("../lib/tauri").ChatImage[]) => void;
+  /**
+   * If a plan / question / command-approval is waiting, resolve it from
+   * this chat line and return true. Used by send + enqueueOrSend.
+   */
+  tryRouteChatToPending: (text: string) => boolean;
   enqueue: (text: string, images?: import("../lib/tauri").ChatImage[]) => void;
   updateQueued: (id: string, text: string) => void;
   removeQueued: (id: string) => void;
@@ -676,6 +682,59 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   setActiveIntakeGoal: (id) => set({ activeIntakeGoalId: id }),
 
+  tryRouteChatToPending: (text) => {
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    const s = get();
+    const intent = classifyChat(trimmed);
+
+    if (s.pendingPlan) {
+      const id = s.pendingPlan.id;
+      const fallbackSend = () => {
+        // Waiter already gone (timeout / superseded). Drop the stale modal
+        // and start a normal turn so the chat line is not swallowed.
+        set({ pendingPlan: null, planDraft: "" });
+        void get().send(trimmed);
+      };
+      if (intent.kind === "approve" || intent.kind === "continue") {
+        void get().applyPlan(id).catch(fallbackSend);
+        return true;
+      }
+      if (intent.kind === "reject") {
+        void get()
+          .revisePlan(id, intent.feedback || trimmed)
+          .catch(fallbackSend);
+        return true;
+      }
+      if (intent.kind === "cancel") {
+        void get().cancelPlanAction(id).catch(fallbackSend);
+        return true;
+      }
+      // Free-form notes while the modal is open are revision feedback,
+      // not a second agent turn that would sit behind streaming.
+      void get().revisePlan(id, trimmed).catch(fallbackSend);
+      return true;
+    }
+
+    if (s.pendingQuestions.length > 0) {
+      const q = s.pendingQuestions[0];
+      void get().answerQuestion(q.id, trimmed);
+      return true;
+    }
+
+    if (s.pendingApprovals.length > 0) {
+      if (intent.kind === "approve" || intent.kind === "continue") {
+        void get().resolveApproval(s.pendingApprovals[0].id, true);
+        return true;
+      }
+      if (intent.kind === "reject" || intent.kind === "cancel") {
+        void get().resolveApproval(s.pendingApprovals[0].id, false);
+        return true;
+      }
+    }
+    return false;
+  },
+
   enqueue: (text, images) => {
     set((s) => ({ queued: enqueueMessage(s.queued, text, images) }));
   },
@@ -691,6 +750,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   enqueueOrSend: (text, images) => {
     const trimmed = text.trim();
     if (!trimmed && !images?.length) return;
+    // Chat typed while a plan / question / command-approval is waiting
+    // must resolve that waiter. Queueing it as a follow-up is how
+    // "ok the plan looks good" used to vanish into a new blocked turn.
+    if (get().tryRouteChatToPending(trimmed)) return;
     if (get().streaming) {
       get().enqueue(trimmed, images);
       return;
@@ -711,13 +774,24 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
     // Clear any pending interactive state so the modal/cards don't linger.
     // Keep the follow-up queue; do not auto-send it after an interrupt.
-    set({ pendingPlan: null, pendingQuestions: [], planDraft: "", holdQueue: true });
+    set({
+      pendingPlan: null,
+      pendingQuestions: [],
+      pendingApprovals: [],
+      planDraft: "",
+      holdQueue: true,
+    });
   },
 
   send: async (text, opts) => {
     const trimmed = text.trim();
     const images = opts?.images?.length ? opts.images : undefined;
-    if ((!trimmed && !images) || get().streaming) return;
+    if (!trimmed && !images) return;
+    // Same routing as enqueueOrSend — voice / retry / queue-drain call send
+    // directly. If a waiter is up, resolve it instead of dropping or
+    // starting a second turn.
+    if (trimmed && get().tryRouteChatToPending(trimmed)) return;
+    if (get().streaming) return;
 
     const userMsg: AgentChatMessage = {
       role: "user",

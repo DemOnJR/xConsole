@@ -185,9 +185,12 @@ When a task is complete, stop.";
 /// Injected when plan mode is on: investigate read-only, then present a plan.
 const PLAN_MODE_GUIDANCE: &str = "PLAN MODE IS ON. Do not change anything yet. Investigate using only \
 read-only tools (read_file, local_read_file, local_list_dir, list_vps_targets, read-only commands, \
-web_*). When you understand the task, call present_plan with a clear numbered plan and STOP — wait for \
-the user to approve it. Only after they approve may you run commands or edit/write files. If they \
-request changes, revise and call present_plan again.";
+web_*). When you understand the task, you MUST call present_plan with the full markdown in the `plan` \
+argument (never write the plan only as chat text — the review modal will not open). Then STOP and wait. \
+If the user already approved in chat (e.g. \"ok the plan looks good\", \"go ahead\", \"lgtm\", \
+\"continue\"), do NOT present again and do NOT stop — execute the plan immediately with tools. Only \
+after approval may you run commands or edit/write files. If they request changes, revise and call \
+present_plan again.";
 
 const WEB_GUIDANCE: &str = "You have internet access via web_search, web_fetch, and geo_locate — \
 use them only when a request actually needs current or external data (docs, prices, news, etc.) \

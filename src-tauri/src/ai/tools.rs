@@ -525,8 +525,10 @@ Blocks until the user answers."
             name: "present_plan".into(),
             description: "Present a step-by-step plan to the user and wait for approval BEFORE making \
 any changes. Use this for large, multi-step, or destructive tasks (and always when plan mode is on): \
-first investigate with read-only tools, then call present_plan. The user can approve the plan (you \
-then execute it) or request changes (you revise and present again). Blocks until the user responds."
+first investigate with read-only tools, then call present_plan with the FULL plan in the required \
+`plan` argument (title is optional). Never write the plan only as chat text — without this call the \
+review modal does not open and the user cannot approve. The user can approve in the modal or in chat \
+(you then execute) or request changes (you revise and present again). Blocks until the user responds."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -2534,7 +2536,7 @@ async fn ask_user(ctx: &ToolContext, args: &Value) -> String {
         "questions": questions,
     });
     let _ = ctx.app.emit("ai://question", payload);
-    let rx = ctx.prompts.register(id.clone());
+    let rx = ctx.prompts.register_for_session(id.clone(), &ctx.session_id);
     match tokio::time::timeout(PROMPT_TIMEOUT, rx).await {
         Ok(Ok(answer)) if !answer.trim().is_empty() => format!("User's answer:\n{}", answer.trim()),
         Ok(Ok(_)) => "The user submitted an empty answer.".into(),
@@ -2552,11 +2554,19 @@ async fn present_plan(ctx: &ToolContext, args: &Value) -> String {
                 plan as normal text instead, and do not attempt to execute anything."
             .into();
     }
-    let plan = match args.get("plan").and_then(|v| v.as_str()) {
-        Some(p) if !p.trim().is_empty() => p,
-        _ => return "error: missing 'plan'".into(),
+    let plan = match crate::ai::consent::plan_body_from_args(args) {
+        Some(p) => p,
+        None => {
+            return "error: missing 'plan' — pass the full markdown plan in the `plan` argument \
+                    (aliases: content, text, steps)."
+                .into()
+        }
     };
-    let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("Plan");
+    let title = args
+        .get("title")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Plan");
     let id = Uuid::new_v4().to_string();
     let stored = crate::storage::models::AgentPlan {
         id: id.clone(),

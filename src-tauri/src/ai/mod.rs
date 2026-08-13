@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub mod agent;
 pub mod autoresearch;
 pub mod canvas_context;
+pub mod consent;
 pub mod context;
 pub mod context_compact;
 pub mod context_usage;

@@ -20,9 +20,10 @@ use crate::ai::provider::ChatMessage;
 #[derive(Clone, Default)]
 pub struct PromptRegistry {
     pending: Arc<DashMap<String, oneshot::Sender<String>>>,
-    /// session_id → latest prompt id, so a new plan presentation can supersede
-    /// the previous still-pending one.
-    by_session: Arc<DashMap<String, String>>,
+    /// session_id → every still-pending prompt id (plan + ask_user). A new
+    /// plan presentation supersedes earlier plans; Stop / chat-cancel flushes
+    /// the whole list so a blocked turn cannot hang.
+    by_session: Arc<DashMap<String, Vec<String>>>,
 }
 
 impl PromptRegistry {
@@ -37,38 +38,37 @@ impl PromptRegistry {
         rx
     }
 
-    /// Register a prompt that belongs to a session (plans), so later prompts for
-    /// the same session can supersede it.
+    /// Register a prompt that belongs to a session (plans / questions), so Stop
+    /// and a later presentation can find it.
     pub fn register_for_session(&self, id: String, session_id: &str) -> oneshot::Receiver<String> {
         let rx = self.register(id.clone());
-        self.by_session.insert(session_id.to_string(), id);
+        self.by_session
+            .entry(session_id.to_string())
+            .or_default()
+            .push(id);
         rx
     }
 
     /// Resolve (with "CANCEL: superseded") any pending prompt for this session
     /// other than `keep_id`, so a newer plan presentation replaces the old one.
     pub fn cancel_superseded(&self, session_id: &str, keep_id: &str) {
-        if let Some((_, old_id)) = self.by_session.remove(session_id) {
-            if old_id != keep_id {
-                if let Some((_, tx)) = self.pending.remove(&old_id) {
-                    let _ = tx.send("CANCEL: superseded".into());
-                }
+        let old_ids: Vec<String> = self
+            .by_session
+            .get(session_id)
+            .map(|ids| ids.iter().filter(|id| *id != keep_id).cloned().collect())
+            .unwrap_or_default();
+        for old_id in old_ids {
+            if let Some((_, tx)) = self.pending.remove(&old_id) {
+                let _ = tx.send("CANCEL: superseded".into());
             }
+            self.forget_session_id(session_id, &old_id);
         }
     }
 
     /// Deliver the user's answer to a waiting prompt. Returns true if it was awaiting.
     pub fn resolve(&self, id: &str, answer: String) -> bool {
         if let Some((_, tx)) = self.pending.remove(id) {
-            // Drop the session mapping so it can't leak / supersede later.
-            let session = self
-                .by_session
-                .iter()
-                .find(|e| e.value() == id)
-                .map(|e| e.key().clone());
-            if let Some(s) = session {
-                let _ = self.by_session.remove(&s);
-            }
+            self.forget_id(id);
             let _ = tx.send(answer);
             true
         } else {
@@ -78,15 +78,8 @@ impl PromptRegistry {
 
     /// Drop a pending prompt without answering (e.g. on timeout).
     pub fn cancel(&self, id: &str) -> bool {
-        if let Some((_, _)) = self.pending.remove(id) {
-            let session = self
-                .by_session
-                .iter()
-                .find(|e| e.value() == id)
-                .map(|e| e.key().clone());
-            if let Some(s) = session {
-                let _ = self.by_session.remove(&s);
-            }
+        if self.pending.remove(id).is_some() {
+            self.forget_id(id);
             true
         } else {
             false
@@ -98,17 +91,49 @@ impl PromptRegistry {
     pub fn resolve_all_for_session(&self, session_id: &str, answer: String) -> usize {
         let ids: Vec<String> = self
             .by_session
-            .iter()
-            .filter(|e| e.key() == session_id)
-            .map(|e| e.value().clone())
-            .collect();
+            .remove(session_id)
+            .map(|(_, v)| v)
+            .unwrap_or_default();
         let mut n = 0;
         for id in ids {
-            if self.resolve(&id, answer.clone()) {
+            if let Some((_, tx)) = self.pending.remove(&id) {
+                let _ = tx.send(answer.clone());
                 n += 1;
             }
         }
         n
+    }
+
+    #[allow(dead_code)]
+    pub fn has_pending_for_session(&self, session_id: &str) -> bool {
+        self.by_session
+            .get(session_id)
+            .map(|ids| !ids.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn forget_id(&self, id: &str) {
+        let sessions: Vec<String> = self
+            .by_session
+            .iter()
+            .filter(|e| e.value().iter().any(|x| x == id))
+            .map(|e| e.key().clone())
+            .collect();
+        for s in sessions {
+            self.forget_session_id(&s, id);
+        }
+    }
+
+    fn forget_session_id(&self, session_id: &str, id: &str) {
+        let empty = if let Some(mut ids) = self.by_session.get_mut(session_id) {
+            ids.retain(|x| x != id);
+            ids.is_empty()
+        } else {
+            false
+        };
+        if empty {
+            self.by_session.remove(session_id);
+        }
     }
 }
 
@@ -350,5 +375,29 @@ mod tests {
         assert!(r.resolve("q1", "hello".into()));
         assert_eq!(rx.try_recv().unwrap(), "hello");
         assert!(!r.resolve("q1", "again".into()));
+    }
+
+    #[test]
+    fn session_tracks_plan_and_question_and_stop_flushes_both() {
+        let r = PromptRegistry::new();
+        let mut plan = r.register_for_session("plan1".into(), "s");
+        let mut q = r.register_for_session("q1".into(), "s");
+        assert!(r.has_pending_for_session("s"));
+        assert_eq!(r.resolve_all_for_session("s", "CANCEL".into()), 2);
+        assert_eq!(plan.try_recv().unwrap(), "CANCEL");
+        assert_eq!(q.try_recv().unwrap(), "CANCEL");
+        assert!(!r.has_pending_for_session("s"));
+    }
+
+    #[test]
+    fn newer_plan_supersedes_only_the_old_plan() {
+        let r = PromptRegistry::new();
+        let mut old = r.register_for_session("old".into(), "s");
+        r.cancel_superseded("s", "new");
+        let _new = r.register_for_session("new".into(), "s");
+        assert_eq!(old.try_recv().unwrap(), "CANCEL: superseded");
+        assert!(r.has_pending_for_session("s"));
+        assert!(r.resolve("new", "APPROVE".into()));
+        assert!(!r.has_pending_for_session("s"));
     }
 }

@@ -21,7 +21,12 @@ const APPROVAL_TIMEOUT: Duration = Duration::from_secs(600);
 /// Tracks in-flight approval requests so the UI can resolve them. Managed state.
 #[derive(Clone, Default)]
 pub struct ApprovalRegistry {
-    pending: Arc<DashMap<String, oneshot::Sender<bool>>>,
+    pending: Arc<DashMap<String, PendingApproval>>,
+}
+
+struct PendingApproval {
+    session_id: String,
+    tx: oneshot::Sender<bool>,
 }
 
 impl ApprovalRegistry {
@@ -29,16 +34,22 @@ impl ApprovalRegistry {
         Self::default()
     }
 
-    fn register(&self, id: String) -> oneshot::Receiver<bool> {
+    fn register(&self, id: String, session_id: &str) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
-        self.pending.insert(id, tx);
+        self.pending.insert(
+            id,
+            PendingApproval {
+                session_id: session_id.to_string(),
+                tx,
+            },
+        );
         rx
     }
 
     /// Resolve a pending approval. Returns true if it was awaiting.
     pub fn resolve(&self, id: &str, approved: bool) -> bool {
-        if let Some((_, tx)) = self.pending.remove(id) {
-            let _ = tx.send(approved);
+        if let Some((_, pending)) = self.pending.remove(id) {
+            let _ = pending.tx.send(approved);
             true
         } else {
             false
@@ -48,6 +59,29 @@ impl ApprovalRegistry {
     /// Drop a pending approval without sending a decision (e.g. on timeout).
     pub fn cancel(&self, id: &str) -> bool {
         self.pending.remove(id).is_some()
+    }
+
+    /// Deny every waiting command approval for a session (Stop). Unblocks
+    /// `authorize` so the turn does not hang until the 10-minute timeout.
+    pub fn deny_all_for_session(&self, session_id: &str) -> usize {
+        let ids: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|e| e.value().session_id == session_id)
+            .map(|e| e.key().clone())
+            .collect();
+        let mut n = 0;
+        for id in ids {
+            if self.resolve(&id, false) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    #[allow(dead_code)]
+    pub fn has_pending_for_session(&self, session_id: &str) -> bool {
+        self.pending.iter().any(|e| e.value().session_id == session_id)
     }
 }
 
@@ -338,7 +372,7 @@ pub async fn authorize(
     let approval = db
         .create_approval(session_id, vps_id, &shown)
         .map_err(|e| e.to_string())?;
-    let rx = approvals.register(approval.id.clone());
+    let rx = approvals.register(approval.id.clone(), session_id);
     let _ = app.emit("ai://approval", &approval);
 
     match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
@@ -548,5 +582,20 @@ mod tests {
         assert!(is_terraform_readonly("local terraform plan (project: my-app)"));
         assert!(is_terraform_readonly("TFC remote plan for project my-app"));
         assert!(!is_terraform_readonly("TFC remote apply for project my-app"));
+    }
+
+    #[test]
+    fn stop_denies_waiting_approvals_for_that_session() {
+        let r = ApprovalRegistry::new();
+        let mut a = r.register("a1".into(), "s1");
+        let mut b = r.register("b1".into(), "s2");
+        assert!(r.has_pending_for_session("s1"));
+        assert_eq!(r.deny_all_for_session("s1"), 1);
+        assert_eq!(a.try_recv().unwrap(), false);
+        assert!(b.try_recv().is_err());
+        assert!(!r.has_pending_for_session("s1"));
+        assert!(r.has_pending_for_session("s2"));
+        assert!(r.resolve("b1", true));
+        assert_eq!(b.try_recv().unwrap(), true);
     }
 }

@@ -192,9 +192,12 @@ pub async fn ai_chat(
         }
     }
 
-    // Fresh turn — clear state left over from the previous turn.
+    // Fresh turn — clear leftover Stop, then decide whether this chat line
+    // is approval of a plan that was written as text (no modal). Blindly
+    // clearing plan_approved here is what made "ok the plan looks good"
+    // start a new blocked turn that then sat idle.
     tc.session_state.clear_cancel(&tc.session_id);
-    tc.session_state.clear_plan_approved(&tc.session_id);
+    apply_chat_plan_decision(&tc, &mut messages);
     let result = agent::run_turn(
         &tc,
         provider_id.filter(|s| !s.is_empty()),
@@ -208,6 +211,51 @@ pub async fn ai_chat(
     drop(tx);
     let _ = forward.await;
     result
+}
+
+/// Lift or reset the plan-mode mutation guard from the latest user chat line.
+///
+/// The review modal is the happy path (`present_plan` marks approved mid-turn).
+/// When the model wrote the plan as assistant text instead, the next user
+/// message is the only approval signal we get.
+fn apply_chat_plan_decision(tc: &ToolContext, messages: &mut [ChatMessage]) {
+    if !tc.plan_mode {
+        tc.session_state.clear_plan_approved(&tc.session_id);
+        return;
+    }
+    let user = crate::ai::consent::last_user_text(messages);
+    let prev = crate::ai::consent::last_assistant_text(messages);
+    if crate::ai::consent::chat_approves_plan(user, prev) {
+        tc.session_state.mark_plan_approved(&tc.session_id);
+        if let Some(m) = messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == "user" && !crate::ai::context::is_runtime_message(m))
+        {
+            if !m.content.contains("APPROVED the plan") {
+                m.content.push_str(
+                    "\n\n[system] The user APPROVED the plan in chat. Execute it now with tools. \
+                     Do not call present_plan again. Do not stop to wait.",
+                );
+            }
+        }
+        return;
+    }
+    if crate::ai::consent::chat_rejects_plan(user) {
+        tc.session_state.clear_plan_approved(&tc.session_id);
+        if let Some(m) = messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == "user" && !crate::ai::context::is_runtime_message(m))
+        {
+            m.content.push_str(
+                "\n\n[system] The user rejected or wants changes to the plan. Revise it and call \
+                 present_plan again. Do not execute.",
+            );
+        }
+        return;
+    }
+    tc.session_state.clear_plan_approved(&tc.session_id);
 }
 
 /// All file edits the agent made in a chat session (for the changes/diff panel).
@@ -701,12 +749,14 @@ pub async fn setup_edge_tts(app: AppHandle) -> Result<(), String> {
 pub fn agent_cancel(
     session_state: State<'_, SessionState>,
     prompts: State<'_, PromptRegistry>,
+    approvals: State<'_, ApprovalRegistry>,
     session_id: String,
 ) -> Result<(), String> {
     session_state.cancel(&session_id);
-    // Interrupt any interactive wait (plan review / ask_user) for this session so
-    // a blocked turn stops immediately instead of hanging up to PROMPT_TIMEOUT.
+    // Interrupt any interactive wait (plan review / ask_user / command approval)
+    // so a blocked turn stops immediately instead of hanging until timeout.
     prompts.resolve_all_for_session(&session_id, "CANCEL".into());
+    approvals.deny_all_for_session(&session_id);
     Ok(())
 }
 

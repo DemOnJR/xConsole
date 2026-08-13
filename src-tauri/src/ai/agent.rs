@@ -762,6 +762,7 @@ pub async fn run_turn(
     crate::ai::provider::close_unanswered_tool_calls(&mut messages);
 
     let mut iter: usize = 0;
+    let mut execution_nudge = false;
     loop {
         // User pressed Stop — halt before the next model call.
         if tc.session_state.is_cancelled(&tc.session_id) {
@@ -882,6 +883,65 @@ pub async fn run_turn(
 
         // No tools to run, or an autonomous CLI that does its own tool use.
         if resp.tool_calls.is_empty() || cli_mode {
+            if !cli_mode {
+                // Model wrote a plan as chat text and skipped present_plan —
+                // open the review modal ourselves so the user can approve.
+                if let Some(call) = crate::ai::consent::synthetic_present_plan(
+                    tc.plan_mode,
+                    tc.session_state.plan_approved(&tc.session_id),
+                    &resp.content,
+                ) {
+                    emit(
+                        Some(sink),
+                        StreamEvent::Status(
+                            "Opening the plan review modal — the plan was written in chat.".into(),
+                        ),
+                    );
+                    if let Some(asst) = messages.last_mut() {
+                        if asst.role == "assistant" {
+                            asst.tool_calls = vec![call.clone()];
+                        }
+                    }
+                    last.tool_calls = vec![call.clone()];
+                    emit(Some(sink), StreamEvent::ToolCall(call.clone()));
+                    let output =
+                        tools::dispatch_with_telemetry(tc, &call, sink, Some(&telemetry)).await;
+                    let capped = cap_tool_result(&call, &output);
+                    emit(
+                        Some(sink),
+                        StreamEvent::ToolResult {
+                            id: call.id.clone(),
+                            output: capped.clone(),
+                        },
+                    );
+                    messages.push(ChatMessage::tool_result(call.id, capped));
+                    iter += 1;
+                    continue;
+                }
+                // User approved (modal or chat) but the model returned empty /
+                // "waiting for you" instead of executing. Nudge once.
+                if crate::ai::consent::should_nudge_execute(
+                    tc.plan_mode,
+                    tc.session_state.plan_approved(&tc.session_id),
+                    &resp.content,
+                    execution_nudge,
+                ) {
+                    execution_nudge = true;
+                    emit(
+                        Some(sink),
+                        StreamEvent::Status(
+                            "Plan approved — continuing execution.".into(),
+                        ),
+                    );
+                    messages.push(ChatMessage::user(
+                        "[system] The user approved the plan. Execute it now with tools. \
+                         Do not wait and do not re-present the plan."
+                            .to_string(),
+                    ));
+                    iter += 1;
+                    continue;
+                }
+            }
             break;
         }
         // Surface a "testing" status when the agent runs a test/verify command.
