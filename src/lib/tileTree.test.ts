@@ -47,6 +47,25 @@ describe("treeFromPositions", () => {
     expect(treeIds(bands[1])).toEqual(["d"]);
     expect(treeIds(bands[2]).sort()).toEqual(["e", "f", "g", "h"]);
   });
+
+  it("reads 1 top + 2 bottom on the left beside a full-height right pane", () => {
+    const nodes = [
+      box("a", 0, 0, 800, 450),
+      box("b", 0, 450, 400, 450),
+      box("c", 400, 450, 400, 450),
+      box("d", 800, 0, 800, 900),
+    ];
+    const tree = treeFromPositions(nodes);
+    expect(tree.kind).toBe("row");
+    const row = tree as Extract<Split, { kind: "row" }>;
+    expect(row.kids).toHaveLength(2);
+    expect(row.kids[1].kind === "leaf" && row.kids[1].id === "d").toBe(true);
+    const left = row.kids[0];
+    expect(left.kind).toBe("col");
+    const bands = (left as Extract<Split, { kind: "col" }>).kids;
+    expect(treeIds(bands[0])).toEqual(["a"]);
+    expect(treeIds(bands[1]).sort()).toEqual(["b", "c"]);
+  });
 });
 
 describe("swapLeaves", () => {

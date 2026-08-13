@@ -253,6 +253,39 @@ describe("column tiling (side-by-side panes)", () => {
     expect(useCanvasStore.getState().tileLayout?.columns).toBeUndefined();
     expectGapFree();
   });
+
+  it("re-tiling keeps 1-over-2 on the left beside a full-height right pane", () => {
+    const s = useCanvasStore.getState();
+    const ids = [s.addVps(vps(1)), s.addVps(vps(2)), s.addVps(vps(3)), s.addVps(vps(4))];
+    useCanvasStore.setState({
+      layoutMode: "tile",
+      paneSize: PANE,
+      nodes: useCanvasStore.getState().nodes.map((n) => {
+        if (n.id === ids[0]) return { ...n, position: { x: 0, y: 0 }, width: 800, height: 450 };
+        if (n.id === ids[1]) return { ...n, position: { x: 0, y: 450 }, width: 400, height: 450 };
+        if (n.id === ids[2]) return { ...n, position: { x: 400, y: 450 }, width: 400, height: 450 };
+        return { ...n, position: { x: 800, y: 0 }, width: 800, height: 900 };
+      }),
+    });
+
+    useCanvasStore.getState().retileFromPositions(PANE);
+
+    const byId = new Map(tiles().map((t) => [t.id, t]));
+    const top = byId.get(ids[0])!;
+    const bottomLeft = byId.get(ids[1])!;
+    const bottomRight = byId.get(ids[2])!;
+    const right = byId.get(ids[3])!;
+
+    expect(top.y).toBe(0);
+    expect(top.x).toBe(0);
+    expect(bottomLeft.y).toBe(top.h);
+    expect(bottomRight.y).toBe(bottomLeft.y);
+    expect(bottomRight.x).toBe(bottomLeft.x + bottomLeft.w);
+    expect(right.x).toBe(top.w);
+    expect(right.y).toBe(0);
+    expect(right.h).toBe(PANE.height);
+    expect(bottomLeft.x).not.toBe(bottomRight.x);
+  });
 });
 
 describe("queued terminal commands (Execute button)", () => {

@@ -7,6 +7,7 @@ import {
   resizeRow,
   resizeSolo,
   resizeTile,
+  rowsFromPositions,
   type TileLayout,
 } from "./tileLayout";
 
@@ -186,5 +187,52 @@ describe("the lone window", () => {
       rows: [{ weight: 1, items: [{ id: "a", weight: 1 }, { id: "b", weight: 1 }] }],
     };
     expect(resizeSolo(two, -0.5, -0.5)).toBe(two);
+  });
+});
+
+describe("rowsFromPositions keeps nested left + full-height right", () => {
+  // 1 window on top of the left half, 2 side-by-side under it, 1 tall on the right.
+  // Pressing Tile / refreshing used to stack the three left windows into one column.
+  const nested = [
+    { id: "a", x: 0, y: 0, width: 800, height: 450 },
+    { id: "b", x: 0, y: 450, width: 400, height: 450 },
+    { id: "c", x: 400, y: 450, width: 400, height: 450 },
+    { id: "d", x: 800, y: 0, width: 800, height: 900 },
+  ];
+
+  it("does not flatten the left 1-over-2 into three stacked tiles", () => {
+    const layout = rowsFromPositions(nested);
+    const byId = boxes(layout);
+
+    const a = byId.get("a")!;
+    const b = byId.get("b")!;
+    const c = byId.get("c")!;
+    const d = byId.get("d")!;
+
+    expect(a.y).toBe(0);
+    expect(a.x).toBe(0);
+    expect(a.width).toBeGreaterThan(b.width);
+    expect(b.y).toBeGreaterThan(a.y);
+    expect(c.y).toBe(b.y);
+    expect(c.x).toBeGreaterThan(b.x);
+    expect(b.x + b.width).toBe(c.x);
+    expect(d.x).toBeGreaterThanOrEqual(a.x + a.width);
+    expect(d.y).toBe(0);
+    expect(d.height).toBe(PANE.height);
+
+    // The three left tiles must not share one x and stack as a single column.
+    expect(new Set([a.x, b.x, c.x]).size).toBeGreaterThan(1);
+    expect(a.height + b.height).toBe(PANE.height);
+  });
+
+  it("round-trips through computeBoxes so Tile / refresh keep the same shape", () => {
+    const first = rowsFromPositions(nested);
+    const once = computeBoxes(first, PANE.width, PANE.height);
+    const again = computeBoxes(rowsFromPositions(once), PANE.width, PANE.height);
+    const pos = (box: { x: number; y: number; width: number; height: number }) =>
+      `${box.x},${box.y},${box.width},${box.height}`;
+    const byId = (list: typeof once) =>
+      new Map(list.map((box) => [box.id, pos(box)]));
+    expect(byId(again)).toEqual(byId(once));
   });
 });

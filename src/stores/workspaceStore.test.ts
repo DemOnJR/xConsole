@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseSavedNodes } from "./workspaceStore";
+import { deserializeTiles, parseSavedNodes } from "./workspaceStore";
 
 describe("workspace tile persistence (columns)", () => {
   it("round-trips a column layout through the saved nodes_json shape", () => {
@@ -65,5 +65,46 @@ describe("workspace tile persistence (columns)", () => {
     const parsed = parseSavedNodes("{not json");
     expect(parsed.nodes).toEqual([]);
     expect(parsed.columns).toBeUndefined();
+  });
+
+  it("restore keeps a nested tree even when a flat column fallback is also saved", () => {
+    const tree = {
+      kind: "row" as const,
+      weight: 1,
+      kids: [
+        {
+          kind: "col" as const,
+          weight: 1,
+          kids: [
+            { kind: "leaf" as const, index: 0, weight: 1 },
+            {
+              kind: "row" as const,
+              weight: 1,
+              kids: [
+                { kind: "leaf" as const, index: 1, weight: 1 },
+                { kind: "leaf" as const, index: 2, weight: 1 },
+              ],
+            },
+          ],
+        },
+        { kind: "leaf" as const, index: 3, weight: 1 },
+      ],
+    };
+    const layout = deserializeTiles(
+      [{ weight: 1, items: [0, 1, 2, 3].map((index) => ({ index, weight: 1 })) }],
+      [
+        { weight: 1, items: [0, 1, 2].map((index) => ({ index, weight: 1 })) },
+        { weight: 1, items: [{ index: 3, weight: 1 }] },
+      ],
+      ["a", "b", "c", "d"],
+      tree,
+    );
+    expect(layout?.tree?.kind).toBe("row");
+    const left = layout?.tree && layout.tree.kind !== "leaf" ? layout.tree.kids[0] : null;
+    expect(left?.kind).toBe("col");
+    const bands = left && left.kind === "col" ? left.kids : [];
+    expect(bands).toHaveLength(2);
+    expect(bands[0].kind === "leaf" && bands[0].id === "a").toBe(true);
+    expect(bands[1].kind).toBe("row");
   });
 });

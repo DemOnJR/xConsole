@@ -118,7 +118,7 @@ function serializeTiles(
 }
 
 /** Index form → tile layout, against the node ids a restore just produced. */
-function deserializeTiles(
+export function deserializeTiles(
   rows: SavedTileRow[],
   columns: SavedTileColumn[] | undefined,
   ids: string[],
@@ -141,10 +141,18 @@ function deserializeTiles(
       .filter((col) => col.items.length > 0);
     if (cols.length > 0) {
       const flat = cols.flatMap((c) => c.items);
-      return {
+      const layout: TileLayout = {
         rows: flat.length > 0 ? [{ weight: 1, items: flat }] : [],
         columns: cols,
       };
+      // Columns are a flat fallback (one stack per x-band). A nested left
+      // pane — 1 over 2 beside a full-height right — lives only on `tree`.
+      // Dropping it here made refresh collapse that layout to 3 stacked left.
+      if (tree) {
+        const parsed = deserializeSplit(tree, ids);
+        if (parsed) layout.tree = parsed;
+      }
+      return layout;
     }
   }
 

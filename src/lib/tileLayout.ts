@@ -208,6 +208,11 @@ export interface PlacedNode {
 export function rowsFromPositions(nodes: PlacedNode[]): TileLayout {
   if (nodes.length === 0) return { rows: [] };
 
+  // Nested splits (1-over-2 on the left, full-height on the right) cannot be
+  // expressed by a flat column stack. Always keep the recursive tree so Tile /
+  // refresh do not flatten those bands into "3 stacked left + 1 right".
+  const tree = treeFromPositions(nodes);
+
   // Detect a column arrangement first: nodes grouped into distinct x-bands (each band
   // is a vertical stack sharing roughly the same x). A column layout looks like
   // [2 on left, 1 tall on right] — the x-centres cluster into groups. Only treat it as
@@ -251,6 +256,7 @@ export function rowsFromPositions(nodes: PlacedNode[]): TileLayout {
     // Mirror rows so the row-based helpers (rowCounts, etc.) stay consistent.
     const flat = columns.flatMap((c) => c.items);
     return normalize({
+      tree,
       rows: flat.length > 0 ? [{ weight: 1, items: flat }] : [],
       columns,
     });
@@ -292,7 +298,6 @@ export function rowsFromPositions(nodes: PlacedNode[]): TileLayout {
     bandsY.reduce((s, r) => s + r.reduce((m, n) => Math.max(m, n.height), 0), 0) /
     Math.max(bandsY.length, 1);
 
-  const tree = treeFromPositions(nodes);
   return normalize({
     tree,
     rows: bandsY.map((band) => {
