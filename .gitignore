@@ -52,6 +52,11 @@ RELEASING.md
 db.lock.json
 xconsole-unencrypted-backup-*.db
 
+# Local xconsole-bench dumps — generated on this machine, not source.
+bench/results/cache.json
+bench/results/cost.json
+bench/results/provider-cache.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
