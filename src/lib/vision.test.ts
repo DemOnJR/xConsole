@@ -9,6 +9,8 @@ import {
   modelHasNativeVision,
   parseVisionMode,
   visionLabel,
+  imagesFromClipboardEvent,
+  clipboardLooksLikeImage,
 } from "./vision";
 
 describe("vision helpers", () => {
@@ -64,5 +66,36 @@ describe("vision helpers", () => {
     expect(visionLabel("ask", "Gemini", "gemini-2.5-flash")).toBe(
       "vision ask · Gemini · gemini-2.5-flash",
     );
+  });
+
+  it("pulls image files off a paste DataTransfer", () => {
+    const png = new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
+    const txt = new File([new Uint8Array([4])], "notes.txt", { type: "text/plain" });
+    const dt = {
+      files: [png, txt],
+      items: [],
+      types: ["Files"],
+      getData: () => "",
+    } as unknown as DataTransfer;
+    expect(imagesFromClipboardEvent(dt).map((f) => f.name)).toEqual(["shot.png"]);
+    expect(clipboardLooksLikeImage(dt)).toBe(true);
+  });
+
+  it("treats an image MIME type as a screenshot clipboard", () => {
+    const dt = {
+      files: [],
+      items: [],
+      types: ["image/png"],
+      getData: () => "",
+    } as unknown as DataTransfer;
+    expect(imagesFromClipboardEvent(dt)).toEqual([]);
+    expect(clipboardLooksLikeImage(dt)).toBe(true);
+    const text = {
+      files: [],
+      items: [],
+      types: ["text/plain"],
+      getData: () => "hello",
+    } as unknown as DataTransfer;
+    expect(clipboardLooksLikeImage(text)).toBe(false);
   });
 });

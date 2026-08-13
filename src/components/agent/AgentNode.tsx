@@ -19,9 +19,11 @@ import { clipboardImagePng } from "../../lib/terminalClipboard";
 import { onOsFilesDropped } from "../../hooks/useOsFileDrop";
 import {
   bytesToChatImage,
+  clipboardLooksLikeImage,
   defaultVisionModel,
   fileBaseName,
   fileToChatImage,
+  imagesFromClipboardEvent,
   isGeminiProvider,
   isImagePath,
   parseVisionMode,
@@ -396,9 +398,12 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   const [input, setInput] = useState("");
   const [pendingImages, setPendingImages] = useState<ChatImage[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const agentRootRef = useRef<HTMLDivElement>(null);
   const pendingImagesRef = useRef(pendingImages);
   pendingImagesRef.current = pendingImages;
   const askDraftRef = useRef("");
+  const selectedRef = useRef(!!selected);
+  selectedRef.current = !!selected;
 
   // Persist draft per conversation so switching sessions does not lose typed text.
   useEffect(() => {
@@ -937,7 +942,84 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   const addImages = (imgs: ChatImage[]) => {
     if (imgs.length === 0) return;
     setPendingImages((cur) => [...cur, ...imgs].slice(0, 8));
+    requestAnimationFrame(() => inputRef.current?.focus());
   };
+
+  const insertComposerText = (text: string) => {
+    const el = inputRef.current;
+    const cur = el?.value ?? "";
+    const start = el?.selectionStart ?? cur.length;
+    const end = el?.selectionEnd ?? cur.length;
+    const next = cur.slice(0, start) + text + cur.slice(end);
+    setInput(next);
+    history.record(next);
+    requestAnimationFrame(() => {
+      const box = inputRef.current;
+      if (!box) return;
+      const pos = start + text.length;
+      box.focus();
+      box.setSelectionRange(pos, pos);
+    });
+  };
+
+  const attachClipboardImages = async (data: DataTransfer | null | undefined): Promise<boolean> => {
+    const files = imagesFromClipboardEvent(data);
+    if (files.length) {
+      addImages(await Promise.all(files.map((f) => fileToChatImage(f))));
+      return true;
+    }
+    const png = await clipboardImagePng();
+    if (!png) return false;
+    addImages([await bytesToChatImage(png, "clipboard.png")]);
+    return true;
+  };
+
+  const onAgentPaste = (e: ClipboardEvent) => {
+    const root = agentRootRef.current;
+    const target = e.target as HTMLElement | null;
+    const inside = !!(root && target && root.contains(target));
+    if (!inside && !selectedRef.current) return;
+    if (!inside && selectedRef.current) {
+      if (target?.closest(".xterm, [data-terminal]")) return;
+      if (
+        target &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) &&
+        !root?.contains(target)
+      ) {
+        return;
+      }
+    }
+
+    const data = e.clipboardData;
+    const htmlImages = imagesFromClipboardEvent(data);
+    const looksImage = clipboardLooksLikeImage(data);
+    const otherField =
+      !!target &&
+      target !== inputRef.current &&
+      (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || !!target.isContentEditable);
+
+    if (otherField && htmlImages.length === 0 && !looksImage) return;
+
+    const text = data?.getData("text/plain") ?? "";
+    if (!htmlImages.length && !looksImage && text && otherField) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    void (async () => {
+      const got = await attachClipboardImages(data);
+      if (got) return;
+      if (text && !otherField) insertComposerText(text);
+    })();
+  };
+
+  const onAgentPasteRef = useRef(onAgentPaste);
+  onAgentPasteRef.current = onAgentPaste;
+
+  useEffect(() => {
+    const fn = (e: ClipboardEvent) => onAgentPasteRef.current(e);
+    window.addEventListener("paste", fn, true);
+    return () => window.removeEventListener("paste", fn, true);
+  }, []);
 
   const loadImagePath = async (path: string): Promise<ChatImage | null> => {
     try {
@@ -1054,6 +1136,8 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
   return (
     <div
+      ref={agentRootRef}
+      data-agent-root
       className={`group flex h-full w-full flex-col overflow-hidden border bg-[var(--bg)] shadow-lg ${
         tiled ? "rounded-none" : "rounded-lg"
       } ${selected ? "border-blue-500" : "border-[var(--border)]"}`}
@@ -1127,7 +1211,14 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
       {/* Body: nodrag so only the header starts a node drag (like TerminalNode) —
           text selection inside the console/composer works normally. */}
-      <div className="nodrag flex min-h-0 flex-1 flex-col">
+      <div
+        className="nodrag flex min-h-0 flex-1 flex-col"
+        onMouseDown={(e) => {
+          const t = e.target as HTMLElement;
+          if (t.closest("button, input, textarea, select, [data-picker], a")) return;
+          inputRef.current?.focus();
+        }}
+      >
       {/* Messages */}
       {messages.length === 0 && !streaming ? (
         <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs text-gray-600">
@@ -1432,27 +1523,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
               ref={inputRef}
               value={input}
               rows={1}
-              onPaste={(e) => {
-                const items = e.clipboardData?.items;
-                const files: File[] = [];
-                if (items) {
-                  for (const item of items) {
-                    if (item.type.startsWith("image/")) {
-                      const f = item.getAsFile();
-                      if (f) files.push(f);
-                    }
-                  }
-                }
-                if (files.length) {
-                  e.preventDefault();
-                  void Promise.all(files.map((f) => fileToChatImage(f))).then((imgs) => addImages(imgs));
-                  return;
-                }
-                void clipboardImagePng().then((png) => {
-                  if (!png) return;
-                  void bytesToChatImage(png, "clipboard.png").then((img) => addImages([img]));
-                });
-              }}
               onChange={(e) => {
                 setInput(e.target.value);
                 history.record(e.target.value);
@@ -1573,7 +1643,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
               placeholder={
                 streaming
                   ? "Queue a follow-up — you can edit it before it sends…"
-                  : "Ask anything… (/ for commands · Enter to send · Shift+Enter for new line)"
+                  : "Ask anything… (paste an image · / for commands · Enter to send)"
               }
               spellCheck={false}
               autoComplete="off"
@@ -1595,7 +1665,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
             <button
               type="button"
               className="shrink-0 rounded px-1 py-0.5 text-[12px] text-[var(--text-faint)] hover:bg-[var(--border)] hover:text-[var(--text)]"
-              data-tooltip="Attach image (paste, drop, or /vision path)"
+              data-tooltip="Attach image — Ctrl+V anywhere in this window, drop, or pick a file"
               onClick={() => fileInputRef.current?.click()}
             >
               +img

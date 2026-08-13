@@ -47,12 +47,22 @@ async function rgbaToPng(
   width: number,
   height: number,
 ): Promise<Uint8Array | null> {
+  if (width <= 0 || height <= 0) return null;
+  const expected = width * height * 4;
+  let pixels: Uint8ClampedArray;
+  if (rgba.length === expected) {
+    pixels = new Uint8ClampedArray(rgba);
+  } else if (rgba.length > expected) {
+    pixels = new Uint8ClampedArray(rgba.subarray(0, expected));
+  } else {
+    return null;
+  }
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
-  ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0);
+  ctx.putImageData(new ImageData(pixels, width, height), 0, 0);
   const blob = await new Promise<Blob | null>((res) =>
     canvas.toBlob((b) => res(b), "image/png"),
   );

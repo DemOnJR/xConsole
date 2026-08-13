@@ -181,3 +181,37 @@ async function blobToBase64(blob: Blob): Promise<string> {
 export function previewSrc(img: ChatImage): string {
   return `data:${img.media_type || "image/png"};base64,${img.data}`;
 }
+
+/** Image files sitting on a paste/drop DataTransfer (browser clipboard). */
+export function imagesFromClipboardEvent(data: DataTransfer | null | undefined): File[] {
+  if (!data) return [];
+  const out: File[] = [];
+  const seen = new Set<string>();
+  const add = (file: File | null | undefined) => {
+    if (!file) return;
+    const type = (file.type || mimeFromName(file.name)).toLowerCase();
+    if (!type.startsWith("image/")) return;
+    const key = `${file.name}:${file.size}:${type}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(file);
+  };
+  for (const file of Array.from(data.files ?? [])) add(file);
+  for (const item of Array.from(data.items ?? [])) {
+    if (item.kind === "file") add(item.getAsFile());
+  }
+  return out;
+}
+
+/** True when the OS clipboard is likely a screenshot (WebView2 often omits the bytes). */
+export function clipboardLooksLikeImage(data: DataTransfer | null | undefined): boolean {
+  if (!data) return false;
+  if (imagesFromClipboardEvent(data).length > 0) return true;
+  const types = Array.from(data.types ?? []).map((t) => t.toLowerCase());
+  if (types.some((t) => t.startsWith("image/") || t === "files" || t.includes("png") || t.includes("dib"))) {
+    return true;
+  }
+  const text = data.getData("text/plain")?.trim() ?? "";
+  if (text && isImagePath(text)) return true;
+  return false;
+}
