@@ -112,7 +112,9 @@ fn redact_marker(input: &str, marker: &str) -> String {
         }
         let value = skip_whitespace(input, value_start);
         if input[value..].starts_with(REDACTED) {
-            cursor = value + REDACTED.len();
+            let keep_until = value + REDACTED.len();
+            output.push_str(&input[cursor..keep_until]);
+            cursor = keep_until;
             continue;
         }
         let end = value_end(input, value);
@@ -149,7 +151,9 @@ fn redact_mysql_password_flag(input: &str) -> String {
         }
         let value = skip_whitespace(input, start + 2);
         if input[value..].starts_with(REDACTED) {
-            cursor = value + REDACTED.len();
+            let keep_until = value + REDACTED.len();
+            output.push_str(&input[cursor..keep_until]);
+            cursor = keep_until;
             continue;
         }
         if value == value_end(input, value) || input[value..].starts_with(char::is_numeric) {
