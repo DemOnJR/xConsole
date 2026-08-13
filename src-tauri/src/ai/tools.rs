@@ -148,7 +148,9 @@ lock. Only callable while the goal is in 'intake' status.".into(),
         ToolDef {
             name: "goal_add_task".into(),
             description: "Add a kanban card to the goal board. Columns: backlog, in_progress, \
-waiting, testing, blocked, done. kind: edit, test, bug, research, check.".into(),
+waiting, testing, blocked, done. kind: edit, test, bug, research, check. Pass parent_id to \
+create a sub-task under an existing card — break work into sub-tasks whenever a step has \
+more than one action.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -156,22 +158,28 @@ waiting, testing, blocked, done. kind: edit, test, bug, research, check.".into()
                     "title": {"type": "string"},
                     "kind": {"type": "string"},
                     "detail": {"type": "string"},
-                    "files": {"type": "array", "items": {"type": "string"}}
+                    "files": {"type": "array", "items": {"type": "string"}},
+                    "parent_id": {"type": "string", "description": "Existing task id to nest this under"}
                 },
                 "required": ["column", "title"]
             }),
         },
         ToolDef {
             name: "goal_update_task".into(),
-            description: "Move or annotate an existing kanban card (column, result, error, files). \
+            description: "Move or annotate an existing kanban card (column, result, error, files, \
+detail, note). Always write a note of what you just did so the task history stays complete. \
 The task id is returned by goal_add_task.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "task_id": {"type": "string"},
                     "column": {"type": "string"},
+                    "title": {"type": "string"},
+                    "detail": {"type": "string"},
+                    "kind": {"type": "string"},
                     "result": {"type": "string"},
                     "error": {"type": "string"},
+                    "note": {"type": "string", "description": "What happened — appended to task history"},
                     "files": {"type": "array", "items": {"type": "string"}}
                 },
                 "required": ["task_id"]
@@ -2466,17 +2474,53 @@ async fn goal_propose_spec(ctx: &ToolContext, args: &Value) -> String {
     "Goal spec proposed. The user must review and click 'Lock goal & start' to activate it.".into()
 }
 
+fn goal_now() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn push_task_history(
+    task: &mut crate::storage::models::GoalTask,
+    action: &str,
+    note: Option<String>,
+) {
+    let at = goal_now();
+    task.history.push(crate::storage::models::GoalTaskEvent {
+        at: at.clone(),
+        action: action.to_string(),
+        column: Some(task.column.clone()),
+        note,
+    });
+    task.updated_at = Some(at);
+}
+
 async fn goal_add_task(ctx: &ToolContext, args: &Value) -> String {
     let (goal_id, mut goal) = match goal_session_mut(ctx) {
         Ok(v) => v,
         Err(e) => return format!("error: {e}"),
     };
     let mut tasks = crate::ai::goal::parse_kanban(&goal);
-    let task = crate::storage::models::GoalTask {
+    let parent_id = args
+        .get("parent_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if let Some(ref pid) = parent_id {
+        if !tasks.iter().any(|t| t.id == *pid) {
+            return format!("error: parent task '{pid}' not found");
+        }
+    }
+    let now = goal_now();
+    let column = args
+        .get("column")
+        .and_then(|v| v.as_str())
+        .unwrap_or("backlog")
+        .to_string();
+    let detail = args.get("detail").and_then(|v| v.as_str()).map(String::from);
+    let mut task = crate::storage::models::GoalTask {
         id: Uuid::new_v4().to_string(),
-        column: args.get("column").and_then(|v| v.as_str()).unwrap_or("backlog").to_string(),
+        column: column.clone(),
         title: args.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        detail: args.get("detail").and_then(|v| v.as_str()).map(String::from),
+        detail: detail.clone(),
         kind: args.get("kind").and_then(|v| v.as_str()).unwrap_or("task").to_string(),
         files: args
             .get("files")
@@ -2485,9 +2529,12 @@ async fn goal_add_task(ctx: &ToolContext, args: &Value) -> String {
             .unwrap_or_default(),
         result: None,
         error: None,
-        created_at: Some(chrono::Utc::now().to_rfc3339()),
-        updated_at: Some(chrono::Utc::now().to_rfc3339()),
+        parent_id,
+        history: Vec::new(),
+        created_at: Some(now.clone()),
+        updated_at: Some(now),
     };
+    push_task_history(&mut task, "created", detail);
     let id = task.id.clone();
     tasks.push(task);
     crate::ai::goal::set_kanban(&mut goal, tasks);
@@ -2515,19 +2562,56 @@ async fn goal_update_task(ctx: &ToolContext, args: &Value) -> String {
     let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) else {
         return format!("error: task '{task_id}' not found");
     };
+    let mut action = "updated";
     if let Some(col) = args.get("column").and_then(|v| v.as_str()) {
+        if col != task.column {
+            action = "moved";
+        }
         task.column = col.to_string();
+    }
+    if let Some(title) = args.get("title").and_then(|v| v.as_str()) {
+        task.title = title.to_string();
+    }
+    if let Some(d) = args.get("detail").and_then(|v| v.as_str()) {
+        task.detail = Some(d.to_string());
+        if action == "updated" {
+            action = "detail";
+        }
+    }
+    if let Some(k) = args.get("kind").and_then(|v| v.as_str()) {
+        task.kind = k.to_string();
     }
     if let Some(r) = args.get("result").and_then(|v| v.as_str()) {
         task.result = Some(r.to_string());
+        action = "result";
     }
     if let Some(e) = args.get("error").and_then(|v| v.as_str()) {
         task.error = Some(e.to_string());
+        action = "error";
     }
     if let Some(f) = args.get("files").and_then(|v| v.as_array()) {
         task.files = f.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+        if action == "updated" {
+            action = "files";
+        }
     }
-    task.updated_at = Some(chrono::Utc::now().to_rfc3339());
+    let note = args
+        .get("note")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| {
+            if action == "result" {
+                task.result.clone()
+            } else if action == "error" {
+                task.error.clone()
+            } else {
+                None
+            }
+        });
+    if args.get("note").and_then(|v| v.as_str()).is_some() && action == "updated" {
+        action = "note";
+    }
+    push_task_history(task, action, note);
     crate::ai::goal::set_kanban(&mut goal, tasks);
     if let Err(e) = ctx.db.update_goal(&goal) {
         return format!("error: {e}");

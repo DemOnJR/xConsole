@@ -123,10 +123,33 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
         vps_targets: vec![],
     });
     let kanban = parse_kanban(goal);
-    let kanban_summary: Vec<String> = kanban
-        .iter()
-        .map(|t| format!("[{}] {} — {}", t.column, t.title, t.result.clone().unwrap_or_default()))
-        .collect();
+    let kanban_summary: Vec<String> = {
+        let roots: Vec<&GoalTask> = kanban
+            .iter()
+            .filter(|t| {
+                t.parent_id
+                    .as_ref()
+                    .map(|p| !kanban.iter().any(|o| o.id == *p))
+                    .unwrap_or(true)
+            })
+            .collect();
+        let mut lines = Vec::new();
+        fn walk(tasks: &[GoalTask], t: &GoalTask, indent: &str, lines: &mut Vec<String>) {
+            let extra = t.result.clone().unwrap_or_default();
+            lines.push(format!(
+                "{indent}[{}] {} — {extra}",
+                t.column,
+                t.title
+            ));
+            for child in tasks.iter().filter(|c| c.parent_id.as_deref() == Some(&t.id)) {
+                walk(tasks, child, &format!("{indent}  "), lines);
+            }
+        }
+        for t in roots {
+            walk(&kanban, t, "", &mut lines);
+        }
+        lines
+    };
     let prompt = format!(
         "You are driving an autonomous goal. Keep the kanban LIVE this cycle.\n\
          Objective: {objective}\n\
@@ -138,7 +161,9 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
          Current kanban:\n{kanban}\n\n\
          Rules:\n\
          - Before you work, goal_add_task (column in_progress) for the concrete step.\n\
+         - If a step has more than one action, add sub-tasks with goal_add_task parent_id=<parent>.\n\
          - As you work, goal_update_task to move cards: in_progress → testing → done.\n\
+         - After every action, goal_update_task with note= what you did (commands, findings, errors).\n\
          - Use waiting only when YOU are blocked on real external time the user asked for.\n\
          - Never invent 'blocked' cards that just say they depend on another card — do the work.\n\
          - Do NOT call goal_schedule_wait unless the user specified a delay/timeout.\n\

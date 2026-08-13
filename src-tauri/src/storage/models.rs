@@ -260,6 +260,17 @@ pub struct GoalSpec {
     pub vps_targets: Vec<String>,
 }
 
+/// One event on a kanban card (created / moved / result / note / …).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GoalTaskEvent {
+    pub at: String,
+    pub action: String,
+    #[serde(default)]
+    pub column: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 /// One kanban card for a goal session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalTask {
@@ -281,6 +292,12 @@ pub struct GoalTask {
     /// Populated when kind="bug" or a test failed.
     #[serde(default)]
     pub error: Option<String>,
+    /// Parent card id when this is a sub-task. Roots have `None`.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// What happened on this card, oldest first.
+    #[serde(default)]
+    pub history: Vec<GoalTaskEvent>,
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]

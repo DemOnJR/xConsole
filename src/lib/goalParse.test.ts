@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { parseGoalMemory, parseGoalSpec, parseGoalTasks } from "./goalParse";
+import {
+  goalRootTasks,
+  goalTaskChildren,
+  parseGoalMemory,
+  parseGoalSpec,
+  parseGoalTasks,
+} from "./goalParse";
 
 describe("goal JSON parsers", () => {
   it("treats the empty intake spec as missing, not a crash", () => {
@@ -36,6 +42,31 @@ describe("goal JSON parsers", () => {
       id: "task-0",
       column: "backlog",
       title: "scan",
+    });
+  });
+
+  it("flattens nested subtasks and keeps history", () => {
+    const tasks = parseGoalTasks(
+      JSON.stringify([
+        {
+          id: "parent",
+          title: "scan cluster",
+          column: "in_progress",
+          history: [{ at: "2026-08-13T10:00:00Z", action: "created", note: "started" }],
+          subtasks: [
+            { id: "child-a", title: "list ns", column: "done" },
+            { id: "child-b", title: "check pods", column: "in_progress", parent_id: "parent" },
+          ],
+        },
+      ]),
+    );
+    expect(tasks).toHaveLength(3);
+    expect(goalRootTasks(tasks).map((t) => t.id)).toEqual(["parent"]);
+    expect(goalTaskChildren(tasks, "parent").map((t) => t.id)).toEqual(["child-a", "child-b"]);
+    expect(tasks.find((t) => t.id === "child-a")?.parent_id).toBe("parent");
+    expect(tasks.find((t) => t.id === "parent")?.history?.[0]).toMatchObject({
+      action: "created",
+      note: "started",
     });
   });
 });

@@ -513,7 +513,15 @@ export interface GoalSpec {
   vps_targets?: string[];
 }
 
-/** One kanban card. */
+/** One event on a kanban card (created / moved / result / note / …). */
+export interface GoalTaskEvent {
+  at: string;
+  action: string;
+  column?: string | null;
+  note?: string | null;
+}
+
+/** One kanban card. Sub-tasks are other cards whose `parent_id` is this id. */
 export interface GoalTask {
   id: string;
   column: string;
@@ -523,6 +531,8 @@ export interface GoalTask {
   files?: string[];
   result?: string | null;
   error?: string | null;
+  parent_id?: string | null;
+  history?: GoalTaskEvent[];
   created_at?: string | null;
   updated_at?: string | null;
 }

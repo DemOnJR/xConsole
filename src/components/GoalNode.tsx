@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { NodeResizer, useStore, type NodeProps } from "@xyflow/react";
 import { api, onGoalEvent, type GoalMemory, type GoalSession, type GoalSpec, type GoalTask } from "../lib/tauri";
-import { parseGoalSessionViews } from "../lib/goalParse";
+import { goalRootTasks, goalTaskChildren, parseGoalSessionViews } from "../lib/goalParse";
 import { useCanvasStore, type GoalNode as GoalNodeType } from "../stores/canvasStore";
 import { useGoalStore } from "../stores/goalStore";
 import { useAgentStore } from "../stores/agentStore";
 import { NodeErrorBoundary } from "./NodeErrorBoundary";
 import { GoalLockCard } from "./agent/GoalLockCard";
+import { GoalTaskModal } from "./GoalTaskModal";
 
 const COLUMNS = ["backlog", "in_progress", "waiting", "testing", "blocked", "done"];
 
@@ -54,6 +55,7 @@ function GoalBoard({ id, data, selected }: NodeProps<GoalNodeType>) {
   const [memory, setMemory] = useState<GoalMemory>({ learned: [] });
   const [error, setError] = useState<string | null>(null);
   const [countdown, setCountdown] = useState<string>("");
+  const [openTaskId, setOpenTaskId] = useState<string | null>(null);
   const intervalRef = useRef<number | null>(null);
 
   // Load the session on mount + refresh on goal events.
@@ -115,7 +117,7 @@ function GoalBoard({ id, data, selected }: NodeProps<GoalNodeType>) {
   const byColumn = useMemo(() => {
     const map = new Map<string, GoalTask[]>();
     for (const c of COLUMNS) map.set(c, []);
-    for (const t of tasks) {
+    for (const t of goalRootTasks(tasks)) {
       const list = map.get(t.column) ?? [];
       list.push(t);
       map.set(t.column, list);
@@ -269,37 +271,76 @@ function GoalBoard({ id, data, selected }: NodeProps<GoalNodeType>) {
         </div>
       )}
 
-      {/* Kanban board */}
-      <div className="nodrag nowheel flex min-h-0 flex-1 gap-1.5 overflow-x-auto px-2 py-2">
-        {COLUMNS.map((col) => (
-          <div key={col} className="flex min-w-[110px] flex-1 flex-col gap-1 rounded border border-[var(--border)]/60 bg-[var(--surface)]/40 p-1">
-            <div className="text-center text-[9px] uppercase tracking-wide text-[var(--text-faint)]">
-              {col}
-            </div>
-            {(byColumn.get(col) ?? []).map((t) => (
-              <div key={t.id} className="rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-1">
-                <div className="flex items-center gap-1">
-                  {t.kind && (
-                    <span className={`text-[9px] ${KIND_COLOR[t.kind] ?? "text-gray-400"}`}>
-                      {t.kind}
-                    </span>
-                  )}
-                  <span className="min-w-0 flex-1 truncate text-[10px] text-gray-200" data-tooltip={t.detail ?? undefined}>
-                    {t.title}
-                  </span>
-                </div>
-                {t.files && t.files.length > 0 && (
-                  <div className="mt-0.5 truncate text-[9px] text-[var(--text-faint)]">
-                    {t.files.join(", ")}
-                  </div>
-                )}
-                {t.result && <div className="mt-0.5 truncate text-[9px] text-emerald-300/80">{t.result}</div>}
-                {t.error && <div className="mt-0.5 truncate text-[9px] text-red-300/80">{t.error}</div>}
+      {/* Kanban board — each column is the vertical scroller (nowheel so RF
+          zoom does not steal the wheel; overflow-y-auto is what makes the bar work). */}
+      <div
+        className="nodrag nopan nowheel flex min-h-0 flex-1 gap-1.5 overflow-x-auto overflow-y-hidden px-2 py-2"
+        onWheel={(e) => e.stopPropagation()}
+      >
+        {COLUMNS.map((col) => {
+          const cards = byColumn.get(col) ?? [];
+          return (
+            <div
+              key={col}
+              className="flex min-h-0 min-w-[132px] flex-1 flex-col overflow-hidden rounded border border-[var(--border)]/60 bg-[var(--surface)]/40"
+            >
+              <div className="shrink-0 px-1 py-1 text-center text-[9px] uppercase tracking-wide text-[var(--text-faint)]">
+                {col.replace(/_/g, " ")}
+                {cards.length > 0 ? ` · ${cards.length}` : ""}
               </div>
-            ))}
-          </div>
-        ))}
+              <div
+                className="nowheel min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden overscroll-contain px-1 pb-1"
+                onWheel={(e) => e.stopPropagation()}
+              >
+                {cards.map((t) => {
+                  const kids = goalTaskChildren(tasks, t.id);
+                  const doneKids = kids.filter((c) => c.column === "done").length;
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={() => setOpenTaskId(t.id)}
+                      className="block w-full rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-1 text-left hover:border-violet-400/60"
+                    >
+                      <div className="flex items-center gap-1">
+                        {t.kind && (
+                          <span className={`text-[9px] ${KIND_COLOR[t.kind] ?? "text-gray-400"}`}>
+                            {t.kind}
+                          </span>
+                        )}
+                        <span className="min-w-0 flex-1 truncate text-[10px] text-gray-200">
+                          {t.title}
+                        </span>
+                      </div>
+                      {kids.length > 0 && (
+                        <div className="mt-0.5 text-[9px] text-violet-300/80">
+                          {doneKids}/{kids.length} sub-tasks
+                        </div>
+                      )}
+                      {t.files && t.files.length > 0 && (
+                        <div className="mt-0.5 truncate text-[9px] text-[var(--text-faint)]">
+                          {t.files.join(", ")}
+                        </div>
+                      )}
+                      {t.result && (
+                        <div className="mt-0.5 truncate text-[9px] text-emerald-300/80">{t.result}</div>
+                      )}
+                      {t.error && (
+                        <div className="mt-0.5 truncate text-[9px] text-red-300/80">{t.error}</div>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
       </div>
+
+      {openTaskId && (
+        <GoalTaskModal tasks={tasks} taskId={openTaskId} onClose={() => setOpenTaskId(null)} />
+      )}
 
       {/* Constraint memory strip */}
       {(memory.learned ?? []).length > 0 && (
