@@ -29,6 +29,8 @@ interface SavedNode {
   nodeType?: "terminal" | "sftp" | "db" | "agent" | "goal";
   linkedTerminalIndex?: number;
   followTerminal?: boolean;
+  /** Persisted /goal session id (kanban boards). */
+  goalId?: string;
 }
 
 interface SavedEdge {
@@ -230,6 +232,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           base.followTerminal = n.data.followTerminal ?? true;
         }
       }
+      if (n.type === "goal" && n.data.goalId) {
+        base.goalId = String(n.data.goalId);
+      }
       return base;
     });
     const indexOf = (nodeId: string) => nodes.findIndex((n) => n.id === nodeId);
@@ -388,6 +393,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
               followTerminal: s.followTerminal ?? true,
             }
           : {}),
+        ...(s.nodeType === "goal" && s.goalId ? { goalId: s.goalId } : {}),
       };
       return {
         id: nodeId,

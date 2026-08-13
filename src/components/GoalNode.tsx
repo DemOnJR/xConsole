@@ -47,7 +47,7 @@ function GoalBoard({ id, data, selected }: NodeProps<GoalNodeType>) {
   const tiled = layoutMode === "tile";
   const zoom = useStore((s) => s.transform[2]) || 1;
 
-  const goalId = data.goalId;
+  const goalId = typeof data.goalId === "string" ? data.goalId : "";
   const [session, setSession] = useState<GoalSession | null>(null);
   const [spec, setSpec] = useState<GoalSpec | null>(null);
   const [tasks, setTasks] = useState<GoalTask[]>([]);
@@ -58,6 +58,10 @@ function GoalBoard({ id, data, selected }: NodeProps<GoalNodeType>) {
 
   // Load the session on mount + refresh on goal events.
   useEffect(() => {
+    if (!goalId) {
+      setError("This goal board has no session id. Start a new /goal.");
+      return;
+    }
     let alive = true;
     let un: (() => void) | undefined;
     (async () => {

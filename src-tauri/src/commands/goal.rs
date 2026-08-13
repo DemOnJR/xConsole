@@ -57,10 +57,10 @@ pub async fn confirm_goal(
     sessions: State<'_, SessionManager>,
     approvals: State<'_, ApprovalRegistry>,
     running: State<'_, GoalRunning>,
-    goal_id: String,
+    id: String,
 ) -> Result<(), String> {
     let mut goal = db
-        .get_goal(&goal_id)
+        .get_goal(&id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "goal not found".to_string())?;
     if goal.status != "intake" {
@@ -78,12 +78,12 @@ pub async fn confirm_goal(
         approvals: approvals.inner().clone(),
         running: running.inner().clone(),
     };
-    let id = goal_id.clone();
+    let loop_id = id.clone();
     tauri::async_runtime::spawn(async move {
-        run_loop(&ctx, &id).await;
+        run_loop(&ctx, &loop_id).await;
     });
     let _ = app.emit(
-        &crate::ai::goal::goal_event(&goal_id),
+        &crate::ai::goal::goal_event(&id),
         crate::ai::provider::StreamEvent::Status("active".into()),
     );
     Ok(())
@@ -94,25 +94,25 @@ pub async fn confirm_goal(
 pub async fn stop_goal(
     app: AppHandle,
     db: State<'_, Db>,
-    goal_id: String,
+    id: String,
 ) -> Result<(), String> {
     let mut goal = db
-        .get_goal(&goal_id)
+        .get_goal(&id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "goal not found".to_string())?;
     goal.status = "stopped".to_string();
     goal.finished_at = Some(chrono::Utc::now().to_rfc3339());
     db.update_goal(&goal).map_err(|e| e.to_string())?;
     let _ = app.emit(
-        &crate::ai::goal::goal_event(&goal_id),
+        &crate::ai::goal::goal_event(&id),
         crate::ai::provider::StreamEvent::Status("stopped".into()),
     );
     Ok(())
 }
 
 #[tauri::command]
-pub async fn get_goal(db: State<'_, Db>, goal_id: String) -> Result<GoalSession, String> {
-    db.get_goal(&goal_id)
+pub async fn get_goal(db: State<'_, Db>, id: String) -> Result<GoalSession, String> {
+    db.get_goal(&id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "goal not found".to_string())
 }
@@ -123,6 +123,6 @@ pub async fn list_goals(db: State<'_, Db>) -> Result<Vec<GoalSession>, String> {
 }
 
 #[tauri::command]
-pub async fn delete_goal(db: State<'_, Db>, goal_id: String) -> Result<(), String> {
-    db.delete_goal(&goal_id).map_err(|e| e.to_string())
+pub async fn delete_goal(db: State<'_, Db>, id: String) -> Result<(), String> {
+    db.delete_goal(&id).map_err(|e| e.to_string())
 }

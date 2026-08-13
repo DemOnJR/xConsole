@@ -680,6 +680,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     let alive = true;
     let un: (() => void) | undefined;
     const refresh = async () => {
+      if (!activeIntakeGoalId) return;
       try {
         const s: GoalSession = await api.getGoal(activeIntakeGoalId);
         if (!alive) return;

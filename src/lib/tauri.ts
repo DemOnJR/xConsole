@@ -1138,11 +1138,11 @@ export const api = {
   runCronJob: (id: string) => invoke<void>("run_cron_job", { id }),
 
   startGoal: (text: string) => invoke<string>("start_goal", { text }),
-  confirmGoal: (goalId: string) => invoke<void>("confirm_goal", { goalId }),
-  stopGoal: (goalId: string) => invoke<void>("stop_goal", { goalId }),
-  getGoal: (goalId: string) => invoke<GoalSession>("get_goal", { goalId }),
+  confirmGoal: (id: string) => invoke<void>("confirm_goal", { id }),
+  stopGoal: (id: string) => invoke<void>("stop_goal", { id }),
+  getGoal: (id: string) => invoke<GoalSession>("get_goal", { id }),
   listGoals: () => invoke<GoalSession[]>("list_goals"),
-  deleteGoal: (goalId: string) => invoke<void>("delete_goal", { goalId }),
+  deleteGoal: (id: string) => invoke<void>("delete_goal", { id }),
 
   listInfraProjects: () => invoke<InfraProject[]>("list_infra_projects"),
   saveInfraProject: (input: InfraProjectInput) =>

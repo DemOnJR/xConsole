@@ -38,6 +38,29 @@ describe("workspace tile persistence (columns)", () => {
     expect(parsed.tiles.length).toBe(1);
   });
 
+  it("keeps a goal board's session id through the saved nodes_json", () => {
+    const parsed = parseSavedNodes(
+      JSON.stringify({
+        nodes: [
+          {
+            vpsId: "",
+            name: "Goal",
+            host: "",
+            x: 0,
+            y: 0,
+            width: 700,
+            height: 380,
+            nodeType: "goal",
+            goalId: "goal-abc",
+          },
+        ],
+        edges: [],
+      }),
+    );
+    expect(parsed.nodes[0]?.nodeType).toBe("goal");
+    expect(parsed.nodes[0]?.goalId).toBe("goal-abc");
+  });
+
   it("degrades gracefully for corrupt blobs", () => {
     const parsed = parseSavedNodes("{not json");
     expect(parsed.nodes).toEqual([]);
