@@ -27,6 +27,15 @@ import {
   textFromSegments,
   type TurnSegment,
 } from "./turnSegments";
+import {
+  enqueueMessage,
+  removeQueuedMessage,
+  takeNextQueued,
+  updateQueuedMessage,
+  type QueuedMessage,
+} from "./messageQueue";
+
+export type { QueuedMessage } from "./messageQueue";
 
 export type { TurnSegment } from "./turnSegments";
 import {
@@ -203,12 +212,21 @@ interface AgentState {
   hydrated: boolean;
   /** Running estimated cost (USD) of the current conversation. */
   conversationCostUsd: number;
+  /** Follow-ups typed while a turn is running. Editable until they send. */
+  queued: QueuedMessage[];
+  /** After Stop, do not auto-send the queue until the user sends again. */
+  holdQueue: boolean;
 
   init: () => Promise<void>;
   setTargets: (ids: string[]) => void;
   setSpeaking: (v: boolean) => void;
   togglePlanMode: () => void;
   send: (text: string, opts?: { providerId?: string; conversation?: boolean }) => Promise<void>;
+  /** Queue a follow-up if a turn is running; otherwise send now. */
+  enqueueOrSend: (text: string) => void;
+  enqueue: (text: string) => void;
+  updateQueued: (id: string, text: string) => void;
+  removeQueued: (id: string) => void;
   /** Re-send the last user message (after an error or aborted turn). */
   retryLast: () => Promise<void>;
   clearError: () => void;
@@ -306,6 +324,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   contextUsage: null,
   compactFlipCount: 0,
   error: null,
+  queued: [],
+  holdQueue: false,
   targets: (() => {
     try {
       const raw = localStorage.getItem("xconsole-agent-targets");
@@ -533,6 +553,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       compactFlipCount: 0,
       error: null,
       conversationCostUsd: 0,
+      queued: [],
+      holdQueue: false,
     });
     const list = await api.listAgentConversations().catch(() => get().conversations);
     set({ conversations: list });
@@ -570,6 +592,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       compactFlipCount: 0,
       error: null,
       conversationCostUsd: 0,
+      queued: [],
+      holdQueue: false,
     });
     const list = await api.listAgentConversations().catch(() => get().conversations);
     set({ conversations: list });
@@ -619,6 +643,28 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   setSpeaking: (speaking) => set({ speaking }),
 
+  enqueue: (text) => {
+    set((s) => ({ queued: enqueueMessage(s.queued, text) }));
+  },
+
+  updateQueued: (id, text) => {
+    set((s) => ({ queued: updateQueuedMessage(s.queued, id, text) }));
+  },
+
+  removeQueued: (id) => {
+    set((s) => ({ queued: removeQueuedMessage(s.queued, id) }));
+  },
+
+  enqueueOrSend: (text) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    if (get().streaming) {
+      get().enqueue(trimmed);
+      return;
+    }
+    void get().send(trimmed);
+  },
+
   stop: async () => {
     // Hush any spoken reply immediately…
     if (get().speaking) {
@@ -631,7 +677,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       await api.agentCancel(get().sessionId).catch(() => {});
     }
     // Clear any pending interactive state so the modal/cards don't linger.
-    set({ pendingPlan: null, pendingQuestions: [], planDraft: "" });
+    // Keep the follow-up queue; do not auto-send it after an interrupt.
+    set({ pendingPlan: null, pendingQuestions: [], planDraft: "", holdQueue: true });
   },
 
   send: async (text, opts) => {
@@ -643,6 +690,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set({
       messages: history,
       streaming: true,
+      holdQueue: false,
       streamingText: "",
       activity: [],
       streamingSegments: [],
@@ -829,6 +877,13 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       await persistConversation({ sessionId: mySession, messages, targets });
       const list = await api.listAgentConversations().catch(() => get().conversations);
       set({ conversations: list });
+      if (isCurrent() && !get().holdQueue && !get().streaming) {
+        const { next, rest } = takeNextQueued(get().queued);
+        if (next) {
+          set({ queued: rest });
+          void get().send(next.text);
+        }
+      }
     } catch (e) {
       const messages: AgentChatMessage[] = turnText
         ? [

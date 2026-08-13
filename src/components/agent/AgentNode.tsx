@@ -36,6 +36,7 @@ import {
 import { notify } from "../../lib/notify";
 import { PROVIDER_CATALOG } from "../../lib/providerCatalog";
 import { InputBar, type ReasoningLevel } from "./InputBar";
+import { QueuedMessages } from "./QueuedMessages";
 import { useGitBranch } from "../../hooks/useGitBranch";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useGoalStore } from "../../stores/goalStore";
@@ -236,6 +237,8 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
     streaming,
 
+    queued,
+
     error,
 
     targets,
@@ -247,6 +250,9 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     planMode,
 
     send,
+    enqueueOrSend,
+    updateQueued,
+    removeQueued,
 
     retryLast, clearError, setTargets,
 
@@ -832,7 +838,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
       void executeSlashAction(exact);
       return;
     }
-    send(input);
+    enqueueOrSend(input);
     setInput("");
     history.reset("");
     recallIdx.current = null;
@@ -1099,6 +1105,19 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
         </div>
       )}
 
+      <QueuedMessages
+        items={queued}
+        onChange={updateQueued}
+        onRemove={removeQueued}
+        canSendNow={!streaming}
+        onSendNow={(id) => {
+          const item = queued.find((q) => q.id === id);
+          if (!item) return;
+          removeQueued(id);
+          enqueueOrSend(item.text);
+        }}
+      />
+
       {/* Composer — terminal prompt line */}
       <div className="border-t border-[var(--border)] px-3 pb-3 pt-2">
         {!activeProvider && (
@@ -1265,8 +1284,11 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
                   submit();
                 }
               }}
-              placeholder="Ask anything… (/ for commands · Enter to send · Shift+Enter for new line)"
-              disabled={streaming}
+              placeholder={
+                streaming
+                  ? "Queue a follow-up — you can edit it before it sends…"
+                  : "Ask anything… (/ for commands · Enter to send · Shift+Enter for new line)"
+              }
               spellCheck={false}
               autoComplete="off"
               className="max-h-[132px] min-w-0 flex-1 resize-none border-0 bg-transparent text-[13px] leading-relaxed text-[var(--text)] outline-none placeholder:text-[var(--text-faint)] disabled:opacity-50"

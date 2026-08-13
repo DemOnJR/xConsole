@@ -178,20 +178,37 @@ export function InputBar({
           onPointerDown={stopNode}
         />
 
-        {/* Send / Stop */}
+        {/* Send / Stop — while running, Send queues a follow-up */}
         {streaming ? (
-          <button
-            type="button"
-            onClick={onStop}
-            aria-label="Stop generation"
-            className="flex h-6 w-6 items-center justify-center rounded bg-red-600/90 text-white transition hover:bg-red-600"
-          >
-            <span className="block h-2 w-2 rounded-[2px] bg-white" />
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={onSend}
+              onPointerDown={stopNode}
+              onMouseDown={stopNode}
+              aria-label="Queue follow-up"
+              data-tooltip="Queue this message — you can edit it before it sends"
+              className="flex h-6 w-6 items-center justify-center rounded border border-[var(--border)] text-[var(--text-dim)] transition hover:bg-[var(--border)] hover:text-[var(--text)]"
+            >
+              <span className="block h-0 w-0 border-y-[4px] border-l-[6px] border-y-transparent border-l-current" />
+            </button>
+            <button
+              type="button"
+              onClick={onStop}
+              onPointerDown={stopNode}
+              onMouseDown={stopNode}
+              aria-label="Stop generation"
+              className="flex h-6 w-6 items-center justify-center rounded bg-red-600/90 text-white transition hover:bg-red-600"
+            >
+              <span className="block h-2 w-2 rounded-[2px] bg-white" />
+            </button>
+          </>
         ) : (
           <button
             type="button"
             onClick={onSend}
+            onPointerDown={stopNode}
+            onMouseDown={stopNode}
             aria-label="Send"
             className="flex h-6 w-6 items-center justify-center rounded bg-blue-600 text-white transition hover:bg-blue-500"
           >
