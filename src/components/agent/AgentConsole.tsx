@@ -65,10 +65,13 @@ export function AgentConsole({
         className="nowheel flex min-h-0 flex-1 cursor-text select-text flex-col gap-2 overflow-y-auto px-3 py-3 leading-relaxed"
       >
         {messages.map((message, index) => {
+          // Stable-ish key: role+index keeps CommandCard state attached across
+          // re-renders (compaction markers can shift plain indices).
+          const key = message.isCompaction ? `compact-${index}` : `${message.role}-${index}`;
           if (message.isCompaction) {
             return (
               <div
-                key={index}
+                key={key}
                 className="my-1.5 flex items-center justify-between gap-2 rounded border border-cyan-500/25 bg-cyan-950/20 px-2.5 py-1.5 text-[11px]"
               >
                 <div className="flex items-center gap-2 text-cyan-300">
@@ -95,7 +98,7 @@ export function AgentConsole({
 
           if (message.role === "user") {
             return (
-              <div key={index} className="flex gap-2 text-[var(--text)]">
+              <div key={key} className="flex gap-2 text-[var(--text)]">
                 <span className="shrink-0 font-bold text-cyan-400">›</span>
                 <div className="min-w-0 flex-1 whitespace-pre-wrap break-words">
                   {plainText(message.content)}
@@ -106,7 +109,7 @@ export function AgentConsole({
 
           if (message.role === "assistant") {
             return (
-              <div key={index} className="flex flex-col gap-2">
+              <div key={key} className="flex flex-col gap-2">
                 <div className="flex gap-2 text-[var(--text)]">
                   <span className="shrink-0 text-emerald-400">•</span>
                   <div className={`min-w-0 ${expanded ? "w-full" : "w-[92%]"}`}>

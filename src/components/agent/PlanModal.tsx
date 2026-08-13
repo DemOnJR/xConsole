@@ -9,6 +9,15 @@ const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
   cancelled: { label: "Cancelled", cls: "text-red-300 border-red-500/40 bg-red-500/10" },
 };
 
+/** Parse a SQLite `datetime('now')` value (UTC, no zone) defensively. */
+function formatTimestamp(s: string): string {
+  // "YYYY-MM-DD HH:MM:SS" — treat as UTC so WebKit doesn't produce Invalid Date.
+  const iso = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}/.test(s) ? `${s.replace(" ", "T")}Z` : s;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return s;
+  return d.toLocaleString();
+}
+
 /**
  * Full-window plan review modal, rendered above the terminal canvas.
  * The plan is editable; revisions are sent back to the agent as feedback and
@@ -37,6 +46,9 @@ export function PlanModal() {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
+      // Never steal Esc while the user is typing in an editor/input.
+      const el = document.activeElement;
+      if (el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT")) return;
       if (e.key === "Escape") {
         e.preventDefault();
         if (viewing) {
@@ -64,6 +76,9 @@ export function PlanModal() {
         await revisePlan(pendingPlan.id, feedback);
         setFeedback("");
       }
+    } catch (e) {
+      // Surface failures instead of silently keeping the modal stuck.
+      setFeedback((f) => f || String(e));
     } finally {
       setSending(false);
     }
@@ -129,14 +144,7 @@ export function PlanModal() {
               <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap px-4 py-3 font-mono text-[12px] leading-relaxed text-[var(--text)]">
                 {viewing.plan}
               </pre>
-            ) : pendingPlan ? (
-              <textarea
-                value={planDraft}
-                onChange={(e) => setPlanDraft(e.target.value)}
-                spellCheck={false}
-                className="min-h-0 flex-1 resize-none bg-transparent px-4 py-3 font-mono text-[12px] leading-relaxed text-[var(--text)] outline-none"
-              />
-            ) : (
+            ) : planHistoryOpen ? (
               <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
                 {planHistory.length === 0 ? (
                   <div className="px-2 py-6 text-center text-[11px] text-[var(--text-faint)]">
@@ -157,17 +165,30 @@ export function PlanModal() {
                         {badge(p.status).label}
                       </span>
                       <span className="shrink-0 text-[10px] text-[var(--text-faint)]">
-                        {p.updated_at ? new Date(p.updated_at).toLocaleString() : ""}
+                        {p.updated_at ? formatTimestamp(p.updated_at) : ""}
                       </span>
                     </button>
                   ))
                 )}
               </div>
+            ) : pendingPlan ? (
+              <textarea
+                value={planDraft}
+                onChange={(e) => setPlanDraft(e.target.value)}
+                spellCheck={false}
+                className="min-h-0 flex-1 resize-none bg-transparent px-4 py-3 font-mono text-[12px] leading-relaxed text-[var(--text)] outline-none"
+              />
+            ) : (
+              <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+                <div className="px-2 py-6 text-center text-[11px] text-[var(--text-faint)]">
+                  No plans yet. Plans the agent presents will appear here.
+                </div>
+              </div>
             )}
           </div>
 
           {/* Side: revision chat + actions (only for the active pending plan) */}
-          {pendingPlan && !viewing && (
+          {pendingPlan && !viewing && !planHistoryOpen && (
             <div className="flex w-64 shrink-0 flex-col border-l border-[var(--border)]">
               <div className="border-b border-[var(--border)] px-3 py-2 text-[10px] font-medium uppercase tracking-wide text-[var(--text-faint)]">
                 Refine with the agent
@@ -203,23 +224,26 @@ export function PlanModal() {
               <div className="flex flex-col gap-1.5 border-t border-[var(--border)] px-3 py-2">
                 <button
                   type="button"
+                  disabled={sending}
                   onClick={() => void applyPlan(pendingPlan.id)}
-                  className="rounded bg-emerald-600/90 px-2 py-1.5 text-[12px] font-semibold text-white hover:bg-emerald-600"
+                  className="rounded bg-emerald-600/90 px-2 py-1.5 text-[12px] font-semibold text-white hover:bg-emerald-600 disabled:opacity-40"
                 >
-                  Apply & run
+                  {sending ? "Working…" : "Apply & run"}
                 </button>
                 <div className="flex gap-1.5">
                   <button
                     type="button"
+                    disabled={sending}
                     onClick={() => void archivePlanAction(pendingPlan.id)}
-                    className="flex-1 rounded border border-[var(--border)] px-2 py-1.5 text-[11px] text-[var(--text-faint)] hover:bg-[var(--border)]"
+                    className="flex-1 rounded border border-[var(--border)] px-2 py-1.5 text-[11px] text-[var(--text-faint)] hover:bg-[var(--border)] disabled:opacity-40"
                   >
                     Archive
                   </button>
                   <button
                     type="button"
+                    disabled={sending}
                     onClick={() => void cancelPlanAction(pendingPlan.id)}
-                    className="flex-1 rounded border border-[var(--border)] px-2 py-1.5 text-[11px] text-[var(--text-faint)] hover:bg-[var(--border)]"
+                    className="flex-1 rounded border border-[var(--border)] px-2 py-1.5 text-[11px] text-[var(--text-faint)] hover:bg-[var(--border)] disabled:opacity-40"
                   >
                     Cancel
                   </button>

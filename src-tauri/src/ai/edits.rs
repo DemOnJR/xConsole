@@ -12,18 +12,16 @@
 //! history survives restarts and can be browsed per session and per workspace.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+use uuid::Uuid;
 
 use crate::storage::Db;
 
 /// Cap stored content per side so a runaway write can't balloon memory.
 const MAX_CONTENT: usize = 256 * 1024;
-
-static COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Serialize)]
 pub struct EditRecord {
@@ -81,7 +79,9 @@ impl EditJournal {
             return;
         }
         let rec = EditRecord {
-            id: format!("edit-{}", COUNTER.fetch_add(1, Ordering::Relaxed)),
+            // UUID so ids never collide with persisted rows after a restart
+            // (a process-local counter would silently overwrite old history).
+            id: Uuid::new_v4().to_string(),
             session_id: session_id.to_string(),
             workspace_id: workspace_id.clone(),
             scope: scope.to_string(),

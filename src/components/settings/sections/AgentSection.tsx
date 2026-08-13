@@ -60,7 +60,7 @@ export function AgentSection() {
       <Card className="mb-3">
         <Field
           label="Tool output limit (chars)"
-          hint="Long command outputs are truncated to this size before they re-enter context. 0 = unlimited."
+          hint="Applied once when the tool result is stored (append-only, cache-friendly). Default 4000. 0 = unlimited."
         >
           <input
             type="number"
@@ -73,7 +73,7 @@ export function AgentSection() {
         </Field>
         <Field
           label="Cache retention"
-          hint="'Long' keeps the prompt cache alive for 1h (2× write price) so idle gaps don't re-bill. Off = 5-minute cache."
+          hint="Anthropic only. Long = 1h TTL at 2× cache-write price. Leave at 5 minutes unless sessions sit idle. DeepSeek / Command Code ignore this — they auto-cache the prefix."
         >
           <Select
             value={settings[SK.cacheRetention] ?? ""}

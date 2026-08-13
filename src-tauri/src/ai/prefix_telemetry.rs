@@ -43,7 +43,13 @@ pub fn fingerprint_request(req: &ChatRequest) -> RequestFingerprint {
     let schema = fingerprint_value(&Value::Array(
         req.tools.iter().map(tool_value).collect(),
     ));
-    let message_values: Vec<Value> = req.messages.iter().map(message_value).collect();
+    // Ignore the trailing request-only runtime block so a changing date/canvas
+    // tail does not look like a history rewrite (provider cache still hits the
+    // real messages prefix).
+    let message_values: Vec<Value> = core_messages(&req.messages)
+        .iter()
+        .map(|m| message_value(m))
+        .collect();
     let messages = fingerprint_value(&Value::Array(message_values.clone()));
     let message_hashes = message_values
         .iter()
@@ -80,6 +86,15 @@ pub fn classify(
         return PrefixClassification::AppendOnly;
     }
     PrefixClassification::MessagePrefix
+}
+
+fn core_messages(messages: &[ChatMessage]) -> &[ChatMessage] {
+    match messages.last() {
+        Some(last) if crate::ai::context::is_runtime_message(last) => {
+            &messages[..messages.len() - 1]
+        }
+        _ => messages,
+    }
 }
 
 fn tool_value(tool: &ToolDef) -> Value {
@@ -193,6 +208,54 @@ mod tests {
         changed_message.messages[0] = ChatMessage::user("rewritten earlier message");
         assert_eq!(
             classify(Some(&first_fp), &fingerprint_request(&changed_message)),
+            PrefixClassification::MessagePrefix
+        );
+    }
+
+    #[test]
+    fn cache07_trailing_runtime_change_is_still_append_only() {
+        let mut t1 = request();
+        crate::ai::context::inject_dynamic_into_last_user(&mut t1.messages, "Date: Mon");
+        let mut t2 = request();
+        t2.messages.push(ChatMessage::assistant("hi"));
+        t2.messages.push(ChatMessage::user("next"));
+        crate::ai::context::inject_dynamic_into_last_user(&mut t2.messages, "Date: Tue");
+        assert_eq!(
+            classify(Some(&fingerprint_request(&t1)), &fingerprint_request(&t2)),
+            PrefixClassification::AppendOnly
+        );
+    }
+
+    #[test]
+    fn cache08_tool_loop_with_trailing_runtime_is_append_only() {
+        let mut iter0 = request();
+        crate::ai::context::inject_dynamic_into_last_user(&mut iter0.messages, "Date: Mon");
+        let mut iter1 = request();
+        let mut asst = ChatMessage::assistant("");
+        asst.tool_calls.push(crate::ai::provider::ToolCall {
+            id: "c1".into(),
+            name: "run_command".into(),
+            arguments: serde_json::json!({}),
+        });
+        iter1.messages.push(asst);
+        iter1.messages.push(ChatMessage::tool_result("c1", "ok"));
+        crate::ai::context::inject_dynamic_into_last_user(&mut iter1.messages, "Date: Mon");
+        assert_eq!(
+            classify(Some(&fingerprint_request(&iter0)), &fingerprint_request(&iter1)),
+            PrefixClassification::AppendOnly
+        );
+    }
+
+    #[test]
+    fn cache09_old_last_user_rewrite_is_a_message_prefix_miss() {
+        let mut t1 = request();
+        t1.messages[0] = ChatMessage::user("hello as sent on turn 1");
+        t1.messages.push(ChatMessage::assistant("hi"));
+        let mut t2 = t1.clone();
+        t2.messages[0] = ChatMessage::user("hello");
+        t2.messages.push(ChatMessage::user("next"));
+        assert_eq!(
+            classify(Some(&fingerprint_request(&t1)), &fingerprint_request(&t2)),
             PrefixClassification::MessagePrefix
         );
     }

@@ -17,12 +17,39 @@ export interface TokenStats {
   source: "estimate" | "provider";
 }
 
-/** Cache hit rate 0..1: reads / (reads + fresh input). */
-export function cacheHitRate(stats: TokenStats): number | null {
+export interface CacheBreakdown {
+  hit: number;
+  miss: number;
+  rate: number;
+}
+
+/**
+ * Hit / miss token counts from provider-reported prompt + cached.
+ *
+ * OpenAI / DeepSeek / Command Code: `promptTokens` is inclusive (cached is a
+ * subset). Anthropic: `promptTokens` is cache-miss only.
+ */
+export function cacheBreakdown(stats: TokenStats): CacheBreakdown | null {
   if (stats.source !== "provider") return null;
-  const total = (stats.cachedTokens ?? 0) + (stats.promptTokens ?? 0);
+  const prompt = stats.promptTokens ?? 0;
+  const cached = stats.cachedTokens ?? 0;
+  if (cached > 0 && cached <= prompt) {
+    return { hit: cached, miss: prompt - cached, rate: cached / prompt };
+  }
+  const total = cached + prompt;
   if (total <= 0) return null;
-  return (stats.cachedTokens ?? 0) / total;
+  return { hit: cached, miss: prompt, rate: cached / total };
+}
+
+/** Cache hit rate 0..1, or null when the provider did not report usage. */
+export function cacheHitRate(stats: TokenStats): number | null {
+  return cacheBreakdown(stats)?.rate ?? null;
+}
+
+export function formatCacheLine(stats: TokenStats): string {
+  const b = cacheBreakdown(stats);
+  if (!b) return "";
+  return `cache ${formatTokenCount(b.hit)} hit · ${formatTokenCount(b.miss)} miss · ${Math.round(b.rate * 100)}%`;
 }
 
 export function formatUsd(n: number | undefined): string {

@@ -17,9 +17,14 @@ export function visibleActivityItems(items: AgentActivityItem[]): AgentActivityI
   const fileEditIds = new Set(items.filter((i) => i.kind === "file_edit").map((i) => i.id));
   return items.filter((item) => {
     if (!item.label.trim() && item.kind !== "file_edit") return false;
-    // Parallel-batch status is the one status line users care about.
+    // Parallel-batch + cache hit/miss lines stay visible in the transcript.
     if (item.kind === "status") {
-      return item.id === "parallel-batch" || /parallel/i.test(item.label);
+      return (
+        item.id === "parallel-batch" ||
+        item.id.startsWith("cache-") ||
+        /parallel/i.test(item.label) ||
+        /^cache /i.test(item.label)
+      );
     }
     if (item.id.startsWith("snapshot-")) return false;
     if (item.kind === "tool" && fileEditIds.has(item.id)) return false;
@@ -78,10 +83,11 @@ function metaLine(item: AgentActivityItem): string {
 }
 
 function commandTitle(item: AgentActivityItem): string {
-  const cmd =
+  const cmd = redactExportText(
     item.detail?.trim() ||
-    item.label.replace(/^(SSH|Shell)\s*›\s*/i, "").trim() ||
-    item.label.replace(/^Run on [^:]+:\s*/i, "").trim();
+      item.label.replace(/^(SSH|Shell)\s*›\s*/i, "").trim() ||
+      item.label.replace(/^Run on [^:]+:\s*/i, "").trim(),
+  );
   const words = cmd.split(/\s+/).slice(0, 4).join(" ");
   return truncate(words, 48);
 }
@@ -332,7 +338,20 @@ function CommandCard({ item, defaultCollapsed = false }: { item: AgentActivityIt
   );
 }
 
-function ActivityBlock({ item }: { item: AgentActivityItem }) {
+function ActivityBlock({ item, defaultCollapsed = false }: { item: AgentActivityItem; defaultCollapsed?: boolean }) {
+  if (item.kind === "status" && (item.id === "cache-line" || item.id === "cache-miss" || /^cache /i.test(item.label))) {
+    const miss = item.id === "cache-miss" || item.label.startsWith("cache miss");
+    return (
+      <div
+        className={`font-mono text-[10px] tabular-nums ${
+          miss ? "text-amber-300/90" : "text-emerald-400/80"
+        }`}
+        title="Provider prompt-cache accounting for this model request"
+      >
+        {item.label}
+      </div>
+    );
+  }
   if (item.kind === "status" && (item.id === "parallel-batch" || /parallel/i.test(item.label))) {
     // Banner is rendered once by the feed when grouping; skip duplicate rows.
     return null;
@@ -341,7 +360,7 @@ function ActivityBlock({ item }: { item: AgentActivityItem }) {
     return <FileEditCard item={item} />;
   }
   if (isCommandItem(item)) {
-    return <CommandCard item={item} />;
+    return <CommandCard item={item} defaultCollapsed={defaultCollapsed} />;
   }
   if (isMetaItem(item)) {
     return (
@@ -397,7 +416,7 @@ export function AgentActivityFeed({
     return {
       show,
       done,
-      count: running.length || (banner ? 0 : 0),
+      count: running.length,
       label: banner?.label,
       // Prefer live running count; fall back to parsing "Running N …" from status.
       displayCount:
@@ -446,51 +465,37 @@ export function AgentActivityFeed({
     // Only collapse when there are enough items to make it worth hiding.
     if (collapsibleCount <= 1 && metaCount <= META_KEEP_TAIL + 2) return blocks;
     const drop = new Set(collapseIdxs.slice(0, collapseIdxs.length - META_KEEP_TAIL));
+    // Pre-count dropped items so the summary labels are correct even when a
+    // non-collapsible block (file_edit, running tool) sits between them.
+    let droppedCmds = 0;
+    let droppedMeta = 0;
+    for (const i of drop) {
+      if (isCollapsible(blocks[i])) droppedCmds += 1;
+      else droppedMeta += 1;
+    }
     const kept: AgentActivityItem[] = [];
-    let collapsedCmds = 0;
-    let collapsedMeta = 0;
     let cmdSummaryInserted = false;
     let metaSummaryInserted = false;
     for (let i = 0; i < blocks.length; i++) {
       if (drop.has(i)) {
         if (isCollapsible(blocks[i])) {
-          collapsedCmds += 1;
           if (!cmdSummaryInserted) {
             kept.push({
               id: "collapsed-commands",
               kind: "status",
-              label: `${collapsedCmds} commands run`,
+              label: `${droppedCmds} commands run`,
               state: "done",
             } as AgentActivityItem);
             cmdSummaryInserted = true;
-          } else {
-            const last = kept[kept.length - 1];
-            if (last.id === "collapsed-commands") {
-              kept[kept.length - 1] = {
-                ...last,
-                label: `${collapsedCmds} commands run`,
-              };
-            }
           }
-        } else {
-          collapsedMeta += 1;
-          if (!metaSummaryInserted) {
-            kept.push({
-              id: "collapsed-meta",
-              kind: "status",
-              label: `${collapsedMeta} earlier steps`,
-              state: "done",
-            } as AgentActivityItem);
-            metaSummaryInserted = true;
-          } else {
-            const last = kept[kept.length - 1];
-            if (last.id === "collapsed-meta") {
-              kept[kept.length - 1] = {
-                ...last,
-                label: `${collapsedMeta} earlier steps`,
-              };
-            }
-          }
+        } else if (!metaSummaryInserted) {
+          kept.push({
+            id: "collapsed-meta",
+            kind: "status",
+            label: `${droppedMeta} earlier steps`,
+            state: "done",
+          } as AgentActivityItem);
+          metaSummaryInserted = true;
         }
         continue;
       }
@@ -504,12 +509,14 @@ export function AgentActivityFeed({
   const copyActivity = () => {
     const lines = collapsedBlocks.map((item) => {
       if (item.kind === "command") {
-        return `$ ${item.detail || item.label}${item.output ? `\n${item.output}` : ""}`;
+        const cmd = redactExportText(item.detail || item.label);
+        const out = item.output ? redactExportText(item.output) : "";
+        return `$ ${cmd}${out ? `\n${out}` : ""}`;
       }
       if (item.kind === "file_edit") {
-        return `edit ${item.path || item.label} +${item.linesAdded ?? 0}/-${item.linesRemoved ?? 0}`;
+        return `edit ${redactExportText(item.path || item.label)} +${item.linesAdded ?? 0}/-${item.linesRemoved ?? 0}`;
       }
-      return item.label + (item.detail ? ` — ${item.detail}` : "");
+      return redactExportText(item.label + (item.detail ? ` — ${item.detail}` : ""));
     });
     void navigator.clipboard.writeText(lines.join("\n"));
   };
@@ -549,7 +556,7 @@ export function AgentActivityFeed({
             <span className="text-[10px] text-gray-600">show</span>
           </button>
         ) : (
-          <ActivityBlock key={`${item.id}-${item.kind}`} item={item} />
+          <ActivityBlock key={`${item.id}-${item.kind}`} item={item} defaultCollapsed={!live} />
         ),
       )}
       {live && blocks.length > 0 && !parallelMeta.show && (

@@ -12,42 +12,52 @@ pub fn load_memory(home: &AgentHome) -> String {
     read(home.memory().as_path())
 }
 
-pub fn load_user(home: &AgentHome) -> String {
-    crate::ai::taste::load_user_profile(home)
-}
-
 pub fn save_memory(home: &AgentHome, content: &str) -> Result<(), String> {
     std::fs::write(home.memory(), content).map_err(|e| e.to_string())
 }
 
-pub fn save_user(home: &AgentHome, content: &str) -> Result<(), String> {
-    crate::ai::taste::save(home, content)
-}
-
-/// Append a memory entry as a single bullet line, then return the new contents.
+/// Append a memory entry as one bullet per non-empty line, then return the new
+/// contents.
 pub fn append_memory(home: &AgentHome, entry: &str) -> Result<String, String> {
-    // Normalize to one bullet: collapse multi-line input and strip any leading
-    // marker so we never write "- - x" or unbulleted continuation lines.
-    let normalized = entry
+    let lines: Vec<String> = entry
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let normalized = normalized.trim_start_matches(['-', '*', '•']).trim();
-    if normalized.is_empty() {
+        .map(|l| strip_single_marker(l).to_string())
+        .collect();
+    if lines.is_empty() {
         return Err("memory entry is empty".into());
     }
 
     let mut content = load_memory(home);
-    if !content.is_empty() && !content.ends_with('\n') {
+    let mut added = false;
+    for line in lines {
+        if content.lines().any(|l| l.trim() == line) {
+            continue; // dedup exact lines only
+        }
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str("- ");
+        content.push_str(&line);
         content.push('\n');
+        added = true;
     }
-    content.push_str("- ");
-    content.push_str(normalized);
-    content.push('\n');
-    save_memory(home, &content)?;
+    if added {
+        save_memory(home, &content)?;
+    }
     Ok(content)
+}
+
+/// Strip a single leading bullet marker + space (never `--flag`'s dashes).
+fn strip_single_marker(line: &str) -> &str {
+    let l = line.trim_start();
+    for m in ["- ", "* ", "• ", "-", "*", "•"] {
+        if let Some(rest) = l.strip_prefix(m) {
+            return rest.trim_start();
+        }
+    }
+    l
 }
 
 /// One-time migration: fold any existing `USER.md` content into `TASTE.md`
@@ -59,21 +69,24 @@ pub fn migrate_user_into_taste(home: &AgentHome) {
         return;
     }
     let content = read(&user_path);
-    let _ = std::fs::remove_file(&user_path);
+    let merged;
     if content.trim().is_empty() {
+        // Nothing to migrate — just remove the empty legacy file.
+        let _ = std::fs::remove_file(&user_path);
         return;
     }
     let taste = crate::ai::taste::load(home);
-    if taste.trim().is_empty() {
-        let _ = crate::ai::taste::save(home, &content);
-        return;
+    // Merge raw content (never flatten through append — that would mangle a
+    // structured profile into one giant bullet line).
+    merged = if taste.trim().is_empty() {
+        content.trim().to_string()
+    } else {
+        format!("{}\n{}\n", taste.trim_end(), content.trim())
+    };
+    // Save FIRST; only delete USER.md once the merge is safely on disk.
+    if crate::ai::taste::save(home, &merged).is_ok() {
+        let _ = std::fs::remove_file(&user_path);
     }
-    if !taste.ends_with('\n') {
-        let mut t = taste;
-        t.push('\n');
-        let _ = crate::ai::taste::save(home, &t);
-    }
-    let _ = crate::ai::taste::append(home, &content);
 }
 
 /// Render the memory block for the volatile prompt tier. User-profile content

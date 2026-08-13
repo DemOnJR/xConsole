@@ -78,14 +78,25 @@ pub fn load(home: &AgentHome) -> String {
         return DEFAULT_SOUL_MD.to_string();
     }
     match read_trimmed(&path) {
-        Some(text) if text == OLD_DEFAULT_SOUL_MD.trim() => {
-            // User never touched it — migrate to the current default.
+        Some(text) if whitespace_normalized(&text) == whitespace_normalized(OLD_DEFAULT_SOUL_MD) => {
+            // User never touched it (BOM/rewrap-proof comparison) — migrate.
             let _ = std::fs::write(&path, DEFAULT_SOUL_MD);
             DEFAULT_SOUL_MD.to_string()
         }
         Some(text) => text,
-        None => DEFAULT_SOUL_MD.to_string(),
+        // Unreadable or non-UTF-8: reseed the file so the corruption is healed
+        // instead of silently showing the default while the bad file stays.
+        None => {
+            let _ = std::fs::write(&path, DEFAULT_SOUL_MD);
+            DEFAULT_SOUL_MD.to_string()
+        }
     }
+}
+
+/// Whitespace-insensitive comparison: splits on any whitespace, so a UTF-8 BOM
+/// or a line-rewrap by an editor can't defeat the one-time migration.
+fn whitespace_normalized(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Overwrite the soul file.

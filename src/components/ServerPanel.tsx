@@ -159,8 +159,9 @@ export function ServerPanel({ width }: { width?: number }) {
                   {v.username}@{v.host}:{v.port}
                 </div>
               </button>
-              {/* Icons overlay the row on hover so they never steal text width. */}
-              <div className="absolute right-0 flex items-center gap-1 bg-gradient-to-l from-[var(--surface-2)] via-[var(--surface-2)] to-transparent pl-3 opacity-0 transition group-hover:opacity-100">
+              {/* Icons overlay the row on hover so they never steal text width.
+                  Also visible on keyboard focus (group-focus-within) for a11y. */}
+              <div className="absolute inset-y-0 right-0 flex items-center gap-1 bg-gradient-to-l from-[var(--surface)] via-[var(--surface)] to-transparent pl-3 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
                 <button
                   className={`rounded p-1 text-xs hover:bg-[var(--border)] ${
                     pinned.includes(v.id) ? "text-amber-300 opacity-100" : "text-gray-500"

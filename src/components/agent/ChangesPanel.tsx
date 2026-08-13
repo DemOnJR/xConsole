@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useEditsStore } from "../../stores/editsStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { lineDiff, type DiffResult } from "../../lib/diff";
@@ -30,15 +30,24 @@ export function ChangesPanel() {
 
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const workspaceId = useWorkspaceStore((s) => s.activeId);
+  const [confirmRevertId, setConfirmRevertId] = useState<string | null>(null);
 
   // Load history whenever it opens or filters change.
   useEffect(() => {
     if (open && mode === "history") void loadHistory();
   }, [open, mode, historyWorkspace, historySession, loadHistory]);
 
-  // Flat list of visible changes in the current mode.
-  const visible: FileChange[] =
-    mode === "live" ? changes : historyGroups.flatMap((g) => g.changes);
+  // Reset the two-click confirm when the selection changes.
+  useEffect(() => {
+    setConfirmRevertId(null);
+  }, [selectedId]);
+
+  // Flat list of visible changes in the current mode, memoized so the diff
+  // map below actually reuses work across renders.
+  const visible = useMemo<FileChange[]>(
+    () => (mode === "live" ? changes : historyGroups.flatMap((g) => g.changes)),
+    [mode, changes, historyGroups],
+  );
 
   const diffs = useMemo(() => {
     const map = new Map<string, DiffResult>();
@@ -67,6 +76,13 @@ export function ChangesPanel() {
           ? workspaces.map((w) => (
               <option key={w.id} value={w.id}>
                 {w.name}
+              </option>
+            ))
+          : null}
+        {id === "session"
+          ? [...new Set(historyGroups.map((g) => g.sessionId))].map((s) => (
+              <option key={s} value={s}>
+                {s.slice(0, 8)}
               </option>
             ))
           : null}
@@ -113,6 +129,7 @@ export function ChangesPanel() {
           {mode === "history" && (
             <div className="ml-2 flex items-end gap-2">
               {filterInput("workspace", "Workspace", historyWorkspace)}
+              {filterInput("session", "Session", historySession)}
               {workspaceId ? (
                 <button
                   onClick={() => setHistoryFilters(workspaceId, null)}
@@ -201,7 +218,16 @@ export function ChangesPanel() {
                       {selected.scope === "local" ? "This PC" : selected.label}
                     </span>
                     <button
-                      onClick={() => revert(selected.id)}
+                      onClick={() => {
+                        // Two-click confirm in history mode: a revert can destroy
+                        // later edits to the same file.
+                        if (mode === "history" && !confirmRevertId) {
+                          setConfirmRevertId(selected.id);
+                          return;
+                        }
+                        setConfirmRevertId(null);
+                        void revert(selected.id);
+                      }}
                       disabled={selected.reverted || reverting === selected.id}
                       data-tooltip={
                         selected.is_new
@@ -214,7 +240,9 @@ export function ChangesPanel() {
                         ? "Reverted"
                         : reverting === selected.id
                           ? "Reverting…"
-                          : "Revert"}
+                          : mode === "history" && confirmRevertId === selected.id
+                            ? "Click again to confirm"
+                            : "Revert"}
                     </button>
                   </div>
                   <DiffBody diff={selectedDiff} />

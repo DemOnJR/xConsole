@@ -25,7 +25,6 @@ pub async fn run_turn(
     conversation: bool,
     sink: &EventSink,
 ) -> Result<ChatMessage, String> {
-    let mut messages = context::compress_window(messages);
     let telemetry = crate::ai::tool_cache::new_turn_telemetry();
     let mut previous_prefix: Option<crate::ai::prefix_telemetry::RequestFingerprint> = None;
 
@@ -43,7 +42,7 @@ pub async fn run_turn(
         if tool_result_max_chars == 0 || output.len() <= tool_result_max_chars {
             return output.to_string();
         }
-        let mut cut = output[..tool_result_max_chars].to_string();
+        let mut cut = crate::ai::text::truncate_bytes(output, tool_result_max_chars).to_string();
         cut.push_str("\n…[output truncated to save context]");
         cut
     };
@@ -71,6 +70,20 @@ pub async fn run_turn(
     // Read num_ctx from the resolved provider (not preferred_id) so a CLI→Ollama
     // fallback budgets context against the Ollama provider that actually runs.
     let ollama_num_ctx = resolved.ollama_num_ctx;
+    // Local models have a small KV window so we must drop old turns. API
+    // providers prompt-cache the growing prefix — a 20K sliding window rewrites
+    // that prefix every turn and converts cheap cache reads into full misses.
+    let mut messages = if ollama_mode {
+        match ollama_num_ctx {
+            Some(n) => context::compress_window_to(
+                messages,
+                (n as usize).saturating_sub(4_096).max(context::WORKING_SET_TOKENS),
+            ),
+            None => context::compress_window(messages),
+        }
+    } else {
+        context::compress_window_to(messages, context::API_WORKING_SET_TOKENS)
+    };
     let last_user_msg = messages
         .iter()
         .rev()
@@ -321,11 +334,18 @@ pub async fn run_turn(
         let assembled = context::assemble_prompt(&ctx);
         let mut dynamic = assembled.dynamic_block;
         let mut snap_txt = String::new();
-        if !snapshot.is_empty() {
-            let ctx_budget = if force_minimal {
-                ollama_num_ctx.unwrap_or(65_536).min(32_768)
+        // Live canvas already shows what's on screen. A 50K-char snapshot in
+        // the last user message is a permanent cache-miss tail — skip it when
+        // canvas is present, and keep a small cap for API providers otherwise.
+        if !snapshot.is_empty() && canvas_block.is_none() {
+            let ctx_budget = if ollama_mode {
+                if force_minimal {
+                    ollama_num_ctx.unwrap_or(65_536).min(32_768)
+                } else {
+                    ollama_num_ctx.unwrap_or(65_536)
+                }
             } else {
-                ollama_num_ctx.unwrap_or(65_536)
+                8_192 // → ~3K chars in truncate_for_context
             };
             snap_txt = vps_snapshot::truncate_for_context(&snapshot, ctx_budget);
             if !dynamic.is_empty() {
@@ -346,7 +366,7 @@ pub async fn run_turn(
         build_system(false, &thread_summary);
 
     let context_limit =
-        context_usage::default_context_limit(&resolved.kind, ollama_num_ctx);
+        context_usage::default_context_limit(&resolved.kind, &resolved.model, ollama_num_ctx);
 
     if registry::is_tool_capable_kind(&resolved.kind) && !cli_mode {
         if let Ok(Some(compact)) = context_compact::auto_compact_if_needed(
@@ -601,12 +621,7 @@ pub async fn run_turn(
         // Request-only copy: inject runtime context into last user message so the
         // system prefix stays cache-stable across multi-turn / multi-iter calls.
         let mut req_messages = messages.clone();
-        if !context::inject_dynamic_into_last_user(&mut req_messages, &dynamic_block) {
-            emit(
-                Some(sink),
-                StreamEvent::Status("Runtime context was not attached: no user message.".into()),
-            );
-        }
+        context::inject_dynamic_into_last_user(&mut req_messages, &dynamic_block);
         req.messages = req_messages;
         req.tools = tool_defs_for_turn.clone();
         req.xconsole = xconsole_exec.clone();
@@ -666,6 +681,22 @@ pub async fn run_turn(
                 return Err(e);
             }
         };
+
+        if let Some(prompt) = resp.prompt_tokens {
+            let cached = resp.cached_tokens.unwrap_or(0);
+            let line = crate::ai::cost::format_cache_line(prompt, cached);
+            eprintln!("[xconsole] {line} · prefix={}", classification.as_str());
+            emit(Some(sink), StreamEvent::Status(line));
+            if let Some(why) = crate::ai::cost::cache_miss_reason(
+                prompt,
+                cached,
+                classification.as_str(),
+                iter as u32,
+            ) {
+                eprintln!("[xconsole] {why}");
+                emit(Some(sink), StreamEvent::Status(why));
+            }
+        }
 
         let assistant = ChatMessage {
             role: "assistant".into(),

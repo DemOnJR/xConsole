@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import shell from "highlight.js/lib/languages/shell";
@@ -293,14 +293,19 @@ export function MarkdownCodeBlock({
 }) {
   const lang = langFromMarkdownClass(className);
   const label = lang ?? "code";
-  const shellLike = !lang || ["bash", "shell", "sh", "console", "zsh", "powershell", "ps1"].includes(lang);
+  // Only explicitly-tagged shell blocks get an Execute button (an unlabeled
+  // YAML/Python fence shouldn't be runnable).
+  const shellLike = !!lang && ["bash", "shell", "sh", "zsh"].includes(lang);
   const canExecute = shellLike && executeTarget != null && !!onExecute;
   const [copied, setCopied] = useState(false);
+  const copyTimer = useRef<number | null>(null);
+  useEffect(() => () => { if (copyTimer.current != null) clearTimeout(copyTimer.current); }, []);
 
   const copy = async () => {
     await navigator.clipboard.writeText(code);
     setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    if (copyTimer.current != null) clearTimeout(copyTimer.current);
+    copyTimer.current = window.setTimeout(() => setCopied(false), 1500);
   };
 
   return (
@@ -309,7 +314,7 @@ export function MarkdownCodeBlock({
         <span className="font-mono text-[10px] uppercase tracking-wide text-gray-500">
           {label}
         </span>
-        <span className="ml-auto flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
+        <span className="ml-auto flex items-center gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
           {canExecute && (
             <button
               type="button"

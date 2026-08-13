@@ -17,6 +17,8 @@
 //!   xconsole-bench all
 //!   xconsole-bench hooks    [--out results.json]   # hooks dispatch overhead (no model)
 //!   xconsole-bench cache    [--out results.json]   # tool-result cache smoke test (no model)
+//!   xconsole-bench cost     [--out results.json]   # price-table + hit-rate fixtures (no model)
+//!   xconsole-bench provider-cache [--out results.json]  # live Command Code DeepSeek Flash prefix-cache probe
 //!   xconsole-bench selftest                        # pure-logic + live-hook checks (no model)
 //!
 //! These are REGRESSION benchmarks: run them, change a feature, run them again,
@@ -98,6 +100,17 @@ async fn run_async(args: &[String]) -> i32 {
         return bench_cache(out);
     }
 
+    // Price-table + hit-rate fixtures — no model, no network.
+    if mode == "cost" {
+        return bench_cost(out);
+    }
+
+    // Live Command Code DeepSeek Flash prefix-cache probe (reads key from
+    // COMMANDCODE_API_KEY or ~/.commandcode/auth.json; never prints the secret).
+    if mode == "provider-cache" {
+        return bench_provider_cache(out).await;
+    }
+
     // Regenerate the history HTML dashboard + OKF bundle from the existing history log
     // (no model needed). Useful after editing the renderer or to rebuild on a new machine.
     if mode == "report" {
@@ -166,7 +179,7 @@ async fn run_async(args: &[String]) -> i32 {
         }
         other => {
             eprintln!(
-                "bench: unknown mode '{other}' (use: agent | hard | recall | learnloop | ablation | learn | llm | cache | all | report | hooks | scanner | selftest)"
+                "bench: unknown mode '{other}' (use: agent | hard | recall | learnloop | ablation | learn | llm | cache | cost | provider-cache | all | report | hooks | scanner | selftest)"
             );
             return 1;
         }
@@ -730,7 +743,7 @@ async fn run_scenario_suite(
 // ---- Ablation: cost vs. quality of each prompt system --------------------
 //
 // Measures what the four "agent-brain" systems — SOUL (identity), MEMORY
-// (MEMORY.md + USER.md), SKILLS (the skills index), and the PROJECT BRIEF (the
+// (MEMORY.md + TASTE.md), SKILLS (the skills index), and the PROJECT BRIEF (the
 // per-workspace CONTEXT.md the agent keeps updated) — cost in prompt tokens /
 // latency and what they buy in answer quality, by toggling each one off in turn
 // and re-running the same scenarios on the real production prompt assembly.
@@ -2152,6 +2165,293 @@ fn bench_cache(out: Option<String>) -> i32 {
     if checks_ok { 0 } else { 1 }
 }
 
+// ---- Cost / hit-rate fixtures (no model needed) --------------------------
+
+fn bench_cost(out: Option<String>) -> i32 {
+    use crate::ai::cost;
+
+    println!("\n=== COST ACCOUNTING ===");
+
+    let flash = cost::price_for("openai", "deepseek/deepseek-v4-flash");
+    let flash_ok = flash.input == 0.14 && flash.cache_read == 0.0028 && flash.output == 0.28;
+
+    let inclusive = cost::turn_cost(
+        "openai",
+        "deepseek/deepseek-v4-flash",
+        Some(50_000),
+        200,
+        Some(48_000),
+        None,
+    );
+    let expected_inclusive = 2_000.0 / 1_000_000.0 * 0.14
+        + 48_000.0 / 1_000_000.0 * 0.0028
+        + 200.0 / 1_000_000.0 * 0.28;
+    let inclusive_ok = (inclusive.usd - expected_inclusive).abs() < 1e-12
+        && inclusive.input_tokens == 2_000
+        && inclusive.cache_read_tokens == 48_000;
+
+    let exclusive = cost::turn_cost(
+        "anthropic",
+        "claude-sonnet-4-6",
+        Some(1_000),
+        500,
+        Some(40_000),
+        Some(1_000),
+    );
+    let exclusive_ok = exclusive.input_tokens == 1_000 && exclusive.cache_read_tokens == 40_000;
+
+    let hit_inclusive = cost::cache_hit_rate(50_000, 48_000);
+    let hit_exclusive = cost::cache_hit_rate(1_000, 39_000);
+    let long_hit = cost::expected_prefix_hit_rate(20_000, 1_000);
+    let fat_tail = cost::expected_prefix_hit_rate(40_000, 8_000);
+    let hit_ok = (hit_inclusive - 0.96).abs() < 1e-9
+        && (hit_exclusive - 0.975).abs() < 1e-9
+        && long_hit > 0.95
+        && fat_tail < 0.90;
+
+    let checks_ok = flash_ok && inclusive_ok && exclusive_ok && hit_ok;
+    let report = json!({
+        "mode": "cost",
+        "flash_input_per_m": flash.input,
+        "flash_cache_read_per_m": flash.cache_read,
+        "inclusive_usd": inclusive.usd,
+        "inclusive_fresh": inclusive.input_tokens,
+        "inclusive_cached": inclusive.cache_read_tokens,
+        "hit_rate_inclusive": hit_inclusive,
+        "hit_rate_exclusive": hit_exclusive,
+        "long_session_20k_1k": long_hit,
+        "fat_tail_40k_8k": fat_tail,
+        "checks": {
+            "flash_prices": flash_ok,
+            "inclusive_no_double_count": inclusive_ok,
+            "exclusive_anthropic": exclusive_ok,
+            "hit_rate": hit_ok,
+        },
+        "pass": checks_ok,
+    });
+
+    println!(
+        "flash ${:.4}/${:.4}  inclusive ${:.6} (fresh {} cached {})  hit {:.1}% / {:.1}%",
+        flash.input,
+        flash.cache_read,
+        inclusive.usd,
+        inclusive.input_tokens,
+        inclusive.cache_read_tokens,
+        hit_inclusive * 100.0,
+        hit_exclusive * 100.0,
+    );
+
+    if let Some(path) = out {
+        match std::fs::write(&path, serde_json::to_string_pretty(&report).unwrap_or_default()) {
+            Ok(()) => println!("Wrote results → {path}"),
+            Err(e) => {
+                eprintln!("bench: could not write {path}: {e}");
+                return 1;
+            }
+        }
+    }
+    if checks_ok { 0 } else { 1 }
+}
+
+// ---- Live Command Code DeepSeek Flash prefix-cache probe -----------------
+
+fn commandcode_api_key() -> Option<(String, &'static str)> {
+    if let Ok(k) = std::env::var("COMMANDCODE_API_KEY") {
+        if !k.trim().is_empty() {
+            return Some((k.trim().to_string(), "env"));
+        }
+    }
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()?;
+    let path = std::path::PathBuf::from(home)
+        .join(".commandcode")
+        .join("auth.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    let key = v.get("apiKey").and_then(|x| x.as_str())?.trim();
+    if key.is_empty() {
+        return None;
+    }
+    Some((key.to_string(), "auth.json"))
+}
+
+async fn bench_provider_cache(out: Option<String>) -> i32 {
+    use crate::ai::cost;
+
+    println!("\n=== PROVIDER CACHE (Command Code · DeepSeek V4 Flash) ===");
+
+    let Some((_api_key, key_source)) = commandcode_api_key() else {
+        eprintln!(
+            "bench: no Command Code key. Set COMMANDCODE_API_KEY or sign in via the Command Code CLI \
+             (~/.commandcode/auth.json)."
+        );
+        return 2;
+    };
+    println!("key source: {key_source} (secret not printed)");
+
+    // ~4K-token stable system (realistic agent prefix). DeepSeek caches in
+    // 128-token blocks, so a 589-token probe tops out around 87% even when
+    // every byte matches. Long sessions need a large prefix + tiny tail.
+    let pad = "Stable cache prefix. ".repeat(400);
+    let system = format!(
+        "You are a cache probe. Reply with a single lowercase word and nothing else.\n{pad}"
+    );
+    let session = format!("xc-bench-{}", std::process::id());
+
+    let mut req = ChatRequest::new("deepseek/deepseek-v4-flash");
+    req.system = system;
+    req.max_tokens = 8;
+    req.temperature = 0.0;
+    req.session_id = session;
+
+    // Append-only turns: each request keeps every earlier message byte-identical
+    // and adds one new user line (the uncached tail).
+    // 10 append-only turns. Each keeps every earlier message byte-identical.
+    let words = [
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    ];
+    let mut script: Vec<Vec<ChatMessage>> = Vec::new();
+    let mut growing: Vec<ChatMessage> = Vec::new();
+    for (i, word) in words.iter().enumerate() {
+        growing.push(ChatMessage::user(format!("Reply with the single word {word}.")));
+        script.push(growing.clone());
+        if i + 1 < words.len() {
+            growing.push(ChatMessage::assistant((*word).to_string()));
+        }
+    }
+
+    let mut rows = Vec::new();
+    for (i, messages) in script.into_iter().enumerate() {
+        let turn = i + 1;
+        req.messages = messages;
+        let started = Instant::now();
+        match probe_commandcode_usage(&req).await {
+            Ok((prompt, cached, completion)) => {
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                let p = prompt.unwrap_or(0);
+                let c = cached.unwrap_or(0);
+                let hit = cost::cache_hit_rate(p, c);
+                let priced = cost::turn_cost(
+                    "deepseek",
+                    "deepseek/deepseek-v4-flash",
+                    prompt,
+                    completion,
+                    cached,
+                    None,
+                );
+                println!(
+                    "turn {turn}: {elapsed_ms} ms  prompt={p} cached={c} hit={:.1}%  est ${:.6}",
+                    hit * 100.0,
+                    priced.usd
+                );
+                rows.push(json!({
+                    "turn": turn,
+                    "elapsed_ms": elapsed_ms,
+                    "prompt_tokens": p,
+                    "cached_tokens": c,
+                    "completion_tokens": completion,
+                    "hit_rate": hit,
+                    "usd": priced.usd,
+                    "fresh_input": priced.input_tokens,
+                }));
+            }
+            Err(e) => {
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                eprintln!("turn {turn}: error {e}");
+                rows.push(json!({
+                    "turn": turn,
+                    "elapsed_ms": elapsed_ms,
+                    "error": e,
+                }));
+            }
+        }
+    }
+
+    let last = rows.last().cloned().unwrap_or(json!({}));
+    let hit = last.get("hit_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let cached = last.get("cached_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let pass = last.get("error").is_none() && cached > 0 && hit >= 0.95;
+    let report = json!({
+        "mode": "provider-cache",
+        "provider": "command-code",
+        "model": "deepseek/deepseek-v4-flash",
+        "key_source": key_source,
+        "turns": rows,
+        "pass": pass,
+        "note": "Append-only 10-turn session with a ~4K system prefix. Last-turn hit ≥95% is the long-session gate.",
+    });
+
+    println!(
+        "turn-10 hit={:.1}% cached={}  {}",
+        hit * 100.0,
+        cached,
+        if pass { "PASS" } else { "FAIL (long-session hit < 95%)" },
+    );
+
+    if let Some(path) = out {
+        match std::fs::write(&path, serde_json::to_string_pretty(&report).unwrap_or_default()) {
+            Ok(()) => println!("Wrote results → {path}"),
+            Err(e) => {
+                eprintln!("bench: could not write {path}: {e}");
+                return 1;
+            }
+        }
+    }
+    if rows.iter().any(|r| r.get("error").map(|e| !e.is_null()).unwrap_or(false)) {
+        return 1;
+    }
+    if pass { 0 } else { 1 }
+}
+
+async fn probe_commandcode_usage(req: &ChatRequest) -> Result<(Option<u32>, Option<u32>, u32), String> {
+    let Some((api_key, _)) = commandcode_api_key() else {
+        return Err("no key".into());
+    };
+    let http = reqwest::Client::new();
+    let mut messages = vec![json!({ "role": "system", "content": req.system })];
+    for m in &req.messages {
+        messages.push(json!({ "role": m.role, "content": m.content }));
+    }
+    let body = json!({
+        "model": req.model,
+        "max_tokens": req.max_tokens,
+        "temperature": req.temperature,
+        "stream": false,
+        "prompt_cache_key": format!("xc-{}", req.session_id),
+        "messages": messages,
+    });
+    let resp = http
+        .post("https://api.commandcode.ai/provider/v1/chat/completions")
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        // Never echo secrets; truncate the body in case a gateway reflects headers.
+        let snippet: String = text.chars().take(240).collect();
+        return Err(format!("http {status}: {snippet}"));
+    }
+    let v: Value = serde_json::from_str(&text).map_err(|e| format!("json: {e}"))?;
+    let usage = v.get("usage").cloned().unwrap_or(json!({}));
+    let count = |key: &str| usage.get(key).and_then(|x| x.as_u64()).and_then(|n| u32::try_from(n).ok());
+    let details = usage.get("prompt_tokens_details");
+    let cached = details
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|x| x.as_u64())
+        .and_then(|n| u32::try_from(n).ok())
+        .or_else(|| count("prompt_cache_hit_tokens"))
+        .or_else(|| count("cached_tokens"));
+    Ok((
+        count("prompt_tokens"),
+        cached,
+        count("completion_tokens").unwrap_or(0),
+    ))
+}
+
 // ---- Hooks overhead benchmark (no model needed) --------------------------
 
 /// Measure what a Claude Code–style hook costs the agent loop: the pure config/select
@@ -2409,6 +2709,635 @@ fn selftest() -> i32 {
         tool_calls: vec![ToolCall { id: id.into(), name: name.into(), arguments: args }],
         tool_call_id: None,
     };
+
+    println!("\n=== SELFTEST: prompt-cache miss hunt (74 unique cases) ===");
+    {
+        use crate::ai::context::{
+            inject_dynamic_into_last_user, is_runtime_message, RUNTIME_MARKER,
+        };
+        use crate::ai::cost;
+        use crate::ai::prefix_telemetry::{classify, fingerprint_request, PrefixClassification};
+        use crate::ai::provider::ChatRequest;
+
+        let send = |history: &[ChatMessage], dyn_txt: &str| {
+            let mut req = history.to_vec();
+            inject_dynamic_into_last_user(&mut req, dyn_txt);
+            req
+        };
+
+        // 1. Old last-user rewrite would change the first message across turns.
+        let mut broken = vec![ChatMessage::user("hello")];
+        broken[0].content = format!("{RUNTIME_MARKER}\nDate: Mon\n\n---\n\nhello");
+        check(
+            "01 old inject rewrites first user across turns (the miss we fixed)",
+            broken[0].content != "hello",
+        );
+
+        // 2. New inject keeps the real user bytes identical.
+        let t1 = send(&[ChatMessage::user("hello")], "Date: Mon");
+        let t2 = send(
+            &[
+                ChatMessage::user("hello"),
+                ChatMessage::assistant("hi"),
+                ChatMessage::user("next"),
+            ],
+            "Date: Tue",
+        );
+        check("02 trailing runtime keeps user bytes stable", t1[0].content == "hello" && t2[0].content == "hello");
+
+        // 3. Tool loop does not rewrite the user turn.
+        let mut persist = vec![ChatMessage::user("deploy nginx")];
+        let iter0 = send(&persist, "Date: Mon");
+        persist.push(ChatMessage::assistant("ok"));
+        persist.push(ChatMessage::tool_result("c1", "active"));
+        let iter1 = send(&persist, "Date: Mon");
+        check(
+            "03 tool-loop user text unchanged",
+            iter0[0].content == "deploy nginx" && iter1[0].content == "deploy nginx",
+        );
+
+        // 4–5. Prefix telemetry: changing canvas / date is still append_only.
+        let mut r1 = ChatRequest::new("deepseek/deepseek-v4-flash");
+        r1.system = "soul".into();
+        r1.messages = send(&[ChatMessage::user("hello")], "canvas A");
+        let mut r2 = r1.clone();
+        r2.messages = send(
+            &[
+                ChatMessage::user("hello"),
+                ChatMessage::assistant("hi"),
+                ChatMessage::user("next"),
+            ],
+            "canvas B",
+        );
+        check(
+            "04 canvas change classifies append_only (not message_prefix)",
+            classify(Some(&fingerprint_request(&r1)), &fingerprint_request(&r2))
+                == PrefixClassification::AppendOnly,
+        );
+
+        let mut loop0 = r1.clone();
+        loop0.messages = send(&[ChatMessage::user("hello")], "Date: Mon");
+        let mut loop1 = r1.clone();
+        let mut asst = ChatMessage::assistant("");
+        asst.tool_calls.push(crate::ai::provider::ToolCall {
+            id: "c1".into(),
+            name: "run_command".into(),
+            arguments: json!({}),
+        });
+        loop1.messages = vec![ChatMessage::user("hello"), asst, ChatMessage::tool_result("c1", "ok")];
+        inject_dynamic_into_last_user(&mut loop1.messages, "Date: Mon");
+        check(
+            "05 tool-loop classifies append_only",
+            classify(Some(&fingerprint_request(&loop0)), &fingerprint_request(&loop1))
+                == PrefixClassification::AppendOnly,
+        );
+
+        // 6. Re-inject does not stack runtime messages.
+        let mut stacked = vec![ChatMessage::user("hello")];
+        inject_dynamic_into_last_user(&mut stacked, "1");
+        inject_dynamic_into_last_user(&mut stacked, "2");
+        inject_dynamic_into_last_user(&mut stacked, "3");
+        check(
+            "06 re-inject does not stack runtime messages",
+            stacked.len() == 2 && stacked.iter().filter(|m| is_runtime_message(m)).count() == 1,
+        );
+
+        // 7. Rewriting an earlier real user message is a prefix miss.
+        let mut old1 = ChatRequest::new("m");
+        old1.messages = vec![
+            ChatMessage::user("hello as sent on turn 1"),
+            ChatMessage::assistant("hi"),
+        ];
+        let mut old2 = old1.clone();
+        old2.messages[0] = ChatMessage::user("hello");
+        old2.messages.push(ChatMessage::user("next"));
+        check(
+            "07 rewriting an earlier user message is message_prefix miss",
+            classify(Some(&fingerprint_request(&old1)), &fingerprint_request(&old2))
+                == PrefixClassification::MessagePrefix,
+        );
+
+        // 8. DeepSeek cache field parse.
+        // usage_counts is private — prove accounting from the same numbers DeepSeek reports.
+        let r = cost::cache_report(1732, 1664);
+        check("08 inclusive split: 1664 hit / 68 miss / ~96%", r.hit == 1664 && r.miss == 68 && r.rate > 0.95);
+
+        // 9. Long session math.
+        check(
+            "09 20K prefix + 1K tail ≥ 95%",
+            cost::expected_prefix_hit_rate(20_000, 1_000) > 0.95,
+        );
+
+        // 10. Fat tail (the old dynamic block) stays under 90%.
+        check(
+            "10 fat 8K tail on 40K prefix < 90% (why we moved skills to static)",
+            cost::expected_prefix_hit_rate(40_000, 8_000) < 0.90,
+        );
+
+        // 11. Surprising miss is explained; alignment remainder is not.
+        check(
+            "11 alignment remainder is not logged as a miss",
+            cost::cache_miss_reason(1732, 1664, "append_only", 2).is_none(),
+        );
+        check(
+            "12 system-prefix miss is explained",
+            cost::cache_miss_reason(20_000, 1_000, "system", 1)
+                .is_some_and(|s| s.contains("system prefix changed")),
+        );
+
+        // --- second wave: 10 more different miss paths ---
+
+        // 13. Tool-schema change is a schema miss, not a history rewrite.
+        let mut s1 = ChatRequest::new("m");
+        s1.system = "soul".into();
+        s1.messages = vec![ChatMessage::user("hello")];
+        s1.tools = vec![crate::ai::provider::ToolDef {
+            name: "run_command".into(),
+            description: "run".into(),
+            parameters: json!({}),
+        }];
+        let mut s2 = s1.clone();
+        s2.tools[0].description.push_str(" (updated)");
+        check(
+            "13 tool description change is schema miss",
+            classify(Some(&fingerprint_request(&s1)), &fingerprint_request(&s2))
+                == PrefixClassification::Schema,
+        );
+
+        // 14. Soul/system text change is a system miss.
+        let mut sys2 = s1.clone();
+        sys2.system.push_str("\n# extra rule");
+        check(
+            "14 soul/system change is system miss",
+            classify(Some(&fingerprint_request(&s1)), &fingerprint_request(&sys2))
+                == PrefixClassification::System,
+        );
+
+        // 15. Five growing turns stay append_only the whole way.
+        let mut prev: Option<crate::ai::prefix_telemetry::RequestFingerprint> = None;
+        let mut hist: Vec<ChatMessage> = Vec::new();
+        let mut all_append = true;
+        for i in 0..5 {
+            hist.push(ChatMessage::user(format!("q{i}")));
+            let mut req = ChatRequest::new("m");
+            req.system = "soul".into();
+            req.messages = send(&hist, &format!("Date: day-{i}"));
+            let fp = fingerprint_request(&req);
+            if let Some(p) = &prev {
+                if classify(Some(p), &fp) != PrefixClassification::AppendOnly {
+                    all_append = false;
+                }
+            }
+            prev = Some(fp);
+            hist.push(ChatMessage::assistant(format!("a{i}")));
+        }
+        check("15 five-turn session stays append_only", all_append);
+
+        // 16. User text that *mentions* the marker is not stripped as runtime.
+        let mentioned = ChatMessage::user("do not put # Runtime context in commits");
+        check(
+            "16 mention of runtime marker is a real user message",
+            !is_runtime_message(&mentioned),
+        );
+
+        // 17. Anthropic exclusive usage: input is miss-only, cached is larger.
+        let anthro = cost::cache_report(1_000, 39_000);
+        check(
+            "17 Anthropic exclusive split: 39k hit / 1k miss",
+            anthro.hit == 39_000 && anthro.miss == 1_000 && (anthro.rate - 0.975).abs() < 1e-9,
+        );
+
+        // 18. Status line format the terminal shows.
+        check(
+            "18 cache line format",
+            cost::format_cache_line(50_000, 48_000) == "cache 48000 hit · 2000 miss · 96%",
+        );
+
+        // 19. DeepSeek is treated as 1M context so we don't compact (and miss) at 64K.
+        check(
+            "19 DeepSeek Flash context is 1M",
+            crate::ai::context_usage::default_context_limit(
+                "openai",
+                "deepseek/deepseek-v4-flash",
+                None,
+            ) == 1_000_000,
+        );
+        check(
+            "20 40K session does not auto-compact on DeepSeek 1M",
+            !crate::ai::context_compact::should_auto_compact(40_000, 1_000_000),
+        );
+
+        // 21. API working-set does not slide a typical 40-turn tool history.
+        let mut long_hist = Vec::new();
+        for i in 0..40 {
+            long_hist.push(ChatMessage::user(format!("q{i}")));
+            let mut a = ChatMessage::assistant("");
+            a.tool_calls.push(crate::ai::provider::ToolCall {
+                id: format!("c{i}"),
+                name: "run_command".into(),
+                arguments: json!({}),
+            });
+            long_hist.push(a);
+            long_hist.push(ChatMessage::tool_result(format!("c{i}"), "x".repeat(4000)));
+        }
+        let n = long_hist.len();
+        let kept = crate::ai::context::compress_window_to(
+            long_hist,
+            crate::ai::context::API_WORKING_SET_TOKENS,
+        );
+        check(
+            "21 API window keeps 40 tool turns (no prefix slide)",
+            kept.len() == n && !kept[0].content.contains("compressed"),
+        );
+
+        // 22. UTF-8 tool-cap never splits a codepoint (would panic / mutate bytes).
+        let motd = "ok ✅✅✅";
+        let cut = crate::ai::text::truncate_bytes(motd, 5);
+        check(
+            "22 UTF-8 truncate stays on a char boundary",
+            motd.starts_with(cut) && cut.is_char_boundary(cut.len()),
+        );
+
+        // --- third wave: 50 unique tests (23–72), none overlap 01–22 ---
+        use crate::ai::context::{assemble_prompt, PromptContext, WORKING_SET_TOKENS};
+        use crate::ai::context_compact::{
+            compute_threshold, force_minimal_system_prompt, tail_token_budget,
+        };
+        use crate::ai::context_usage::default_context_limit;
+        use crate::ai::tool_cache;
+        use crate::ai::AgentHome;
+        use crate::storage::Db;
+
+        check(
+            "23 empty history still gets a trailing runtime message",
+            send(&[], "Date: Wed")
+                .first()
+                .is_some_and(|m| is_runtime_message(m)),
+        );
+        let mut leftover = send(&[ChatMessage::user("hi")], "Date: Wed");
+        inject_dynamic_into_last_user(&mut leftover, "");
+        check(
+            "24 empty dynamic drops leftover runtime",
+            leftover.len() == 1 && leftover[0].content == "hi",
+        );
+        let after_tool = send(
+            &[
+                ChatMessage::user("run"),
+                ChatMessage::assistant("ok"),
+                ChatMessage::tool_result("t", "done"),
+            ],
+            "live",
+        );
+        check(
+            "25 runtime stays last after a tool result",
+            is_runtime_message(after_tool.last().unwrap())
+                && after_tool[after_tool.len() - 2].role == "tool",
+        );
+
+        let mut base = ChatRequest::new("m");
+        base.system = "soul".into();
+        base.messages = vec![ChatMessage::user("hello")];
+        check(
+            "26 no previous fingerprint is first_request",
+            classify(None, &fingerprint_request(&base)) == PrefixClassification::FirstRequest,
+        );
+        check(
+            "27 identical replay is append_only",
+            classify(
+                Some(&fingerprint_request(&base)),
+                &fingerprint_request(&base),
+            ) == PrefixClassification::AppendOnly,
+        );
+        let mut shorter = base.clone();
+        shorter.messages.clear();
+        check(
+            "28 shrinking history is message_prefix miss",
+            classify(
+                Some(&fingerprint_request(&base)),
+                &fingerprint_request(&shorter),
+            ) == PrefixClassification::MessagePrefix,
+        );
+        let mut swapped = ChatRequest::new("m");
+        swapped.system = "soul".into();
+        swapped.messages = vec![
+            ChatMessage::user("a"),
+            ChatMessage::assistant("1"),
+            ChatMessage::user("b"),
+            ChatMessage::assistant("2"),
+        ];
+        let mut swapped2 = swapped.clone();
+        swapped2.messages.swap(0, 2);
+        check(
+            "29 reordering earlier users is message_prefix miss",
+            classify(
+                Some(&fingerprint_request(&swapped)),
+                &fingerprint_request(&swapped2),
+            ) == PrefixClassification::MessagePrefix,
+        );
+        let mut both = s1.clone();
+        both.system.push_str("!");
+        both.tools[0].description.push_str("!");
+        check(
+            "30 system+schema change reports system (checked first)",
+            classify(Some(&fingerprint_request(&s1)), &fingerprint_request(&both))
+                == PrefixClassification::System,
+        );
+
+        check(
+            "31 schema miss reason names tool schema",
+            cost::cache_miss_reason(10_000, 1_000, "schema", 1)
+                .is_some_and(|s| s.contains("tool schema")),
+        );
+        check(
+            "32 history-rewrite miss reason names compaction",
+            cost::cache_miss_reason(10_000, 1_000, "message_prefix", 1)
+                .is_some_and(|s| s.contains("compaction")),
+        );
+        check(
+            "33 append_only fat tail miss names canvas/memory",
+            cost::cache_miss_reason(10_000, 2_000, "append_only", 1)
+                .is_some_and(|s| s.contains("uncached tail")),
+        );
+        check(
+            "34 first_request after iter 0 with low hit is explained",
+            cost::cache_miss_reason(8_000, 100, "first_request", 1)
+                .is_some_and(|s| s.contains("fresh prefix")),
+        );
+        check(
+            "35 97% hit is not logged as a miss",
+            cost::cache_miss_reason(10_000, 9_700, "append_only", 3).is_none(),
+        );
+        let z = cost::cache_report(0, 0);
+        check("36 zero usage report is 0/0/0", z.hit == 0 && z.miss == 0 && z.rate == 0.0);
+        check(
+            "37 exact 128-token block + 0 tail is 100% expected",
+            (cost::expected_prefix_hit_rate(128, 0) - 1.0).abs() < 1e-12,
+        );
+        check(
+            "38 worst 128-block remainder is 128/255",
+            (cost::expected_prefix_hit_rate(255, 0) - 128.0 / 255.0).abs() < 1e-12,
+        );
+        let all_hit = cost::split_usage(4_000, 4_000, 0, 10);
+        check(
+            "39 prompt==cached means 0 fresh input",
+            all_hit.fresh_input == 0 && all_hit.cached == 4_000,
+        );
+
+        let flash = cost::price_for("openai", "deepseek/deepseek-v4-flash");
+        check(
+            "40 Flash list price is $0.14 miss / $0.0028 hit",
+            flash.input == 0.14 && flash.cache_read == 0.0028,
+        );
+        let pro = cost::price_for("deepseek", "deepseek-v4-pro");
+        check(
+            "41 Pro miss price is higher than Flash",
+            pro.input > flash.input && pro.cache_read != flash.cache_read,
+        );
+        check(
+            "42 kind_for_model maps Command Code DeepSeek off openai",
+            cost::kind_for_model("openai", "deepseek/deepseek-v4-flash") == "deepseek",
+        );
+        check(
+            "43 kind_for_model maps claude off openai-compat",
+            cost::kind_for_model("openai", "anthropic/claude-sonnet-5") == "anthropic",
+        );
+        let billed = cost::turn_cost(
+            "openai",
+            "deepseek/deepseek-v4-flash",
+            Some(10_000),
+            0,
+            Some(9_000),
+            None,
+        );
+        let naive = 10_000.0 / 1e6 * 0.14 + 9_000.0 / 1e6 * 0.0028;
+        check(
+            "44 inclusive turn_cost is cheaper than prompt+cached double bill",
+            billed.usd < naive && billed.input_tokens == 1_000,
+        );
+
+        check(
+            "45 gpt-5.6 default context is 128K",
+            default_context_limit("openai", "gpt-5.6-luna", None) == 128_000,
+        );
+        check(
+            "46 Anthropic default context is 200K",
+            default_context_limit("anthropic", "claude-sonnet-4-6", None) == 200_000,
+        );
+        check(
+            "47 Ollama uses provider num_ctx",
+            default_context_limit("ollama", "qwen3.5:9b", Some(32_768)) == 32_768,
+        );
+        check(
+            "48 1M DeepSeek compact threshold is 500K",
+            compute_threshold(1_000_000) == 500_000,
+        );
+        check(
+            "49 force_minimal trips at 65% of 128K",
+            force_minimal_system_prompt(83_200, 128_000)
+                && !force_minimal_system_prompt(83_199, 128_000),
+        );
+
+        let mut local_hist = Vec::new();
+        for i in 0..40 {
+            local_hist.push(ChatMessage::user(format!("q{i}")));
+            local_hist.push(ChatMessage::assistant("a"));
+            local_hist.push(ChatMessage::tool_result(format!("c{i}"), "y".repeat(4000)));
+        }
+        let local_n = local_hist.len();
+        let local_kept = crate::ai::context::compress_window_to(local_hist, WORKING_SET_TOKENS);
+        check(
+            "50 local 20K window DOES slide 40×4K tool turns",
+            local_kept.len() < local_n && local_kept[0].content.contains("compressed"),
+        );
+        let three = crate::ai::context::compress_window_to(
+            vec![
+                ChatMessage::user("a".repeat(40_000)),
+                ChatMessage::assistant("b".repeat(40_000)),
+                ChatMessage::user("c".repeat(40_000)),
+            ],
+            WORKING_SET_TOKENS,
+        );
+        check("51 three huge messages are never dropped", three.len() == 3);
+
+        check(
+            "52 assistant starting with runtime marker is not runtime",
+            !is_runtime_message(&ChatMessage::assistant(format!(
+                "{RUNTIME_MARKER}\nnope"
+            ))),
+        );
+        check(
+            "53 tool result is never a runtime message",
+            !is_runtime_message(&ChatMessage::tool_result("id", RUNTIME_MARKER)),
+        );
+        let mut same_dyn = vec![ChatMessage::user("q")];
+        inject_dynamic_into_last_user(&mut same_dyn, "Date: same");
+        let n1 = same_dyn.len();
+        inject_dynamic_into_last_user(&mut same_dyn, "Date: same");
+        check(
+            "54 identical re-inject keeps length 2",
+            same_dyn.len() == n1 && same_dyn.len() == 2,
+        );
+
+        let mut prev10: Option<crate::ai::prefix_telemetry::RequestFingerprint> = None;
+        let mut hist10: Vec<ChatMessage> = Vec::new();
+        let mut ok10 = true;
+        for i in 0..10 {
+            hist10.push(ChatMessage::user(format!("turn-{i}")));
+            let mut req = ChatRequest::new("m");
+            req.system = "soul".into();
+            req.messages = send(&hist10, "vol");
+            let fp = fingerprint_request(&req);
+            if let Some(p) = &prev10 {
+                if classify(Some(p), &fp) != PrefixClassification::AppendOnly {
+                    ok10 = false;
+                }
+            }
+            prev10 = Some(fp);
+            hist10.push(ChatMessage::assistant("ok"));
+        }
+        check("55 ten-turn chain stays append_only", ok10);
+
+        let mut more_tools = s1.clone();
+        more_tools.tools.push(crate::ai::provider::ToolDef {
+            name: "read_file".into(),
+            description: "read".into(),
+            parameters: json!({}),
+        });
+        check(
+            "56 adding a tool is schema miss",
+            classify(
+                Some(&fingerprint_request(&s1)),
+                &fingerprint_request(&more_tools),
+            ) == PrefixClassification::Schema,
+        );
+        let mut no_tools = s1.clone();
+        no_tools.tools.clear();
+        check(
+            "57 removing all tools is schema miss",
+            classify(
+                Some(&fingerprint_request(&s1)),
+                &fingerprint_request(&no_tools),
+            ) == PrefixClassification::Schema,
+        );
+
+        tool_cache::clear();
+        let args = json!({ "path": "/tmp/cache-72.txt" });
+        tool_cache::put("local_read_file", &args, "hello-cache");
+        check(
+            "58 tool-cache hit on same args",
+            tool_cache::get("local_read_file", &args).as_deref() == Some("hello-cache"),
+        );
+        check(
+            "59 tool-cache miss on different path",
+            tool_cache::get("local_read_file", &json!({ "path": "/other" })).is_none(),
+        );
+        check(
+            "60 run_command is not cacheable",
+            !tool_cache::is_cacheable("run_command")
+                && tool_cache::get("run_command", &json!({ "command": "ls" })).is_none(),
+        );
+        tool_cache::put("local_read_file", &json!({ "path": "/empty" }), "");
+        check(
+            "61 empty tool result is not cached",
+            tool_cache::get("local_read_file", &json!({ "path": "/empty" })).is_none(),
+        );
+        tool_cache::put(
+            "local_read_file",
+            &json!({ "path": "/err" }),
+            "error: denied",
+        );
+        check(
+            "62 error: tool result is not cached",
+            tool_cache::get("local_read_file", &json!({ "path": "/err" })).is_none(),
+        );
+        let home_a = std::env::temp_dir().join("xc-cache-scope-a");
+        let home_b = std::env::temp_dir().join("xc-cache-scope-b");
+        let sa = tool_cache::CacheScope::new("s1", None, &[], &home_a);
+        let sb = tool_cache::CacheScope::new("s2", None, &[], &home_b);
+        tool_cache::put_scoped(&sa, "skills_list", &json!({}), "skills-a");
+        check(
+            "63 tool-cache isolated by session scope",
+            tool_cache::get_scoped(&sa, "skills_list", &json!({})).as_deref() == Some("skills-a")
+                && tool_cache::get_scoped(&sb, "skills_list", &json!({})).is_none(),
+        );
+        tool_cache::clear();
+
+        check(
+            "64 cache line with 0 cached still prints miss",
+            cost::format_cache_line(500, 0) == "cache 0 hit · 500 miss · 0%",
+        );
+        check(
+            "65 DeepSeek Pro also gets 1M context",
+            default_context_limit("openai", "deepseek-v4-pro", None) == 1_000_000,
+        );
+        check(
+            "66 128K window autocompacts at 64K",
+            crate::ai::context_compact::should_auto_compact(64_000, 128_000),
+        );
+        check(
+            "67 128K window does not compact at 63_999",
+            !crate::ai::context_compact::should_auto_compact(63_999, 128_000),
+        );
+        check(
+            "68 tail budget is 20% of compact threshold",
+            tail_token_budget(128_000) == compute_threshold(128_000) / 5,
+        );
+        check(
+            "69 4-char heuristic is 1 token",
+            crate::ai::text::estimate_tokens_from_len(4) == 1,
+        );
+        check(
+            "70 truncate_bytes empty input is empty",
+            crate::ai::text::truncate_bytes("", 10).is_empty(),
+        );
+        check(
+            "71 first_request at 80% hit is not a cold-start warning",
+            cost::cache_miss_reason(10_000, 8_000, "first_request", 0).is_none(),
+        );
+        check(
+            "72 unknown classification is echoed in the miss line",
+            cost::cache_miss_reason(8_000, 100, "weird_class", 2)
+                .is_some_and(|s| s.contains("weird_class")),
+        );
+
+        // Bonus uniqueness: taste in static / canvas in dynamic (assemble_prompt).
+        let dir = std::env::temp_dir().join(format!("xc-c72-{}", std::process::id()));
+        let home = AgentHome::new(dir.clone());
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        let _ = std::fs::write(home.taste(), "- prefer rsync over scp");
+        let ctx = PromptContext {
+            home: &home,
+            db: &db,
+            model_label: "deepseek/deepseek-v4-flash",
+            provider_label: "command-code",
+            safety: "approve",
+            target_count: 0,
+            conversation_summary: None,
+            has_tools: false,
+            vps_tools_only: false,
+            ollama_num_ctx: None,
+            target_ids: &[],
+            casual_turn: false,
+            target_selection_note: None,
+            force_minimal_prompt: false,
+            plan_mode: false,
+            workspace_context: None,
+            canvas_context: Some("# Canvas\n$ uptime".into()),
+            conversation: false,
+        };
+        let assembled = assemble_prompt(&ctx);
+        check(
+            "73 taste lives in the cached static prefix",
+            assembled.static_system.contains("prefer rsync")
+                && !assembled.dynamic_block.contains("prefer rsync"),
+        );
+        check(
+            "74 live canvas stays in the uncached tail",
+            assembled.dynamic_block.contains("Canvas")
+                && !assembled.static_system.contains("$ uptime"),
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     println!("\n=== SELFTEST: reflection (self-improvement / ETAPA 29) ===");
     let failed = vec![

@@ -443,7 +443,6 @@ export interface AgentConversation extends AgentConversationMeta {
 export interface AgentDocs {
   soul: string;
   memory: string;
-  user: string;
   taste: string;
 }
 
@@ -1111,7 +1110,6 @@ export const api = {
   hooksStatus: () => invoke<HooksStatus>("hooks_status"),
   saveMemoryDoc: (content: string) =>
     invoke<void>("save_memory_doc", { content }),
-  saveUserDoc: (content: string) => invoke<void>("save_user_doc", { content }),
   saveTasteDoc: (content: string) => invoke<void>("save_taste_doc", { content }),
 
   listSkills: () => invoke<Skill[]>("list_skills"),

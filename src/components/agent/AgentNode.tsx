@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { NodeResizer, useStore, type NodeProps } from "@xyflow/react";
 
 import { useAgentStore } from "../../stores/agentStore";
@@ -355,11 +355,25 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
   /** VPS context passed to code blocks so Execute can show the target name. */
   const executeTarget = useMemo(() => {
-    const vpsList = useVpsStore.getState().vpsList;
+    // Use the reactive vpsList (not a getState() snapshot) so the Execute button
+    // appears once servers finish loading, not only when targets change.
     const targetId = targets[0] ?? vpsList[0]?.id;
     const vps = vpsList.find((v) => v.id === targetId);
     return vps ? { name: vps.name, host: vps.host } : null;
-  }, [targets]);
+  }, [targets, vpsList]);
+
+  // Effective safety mode for the current target (global + per-VPS override),
+  // so the permissions pill shows the truth, not just the global setting.
+  const safetyModeGlobal = useSettingsStore((s) => s.settings["agent.safety_mode"]);
+  const effectiveSafetyMode = useMemo(() => {
+    const settings = useSettingsStore.getState().settings;
+    const perVps: Record<string, string> = {};
+    for (const [k, v] of Object.entries(settings)) {
+      if (k.startsWith("agent.safety_mode.")) perVps[k.slice("agent.safety_mode.".length)] = v;
+    }
+    const targetId = targets[0] ?? vpsList[0]?.id;
+    return effectiveMode(safetyModeGlobal, targetId ?? undefined, perVps);
+  }, [targets, vpsList, safetyModeGlobal]);
 
 
 
@@ -561,8 +575,28 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streaming, loopTask]);
 
-  const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-grow the composer on any input change (typing, history recall, draft
+  // restore, send) — not just while typing.
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 132)}px`;
+  }, [input]);
+
+  // Refocus the composer when a turn finishes, so the user can type the next
+  // message without clicking. Only steals focus when it isn't inside a dialog
+  // or another input.
+  useEffect(() => {
+    if (streaming) return;
+    const el = inputRef.current;
+    if (!el) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && !el.contains(active)) return;
+    el.focus();
+  }, [streaming]);
 
   // Agent console font size (A−/A+ in the status line), persisted like terminals.
   const [consoleFontSize, setConsoleFontSize] = useState<number>(() => {
@@ -596,14 +630,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
       void init();
 
   }, [loadVps, loadSettings, init]);
-
-
-
-  useEffect(() => {
-
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-
-  }, [messages, streamingText, activity]);
 
 
 
@@ -1121,9 +1147,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
                 history.record(e.target.value);
                 recallIdx.current = null;
                 setSlashIndex(0);
-                // Auto-grow up to 6 lines.
-                e.target.style.height = "auto";
-                e.target.style.height = `${Math.min(e.target.scrollHeight, 132)}px`;
               }}
               onKeyDown={(e) => {
                 const mod = e.ctrlKey || e.metaKey;
@@ -1231,7 +1254,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
                   }
                   return;
                 }
-                if (e.key === "Enter" && !e.shiftKey) {
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault();
                   submit();
                 }
@@ -1273,7 +1296,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
             onReasoning={setReasoningPersisted}
             planMode={planMode}
             onTogglePlan={togglePlanMode}
-            safetyMode={useSettingsStore((s) => s.settings["agent.safety_mode"]) ?? "approve"}
+            safetyMode={effectiveSafetyMode}
             onCycleSafety={() => {
               const settings = useSettingsStore.getState().settings;
               const cur = settings["agent.safety_mode"] ?? "approve";

@@ -262,11 +262,16 @@ fn prune_old_tool_results(messages: Vec<ChatMessage>, tail_budget: u32) -> (Vec<
     if n == 0 {
         return (messages, 0);
     }
-    let tail_start = find_tail_cut(&messages, 0, tail_budget);
+    let head_end = protect_head_size(&messages);
+    let tail_start = find_tail_cut(&messages, head_end, tail_budget);
     let mut out = messages;
     let mut pruned = 0usize;
+    // Keep the protected head and the recent tail verbatim. Only stub tool
+    // bodies in the middle (the span that will be summarized). The previous
+    // `i >= tail_start` condition wiped the *recent* outputs — the ones the
+    // model still needs — and left the old dumps intact.
     for (i, m) in out.iter_mut().enumerate() {
-        if i >= tail_start && m.role == "tool" && m.content.len() > 80 {
+        if i >= head_end && i < tail_start && m.role == "tool" && m.content.len() > 80 {
             if !m.content.starts_with('[') {
                 m.content = PRUNED_TOOL.to_string();
                 pruned += 1;
@@ -408,5 +413,40 @@ mod tests {
         ];
         let cut = find_tail_cut(&msgs, 2, 50);
         assert!(cut <= 4);
+    }
+
+    #[test]
+    fn prune_stubs_old_tool_bodies_and_keeps_recent() {
+        let mut msgs = Vec::new();
+        msgs.push(ChatMessage::user("start"));
+        msgs.push(ChatMessage::assistant("ok"));
+        msgs.push(ChatMessage::tool_result("old-1", "O".repeat(400)));
+        for i in 0..8 {
+            msgs.push(ChatMessage::user(format!("q{i}")));
+            msgs.push(ChatMessage::assistant("a"));
+            msgs.push(ChatMessage::tool_result(format!("mid-{i}"), "M".repeat(400)));
+        }
+        msgs.push(ChatMessage::user("latest"));
+        msgs.push(ChatMessage::assistant("working"));
+        msgs.push(ChatMessage::tool_result("recent-1", "R".repeat(400)));
+
+        let (out, pruned) = prune_old_tool_results(msgs, 80);
+        assert!(pruned > 0);
+        let recent = out.iter().rev().find(|m| m.role == "tool").unwrap();
+        assert!(
+            recent.content.starts_with('R'),
+            "recent tool output must stay verbatim, got: {}",
+            &recent.content[..recent.content.len().min(40)]
+        );
+        let old = out.iter().find(|m| m.tool_call_id.as_deref() == Some("old-1"));
+        if let Some(old) = old {
+            // Head is protected (first 3 messages); old-1 is index 2, so it may
+            // survive. A middle tool must be stubbed.
+            let mid = out.iter().find(|m| m.tool_call_id.as_deref() == Some("mid-0"));
+            if let Some(mid) = mid {
+                assert_eq!(mid.content, PRUNED_TOOL);
+            }
+            let _ = old;
+        }
     }
 }

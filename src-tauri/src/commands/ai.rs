@@ -359,8 +359,11 @@ pub fn agent_answer_prompt(
     id: String,
     answer: String,
 ) -> Result<(), String> {
-    prompts.resolve(&id, answer);
-    Ok(())
+    if prompts.resolve(&id, answer) {
+        Ok(())
+    } else {
+        Err("no prompt is waiting for this id (already answered, cancelled, or superseded)".into())
+    }
 }
 
 // ----- Plan history (present_plan) -----
@@ -381,11 +384,18 @@ pub fn get_plan(db: State<'_, Db>, id: String) -> Result<Option<AgentPlan>, Stri
     db.get_agent_plan(&id).map_err(|e| e.to_string())
 }
 
-/// Mark a presented plan as archived (kept in history, never applied).
+/// Mark a presented plan as archived (kept in history, never applied). Unblocks
+/// the waiting `present_plan` tool with "CANCEL" so the turn doesn't hang.
 #[tauri::command]
-pub fn archive_plan(db: State<'_, Db>, id: String) -> Result<(), String> {
+pub fn archive_plan(
+    db: State<'_, Db>,
+    prompts: State<'_, PromptRegistry>,
+    id: String,
+) -> Result<(), String> {
     db.update_agent_plan_status(&id, "archived")
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    prompts.resolve(&id, "CANCEL".into());
+    Ok(())
 }
 
 /// Cancel a pending plan: marks it cancelled and unblocks the waiting
@@ -681,9 +691,13 @@ pub async fn setup_edge_tts(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn agent_cancel(
     session_state: State<'_, SessionState>,
+    prompts: State<'_, PromptRegistry>,
     session_id: String,
 ) -> Result<(), String> {
     session_state.cancel(&session_id);
+    // Interrupt any interactive wait (plan review / ask_user) for this session so
+    // a blocked turn stops immediately instead of hanging up to PROMPT_TIMEOUT.
+    prompts.resolve_all_for_session(&session_id, "CANCEL".into());
     Ok(())
 }
 
@@ -737,14 +751,13 @@ pub fn list_pending_approvals(db: State<'_, Db>) -> Result<Vec<AgentApproval>, S
     db.list_pending_approvals().map_err(|e| e.to_string())
 }
 
-// ----- Soul / Memory / User files -----
+// ----- Soul / Memory / Taste files -----
 
 /// The agent's editable Hermes-format documents.
 #[derive(serde::Serialize)]
 pub struct AgentDocs {
     pub soul: String,
     pub memory: String,
-    pub user: String,
     pub taste: String,
 }
 
@@ -753,9 +766,6 @@ pub fn get_agent_docs(home: State<'_, AgentHome>) -> AgentDocs {
     AgentDocs {
         soul: crate::ai::soul::load(&home),
         memory: crate::ai::memory::load_memory(&home),
-        // USER.md was consolidated into TASTE.md; `user` reflects the merged
-        // profile slice for backward compatibility.
-        user: crate::ai::memory::load_user(&home),
         taste: crate::ai::taste::load(&home),
     }
 }
@@ -768,13 +778,6 @@ pub fn save_soul(home: State<'_, AgentHome>, content: String) -> Result<(), Stri
 #[tauri::command]
 pub fn save_memory_doc(home: State<'_, AgentHome>, content: String) -> Result<(), String> {
     crate::ai::memory::save_memory(&home, &content)
-}
-
-#[tauri::command]
-pub fn save_user_doc(home: State<'_, AgentHome>, content: String) -> Result<(), String> {
-    // USER.md was consolidated into TASTE.md — the user-profile editor now
-    // writes the merged preferences store.
-    crate::ai::memory::save_user(&home, &content)
 }
 
 #[tauri::command]

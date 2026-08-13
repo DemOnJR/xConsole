@@ -113,12 +113,24 @@ fn usage_counts(event: &Value) -> UsageCounts {
     UsageCounts {
         prompt_tokens: count(usage.get("prompt_tokens")),
         completion_tokens: count(usage.get("completion_tokens")),
+        // OpenAI: prompt_tokens_details.cached_tokens
+        // DeepSeek / Command Code: usage.prompt_cache_hit_tokens (and the same
+        // value mirrored under details.cached_tokens).
         cached_tokens: count(details.and_then(|v| v.get("cached_tokens")))
             .or_else(|| count(details.and_then(|v| v.get("cache_read_input_tokens"))))
+            .or_else(|| count(usage.get("prompt_cache_hit_tokens")))
             .or_else(|| count(usage.get("cached_tokens"))),
         cache_write_tokens: count(usage.get("cache_write_tokens"))
             .or_else(|| count(details.and_then(|v| v.get("cache_write_tokens")))),
     }
+}
+
+/// GPT-5.x / native OpenAI accept `prompt_cache_options`. DeepSeek, Command Code,
+/// and most gateways ignore or 400 on the field — only send it where it is proven.
+fn wants_openai_cache_options(model: &str, base_url: &str) -> bool {
+    let m = model.to_lowercase();
+    let url = base_url.to_lowercase();
+    m.contains("gpt-5") || url.contains("api.openai.com")
 }
 
 /// Accumulator for one streamed tool call (arguments arrive as string fragments).
@@ -157,12 +169,14 @@ impl Provider for OpenAiProvider {
                 body["reasoning_effort"] = json!(req.reasoning);
             }
             // Stable cache key routes every request of a session to the same cache
-            // node, so the growing prefix keeps hitting (required for GPT-5.6+).
+            // node (OpenAI, OpenCode Go, most OpenAI-compat proxies). DeepSeek's
+            // automatic prefix cache ignores the field; unknown-field 400s are
+            // rare and cheaper than a full miss on a routed-away prefix.
             if !req.session_id.is_empty() {
                 body["prompt_cache_key"] = json!(format!("xc-{}", req.session_id));
-                // Explicit implicit-mode opt-in for GPT-5.6+ caching; harmless on
-                // older models that ignore unknown cache fields.
-                body["prompt_cache_options"] = json!({ "mode": "implicit" });
+                if wants_openai_cache_options(&req.model, &self.base_url) {
+                    body["prompt_cache_options"] = json!({ "mode": "implicit" });
+                }
             }
             if send_tools {
                 body["tools"] = json!(tools);
@@ -328,6 +342,9 @@ impl Provider for OpenAiProvider {
         // Never promote it into ChatResponse.content, persistence, compaction, or export.
         out.content = visible_response_content(out.content, reasoning);
 
+        out.prompt_tokens = usage.prompt_tokens;
+        out.cached_tokens = usage.cached_tokens;
+
         if let Some(completion_tokens) = usage.completion_tokens {
             let duration_ms = started.elapsed().as_millis() as u64;
             let seconds = (duration_ms as f64 / 1000.0).max(0.05);
@@ -345,7 +362,7 @@ impl Provider for OpenAiProvider {
             emit(
                 sink,
                 StreamEvent::Cost(crate::ai::cost::turn_cost(
-                    "openai",
+                    &crate::ai::cost::kind_for_model("openai", &req.model),
                     &req.model,
                     usage.prompt_tokens,
                     completion_tokens,
@@ -401,6 +418,42 @@ mod tests {
             "usage": { "prompt_tokens": 42, "completion_tokens": 7, "cached_tokens": 19 }
         });
         assert_eq!(usage_counts(&top_level).cached_tokens, Some(19));
+
+        // DeepSeek V4 / Command Code official field.
+        let deepseek: Value = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 1387,
+                "completion_tokens": 423,
+                "prompt_tokens_details": { "cached_tokens": 128, "miss_tokens": 1259 },
+                "prompt_cache_hit_tokens": 128,
+                "prompt_cache_miss_tokens": 1259
+            }
+        });
+        assert_eq!(usage_counts(&deepseek).cached_tokens, Some(128));
+        assert_eq!(usage_counts(&deepseek).prompt_tokens, Some(1387));
+
+        let hit_only: Value = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 2000,
+                "completion_tokens": 10,
+                "prompt_cache_hit_tokens": 1856
+            }
+        });
+        assert_eq!(usage_counts(&hit_only).cached_tokens, Some(1856));
+    }
+
+    #[test]
+    fn openai_cache_options_only_for_native_openai() {
+        assert!(wants_openai_cache_options("gpt-5.6-luna", "https://api.openai.com/v1"));
+        assert!(wants_openai_cache_options("gpt-5", "https://example.com/v1"));
+        assert!(!wants_openai_cache_options(
+            "deepseek/deepseek-v4-flash",
+            "https://api.commandcode.ai/provider/v1"
+        ));
+        assert!(!wants_openai_cache_options(
+            "deepseek-v4-flash",
+            "https://api.deepseek.com/v1"
+        ));
     }
 
     #[test]

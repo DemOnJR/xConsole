@@ -109,8 +109,8 @@ interface CanvasState {
   tileLayout: TileLayout | null;
   /** Last known canvas pane size, so layout edits can re-tile without the caller. */
   paneSize: { width: number; height: number } | null;
-  /** Pending terminal commands from the agent chat Execute button. */
-  pendingTerminalCommands: Record<string, { command: string; send: boolean }>;
+  /** Pending terminal commands from the agent chat Execute button (FIFO per node). */
+  pendingTerminalCommands: Record<string, { command: string; send: boolean }[]>;
 
   setNodes: (nodes: CanvasNode[]) => void;
   setEdges: (edges: CanvasEdge[]) => void;
@@ -235,8 +235,8 @@ export const useCanvasStore = create<CanvasState>()(
       webglIds: [],
       tileLayout: null,
       paneSize: null,
-      // Pending terminal commands (Execute button): nodeId → {command, send}.
-      pendingTerminalCommands: {} as Record<string, { command: string; send: boolean }>,
+      // Pending terminal commands (Execute button): nodeId → FIFO array.
+      pendingTerminalCommands: {} as Record<string, { command: string; send: boolean }[]>,
 
       setNodes: (nodes) => set({ nodes }),
       setEdges: (edges) => set({ edges }),
@@ -515,20 +515,25 @@ export const useCanvasStore = create<CanvasState>()(
       },
 
       removeNode: (id) => {
-        set((s) => ({
-          // Drop the node, and unlink any SFTP node that followed it so it isn't
-          // left with a dangling linkedTerminalId / followTerminal=true.
-          nodes: s.nodes
-            .filter((n) => n.id !== id)
-            .map((n) =>
-              n.type === "sftp" && n.data.linkedTerminalId === id
-                ? { ...n, data: { ...n.data, linkedTerminalId: undefined, followTerminal: false } }
-                : n,
-            ),
-          edges: s.edges.filter((e) => e.source !== id && e.target !== id),
-          webglIds: s.webglIds.filter((w) => w !== id),
-          focusedId: s.focusedId === id ? null : s.focusedId,
-        }));
+        set((s) => {
+          const next = { ...s.pendingTerminalCommands };
+          delete next[id];
+          return {
+            // Drop the node, and unlink any SFTP node that followed it so it isn't
+            // left with a dangling linkedTerminalId / followTerminal=true.
+            nodes: s.nodes
+              .filter((n) => n.id !== id)
+              .map((n) =>
+                n.type === "sftp" && n.data.linkedTerminalId === id
+                  ? { ...n, data: { ...n.data, linkedTerminalId: undefined, followTerminal: false } }
+                  : n,
+              ),
+            edges: s.edges.filter((e) => e.source !== id && e.target !== id),
+            webglIds: s.webglIds.filter((w) => w !== id),
+            focusedId: s.focusedId === id ? null : s.focusedId,
+            pendingTerminalCommands: next,
+          };
+        });
         // Close the hole the removed tile left behind.
         if (get().layoutMode === "tile") get().arrangeTiles();
       },
@@ -636,19 +641,21 @@ export const useCanvasStore = create<CanvasState>()(
         set((s) => ({
           pendingTerminalCommands: {
             ...s.pendingTerminalCommands,
-            [nodeId]: { command, send },
+            [nodeId]: [...(s.pendingTerminalCommands[nodeId] ?? []), { command, send }],
           },
         })),
 
       takeTerminalCommand: (nodeId) => {
         const pending = get().pendingTerminalCommands[nodeId];
-        if (!pending) return null;
-        set((s) => {
-          const next = { ...s.pendingTerminalCommands };
-          delete next[nodeId];
-          return { pendingTerminalCommands: next };
-        });
-        return pending;
+        if (!pending || pending.length === 0) return null;
+        const [first, ...rest] = pending;
+        set((s) => ({
+          pendingTerminalCommands: {
+            ...s.pendingTerminalCommands,
+            [nodeId]: rest,
+          },
+        }));
+        return first;
       },
     }),
     {

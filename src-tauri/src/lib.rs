@@ -451,7 +451,6 @@ pub fn run() {
             commands::ai::save_taste_doc,
             commands::ai::save_soul,
             commands::ai::save_memory_doc,
-            commands::ai::save_user_doc,
             commands::ai::get_hooks_config,
             commands::ai::save_hooks_config,
             commands::ai::reload_hooks,

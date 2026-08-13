@@ -7,6 +7,7 @@ import { useVpsStore } from "../stores/vpsStore";
 import { useWorkspaceStore } from "../stores/workspaceStore";
 import { useUiStore } from "../stores/uiStore";
 import { useUpdateStore } from "../stores/updateStore";
+import { cacheBreakdown, formatTokenCount } from "../lib/streamStats";
 
 /**
  * Compact bottom status strip — always visible, minimal.
@@ -100,13 +101,11 @@ export function StatusStrip() {
     if (streamStats.tokensPerSec > 0) {
       bits.push(`${streamStats.tokensPerSec.toFixed(1)} t/s`);
     }
-    if (
-      streamStats.cachedTokens != null &&
-      streamStats.promptTokens != null &&
-      streamStats.promptTokens > 0
-    ) {
-      const pct = Math.round((streamStats.cachedTokens / streamStats.promptTokens) * 100);
-      bits.push(`${pct}% cache`);
+    const cache = cacheBreakdown(streamStats);
+    if (cache) {
+      bits.push(
+        `${formatTokenCount(cache.hit)} hit · ${formatTokenCount(cache.miss)} miss · ${Math.round(cache.rate * 100)}%`,
+      );
     }
     return bits.length ? ` · ${bits.join(" · ")}` : "";
   })();

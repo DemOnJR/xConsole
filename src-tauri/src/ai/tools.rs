@@ -2241,7 +2241,17 @@ fn ssh_key_status(ctx: &ToolContext, args: &Value) -> String {
 
 // ---- Interactive prompts: clarifying questions and plan review --------------
 
+/// Cron and goal runs are unattended — there is nobody to answer interactive
+/// prompts, and their private registries can't be resolved from the UI (which
+/// would deadlock the turn for the full PROMPT_TIMEOUT).
+fn is_unattended_session(session_id: &str) -> bool {
+    session_id.starts_with("cron:") || session_id.starts_with("goal:")
+}
+
 async fn ask_user(ctx: &ToolContext, args: &Value) -> String {
+    if is_unattended_session(&ctx.session_id) {
+        return "error: ask_user is not available in unattended runs (cron/goal)".into();
+    }
     let questions = args.get("questions").filter(|q| {
         q.as_array().map(|a| !a.is_empty()).unwrap_or(false)
     });
@@ -2269,6 +2279,11 @@ async fn ask_user(ctx: &ToolContext, args: &Value) -> String {
 }
 
 async fn present_plan(ctx: &ToolContext, args: &Value) -> String {
+    if is_unattended_session(&ctx.session_id) {
+        return "error: plan mode is not available in unattended runs (cron/goal). Present the \
+                plan as normal text instead, and do not attempt to execute anything."
+            .into();
+    }
     let plan = match args.get("plan").and_then(|v| v.as_str()) {
         Some(p) if !p.trim().is_empty() => p,
         _ => return "error: missing 'plan'".into(),
@@ -2333,7 +2348,9 @@ async fn present_plan(ctx: &ToolContext, args: &Value) -> String {
         Ok(Err(_)) => "error: plan channel closed".into(),
         Err(_) => {
             ctx.prompts.cancel(&id);
-            let _ = ctx.db.update_agent_plan_status(&id, "cancelled");
+            // Only a still-presented plan becomes "cancelled" on timeout; an
+            // already-archived/applied plan keeps its status.
+            let _ = ctx.db.update_agent_plan_status_if(&id, "cancelled", "presented");
             "error: the user did not respond to the plan in time".into()
         }
     }

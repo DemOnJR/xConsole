@@ -17,11 +17,26 @@ use crate::ai::provider::ChatMessage;
 use crate::ai::{memory, skills, soul, AgentHome};
 use crate::storage::Db;
 
-/// Keep at most this many recent **tokens** in the live window (pi keeps 20K,
-/// opencode 15K). Older turns are dropped whole — tool-call/tool-result pairs are
-/// never split — and replaced by a short synthetic note. The durable facts live in
-/// MEMORY.md, so dropping old detail costs little.
+/// Last-resort token window for **local** models (small `num_ctx`).
+///
+/// Do **not** apply this 20K cut to API providers. Prompt-cache reads on
+/// DeepSeek / Anthropic / OpenAI are 10–50× cheaper than a cache miss, and a
+/// sliding window rewrites the prefix every turn — converting a 95%+ hit into a
+/// full miss. Pi's 20K figure is the *compaction keep-recent* budget, not a
+/// silent drop. API turns use [`API_WORKING_SET_TOKENS`] as a safety valve only.
 pub const WORKING_SET_TOKENS: usize = 20_000;
+
+/// Safety-valve window for API providers. DeepSeek V4 Flash has a 1M context;
+/// 200K of append-only history stays cacheable and is far cheaper than rewriting.
+pub const API_WORKING_SET_TOKENS: usize = 200_000;
+
+/// Caps on the *uncached* last-user tail. Long-session hit rate is
+/// `cached_prefix / (prefix + tail)`. A 20K prefix needs tail ≤ ~1.1K tokens
+/// (~4.4K chars) to stay at 95%. Skills/infra/workspace live in the prefix.
+const DYNAMIC_CANVAS_CHARS: usize = 2400;
+const DYNAMIC_HOST_CHARS: usize = 1200;
+const DYNAMIC_MEMORY_CHARS: usize = 1500;
+const DYNAMIC_SUMMARY_CHARS: usize = 1200;
 
 /// Trim an over-long message history to a recent token window.
 ///
@@ -31,15 +46,22 @@ pub const WORKING_SET_TOKENS: usize = 20_000;
 /// tool_call it answers, so the remaining history stays internally consistent for
 /// the provider.
 pub fn compress_window(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    compress_window_to(messages, WORKING_SET_TOKENS)
+}
+
+/// Trim history to `budget_tokens`. Used with [`WORKING_SET_TOKENS`] for local
+/// models and [`API_WORKING_SET_TOKENS`] for API providers.
+pub fn compress_window_to(messages: Vec<ChatMessage>, budget_tokens: usize) -> Vec<ChatMessage> {
     if messages.len() <= 3 {
         return messages;
     }
-    // Estimate the tail's token cost from the back until we're under budget.
+    // Walk from the newest message backward until the budget is spent.
+    // The previous floor (`len - 3`) stopped the walk after three messages,
+    // then cut there — so even a 200K API budget dropped almost all history
+    // and busted the prompt-cache prefix every turn.
     let mut keep_from = messages.len();
-    let mut budget = WORKING_SET_TOKENS;
-    // Never drop below the last 3 messages.
-    let floor = messages.len().saturating_sub(3);
-    while keep_from > floor {
+    let mut budget = budget_tokens;
+    while keep_from > 0 {
         let idx = keep_from - 1;
         let cost = crate::ai::text::estimate_tokens_from_len(messages[idx].content.len())
             + messages[idx].tool_calls.len() * 64; // rough tool-call overhead
@@ -52,6 +74,11 @@ pub fn compress_window(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     }
     if keep_from == 0 {
         return messages;
+    }
+    // Never keep fewer than the last 3 messages.
+    let max_cut = messages.len().saturating_sub(3);
+    if keep_from > max_cut {
+        keep_from = max_cut;
     }
 
     // Only ever cut at a turn boundary: advance the cut forward until it lands on a
@@ -274,29 +301,36 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
     }
 }
 
-/// Prepend the dynamic context block to the last user message of a *request* copy.
-/// Conversation history on disk stays clean (no runtime pollution). Returns false when
-/// there is no user message to receive the request-local context.
-pub fn inject_dynamic_into_last_user(messages: &mut [ChatMessage], dynamic: &str) -> bool {
+/// Marker for the request-only trailing runtime message. Must stay at the *end*
+/// of the request so earlier messages remain a byte-identical cache prefix.
+pub const RUNTIME_MARKER: &str = "# Runtime context";
+
+/// True when this is the ephemeral runtime user message (not a real user turn).
+pub fn is_runtime_message(message: &ChatMessage) -> bool {
+    message.role == "user"
+        && message.tool_call_id.is_none()
+        && message.content.starts_with(RUNTIME_MARKER)
+}
+
+/// Attach dynamic context as a **trailing** user message on a *request* copy.
+///
+/// History on disk stays clean. Real user/assistant/tool messages are never
+/// rewritten — rewriting the last user (the old behavior) made turn N+1 send
+/// `hello` after turn N sent `runtime+hello`, which busts the provider prefix
+/// cache on every new user turn.
+///
+/// Always returns true (runtime can be attached even when there is no user
+/// message yet). Empty `dynamic` only drops a leftover trailing runtime block.
+pub fn inject_dynamic_into_last_user(messages: &mut Vec<ChatMessage>, dynamic: &str) -> bool {
+    if messages.last().is_some_and(is_runtime_message) {
+        messages.pop();
+    }
     let dynamic = dynamic.trim();
     if dynamic.is_empty() {
         return true;
     }
-    if let Some(m) = messages.iter_mut().rev().find(|m| m.role == "user") {
-        if m.content.starts_with("# Runtime context") || m.content.contains("# Runtime context\n") {
-            // Already injected (e.g. tool-loop iteration) — replace the prefix.
-            if let Some(rest) = m.content.split_once("\n\n---\n\n") {
-                m.content = format!("# Runtime context\n{dynamic}\n\n---\n\n{}", rest.1);
-            } else {
-                m.content = format!("# Runtime context\n{dynamic}\n\n---\n\n{}", m.content);
-            }
-        } else {
-            m.content = format!("# Runtime context\n{dynamic}\n\n---\n\n{}", m.content);
-        }
-        true
-    } else {
-        false
-    }
+    messages.push(ChatMessage::user(format!("{RUNTIME_MARKER}\n{dynamic}")));
+    true
 }
 
 fn join_parts(parts: Vec<String>) -> String {
@@ -344,6 +378,11 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
     };
 
     let mut rules = vec![soul];
+    // Mirror the stable tier: taste rides in the prefix now.
+    let taste = stable_taste(ctx, minimal);
+    if !taste.is_empty() {
+        rules.push(taste);
+    }
     if ctx.has_tools {
         rules.push(if ctx.vps_tools_only {
             VPS_TOOL_GUIDANCE.to_string()
@@ -389,7 +428,7 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
     }
 
     let mem = if !minimal {
-        memory::format_for_prompt(ctx.home)
+        truncate_chars(&memory::format_for_prompt(ctx.home), DYNAMIC_MEMORY_CHARS)
     } else {
         String::new()
     };
@@ -402,8 +441,8 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
         .unwrap_or_default();
 
     PromptParts {
-        rules_tokens: count_tokens(&rules.join("\n\n"))
-            + count_tokens(&mutable_context_parts(ctx, minimal).0),
+        // Taste now lives in the stable rules tier (included in `rules`).
+        rules_tokens: count_tokens(&rules.join("\n\n")),
         skills_tokens: count_tokens(&skills_text),
         memory_tokens: count_tokens(&mem),
         infra_tokens: count_tokens(&infra_parts.join("\n\n")),
@@ -463,14 +502,24 @@ fn mutable_context_parts(ctx: &PromptContext, minimal: bool) -> (String, String,
     if minimal {
         return (String::new(), String::new(), String::new());
     }
-    let taste = crate::ai::taste::format_for_prompt(ctx.home);
+    // Taste (preferences) changes rarely — it rides in the *stable* system
+    // prefix so provider prompt caches keep hitting. The tuple is
+    // (skills_index, infra) with taste extracted at the stable tier.
     let skills = if ctx.force_minimal_prompt {
         skills::system_index_minimal(ctx.home)
     } else {
         skills::system_index(ctx.home)
     };
     let infra = crate::infra::summary::format_infra_summary(ctx.db);
-    (taste, skills, infra)
+    (String::new(), skills, infra)
+}
+
+/// Taste content for the stable system prefix (cache-friendly: changes rarely).
+fn stable_taste(ctx: &PromptContext, minimal: bool) -> String {
+    if minimal {
+        return String::new();
+    }
+    crate::ai::taste::format_for_prompt(ctx.home)
 }
 
 fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
@@ -486,6 +535,11 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
         stable.push(CASUAL_GUIDANCE.to_string());
     } else {
         stable.push(soul::load(ctx.home));
+    }
+    // Preferences (taste) belong in the cache-stable prefix, not the dynamic block.
+    let taste = stable_taste(ctx, minimal);
+    if !taste.is_empty() {
+        stable.push(taste);
     }
 
     if ctx.has_tools {
@@ -506,30 +560,38 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
         stable.push(PONYTAIL_COMPACT_GUIDANCE.to_string());
     }
 
-    // ---- DYNAMIC (context + volatile): never put these in the system prefix ----
-    // Workspace brief, live canvas, selected targets, memory body, date, plan mode.
-    let mut context: Vec<String> = Vec::new();
-    let (taste, skills_index, infra) = mutable_context_parts(ctx, minimal);
-    for part in [taste, skills_index, infra] {
+    // Session-stable indexes belong in the *static* prefix so they cache after
+    // turn 1. Putting them in the last user message re-bills them as a miss
+    // every turn and caps long-session hit rate at ~80–90% no matter how long
+    // the history grows. A rare edit (new skill, new server) busts the prefix
+    // once — cheaper than a permanent 2–4K miss tail.
+    let (_, skills_index, infra) = mutable_context_parts(ctx, minimal);
+    for part in [skills_index, infra] {
         if !part.is_empty() {
-            context.push(part);
+            stable.push(part);
         }
     }
     if let Some(ws) = ctx.workspace_context.as_ref().filter(|s| !s.trim().is_empty()) {
-        context.push(ws.clone());
-    }
-    if let Some(canvas) = ctx.canvas_context.as_ref().filter(|s| !s.trim().is_empty()) {
-        context.push(canvas.clone());
+        stable.push(ws.clone());
     }
     if !ctx.casual_turn && !ctx.target_ids.is_empty() {
         let catalog = crate::ai::tools::format_targets_catalog(ctx.db, ctx.target_ids);
         if !catalog.is_empty() {
-            context.push(catalog);
+            stable.push(catalog);
         }
-        // Per-host institutional memory for selected VPS only.
+    }
+
+    // ---- DYNAMIC (volatile only): live screen, memory body, date. Keep this
+    // tail under ~1.2K tokens so a 20K+ history session stays ≥95% cache hit.
+    // DeepSeek caches in 128-token blocks: hit ≈ floor(P/128)*128 / (P+T).
+    let mut context: Vec<String> = Vec::new();
+    if let Some(canvas) = ctx.canvas_context.as_ref().filter(|s| !s.trim().is_empty()) {
+        context.push(truncate_chars(canvas, DYNAMIC_CANVAS_CHARS));
+    }
+    if !ctx.casual_turn && !ctx.target_ids.is_empty() {
         let hosts = crate::ai::host_memory::format_for_prompt(ctx.home, ctx.db, ctx.target_ids);
         if !hosts.is_empty() {
-            context.push(hosts);
+            context.push(truncate_chars(&hosts, DYNAMIC_HOST_CHARS));
         }
     }
 
@@ -544,15 +606,20 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
     }
     if let Some(summary) = &ctx.conversation_summary {
         if !summary.trim().is_empty() {
-            volatile.push(format!(
-                "# This conversation (compact thread context)\n{}",
-                summary.trim()
+            volatile.push(truncate_chars(
+                &format!(
+                    "# This conversation (compact thread context)\n{}",
+                    summary.trim()
+                ),
+                DYNAMIC_SUMMARY_CHARS,
             ));
         }
     }
-    let mem = memory::format_for_prompt(ctx.home);
-    if !mem.is_empty() && !minimal {
-        volatile.push(mem);
+    if !minimal {
+        let mem = memory::format_for_prompt(ctx.home);
+        if !mem.is_empty() {
+            volatile.push(truncate_chars(&mem, DYNAMIC_MEMORY_CHARS));
+        }
     }
     // Date/time MUST stay out of the static system prefix (kills KV/prompt cache).
     let mut runtime = format!("Date: {}", Local::now().format("%A, %B %d, %Y"));
@@ -672,14 +739,76 @@ mod tests {
         .unwrap();
 
         let first = assemble_prompt(&context(&home, &db));
+        fs::create_dir_all(home.skills_dir().join("ops").join("reload")).unwrap();
+        fs::write(
+            home.skills_dir().join("ops").join("reload").join("SKILL.md"),
+            "---\ndescription: Reload services\n---\n",
+        )
+        .unwrap();
+        let second = assemble_prompt(&context(&home, &db));
+
+        // Skills live in the static prefix (cache after turn 1). A new skill
+        // busts the prefix once — cheaper than re-billing the index every turn.
+        assert_ne!(first.static_system, second.static_system);
+        assert!(second.static_system.contains("restart"));
+        assert!(second.static_system.contains("reload"));
+        assert!(!second.dynamic_block.contains("restart"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn live_canvas_and_memory_stay_out_of_static_prefix() {
+        let (home, dir) = test_home();
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        let mut ctx = context(&home, &db);
+        ctx.canvas_context = Some("# Canvas\n$ ls\nfile.txt".into());
+        fs::write(home.memory(), "- prod db is on vps-1").unwrap();
+        let assembled = assemble_prompt(&ctx);
+        assert!(assembled.dynamic_block.contains("Canvas"));
+        assert!(assembled.dynamic_block.contains("prod db"));
+        assert!(!assembled.static_system.contains("prod db"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn taste_lives_in_stable_prefix_not_dynamic_block() {
+        // Taste changes rarely. Putting it in the last user message (dynamic)
+        // re-bills it as a cache miss every turn. Soul-style stable prefix is
+        // the proven Command Code / rick approach.
+        let (home, dir) = test_home();
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        fs::write(home.taste(), "- Prefer concise output").unwrap();
+        let first = assemble_prompt(&context(&home, &db));
         fs::write(home.taste(), "- Prefer detailed output").unwrap();
         let second = assemble_prompt(&context(&home, &db));
 
-        assert_eq!(first.static_system, second.static_system);
-        assert_ne!(first.dynamic_block, second.dynamic_block);
-        assert!(second.dynamic_block.contains("Prefer detailed output"));
-        assert!(second.dynamic_block.contains("restart"));
+        assert!(first.static_system.contains("Prefer concise output"));
+        assert!(second.static_system.contains("Prefer detailed output"));
+        assert!(!second.dynamic_block.contains("Prefer detailed output"));
+        assert_ne!(first.static_system, second.static_system);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn api_window_does_not_slide_a_typical_agent_history() {
+        // 40 tool turns × ~1k tokens stays under the 200K API safety valve, so
+        // the prefix is not rewritten (which would bust provider prompt cache).
+        let mut messages = Vec::new();
+        for i in 0..40 {
+            messages.push(ChatMessage::user(format!("question {i}")));
+            let mut assistant = ChatMessage::assistant("");
+            assistant.tool_calls.push(crate::ai::provider::ToolCall {
+                id: format!("call-{i}"),
+                name: "run_command".into(),
+                arguments: serde_json::json!({}),
+            });
+            messages.push(assistant);
+            messages.push(ChatMessage::tool_result(format!("call-{i}"), "x".repeat(4000)));
+        }
+        let n = messages.len();
+        let out = compress_window_to(messages, API_WORKING_SET_TOKENS);
+        assert_eq!(out.len(), n);
+        assert!(!out[0].content.contains("compressed"));
     }
 
     #[test]
@@ -687,18 +816,111 @@ mod tests {
         let mut messages = vec![ChatMessage::assistant("prior"), ChatMessage::user("check status")];
         assert!(inject_dynamic_into_last_user(&mut messages, "Date: today"));
         assert!(inject_dynamic_into_last_user(&mut messages, "Date: tomorrow"));
-        let content = &messages[1].content;
-        assert_eq!(content.matches("# Runtime context").count(), 1);
-        assert!(content.contains("Date: tomorrow"));
-        assert!(!content.contains("Date: today"));
-        assert!(content.ends_with("check status"));
+        assert_eq!(messages[1].content, "check status");
+        assert!(is_runtime_message(&messages[2]));
+        assert!(messages[2].content.contains("Date: tomorrow"));
+        assert!(!messages[2].content.contains("Date: today"));
+        assert_eq!(
+            messages.iter().filter(|m| is_runtime_message(m)).count(),
+            1
+        );
     }
 
     #[test]
-    fn dynamic_injection_reports_missing_user_message() {
+    fn dynamic_injection_appends_without_a_user_message() {
         let mut messages = vec![ChatMessage::assistant("tool setup")];
-        assert!(!inject_dynamic_into_last_user(&mut messages, "runtime"));
+        assert!(inject_dynamic_into_last_user(&mut messages, "runtime"));
         assert_eq!(messages[0].content, "tool setup");
+        assert!(is_runtime_message(&messages[1]));
         assert!(inject_dynamic_into_last_user(&mut messages, ""));
+        assert_eq!(messages.len(), 1);
+    }
+
+    // --- cache-miss hunt (10 cases) --------------------------------------
+
+    fn sent(history: &[ChatMessage], dynamic: &str) -> Vec<ChatMessage> {
+        let mut req = history.to_vec();
+        inject_dynamic_into_last_user(&mut req, dynamic);
+        req
+    }
+
+    #[test]
+    fn cache01_rewriting_last_user_would_bust_the_next_turn_prefix() {
+        // Documents the bug we removed: mutating the last user on turn 1
+        // then sending the clean user on turn 2 changes the first message.
+        let mut broken = vec![ChatMessage::user("hello")];
+        broken[0].content = format!("{RUNTIME_MARKER}\nDate: Mon\n\n---\n\nhello");
+        let turn2 = vec![
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("hi"),
+            ChatMessage::user("next"),
+        ];
+        assert_ne!(broken[0].content, turn2[0].content);
+    }
+
+    #[test]
+    fn cache02_trailing_runtime_keeps_real_user_bytes_stable() {
+        let t1 = sent(&[ChatMessage::user("hello")], "Date: Mon");
+        let t2 = sent(
+            &[
+                ChatMessage::user("hello"),
+                ChatMessage::assistant("hi"),
+                ChatMessage::user("next"),
+            ],
+            "Date: Tue",
+        );
+        assert_eq!(t1[0].content, t2[0].content);
+        assert_eq!(t1[0].content, "hello");
+    }
+
+    #[test]
+    fn cache03_tool_loop_does_not_rewrite_the_user_turn() {
+        let persist = vec![ChatMessage::user("deploy nginx")];
+        let iter0 = sent(&persist, "Date: Mon");
+        let mut persist = persist;
+        persist.push(ChatMessage::assistant("ok"));
+        persist.push(ChatMessage::tool_result("c1", "active"));
+        let iter1 = sent(&persist, "Date: Mon");
+        assert_eq!(iter0[0].content, iter1[0].content);
+        assert_eq!(iter0[0].content, "deploy nginx");
+        assert!(is_runtime_message(iter0.last().unwrap()));
+        assert!(is_runtime_message(iter1.last().unwrap()));
+    }
+
+    #[test]
+    fn cache04_cross_turn_core_messages_are_append_only() {
+        let t1 = sent(&[ChatMessage::user("hello")], "canvas A");
+        let t2 = sent(
+            &[
+                ChatMessage::user("hello"),
+                ChatMessage::assistant("hi"),
+                ChatMessage::user("next"),
+            ],
+            "canvas B",
+        );
+        let core1: Vec<_> = t1.iter().filter(|m| !is_runtime_message(m)).collect();
+        let core2: Vec<_> = t2.iter().filter(|m| !is_runtime_message(m)).collect();
+        assert_eq!(core1[0].content, core2[0].content);
+        assert!(core2.len() > core1.len());
+    }
+
+    #[test]
+    fn cache05_changing_canvas_only_touches_trailing_runtime() {
+        let hist = vec![ChatMessage::user("status")];
+        let a = sent(&hist, "canvas: ls");
+        let b = sent(&hist, "canvas: top");
+        assert_eq!(a.len(), b.len());
+        assert_eq!(a[0].content, b[0].content);
+        assert_ne!(a.last().unwrap().content, b.last().unwrap().content);
+    }
+
+    #[test]
+    fn cache06_reinject_does_not_stack_runtime_messages() {
+        let mut messages = vec![ChatMessage::user("hello")];
+        inject_dynamic_into_last_user(&mut messages, "Date: 1");
+        inject_dynamic_into_last_user(&mut messages, "Date: 2");
+        inject_dynamic_into_last_user(&mut messages, "Date: 3");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.iter().filter(|m| is_runtime_message(m)).count(), 1);
     }
 }

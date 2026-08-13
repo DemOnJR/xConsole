@@ -83,14 +83,18 @@ fn has_write_or_substitution(command: &str) -> bool {
         || command.contains("$(")
 }
 
-/// Whether a whole command line is read-only. Splits on shell separators and
-/// requires every segment's leading token to be in the read-only set. Output
-/// redirection, input redirection, and command substitution are treated as writes.
+/// Whether a whole command line is read-only. Splits on shell separators
+/// (including newlines — a prompt-injected `ls\nrm -rf /` must NOT be treated
+/// as one read-only segment) and requires every segment's leading token to be
+/// in the read-only set. Output redirection, input redirection, and command
+/// substitution are treated as writes.
 pub fn is_read_only(command: &str) -> bool {
     if has_write_or_substitution(command) {
         return false;
     }
-    let segments = command.split(['|', ';', '&']).filter(|s| !s.trim().is_empty());
+    let segments = command
+        .split(['|', ';', '&', '\n', '\r'])
+        .filter(|s| !s.trim().is_empty());
     let mut any = false;
     for seg in segments {
         any = true;

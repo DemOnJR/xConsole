@@ -87,7 +87,12 @@ export const useEditsStore = create<EditsState>((set, get) => ({
     if (c.session_id !== get().sessionId) return;
     set((s) => {
       if (s.changes.some((x) => x.id === c.id)) return s;
-      return { changes: [...s.changes, c], selectedId: c.id };
+      // Don't steal the user's selection while they're reading a diff.
+      const keepSelection = s.selectedId != null;
+      return {
+        changes: [...s.changes, c],
+        selectedId: keepSelection ? s.selectedId : c.id,
+      };
     });
   },
 

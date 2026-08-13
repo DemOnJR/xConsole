@@ -1,18 +1,18 @@
 import type { AiProvider } from "../../lib/tauri";
 import type { ContextUsage, TokenStats } from "../../lib/streamStats";
+import { cacheBreakdown, formatTokenCount } from "../../lib/streamStats";
 import { ContextGauge } from "./ContextGauge";
 
 export type ReasoningLevel = "off" | "low" | "medium" | "high";
 
 /** Does this provider+model support a reasoning-effort control? (t3code traits.) */
-export function reasoningCapable(kind: string | undefined, model: string | undefined): boolean {
+export function reasoningCapable(kind: string | undefined, _model: string | undefined): boolean {
   const k = (kind ?? "").toLowerCase();
-  const m = (model ?? "").toLowerCase();
   if (k === "anthropic") return true; // thinking budgets on Sonnet/Opus
   if (k === "openai" || k === "ollama") {
     // OpenAI reasoning models + Ollama think; conservative default for openai.
     if (k === "ollama") return true;
-    return /gpt-5|o3|o4|reasoning/.test(m) || true; // openai-compat: effort is harmless
+    return true; // openai-compat: effort is harmless
   }
   return false;
 }
@@ -56,10 +56,16 @@ export function InputBar({
 }) {
   const model = activeModel || activeProvider?.model;
   const canReason = reasoningCapable(activeProvider?.kind, model ?? undefined);
-  const hitRate =
-    streamStats?.cachedTokens != null && (streamStats.promptTokens ?? 0) > 0
-      ? Math.round((streamStats.cachedTokens / (streamStats.cachedTokens + (streamStats.promptTokens ?? 0))) * 100)
-      : null;
+  const cache = streamStats ? cacheBreakdown(streamStats) : null;
+  const hitRate = cache != null ? Math.round(cache.rate * 100) : null;
+  const cacheTone =
+    hitRate == null
+      ? "text-[var(--text-faint)]"
+      : hitRate >= 95
+        ? "text-emerald-300"
+        : hitRate >= 80
+          ? "text-amber-300"
+          : "text-red-300";
 
   const pill =
     "flex items-center gap-1 rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--border)]/40 transition";
@@ -127,11 +133,13 @@ export function InputBar({
           </span>
         )}
 
-        {/* Cost + cache hit */}
-        {costUsd > 0 && (
-          <span className="text-[10px] text-[var(--text-faint)]" data-tooltip="Running conversation cost">
-            ${costUsd.toFixed(4)}
-            {hitRate != null ? ` · ${hitRate}% cached` : ""}
+        {/* Cost + cache hit / miss */}
+        {(costUsd > 0 || cache) && (
+          <span className={`text-[10px] ${cacheTone}`} data-tooltip="Prompt cache: hit / miss / percent (this request)">
+            {costUsd > 0 ? `$${costUsd.toFixed(4)} · ` : ""}
+            {cache && hitRate != null
+              ? `${formatTokenCount(cache.hit)} hit · ${formatTokenCount(cache.miss)} miss · ${hitRate}%`
+              : null}
           </span>
         )}
 

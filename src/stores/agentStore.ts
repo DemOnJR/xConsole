@@ -272,8 +272,29 @@ function applyStreamEvent(
 ): AgentActivityItem[] {
   switch (ev.kind) {
     case "Status": {
-      // Most status lines are internal noise. Parallel tool batches are user-visible:
-      // the agent is genuinely doing multiple read-only tools at once.
+      // Cache hit/miss lines and parallel batches are user-visible.
+      if (/^cache miss/i.test(ev.data)) {
+        return [
+          ...activity.filter((a) => a.id !== "cache-miss"),
+          {
+            id: "cache-miss",
+            kind: "status" as const,
+            label: ev.data,
+            state: "error" as const,
+          },
+        ];
+      }
+      if (/^cache /i.test(ev.data)) {
+        return [
+          ...activity.filter((a) => a.id !== "cache-line"),
+          {
+            id: "cache-line",
+            kind: "status" as const,
+            label: ev.data,
+            state: "done" as const,
+          },
+        ];
+      }
       if (/parallel/i.test(ev.data)) {
         return [
           ...activity.filter((a) => a.id !== "parallel-batch"),
@@ -640,19 +661,34 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   setPlanDraft: (draft) => set({ planDraft: draft }),
 
   applyPlan: async (id) => {
+    try {
+      await api.agentAnswerPrompt(id, "APPROVE");
+    } catch (e) {
+      // Backend returned an error (e.g. no waiter): keep the modal open so the
+      // user can retry, rather than silently closing and losing the plan.
+      throw e;
+    }
     set({ pendingPlan: null, planDraft: "" });
-    await api.agentAnswerPrompt(id, "APPROVE");
+    void get().loadPlanHistory();
   },
 
   archivePlanAction: async (id) => {
+    try {
+      await api.archivePlan(id);
+    } catch (e) {
+      throw e;
+    }
     set({ pendingPlan: null, planDraft: "" });
-    await api.archivePlan(id);
     void get().loadPlanHistory();
   },
 
   cancelPlanAction: async (id) => {
+    try {
+      await api.cancelPlan(id);
+    } catch (e) {
+      throw e;
+    }
     set({ pendingPlan: null, planDraft: "" });
-    await api.cancelPlan(id);
     void get().loadPlanHistory();
   },
 
@@ -663,7 +699,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   loadPlanHistory: async () => {
     try {
-      const history = await api.listPlans();
+      const sid = get().sessionId;
+      const wid = useWorkspaceStore.getState().activeId;
+      const history = await api.listPlans(sid ?? null, wid ?? null);
       set({ planHistory: history });
     } catch {
       /* non-fatal */
@@ -789,10 +827,13 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       cancelSpeech();
       set({ speaking: false });
     }
-    // …and ask the running turn to stop.
+    // …and ask the running turn to stop (backend also interrupts any
+    // interactive plan/question wait for this session).
     if (get().streaming) {
       await api.agentCancel(get().sessionId).catch(() => {});
     }
+    // Clear any pending interactive state so the modal/cards don't linger.
+    set({ pendingPlan: null, pendingQuestions: [], planDraft: "" });
   },
 
   send: async (text, opts) => {

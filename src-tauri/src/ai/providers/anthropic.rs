@@ -29,33 +29,17 @@ impl AnthropicProvider {
 
     /// Convert our portable messages into Anthropic's content-block format.
     ///
-    /// When `cache_last_user` is true, the LAST plain user message (no tool_result,
-    /// non-empty content) gets a `cache_control` breakpoint — everything before it
-    /// (the whole history) becomes a single cheap cache read on the next turn.
-    fn build_messages(messages: &[ChatMessage], cache_last_user: bool) -> Vec<Value> {
-        // Find the index of the last cacheable plain user message.
-        let last_user = if cache_last_user {
-            messages.iter().rposition(|m| {
-                m.role == "user" && !m.content.is_empty() && m.tool_call_id.is_none()
-            })
-        } else {
-            None
-        };
-
+    /// Do **not** put `cache_control` on the last user message. That breakpoint
+    /// moves every turn (and our dynamic runtime block lives inside it), which
+    /// drops `cache_control` from the previous last-user and busts the history
+    /// prefix. System + last tool stay stable across turns; history then caches
+    /// as an implicit prefix behind those breakpoints.
+    fn build_messages(messages: &[ChatMessage]) -> Vec<Value> {
         let mut out: Vec<Value> = Vec::new();
-        for (i, m) in messages.iter().enumerate() {
+        for m in messages {
             match m.role.as_str() {
                 "user" => {
-                    let mut content = json!(m.content);
-                    if Some(i) == last_user {
-                        // Breakpoint goes on the text block, never on tool_result.
-                        content = json!([{
-                            "type": "text",
-                            "text": m.content,
-                            "cache_control": { "type": "ephemeral" },
-                        }]);
-                    }
-                    out.push(json!({"role": "user", "content": content}));
+                    out.push(json!({"role": "user", "content": m.content}));
                 }
                 "assistant" => {
                     let mut blocks: Vec<Value> = Vec::new();
@@ -132,7 +116,7 @@ impl Provider for AnthropicProvider {
             "max_tokens": req.max_tokens,
             "temperature": req.temperature,
             "stream": true,
-            "messages": Self::build_messages(&req.messages, true),
+            "messages": Self::build_messages(&req.messages),
         });
         // Reasoning effort → Anthropic extended thinking budget (only when enabled).
         // off/empty leaves the provider default; low/medium/high map to token budgets.
@@ -297,6 +281,9 @@ impl Provider for AnthropicProvider {
             out.tool_calls.push(tc);
         }
 
+        out.prompt_tokens = input_tokens;
+        out.cached_tokens = cache_read_tokens;
+
         if let Some(completion) = output_tokens {
             let ms = started.elapsed().as_millis() as u64;
             let secs = (ms as f64 / 1000.0).max(0.05);
@@ -325,5 +312,56 @@ impl Provider for AnthropicProvider {
         }
 
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::provider::{ChatMessage, ChatRequest, ToolDef};
+
+    #[test]
+    fn last_tool_def_gets_cache_control() {
+        let mut req = ChatRequest::new("claude-sonnet-4");
+        req.tools = vec![
+            ToolDef {
+                name: "a".into(),
+                description: "a".into(),
+                parameters: json!({}),
+            },
+            ToolDef {
+                name: "b".into(),
+                description: "b".into(),
+                parameters: json!({}),
+            },
+        ];
+        let tools = AnthropicProvider::build_tools(&req);
+        assert!(tools[0].get("cache_control").is_none());
+        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn messages_never_carry_moving_cache_breakpoints() {
+        let msgs = vec![
+            ChatMessage::user("one"),
+            ChatMessage::assistant("ok"),
+            ChatMessage::tool_result("call-1", "output"),
+            ChatMessage::user("two"),
+        ];
+        let built = AnthropicProvider::build_messages(&msgs);
+        for m in &built {
+            if m["role"] == "user" && m["content"].is_string() {
+                // Plain user text — no cache_control (would move next turn).
+                continue;
+            }
+            if m["content"].is_array() {
+                for block in m["content"].as_array().unwrap() {
+                    assert!(
+                        block.get("cache_control").is_none(),
+                        "history blocks must not carry cache_control: {block}"
+                    );
+                }
+            }
+        }
     }
 }

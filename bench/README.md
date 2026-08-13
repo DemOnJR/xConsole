@@ -36,6 +36,12 @@ Run:
 # In-process tool-result cache smoke test — no Ollama or network required
 ./src-tauri/target/release/xconsole-bench.exe cache --out bench/results/cache.json
 
+# Price-table + cache-hit accounting fixtures (no model, no network)
+./src-tauri/target/release/xconsole-bench.exe cost --out bench/results/cost.json
+
+# Live Command Code DeepSeek V4 Flash prefix-cache probe (reads ~/.commandcode/auth.json)
+./src-tauri/target/release/xconsole-bench.exe provider-cache --out bench/results/provider-cache.json
+
 # Both eval + latency
 ./src-tauri/target/release/xconsole-bench.exe all   --model qwen3.5:9b --out bench/results/all.json
 ```
@@ -76,7 +82,11 @@ With **no hooks configured the loop skips the hook path entirely (0 ms)** — ho
 opt-in, so they cost nothing until you add one. The `live_hook_ms` figure is dominated
 by process-spawn latency (lower on Unix `sh -c`); a hook that does real work adds its own time.
 
-**Tool-result cache** (`cache` mode) measures the in-process read-only result cache, not provider prompt/KV caching. It reports cacheable lookups, hits, misses, writes, and `hit_rate`; use a later model-backed repeated-prefix probe for provider cache tokens and latency.
+**Tool-result cache** (`cache` mode) measures the in-process read-only result cache, not provider prompt/KV caching. It reports cacheable lookups, hits, misses, writes, and `hit_rate`.
+
+**Cost accounting** (`cost` mode) is a no-network fixture for the price table and inclusive-vs-exclusive cache math. DeepSeek / Command Code report `prompt_tokens` *including* cached tokens; Anthropic reports miss tokens separately. The old formula billed both and overstated DeepSeek cost.
+
+**Provider prompt cache** (`provider-cache` mode) sends the same Command Code DeepSeek V4 Flash prefix twice and reports second-turn `cached_tokens`, hit rate, and estimated USD. It reads `COMMANDCODE_API_KEY` or `~/.commandcode/auth.json` and never prints the secret. This is the model-backed repeated-prefix probe; a pass is second-turn hit ≥ 50%.
 
 ## 1a. Harder suites — `hard` and `recall`
 

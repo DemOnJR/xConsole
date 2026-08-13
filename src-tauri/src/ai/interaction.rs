@@ -57,6 +57,15 @@ impl PromptRegistry {
     /// Deliver the user's answer to a waiting prompt. Returns true if it was awaiting.
     pub fn resolve(&self, id: &str, answer: String) -> bool {
         if let Some((_, tx)) = self.pending.remove(id) {
+            // Drop the session mapping so it can't leak / supersede later.
+            let session = self
+                .by_session
+                .iter()
+                .find(|e| e.value() == id)
+                .map(|e| e.key().clone());
+            if let Some(s) = session {
+                let _ = self.by_session.remove(&s);
+            }
             let _ = tx.send(answer);
             true
         } else {
@@ -66,7 +75,37 @@ impl PromptRegistry {
 
     /// Drop a pending prompt without answering (e.g. on timeout).
     pub fn cancel(&self, id: &str) -> bool {
-        self.pending.remove(id).is_some()
+        if let Some((_, _)) = self.pending.remove(id) {
+            let session = self
+                .by_session
+                .iter()
+                .find(|e| e.value() == id)
+                .map(|e| e.key().clone());
+            if let Some(s) = session {
+                let _ = self.by_session.remove(&s);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Resolve every pending prompt for a session with the given answer (used
+    /// by Stop so a blocked plan/question wait can be interrupted).
+    pub fn resolve_all_for_session(&self, session_id: &str, answer: String) -> usize {
+        let ids: Vec<String> = self
+            .by_session
+            .iter()
+            .filter(|e| e.key() == session_id)
+            .map(|e| e.value().clone())
+            .collect();
+        let mut n = 0;
+        for id in ids {
+            if self.resolve(&id, answer.clone()) {
+                n += 1;
+            }
+        }
+        n
     }
 }
 

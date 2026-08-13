@@ -1694,6 +1694,23 @@ impl Db {
         Ok(())
     }
 
+    /// Transition a plan's status only when it is still in `only_if_current`
+    /// (e.g. timeout must not overwrite an already-archived/applied plan).
+    pub fn update_agent_plan_status_if(
+        &self,
+        id: &str,
+        status: &str,
+        only_if_current: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE agent_plan SET status = ?2, updated_at = datetime('now')
+             WHERE id = ?1 AND status = ?3",
+            params![id, status, only_if_current],
+        )?;
+        Ok(())
+    }
+
     // ----- Agent file changes (diff history) -----
 
     /// Insert or replace a file-change record (same id = replace, for revert updates).
@@ -1736,27 +1753,27 @@ impl Db {
             (Some(s), Some(w)) => (
                 "SELECT id, session_id, workspace_id, scope, vps_id, label, path, before, after, is_new, reverted, ts
                  FROM agent_file_change WHERE session_id = ?1 AND workspace_id = ?2
-                 ORDER BY ts ASC LIMIT ?3"
+                 ORDER BY ts DESC LIMIT ?3"
                     .into(),
                 vec![s.to_string(), w.to_string(), limit.to_string()],
             ),
             (Some(s), None) => (
                 "SELECT id, session_id, workspace_id, scope, vps_id, label, path, before, after, is_new, reverted, ts
                  FROM agent_file_change WHERE session_id = ?1
-                 ORDER BY ts ASC LIMIT ?2"
+                 ORDER BY ts DESC LIMIT ?2"
                     .into(),
                 vec![s.to_string(), limit.to_string()],
             ),
             (None, Some(w)) => (
                 "SELECT id, session_id, workspace_id, scope, vps_id, label, path, before, after, is_new, reverted, ts
                  FROM agent_file_change WHERE workspace_id = ?1
-                 ORDER BY ts ASC LIMIT ?2"
+                 ORDER BY ts DESC LIMIT ?2"
                     .into(),
                 vec![w.to_string(), limit.to_string()],
             ),
             (None, None) => (
                 "SELECT id, session_id, workspace_id, scope, vps_id, label, path, before, after, is_new, reverted, ts
-                 FROM agent_file_change ORDER BY ts ASC LIMIT ?1"
+                 FROM agent_file_change ORDER BY ts DESC LIMIT ?1"
                     .into(),
                 vec![limit.to_string()],
             ),
@@ -1782,7 +1799,11 @@ impl Db {
                 ts: r.get(11)?,
             })
         })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        let mut out: Vec<EditRecord> =
+            rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        // DESC gives the most recent `limit` rows; reverse to chronological order.
+        out.reverse();
+        Ok(out)
     }
 
     pub fn mark_file_change_reverted(&self, id: &str) -> Result<()> {

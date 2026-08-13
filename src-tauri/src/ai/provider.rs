@@ -122,6 +122,10 @@ pub struct ChatResponse {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
     pub stop_reason: String,
+    /// Prompt tokens for this HTTP request (when the provider reported usage).
+    pub prompt_tokens: Option<u32>,
+    /// Cached prompt tokens for this HTTP request.
+    pub cached_tokens: Option<u32>,
 }
 
 /// One line in a compact file diff (Cursor-style).
