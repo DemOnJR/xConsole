@@ -484,6 +484,26 @@ export const useCanvasStore = create<CanvasState>()(
       },
 
       addGoal: (goalId, position) => {
+        // Don't spawn the board under a maximized agent — un-fill first.
+        const pane = get().paneSize;
+        const agent = get().nodes.find((n) => n.type === "agent");
+        if (agent && pane) {
+          const w = Number(agent.width) || 0;
+          const h = Number(agent.height) || 0;
+          if (w >= pane.width - 4 && h >= pane.height - 4) {
+            if (get().layoutMode === "tile") {
+              get().toggleTileFullWidth(agent.id);
+            } else {
+              set((s) => ({
+                nodes: s.nodes.map((n) =>
+                  n.id === agent.id
+                    ? { ...n, position: { x: 80, y: 80 }, width: NODE_W, height: NODE_H }
+                    : n,
+                ),
+              }));
+            }
+          }
+        }
         // One board per goal session; focus it if already open.
         const existing = get().nodes.find(
           (n) => n.type === "goal" && String(n.data.goalId) === goalId,

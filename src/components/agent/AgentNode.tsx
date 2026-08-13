@@ -14,7 +14,8 @@ import {
   type Conversation,
 } from "../../lib/voice";
 
-import { api, type ChatImage } from "../../lib/tauri";
+import { api, onGoalEvent, type ChatImage, type GoalSession, type GoalSpec } from "../../lib/tauri";
+import { parseGoalSpec } from "../../lib/goalParse";
 import { clipboardImagePng } from "../../lib/terminalClipboard";
 import { onOsFilesDropped } from "../../hooks/useOsFileDrop";
 import {
@@ -39,6 +40,7 @@ import { useCanvasStore, NODE_W, NODE_H, type AgentNode as AgentNodeType } from 
 import { useSettingsStore } from "../../stores/settingsStore";
 
 import { AgentConsole } from "./AgentConsole";
+import { GoalLockCard } from "./GoalLockCard";
 import { CLIPicker, type CLIPickerOption } from "./CLIPicker";
 import {
   filterSlashCommands,
@@ -262,6 +264,8 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
     pendingQuestions,
 
+    activeIntakeGoalId,
+
     planMode,
 
     send,
@@ -396,6 +400,8 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
 
   const [input, setInput] = useState("");
+  const [intakeSpec, setIntakeSpec] = useState<GoalSpec | null>(null);
+  const [intakeStatus, setIntakeStatus] = useState<string | null>(null);
   const [pendingImages, setPendingImages] = useState<ChatImage[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const agentRootRef = useRef<HTMLDivElement>(null);
@@ -664,6 +670,36 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
       void init();
 
   }, [loadVps, loadSettings, init]);
+
+  useEffect(() => {
+    if (!activeIntakeGoalId) {
+      setIntakeSpec(null);
+      setIntakeStatus(null);
+      return;
+    }
+    let alive = true;
+    let un: (() => void) | undefined;
+    const refresh = async () => {
+      try {
+        const s: GoalSession = await api.getGoal(activeIntakeGoalId);
+        if (!alive) return;
+        setIntakeStatus(s.status);
+        setIntakeSpec(parseGoalSpec(s.spec_json));
+      } catch {
+        /* board / chat still usable */
+      }
+    };
+    void refresh();
+    void onGoalEvent(activeIntakeGoalId, () => {
+      void refresh();
+    }).then((fn) => {
+      un = fn;
+    });
+    return () => {
+      alive = false;
+      un?.();
+    };
+  }, [activeIntakeGoalId]);
 
 
 
@@ -1091,6 +1127,15 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
         .then((goalId) => {
           useAgentStore.getState().setActiveIntakeGoal(goalId);
           useCanvasStore.getState().addGoal(goalId);
+          const pane = useCanvasStore.getState().paneSize;
+          const agent = useCanvasStore.getState().nodes.find((n) => n.type === "agent");
+          if (agent && pane) {
+            const w = Number(agent.width) || 0;
+            const h = Number(agent.height) || 0;
+            if (w >= pane.width - 4 && h >= pane.height - 4) {
+              toggleAgentFillPane(agent.id);
+            }
+          }
           void notify("Goal", "Intake started — answer the agent's questions, then lock the goal.");
           void send(
             `Start intake for this autonomous goal.\n\nObjective: ${objective}\n\nAsk only what you need (ask_user), then call goal_propose_spec with a concrete spec (objective, success criteria, how you will check, hard constraints). Do not start the work until the user locks the goal on the board.`,
@@ -1284,8 +1329,31 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
       )}
 
       {/* Interactive prompts: approvals, questions (plans open in the PlanModal) */}
-      {(pendingApprovals.length > 0 || pendingQuestions.length > 0) && (
+      {(pendingApprovals.length > 0 ||
+        pendingQuestions.length > 0 ||
+        (activeIntakeGoalId && (!intakeStatus || intakeStatus === "intake"))) && (
         <div className="border-t border-[var(--border)] bg-[var(--bg)] px-3 py-2">
+          {activeIntakeGoalId && (!intakeStatus || intakeStatus === "intake") && (
+            <div className="mb-2 last:mb-0">
+              <GoalLockCard
+                spec={intakeSpec}
+                onLock={() => {
+                  void useGoalStore
+                    .getState()
+                    .confirm(activeIntakeGoalId)
+                    .then(() => useAgentStore.getState().setActiveIntakeGoal(null))
+                    .catch((e) => notify("Goal", String(e)));
+                }}
+                onCancel={() => {
+                  void useGoalStore
+                    .getState()
+                    .stop(activeIntakeGoalId)
+                    .then(() => useAgentStore.getState().setActiveIntakeGoal(null))
+                    .catch((e) => notify("Goal", String(e)));
+                }}
+              />
+            </div>
+          )}
           {pendingApprovals.map((a) => (
             <ApprovalCard key={a.id} approval={a} onResolve={resolveApproval} />
           ))}

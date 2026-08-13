@@ -6,6 +6,7 @@ import { useCanvasStore, type GoalNode as GoalNodeType } from "../stores/canvasS
 import { useGoalStore } from "../stores/goalStore";
 import { useAgentStore } from "../stores/agentStore";
 import { NodeErrorBoundary } from "./NodeErrorBoundary";
+import { GoalLockCard } from "./agent/GoalLockCard";
 
 const COLUMNS = ["backlog", "in_progress", "waiting", "testing", "blocked", "done"];
 
@@ -156,7 +157,7 @@ function GoalBoard({ id, data, selected }: NodeProps<GoalNodeType>) {
       <NodeResizer minWidth={420} minHeight={240} isVisible lineClassName="!border-blue-500" handleClassName="!bg-blue-500" />
 
       {/* Header */}
-      <div className="flex cursor-move select-none items-center gap-2 border-b border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 font-mono text-[11px]">
+      <div className="flex flex-wrap cursor-move select-none items-center gap-2 border-b border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 font-mono text-[11px]">
         <span className="text-violet-400">⬡</span>
         <span className="truncate text-gray-200">{session?.title ?? "Goal"}</span>
         {session && (
@@ -218,6 +219,12 @@ function GoalBoard({ id, data, selected }: NodeProps<GoalNodeType>) {
       )}
 
       {error && <div className="border-b border-red-900/30 px-3 py-1 text-[10px] text-red-400">{error}</div>}
+
+      {session?.status === "intake" && (
+        <div className="nodrag border-b border-[var(--border)] px-3 py-2">
+          <GoalLockCard spec={spec} onLock={() => void onConfirm()} onCancel={() => void onStop()} />
+        </div>
+      )}
 
       {/* Kanban board */}
       <div className="nodrag nowheel flex min-h-0 flex-1 gap-1.5 overflow-x-auto px-2 py-2">
