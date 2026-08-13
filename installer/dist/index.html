@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
 <title>Install xConsole</title>
+<link rel="icon" href="icon.png" type="image/png" />
 <style>
   :root {
     --bg: #f6f7f9;
@@ -429,25 +430,8 @@
 
   <!-- ============ WELCOME ============ -->
   <section id="welcome" class="view active">
-    <div class="logo-wrap" aria-hidden="true">
-      <svg width="76" height="76" viewBox="0 0 76 76" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="xConsole logo">
-        <defs>
-          <linearGradient id="ringBlue" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stop-color="#60a5fa"/>
-            <stop offset="1" stop-color="#3b82f6"/>
-          </linearGradient>
-          <linearGradient id="ringOrange" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stop-color="#fbbf24"/>
-            <stop offset="1" stop-color="#f59e0b"/>
-          </linearGradient>
-        </defs>
-        <!-- blue ring (behind, lower-right) -->
-        <circle cx="46" cy="44" r="20" stroke="url(#ringBlue)" stroke-width="6" fill="none"/>
-        <!-- orange ring (front, upper-left) -->
-        <circle cx="30" cy="32" r="20" stroke="url(#ringOrange)" stroke-width="6" fill="none"/>
-        <!-- prompt caret core -->
-        <path d="M25 27.5 L33 33.5 L25 39.5" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-      </svg>
+    <div class="logo-wrap">
+      <img src="icon.png" width="88" height="88" alt="xConsole" style="border-radius:18px;display:block" />
     </div>
     <h1 class="wordmark">xConsole</h1>
     <p class="subtitle">AI VPS cockpit — your terminals, SFTP, and an AI agent on one canvas.</p>

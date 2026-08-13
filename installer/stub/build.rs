@@ -51,9 +51,11 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR set by cargo");
     let rc = Path::new(manifest_dir).join("app.rc");
     let manifest = Path::new(manifest_dir).join("app.manifest");
+    let icon = Path::new(manifest_dir).join("..").join("icons").join("icon.ico");
     let obj = Path::new(&out_dir).join("app_res.o");
     println!("cargo:rerun-if-changed={}", rc.display());
     println!("cargo:rerun-if-changed={}", manifest.display());
+    println!("cargo:rerun-if-changed={}", icon.display());
 
     // Allow override (e.g. x86_64-w64-mingw32-windres on some setups); default to PATH.
     let windres = std::env::var("WINDRES").unwrap_or_else(|_| "windres".to_string());
