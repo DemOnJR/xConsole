@@ -492,7 +492,7 @@ export interface GoalSession {
   title: string;
   raw_request: string;
   spec_json: string;
-  status: "intake" | "active" | "waiting" | "blocked" | "done" | "stopped" | string;
+  status: "intake" | "active" | "paused" | "waiting" | "blocked" | "done" | "stopped" | string;
   kanban_json: string;
   memory_json: string;
   next_check_at?: string | null;
@@ -510,6 +510,7 @@ export interface GoalSpec {
   check_tooling?: string[];
   hard_constraints?: string[];
   max_cycles?: number | null;
+  vps_targets?: string[];
 }
 
 /** One kanban card. */
@@ -1138,7 +1139,10 @@ export const api = {
   runCronJob: (id: string) => invoke<void>("run_cron_job", { id }),
 
   startGoal: (text: string) => invoke<string>("start_goal", { text }),
-  confirmGoal: (id: string) => invoke<void>("confirm_goal", { id }),
+  confirmGoal: (id: string, targets?: string[]) =>
+    invoke<void>("confirm_goal", { id, targets: targets ?? [] }),
+  pauseGoal: (id: string) => invoke<void>("pause_goal", { id }),
+  continueGoal: (id: string) => invoke<void>("continue_goal", { id }),
   stopGoal: (id: string) => invoke<void>("stop_goal", { id }),
   getGoal: (id: string) => invoke<GoalSession>("get_goal", { id }),
   listGoals: () => invoke<GoalSession[]>("list_goals"),

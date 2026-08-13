@@ -5,7 +5,9 @@ interface GoalState {
   goals: GoalSession[];
   load: () => Promise<void>;
   start: (text: string) => Promise<string>;
-  confirm: (id: string) => Promise<void>;
+  confirm: (id: string, targets?: string[]) => Promise<void>;
+  pause: (id: string) => Promise<void>;
+  resume: (id: string) => Promise<void>;
   stop: (id: string) => Promise<void>;
   remove: (id: string) => Promise<void>;
   /** Apply a live event to a session (status change etc.). */
@@ -20,8 +22,16 @@ export const useGoalStore = create<GoalState>((set, get) => ({
     await get().load();
     return id;
   },
-  confirm: async (id) => {
-    await api.confirmGoal(id);
+  confirm: async (id, targets) => {
+    await api.confirmGoal(id, targets);
+    await get().load();
+  },
+  pause: async (id) => {
+    await api.pauseGoal(id);
+    await get().load();
+  },
+  resume: async (id) => {
+    await api.continueGoal(id);
     await get().load();
   },
   stop: async (id) => {

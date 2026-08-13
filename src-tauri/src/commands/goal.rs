@@ -5,6 +5,7 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::ai::goal::{run_loop, GoalContext, GoalRunning};
+use crate::ai::interaction::SessionState;
 use crate::ai::safety::ApprovalRegistry;
 use crate::ai::AgentHome;
 use crate::ssh::SessionManager;
@@ -57,7 +58,9 @@ pub async fn confirm_goal(
     sessions: State<'_, SessionManager>,
     approvals: State<'_, ApprovalRegistry>,
     running: State<'_, GoalRunning>,
+    session_state: State<'_, SessionState>,
     id: String,
+    targets: Option<Vec<String>>,
 ) -> Result<(), String> {
     let mut goal = db
         .get_goal(&id)
@@ -66,22 +69,35 @@ pub async fn confirm_goal(
     if goal.status != "intake" {
         return Err(format!("goal is in '{}' status, not intake", goal.status));
     }
+    if let Some(ids) = targets.filter(|t| !t.is_empty()) {
+        let mut spec = crate::ai::goal::parse_spec(&goal).unwrap_or(crate::storage::models::GoalSpec {
+            objective: goal.raw_request.clone(),
+            success_criteria: vec![],
+            check_method: String::new(),
+            check_tooling: vec![],
+            hard_constraints: vec![],
+            max_cycles: None,
+            vps_targets: vec![],
+        });
+        spec.vps_targets = ids;
+        if let Ok(json) = serde_json::to_string(&spec) {
+            goal.spec_json = json;
+        }
+    }
     goal.status = "active".to_string();
     goal.next_check_at = None;
     db.update_goal(&goal).map_err(|e| e.to_string())?;
 
-    let ctx = GoalContext {
-        app: app.clone(),
-        db: db.inner().clone(),
-        sessions: sessions.inner().clone(),
-        home: home.inner().clone(),
-        approvals: approvals.inner().clone(),
-        running: running.inner().clone(),
-    };
-    let loop_id = id.clone();
-    tauri::async_runtime::spawn(async move {
-        run_loop(&ctx, &loop_id).await;
-    });
+    spawn_loop(
+        app.clone(),
+        db.inner().clone(),
+        sessions.inner().clone(),
+        home.inner().clone(),
+        approvals.inner().clone(),
+        running.inner().clone(),
+        session_state.inner().clone(),
+        id.clone(),
+    );
     let _ = app.emit(
         &crate::ai::goal::goal_event(&id),
         crate::ai::provider::StreamEvent::Status("active".into()),
@@ -89,11 +105,103 @@ pub async fn confirm_goal(
     Ok(())
 }
 
-/// Stop a goal (status → "stopped", finished_at set). Idempotent.
+fn spawn_loop(
+    app: AppHandle,
+    db: crate::storage::Db,
+    sessions: SessionManager,
+    home: AgentHome,
+    approvals: ApprovalRegistry,
+    running: GoalRunning,
+    session_state: SessionState,
+    id: String,
+) {
+    let ctx = GoalContext {
+        app,
+        db,
+        sessions,
+        home,
+        approvals,
+        running,
+        session_state,
+    };
+    tauri::async_runtime::spawn(async move {
+        run_loop(&ctx, &id).await;
+    });
+}
+
+/// Pause a running goal. It will not resume until the user presses Continue.
+#[tauri::command]
+pub async fn pause_goal(
+    app: AppHandle,
+    db: State<'_, Db>,
+    session_state: State<'_, SessionState>,
+    id: String,
+) -> Result<(), String> {
+    let mut goal = db
+        .get_goal(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "goal not found".to_string())?;
+    if goal.status == "stopped" || goal.status == "done" {
+        return Err(format!("goal is already {}", goal.status));
+    }
+    goal.status = "paused".to_string();
+    goal.next_check_at = None;
+    db.update_goal(&goal).map_err(|e| e.to_string())?;
+    session_state.cancel(&format!("goal:{id}"));
+    let _ = app.emit(
+        &crate::ai::goal::goal_event(&id),
+        crate::ai::provider::StreamEvent::Status("paused".into()),
+    );
+    Ok(())
+}
+
+/// Resume a paused / waiting / blocked goal.
+#[tauri::command]
+pub async fn continue_goal(
+    app: AppHandle,
+    db: State<'_, Db>,
+    home: State<'_, AgentHome>,
+    sessions: State<'_, SessionManager>,
+    approvals: State<'_, ApprovalRegistry>,
+    running: State<'_, GoalRunning>,
+    session_state: State<'_, SessionState>,
+    id: String,
+) -> Result<(), String> {
+    let mut goal = db
+        .get_goal(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "goal not found".to_string())?;
+    if goal.status == "stopped" || goal.status == "done" || goal.status == "intake" {
+        return Err(format!("cannot continue a goal in '{}' status", goal.status));
+    }
+    goal.status = "active".to_string();
+    goal.next_check_at = None;
+    goal.finished_at = None;
+    db.update_goal(&goal).map_err(|e| e.to_string())?;
+    session_state.clear_cancel(&format!("goal:{id}"));
+    spawn_loop(
+        app.clone(),
+        db.inner().clone(),
+        sessions.inner().clone(),
+        home.inner().clone(),
+        approvals.inner().clone(),
+        running.inner().clone(),
+        session_state.inner().clone(),
+        id.clone(),
+    );
+    let _ = app.emit(
+        &crate::ai::goal::goal_event(&id),
+        crate::ai::provider::StreamEvent::Status("active".into()),
+    );
+    Ok(())
+}
+
+/// Terminate a goal (status → "stopped", finished_at set). Idempotent.
 #[tauri::command]
 pub async fn stop_goal(
     app: AppHandle,
     db: State<'_, Db>,
+    session_state: State<'_, SessionState>,
     id: String,
 ) -> Result<(), String> {
     let mut goal = db
@@ -103,6 +211,7 @@ pub async fn stop_goal(
     goal.status = "stopped".to_string();
     goal.finished_at = Some(chrono::Utc::now().to_rfc3339());
     db.update_goal(&goal).map_err(|e| e.to_string())?;
+    session_state.cancel(&format!("goal:{id}"));
     let _ = app.emit(
         &crate::ai::goal::goal_event(&id),
         crate::ai::provider::StreamEvent::Status("stopped".into()),

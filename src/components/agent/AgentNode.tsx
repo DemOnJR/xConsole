@@ -1341,7 +1341,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
                 onLock={() => {
                   void useGoalStore
                     .getState()
-                    .confirm(activeIntakeGoalId)
+                    .confirm(activeIntakeGoalId, useAgentStore.getState().targets)
                     .then(() => useAgentStore.getState().setActiveIntakeGoal(null))
                     .catch((e) => notify("Goal", String(e)));
                 }}

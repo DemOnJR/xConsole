@@ -126,6 +126,7 @@ function GoalBoard({ id, data, selected }: NodeProps<GoalNodeType>) {
   const statusTone: Record<string, string> = {
     intake: "text-amber-300",
     active: "text-emerald-300",
+    paused: "text-amber-300",
     waiting: "text-blue-300",
     blocked: "text-red-300",
     done: "text-green-300",
@@ -134,8 +135,23 @@ function GoalBoard({ id, data, selected }: NodeProps<GoalNodeType>) {
 
   const onConfirm = async () => {
     try {
-      await useGoalStore.getState().confirm(goalId);
+      const targets = useAgentStore.getState().targets;
+      await useGoalStore.getState().confirm(goalId, targets);
       useAgentStore.getState().setActiveIntakeGoal(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+  const onPause = async () => {
+    try {
+      await useGoalStore.getState().pause(goalId);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+  const onContinue = async () => {
+    try {
+      await useGoalStore.getState().resume(goalId);
     } catch (e) {
       setError(String(e));
     }
@@ -188,6 +204,29 @@ function GoalBoard({ id, data, selected }: NodeProps<GoalNodeType>) {
               Lock goal &amp; start
             </button>
           )}
+          {session?.status === "active" && (
+            <button
+              type="button"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={() => void onPause()}
+              className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-200 hover:bg-amber-500/20"
+            >
+              pause
+            </button>
+          )}
+          {session &&
+            (session.status === "paused" ||
+              session.status === "waiting" ||
+              session.status === "blocked") && (
+            <button
+              type="button"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={() => void onContinue()}
+              className="rounded border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300 hover:bg-emerald-500/20"
+            >
+              continue
+            </button>
+          )}
           {session && session.status !== "done" && session.status !== "stopped" && (
             <button
               type="button"
@@ -195,7 +234,7 @@ function GoalBoard({ id, data, selected }: NodeProps<GoalNodeType>) {
               onClick={() => void onStop()}
               className="rounded border border-red-500/40 px-1.5 py-0.5 text-[10px] text-red-300 hover:bg-red-500/20"
             >
-              stop
+              terminate
             </button>
           )}
           <button

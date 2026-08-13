@@ -232,6 +232,7 @@ pub fn run() {
                 home: agent_home.clone(),
                 approvals: approvals.clone(),
                 running: goal_running.clone(),
+                session_state: session_state.clone(),
             });
 
             app.manage(commands::lock::DataKey(std::sync::Mutex::new(initial_data_key)));
@@ -485,6 +486,8 @@ pub fn run() {
             commands::ai::run_cron_job,
             commands::goal::start_goal,
             commands::goal::confirm_goal,
+            commands::goal::pause_goal,
+            commands::goal::continue_goal,
             commands::goal::stop_goal,
             commands::goal::get_goal,
             commands::goal::list_goals,

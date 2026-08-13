@@ -194,15 +194,15 @@ Google takes to reindex). Provide the key, value, and the evidence you observed.
         },
         ToolDef {
             name: "goal_check_criteria".into(),
-            description: "THE verification gate. Answer whether the goal's success criteria are \
-met: 'met' (with cited evidence), 'not_yet' (more work now), or 'too_early_to_tell' (a change was \
-made but needs time — the loop will wait and re-check). This is the only way the loop may conclude \
-the goal is done.".into(),
+            description: "THE verification gate. Verdicts: 'met' (done, with evidence), \
+'not_yet' (keep working), 'too_early_to_tell' (keep working unless delay_secs is set). \
+Do not wait unless the user asked for a timeout.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "verdict": {"type": "string", "enum": ["met", "not_yet", "too_early_to_tell"]},
-                    "evidence": {"type": "string"}
+                    "evidence": {"type": "string"},
+                    "delay_secs": {"type": "integer", "description": "Optional wait before the next cycle. Omit to keep going."}
                 },
                 "required": ["verdict", "evidence"]
             }),
@@ -2454,6 +2454,9 @@ async fn goal_propose_spec(ctx: &ToolContext, args: &Value) -> String {
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default(),
         max_cycles: args.get("max_cycles").and_then(|v| v.as_i64()),
+        vps_targets: crate::ai::goal::parse_spec(&goal)
+            .map(|s| s.vps_targets)
+            .unwrap_or_default(),
     };
     goal.spec_json = serde_json::to_string(&spec).unwrap_or_default();
     if let Err(e) = ctx.db.update_goal(&goal) {
@@ -2590,15 +2593,21 @@ async fn goal_check_criteria(ctx: &ToolContext, args: &Value) -> String {
             "Not yet met — continue working.".into()
         }
         "too_early_to_tell" => {
-            goal.status = "waiting".to_string();
-            goal.next_check_at = Some(
-                (chrono::Utc::now() + chrono::Duration::seconds(3 * 24 * 3600)).to_rfc3339(),
-            );
-            if let Err(e) = ctx.db.update_goal(&goal) {
-                return format!("error: {e}");
+            let delay = args.get("delay_secs").and_then(|v| v.as_i64()).unwrap_or(0);
+            if delay > 0 {
+                goal.status = "waiting".to_string();
+                goal.next_check_at = Some(
+                    (chrono::Utc::now() + chrono::Duration::seconds(delay)).to_rfc3339(),
+                );
+                if let Err(e) = ctx.db.update_goal(&goal) {
+                    return format!("error: {e}");
+                }
+                emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("waiting".into()));
+                format!("Too early to tell — re-check in {delay}s. Evidence: {evidence}")
+            } else {
+                emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("active".into()));
+                format!("Too early to tell — keep scanning (no delay set). Evidence: {evidence}")
             }
-            emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("waiting".into()));
-            format!("Too early to tell — scheduled a re-check. Evidence: {evidence}")
         }
         other => format!("error: unknown verdict '{other}' (use met|not_yet|too_early_to_tell)"),
     }

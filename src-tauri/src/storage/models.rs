@@ -220,7 +220,7 @@ pub struct GoalSession {
     pub raw_request: String,
     /// Serialized GoalSpec.
     pub spec_json: String,
-    /// "intake" | "active" | "waiting" | "blocked" | "done" | "stopped"
+    /// "intake" | "active" | "paused" | "waiting" | "blocked" | "done" | "stopped"
     pub status: String,
     /// Serialized Vec<GoalTask>.
     pub kanban_json: String,
@@ -255,6 +255,9 @@ pub struct GoalSpec {
     /// Safety valve; None = unbounded but still stoppable.
     #[serde(default)]
     pub max_cycles: Option<i64>,
+    /// VPS ids the loop may act on (copied from the agent picker at lock time).
+    #[serde(default)]
+    pub vps_targets: Vec<String>,
 }
 
 /// One kanban card for a goal session.

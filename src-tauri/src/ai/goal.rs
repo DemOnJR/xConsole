@@ -14,6 +14,7 @@ use dashmap::DashSet;
 use tauri::{AppHandle, Emitter};
 
 use crate::ai::provider::{ChatMessage, StreamEvent};
+use crate::ai::interaction::SessionState;
 use crate::ai::safety::{self, ApprovalRegistry};
 use crate::ai::tools::ToolContext;
 use crate::ai::{agent, AgentHome};
@@ -36,6 +37,7 @@ pub struct GoalContext {
     pub home: AgentHome,
     pub approvals: ApprovalRegistry,
     pub running: GoalRunning,
+    pub session_state: SessionState,
 }
 
 /// Event channel for one goal session's live updates.
@@ -80,9 +82,8 @@ fn notify_user(app: &AppHandle, title: &str, body: &str) {
     let _ = app.emit("goal://notify", serde_json::json!({ "title": title, "body": body }));
 }
 
-/// The default wait before re-checking when "too early to tell" with no learned
-/// latency data — conservative ~3 days for a small site.
-const DEFAULT_REINDEX_WAIT_SECS: i64 = 3 * 24 * 3600;
+/// Brief pause between cycles so we do not hammer the provider. Not a user wait.
+const CYCLE_GAP: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Run one plan → act → verify cycle for an active goal. Returns the new status
 /// ("active" to continue, "waiting" to sleep, "done"/"blocked"/"stopped" to exit).
@@ -119,6 +120,7 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
         check_tooling: vec![],
         hard_constraints: vec![],
         max_cycles: None,
+        vps_targets: vec![],
     });
     let kanban = parse_kanban(goal);
     let kanban_summary: Vec<String> = kanban
@@ -126,15 +128,22 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
         .map(|t| format!("[{}] {} — {}", t.column, t.title, t.result.clone().unwrap_or_default()))
         .collect();
     let prompt = format!(
-        "You are driving an autonomous goal. Objective: {objective}\n\
+        "You are driving an autonomous goal. Keep the kanban LIVE this cycle.\n\
+         Objective: {objective}\n\
          Success criteria (you may ONLY conclude 'done' via goal_check_criteria with evidence):\n\
          {criteria}\n\
          Check method: {check}\n\
          Hard constraints (never violate): {constraints}\n\
+         Selected VPS targets (use these exact vps_id values with run_command):\n{targets}\n\
          Current kanban:\n{kanban}\n\n\
-         This cycle: plan the next concrete step (use goal_add_task / goal_update_task), \
-         execute it with your normal tools, then call goal_check_criteria. If a change needs \
-         external time (e.g. search reindexing), call goal_schedule_wait with a sensible delay.",
+         Rules:\n\
+         - Before you work, goal_add_task (column in_progress) for the concrete step.\n\
+         - As you work, goal_update_task to move cards: in_progress → testing → done.\n\
+         - Use waiting only when YOU are blocked on real external time the user asked for.\n\
+         - Never invent 'blocked' cards that just say they depend on another card — do the work.\n\
+         - Do NOT call goal_schedule_wait unless the user specified a delay/timeout.\n\
+         - If nothing is waiting, keep going: next check, next card.\n\
+         This cycle: pick the next unfinished card (or add one), execute it with tools, update the board, then goal_check_criteria (verdict not_yet unless truly done).",
         objective = spec.objective,
         criteria = spec.success_criteria.iter().map(|c| format!("- {c}")).collect::<Vec<_>>().join("\n"),
         check = spec.check_method,
@@ -143,8 +152,13 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
         } else {
             spec.hard_constraints.join("; ")
         },
+        targets = if spec.vps_targets.is_empty() {
+            "(none selected — call list_vps_targets / ask, or use hosts the user named)".to_string()
+        } else {
+            spec.vps_targets.iter().map(|t| format!("- {t}")).collect::<Vec<_>>().join("\n")
+        },
         kanban = if kanban_summary.is_empty() {
-            "(empty)".to_string()
+            "(empty — add the first card now)".to_string()
         } else {
             kanban_summary.join("\n")
         },
@@ -157,9 +171,9 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
         home: ctx.home.clone(),
         approvals: ctx.approvals.clone(),
         prompts: crate::ai::interaction::PromptRegistry::new(),
-        session_state: crate::ai::interaction::SessionState::new(),
+        session_state: ctx.session_state.clone(),
         session_id: format!("goal:{}", goal.id),
-        targets: Vec::new(),
+        targets: spec.vps_targets.clone(),
         safety: safety::global_safety_mode(&ctx.db),
         plan_mode: false,
         workspace_id: None,
@@ -179,8 +193,10 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
     let fresh = ctx.db.get_goal(&goal.id).map_err(|e| e.to_string())?;
     let fresh = fresh.ok_or_else(|| "goal session disappeared".to_string())?;
 
-    if result.is_err() {
-        return Ok("blocked".to_string()); // error → surface as blocked, not done
+    if let Err(e) = &result {
+        crate::diag(&format!("goal {} cycle error: {e}", goal.id));
+        let _ = ctx.app.emit(&event, StreamEvent::Error(e.clone()));
+        // Stay active — a failed cycle is not the end of the goal.
     }
 
     Ok(fresh.status.clone())
@@ -204,9 +220,15 @@ pub async fn run_loop(ctx: &GoalContext, goal_id: &str) {
         return;
     };
 
+    ctx.session_state.clear_cancel(&format!("goal:{goal_id}"));
+
     loop {
+        if ctx.session_state.is_cancelled(&format!("goal:{goal_id}")) {
+            return;
+        }
         if goal.status != "active" {
-            // waiting/blocked/done/stopped → stop driving (the tick resumes waiting).
+            // paused / waiting / blocked / done / stopped — stop driving.
+            // The tick only resumes waiting-with-a-due-time; paused waits for Continue.
             if goal.status == "waiting" {
                 if let Some(at) = goal.next_check_at.clone() {
                     let _ = ctx.app.emit(
@@ -218,15 +240,15 @@ pub async fn run_loop(ctx: &GoalContext, goal_id: &str) {
             return;
         }
 
-        let status = match run_cycle(ctx, &goal).await {
-            Ok(s) => s,
+        match run_cycle(ctx, &goal).await {
+            Ok(_) => {}
             Err(e) => {
+                crate::diag(&format!("goal {goal_id} cycle failed: {e}"));
                 let _ = ctx
                     .app
                     .emit(&goal_event(&goal.id), StreamEvent::Error(e.clone()));
-                return;
             }
-        };
+        }
 
         // Re-load after the cycle (the agent may have moved to waiting/done itself).
         let Some(fresh) = load_goal(&ctx.db, goal_id).ok().flatten() else {
@@ -234,10 +256,9 @@ pub async fn run_loop(ctx: &GoalContext, goal_id: &str) {
         };
         goal = fresh;
         if goal.status != "active" {
-            continue; // let the loop exit / handle waiting above
+            continue;
         }
 
-        // The agent stayed "active" without resolving: count a cycle and check the cap.
         let cycles = goal.cycles + 1;
         goal.cycles = cycles;
         let spec = parse_spec(&goal);
@@ -251,20 +272,7 @@ pub async fn run_loop(ctx: &GoalContext, goal_id: &str) {
             }
         }
         let _ = save_goal(ctx, &goal);
-
-        // If the agent called goal_schedule_wait, the status is now "waiting".
-        if goal.status == "waiting" {
-            continue;
-        }
-        // Safety valve: if the cycle made no status change and the spec had no
-        // explicit wait, force a short wait to avoid hot-looping.
-        if status == "active" && goal.status == "active" {
-            goal.status = "waiting".to_string();
-            goal.next_check_at = Some(
-                (Utc::now() + chrono::Duration::seconds(DEFAULT_REINDEX_WAIT_SECS)).to_rfc3339(),
-            );
-            let _ = save_goal(ctx, &goal);
-        }
+        tokio::time::sleep(CYCLE_GAP).await;
     }
 }
 
