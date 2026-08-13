@@ -936,7 +936,21 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
       setPicker({ kind: "help" });
     } else if (cmd.actionKey === "vision") {
       setPicker({ kind: "vision" });
+    } else if (cmd.actionKey === "goal" || cmd.actionKey === "loop") {
+      const prefix = `/${cmd.name} `;
+      setInput(prefix);
+      history.record(prefix);
     }
+  };
+
+  const pickSlashCommand = (cmd: SlashCommandDef) => {
+    if (cmd.needsArg) {
+      const prefix = `/${cmd.name} `;
+      setInput(prefix);
+      history.record(prefix);
+      return;
+    }
+    void executeSlashAction(cmd);
   };
 
   const addImages = (imgs: ChatImage[]) => {
@@ -1075,8 +1089,13 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
         .getState()
         .start(objective)
         .then((goalId) => {
+          useAgentStore.getState().setActiveIntakeGoal(goalId);
           useCanvasStore.getState().addGoal(goalId);
           void notify("Goal", "Intake started — answer the agent's questions, then lock the goal.");
+          void send(
+            `Start intake for this autonomous goal.\n\nObjective: ${objective}\n\nAsk only what you need (ask_user), then call goal_propose_spec with a concrete spec (objective, success criteria, how you will check, hard constraints). Do not start the work until the user locks the goal on the board.`,
+            { goalId },
+          );
         })
         .catch((e) => notify("Goal", String(e)));
       return;
@@ -1475,7 +1494,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
                   type="button"
                   onMouseDown={(e) => {
                     e.preventDefault();
-                    void executeSlashAction(cmd);
+                    pickSlashCommand(cmd);
                   }}
                   className={`flex w-full items-center justify-between rounded px-2 py-1 text-left text-[11px] transition ${
                     idx === slashIndex
@@ -1592,7 +1611,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
                     e.preventDefault();
                     const picked = slashSuggestions[slashIndex] || slashSuggestions[0];
                     if (picked) {
-                      void executeSlashAction(picked);
+                      pickSlashCommand(picked);
                       return;
                     }
                   }

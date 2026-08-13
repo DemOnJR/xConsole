@@ -51,6 +51,8 @@ pub async fn ai_chat(
     canvas: Option<Vec<crate::ai::canvas_context::CanvasNode>>,
     // Spoken voice conversation turn — use the lightweight, low-latency prompt.
     conversation: Option<bool>,
+    #[allow(non_snake_case)]
+    goal_id: Option<String>,
 ) -> Result<ChatMessage, String> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
     let event = chat_event(&session_id);
@@ -110,6 +112,7 @@ pub async fn ai_chat(
         edits: edits.inner().clone(),
         hooks: hooks_cfg,
         turn_images,
+        goal_id: goal_id.filter(|s| !s.is_empty()),
     };
 
     // If the chosen provider runs a local server, make sure it's up first so the

@@ -19,6 +19,8 @@ export interface SlashCommandDef {
     | "loop"
     | "goal"
     | "vision";
+  /** When set, picking the command inserts `/name ` so the user can type the rest. */
+  needsArg?: boolean;
 }
 
 export const SLASH_COMMANDS: SlashCommandDef[] = [
@@ -99,12 +101,14 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     syntax: "/loop <task>",
     description: "Loop the task until the agent finishes (Esc to stop)",
     actionKey: "loop",
+    needsArg: true,
   },
   {
     name: "goal",
     syntax: "/goal <objective>",
     description: "Set an autonomous goal — the agent asks what it needs once, then works until it's done",
     actionKey: "goal",
+    needsArg: true,
   },
   {
     name: "vision",
@@ -136,21 +140,35 @@ export function isSlashInput(input: string): boolean {
   return input.trimStart().startsWith("/");
 }
 
-export function filterSlashCommands(input: string): SlashCommandDef[] {
+/** First token after `/` and anything after the first space. */
+export function slashQuery(input: string): { name: string; rest: string } | null {
   const trimmed = input.trimStart();
-  if (!trimmed.startsWith("/")) return [];
-  const query = trimmed.slice(1).trim().toLowerCase();
-  if (!query) return SLASH_COMMANDS;
+  if (!trimmed.startsWith("/")) return null;
+  const body = trimmed.slice(1);
+  const sp = body.search(/\s/);
+  if (sp < 0) return { name: body.toLowerCase(), rest: "" };
+  return { name: body.slice(0, sp).toLowerCase(), rest: body.slice(sp + 1).trim() };
+}
+
+export function filterSlashCommands(input: string): SlashCommandDef[] {
+  const q = slashQuery(input);
+  if (!q) return [];
+  // `/goal deploy nginx` is an invocation, not a menu pick — don't steal Enter.
+  if (q.rest) return [];
+  // `/goal ` (trailing space) means the user is about to type the objective.
+  if (q.name && /\s$/.test(input) && SLASH_COMMANDS.some((c) => c.name === q.name)) {
+    return [];
+  }
+  if (!q.name) return SLASH_COMMANDS;
   return SLASH_COMMANDS.filter(
     (cmd) =>
-      cmd.name.toLowerCase().includes(query) ||
-      cmd.description.toLowerCase().includes(query),
+      cmd.name.toLowerCase().includes(q.name) ||
+      cmd.description.toLowerCase().includes(q.name),
   );
 }
 
 export function parseExactSlashCommand(input: string): SlashCommandDef | null {
-  const trimmed = input.trim().toLowerCase();
-  if (!trimmed.startsWith("/")) return null;
-  const name = trimmed.slice(1);
-  return SLASH_COMMANDS.find((cmd) => cmd.name === name) ?? null;
+  const q = slashQuery(input);
+  if (!q || q.rest) return null;
+  return SLASH_COMMANDS.find((cmd) => cmd.name === q.name) ?? null;
 }

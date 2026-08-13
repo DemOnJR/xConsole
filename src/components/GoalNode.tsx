@@ -3,6 +3,7 @@ import { NodeResizer, useStore, type NodeProps } from "@xyflow/react";
 import { api, onGoalEvent, type GoalMemory, type GoalSession, type GoalSpec, type GoalTask } from "../lib/tauri";
 import { useCanvasStore, type GoalNode as GoalNodeType } from "../stores/canvasStore";
 import { useGoalStore } from "../stores/goalStore";
+import { useAgentStore } from "../stores/agentStore";
 
 const COLUMNS = ["backlog", "in_progress", "waiting", "testing", "blocked", "done"];
 
@@ -135,6 +136,7 @@ export function GoalNode({ id, data, selected }: NodeProps<GoalNodeType>) {
   const onConfirm = async () => {
     try {
       await useGoalStore.getState().confirm(goalId);
+      useAgentStore.getState().setActiveIntakeGoal(null);
     } catch (e) {
       setError(String(e));
     }
@@ -142,6 +144,7 @@ export function GoalNode({ id, data, selected }: NodeProps<GoalNodeType>) {
   const onStop = async () => {
     try {
       await useGoalStore.getState().stop(goalId);
+      useAgentStore.getState().setActiveIntakeGoal(null);
     } catch (e) {
       setError(String(e));
     }

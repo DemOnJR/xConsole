@@ -50,6 +50,9 @@ pub struct ToolContext {
     /// Images from the latest user turn (for the `vision` side-call). Empty when
     /// the session model already received native image blocks.
     pub turn_images: Vec<crate::ai::provider::ChatImage>,
+    /// Intake goal id for a normal chat turn (`/goal`). Loop cycles use `goal:<id>`
+    /// as the session id instead.
+    pub goal_id: Option<String>,
 }
 
 /// Tool schemas advertised to the model.
@@ -2395,11 +2398,23 @@ async fn present_plan(ctx: &ToolContext, args: &Value) -> String {
 // the session id ("goal:<id>"), mirroring how cron jobs use "cron:<id>".
 // ---------------------------------------------------------------------------
 
+fn latest_intake_goal_id(ctx: &ToolContext) -> Option<String> {
+    ctx.db
+        .list_goals()
+        .ok()?
+        .into_iter()
+        .rev()
+        .find(|g| g.status == "intake")
+        .map(|g| g.id)
+}
+
 fn goal_session_mut(
     ctx: &ToolContext,
 ) -> Result<(String, crate::storage::models::GoalSession), String> {
     let goal_id = crate::ai::goal::goal_id_from_session(&ctx.session_id)
-        .ok_or_else(|| "goal tools are only available inside a goal session".to_string())?;
+        .or_else(|| ctx.goal_id.clone().filter(|s| !s.is_empty()))
+        .or_else(|| latest_intake_goal_id(ctx))
+        .ok_or_else(|| "no active goal — start one with /goal <objective>".to_string())?;
     let goal = ctx
         .db
         .get_goal(&goal_id)

@@ -991,6 +991,7 @@ export const api = {
     workspaceId?: string | null;
     canvas?: CanvasSnapshotNode[];
     conversation?: boolean;
+    goalId?: string | null;
   }) =>
     invoke<ChatMessage>("ai_chat", {
       sessionId: args.sessionId,
@@ -1001,6 +1002,7 @@ export const api = {
       workspaceId: args.workspaceId ?? null,
       canvas: args.canvas ?? [],
       conversation: args.conversation ?? false,
+      goalId: args.goalId ?? null,
     }),
 
   agentCancel: (sessionId: string) => invoke<void>("agent_cancel", { sessionId }),

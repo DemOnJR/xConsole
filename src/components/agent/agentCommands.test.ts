@@ -3,6 +3,7 @@ import {
   filterSlashCommands,
   isSlashInput,
   parseExactSlashCommand,
+  slashQuery,
   SLASH_COMMANDS,
 } from "./agentCommands";
 
@@ -36,7 +37,20 @@ describe("Agent Slash Commands", () => {
     expect(parseExactSlashCommand("/plan")?.actionKey).toBe("plan");
     expect(parseExactSlashCommand("/compact")?.actionKey).toBe("compact");
     expect(parseExactSlashCommand("/vision")?.actionKey).toBe("vision");
+    expect(parseExactSlashCommand("/goal")?.actionKey).toBe("goal");
+    expect(parseExactSlashCommand("/goal rank my site")).toBeNull();
     expect(parseExactSlashCommand("/unknown")).toBeNull();
+  });
+
+  it("does not intercept /goal or /loop once arguments are typed", () => {
+    expect(slashQuery("/goal rank my site")).toEqual({
+      name: "goal",
+      rest: "rank my site",
+    });
+    expect(filterSlashCommands("/goal rank my site")).toEqual([]);
+    expect(filterSlashCommands("/goal ")).toEqual([]);
+    expect(filterSlashCommands("/goal").map((c) => c.name)).toContain("goal");
+    expect(SLASH_COMMANDS.find((c) => c.name === "goal")?.needsArg).toBe(true);
   });
 
   it("finds /vision by name and description", () => {

@@ -56,6 +56,7 @@ pub async fn confirm_goal(
     home: State<'_, AgentHome>,
     sessions: State<'_, SessionManager>,
     approvals: State<'_, ApprovalRegistry>,
+    running: State<'_, GoalRunning>,
     goal_id: String,
 ) -> Result<(), String> {
     let mut goal = db
@@ -75,7 +76,7 @@ pub async fn confirm_goal(
         sessions: sessions.inner().clone(),
         home: home.inner().clone(),
         approvals: approvals.inner().clone(),
-        running: GoalRunning::default(),
+        running: running.inner().clone(),
     };
     let id = goal_id.clone();
     tauri::async_runtime::spawn(async move {

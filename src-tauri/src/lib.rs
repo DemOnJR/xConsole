@@ -254,6 +254,7 @@ pub fn run() {
             app.manage(session_state);
             app.manage(llama_server);
             app.manage(cron_running);
+            app.manage(goal_running);
 
             // Idle auto-lock. The timer lives in the backend on purpose: a JS timer stops
             // with a hung or crashed webview, and "the lock quietly stopped working" is the

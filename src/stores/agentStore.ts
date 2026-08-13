@@ -217,14 +217,22 @@ interface AgentState {
   queued: QueuedMessage[];
   /** After Stop, do not auto-send the queue until the user sends again. */
   holdQueue: boolean;
+  /** Intake `/goal` session the chat tools should bind to. */
+  activeIntakeGoalId: string | null;
 
   init: () => Promise<void>;
   setTargets: (ids: string[]) => void;
   setSpeaking: (v: boolean) => void;
   togglePlanMode: () => void;
+  setActiveIntakeGoal: (id: string | null) => void;
   send: (
     text: string,
-    opts?: { providerId?: string; conversation?: boolean; images?: import("../lib/tauri").ChatImage[] },
+    opts?: {
+      providerId?: string;
+      conversation?: boolean;
+      images?: import("../lib/tauri").ChatImage[];
+      goalId?: string;
+    },
   ) => Promise<void>;
   /** Queue a follow-up if a turn is running; otherwise send now. */
   enqueueOrSend: (text: string, images?: import("../lib/tauri").ChatImage[]) => void;
@@ -345,6 +353,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   error: null,
   queued: [],
   holdQueue: false,
+  activeIntakeGoalId: null,
   targets: (() => {
     try {
       const raw = localStorage.getItem("xconsole-agent-targets");
@@ -574,6 +583,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       conversationCostUsd: 0,
       queued: [],
       holdQueue: false,
+      activeIntakeGoalId: null,
     });
     const list = await api.listAgentConversations().catch(() => get().conversations);
     set({ conversations: list });
@@ -613,6 +623,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       conversationCostUsd: 0,
       queued: [],
       holdQueue: false,
+      activeIntakeGoalId: null,
     });
     const list = await api.listAgentConversations().catch(() => get().conversations);
     set({ conversations: list });
@@ -661,6 +672,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   },
 
   setSpeaking: (speaking) => set({ speaking }),
+
+  setActiveIntakeGoal: (id) => set({ activeIntakeGoalId: id }),
 
   enqueue: (text, images) => {
     set((s) => ({ queued: enqueueMessage(s.queued, text, images) }));
@@ -866,6 +879,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         workspaceId: useWorkspaceStore.getState().activeId,
         canvas: canvasSnapshot(),
         conversation: opts?.conversation ?? false,
+        goalId: opts?.goalId ?? get().activeIntakeGoalId,
       });
       const tokenStats =
         latestStats ??

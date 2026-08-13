@@ -167,6 +167,7 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
         edits: crate::ai::edits::EditJournal::with_db(ctx.db.clone()),
         hooks: hooks_cfg,
         turn_images: Vec::new(),
+        goal_id: Some(goal.id.clone()),
     };
 
     let messages = vec![ChatMessage::user(prompt)];
