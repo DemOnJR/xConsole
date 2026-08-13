@@ -72,14 +72,11 @@ pub async fn run_turn(
         .flatten()
         .and_then(|s| s.parse().ok())
         .unwrap_or(4000);
-    // Truncate a tool result for context, keeping the head and marking the cut.
-    let cap_tool_result = |output: &str| -> String {
-        if tool_result_max_chars == 0 || output.len() <= tool_result_max_chars {
-            return output.to_string();
-        }
-        let mut cut = crate::ai::text::truncate_bytes(output, tool_result_max_chars).to_string();
-        cut.push_str("\n…[output truncated to save context]");
-        cut
+    // RTK-style: compress by command type first (failures, not cargo progress;
+    // git hints dropped; logs deduped), then apply the hard char cap.
+    let cap_tool_result = |call: &crate::ai::provider::ToolCall, output: &str| -> String {
+        let cmd = crate::ai::output_compress::command_from_call(&call.name, &call.arguments);
+        crate::ai::output_compress::compress_and_cap(&cmd, output, tool_result_max_chars)
     };
 
     // Per-workspace agent status (working / planning / testing / idle) shown on the
@@ -808,28 +805,28 @@ pub async fn run_turn(
                     let telemetry = telemetry.clone();
                     async move {
                         let output = tools::dispatch_with_telemetry(tc, &call, sink, Some(&telemetry)).await;
-                        (call.id, output)
+                        (call, output)
                     }
                 })
                 .collect();
             let results = futures_util::future::join_all(futs).await;
-            for (id, output) in results {
-                let capped = cap_tool_result(&output);
+            for (call, output) in results {
+                let capped = cap_tool_result(&call, &output);
                 emit(
                     Some(sink),
                     StreamEvent::ToolResult {
-                        id: id.clone(),
+                        id: call.id.clone(),
                         output: capped.clone(),
                     },
                 );
-                messages.push(ChatMessage::tool_result(id, capped));
+                messages.push(ChatMessage::tool_result(call.id, capped));
             }
         } else {
             for call in &resp.tool_calls {
                 // The provider already streamed StreamEvent::ToolCall for each call;
                 // the single ToolResult is emitted by this loop below. No re-emit here.
                 let output = tools::dispatch_with_telemetry(tc, call, sink, Some(&telemetry)).await;
-                let capped = cap_tool_result(&output);
+                let capped = cap_tool_result(call, &output);
                 emit(
                     Some(sink),
                     StreamEvent::ToolResult {

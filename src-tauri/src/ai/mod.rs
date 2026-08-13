@@ -22,6 +22,7 @@ pub mod list_models;
 pub mod llama;
 pub mod memory;
 pub mod models;
+pub mod output_compress;
 pub mod provider;
 pub mod providers;
 pub mod redaction;

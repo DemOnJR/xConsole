@@ -3369,6 +3369,15 @@ fn selftest() -> i32 {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    println!("\n=== SELFTEST: RTK-style output compression (50 unique cases) ===");
+    {
+        let cases = crate::ai::output_compress::selftest();
+        check("00 fifty named cases", cases.len() == 50);
+        for (name, ok) in cases {
+            check(name, ok);
+        }
+    }
+
     println!("\n=== SELFTEST: reflection (self-improvement / ETAPA 29) ===");
     let failed = vec![
         ChatMessage::user("run foo"),
