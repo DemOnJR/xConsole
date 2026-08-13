@@ -150,7 +150,13 @@ pub fn analyze_turn(messages: &[ChatMessage], iters_used: usize, max_iters: usiz
         }
         let (tool, args_brief) =
             call_for_result(messages, idx).unwrap_or_else(|| ("a tool".to_string(), String::new()));
-        let error = take_chars(&crate::ai::redaction::redact_text(&m.content), 200);
+        let mut error = crate::ai::redaction::redact_text(&m.content);
+        // A redacted secret must not leave the surrounding command in MEMORY.md
+        // (e.g. `mysql -u root -p[REDACTED]` still leaks the invocation).
+        if error.contains("[REDACTED]") {
+            error = format!("error: `{tool}` output contained a secret and was redacted");
+        }
+        let error = take_chars(&error, 200);
         let dedup_key = format!("{}\u{0}{}", tool, first_line(&error).to_lowercase());
         if seen.insert(dedup_key) {
             out.failures.push(ToolFailure { tool, args_brief, error });

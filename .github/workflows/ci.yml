@@ -1,14 +1,23 @@
 name: CI
 
+# Fast PR/push checks. Goal: ~1–2 minutes with a warm cache.
+# Heavy supply-chain installs (cargo-audit / deny / cooldown from source)
+# live in supply-chain.yml (weekly + manual).
+
 on:
   push:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -16,43 +25,26 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      # Frozen lockfile keeps the 7-day cooldown guarantee intact.
       - run: pnpm install --frozen-lockfile
-      - run: pnpm audit --audit-level moderate
-      - run: pnpm build
+      - name: Typecheck + unit tests
+        run: pnpm check
+      - name: Dependency audit
+        run: pnpm audit --audit-level moderate
 
   backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install system deps (Tauri on Linux)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - name: Install supply-chain tooling
-        run: cargo install cargo-audit cargo-deny cargo-cooldown --locked
-      - name: Build with cooldown (7-day min publish age)
-        working-directory: src-tauri
-        run: cargo cooldown check --locked
-      - name: Security audit (RustSec)
-        working-directory: src-tauri
-        # Every ignore here is justified in deny.toml — keep the two lists in step, and
-        # read the rationale there before adding to either.
-        #   RUSTSEC-2023-0071  rsa "Marvin Attack" — no fixed release exists upstream.
-        #   RUSTSEC-2026-0194  quick-xml quadratic attribute check (DoS).
-        #   RUSTSEC-2026-0195  quick-xml unbounded namespace allocation (DoS).
-        # Both quick-xml advisories are in its reader; the two paths that reach us either
-        # never parse (toast XML is written and escaped) or parse only our own build
-        # config. Fixed in >=0.41, which plist/tauri-winrt-notification pin us away from.
-        run: |
-          cargo audit \
-            --ignore RUSTSEC-2023-0071 \
-            --ignore RUSTSEC-2026-0194 \
-            --ignore RUSTSEC-2026-0195
-      - name: Policy check (advisories, licenses, sources)
-        working-directory: src-tauri
-        run: cargo deny check
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Cached WebKit / GTK headers (Tauri link)
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          version: "1"
       - name: Unit tests
         working-directory: src-tauri
-        run: cargo test --locked
+        run: cargo test --locked --lib

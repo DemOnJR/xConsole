@@ -58,10 +58,13 @@ fn redact_pem(input: &str) -> String {
             break;
         };
         let end_start = start + end_rel;
-        let Some(end_line_rel) = input[end_start..].find("-----") else {
+        // The first "-----" in this slice is the start of "-----END ". Skip that
+        // and close on the trailing dashes of "-----END <LABEL>-----".
+        let after_label = end_start + "-----END ".len();
+        let Some(end_line_rel) = input[after_label..].find("-----") else {
             break;
         };
-        let end = end_start + end_line_rel + 5;
+        let end = after_label + end_line_rel + 5;
         output.push_str(&input[cursor..start]);
         output.push_str(REDACTED);
         cursor = end;
@@ -108,6 +111,10 @@ fn redact_marker(input: &str, marker: &str) -> String {
             continue;
         }
         let value = skip_whitespace(input, value_start);
+        if input[value..].starts_with(REDACTED) {
+            cursor = value + REDACTED.len();
+            continue;
+        }
         let end = value_end(input, value);
         if value == end {
             cursor = value_start;
@@ -141,6 +148,10 @@ fn redact_mysql_password_flag(input: &str) -> String {
             continue;
         }
         let value = skip_whitespace(input, start + 2);
+        if input[value..].starts_with(REDACTED) {
+            cursor = value + REDACTED.len();
+            continue;
+        }
         if value == value_end(input, value) || input[value..].starts_with(char::is_numeric) {
             cursor = start + 2;
             continue;
