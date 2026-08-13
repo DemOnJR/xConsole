@@ -1,33 +1,19 @@
 /**
- * Snap-drag state: who is being dragged, where, and the zone under the cursor.
- *
- * The node headers start a snap drag with `beginSnapDrag`; the overlay reads this
- * state to draw the zones and highlight. `endSnapDrag` applies the snapped layout
- * via the canvas store (switching to tile mode) when a zone is hit.
+ * Drag-to-place: highlight the window (or pane edge) under the cursor and, on
+ * drop, swap or dock. Other tiles are not reshuffled.
  */
 import { create } from "zustand";
 import { useCanvasStore } from "../stores/canvasStore";
-import { snapZones, zoneAt, snapLayout, type SnapZone } from "./snapLayout";
+import { computeBoxes, reconcile, rowsFromPositions } from "./tileLayout";
+import { applyDrop, dropTargetAt, treeOf, type DropTarget } from "./tileTree";
 
 interface SnapDragState {
-  /** The node being dragged, or null when idle. */
   nodeId: string | null;
-  /** Cursor position in pane coordinates (0..1). */
   px: number;
   py: number;
-  /** Total node count when the drag started. */
-  count: number;
-  /** The layout that was active when the drag started (restored on a miss). */
   prevLayout: ReturnType<typeof useCanvasStore.getState>["tileLayout"];
-  /** The layout mode at drag start, so a miss restores it too. */
   prevMode: "freeform" | "tile";
-  /**
-   * Whether the preview is "armed" — the cursor has entered a zone's trigger band.
-   * Windows only shows the layout overlay once you get close to a snap position.
-   */
-  armed: boolean;
-  /** The zone the cursor is currently in (highlighted). */
-  zone: SnapZone | null;
+  hint: DropTarget | null;
   begin: (nodeId: string) => void;
   move: (px: number, py: number) => void;
   end: () => void;
@@ -37,73 +23,90 @@ export const useSnapDragStore = create<SnapDragState>((set) => ({
   nodeId: null,
   px: 0,
   py: 0,
-  count: 0,
   prevLayout: null,
   prevMode: "freeform",
-  armed: false,
-  zone: null,
+  hint: null,
   begin: (nodeId) => {
     const canvas = useCanvasStore.getState();
     set({
       nodeId,
       px: 0,
       py: 0,
-      count: canvas.nodes.length,
       prevLayout: canvas.tileLayout,
       prevMode: canvas.layoutMode,
-      armed: false,
-      zone: null,
+      hint: null,
     });
   },
   move: (px, py) => {
-    const { count } = useSnapDragStore.getState();
-    const zones = snapZones(count);
-    const zone = zoneAt(zones, px, py);
-    // Arm when the cursor enters any zone; stay armed while inside one. Leaving all
-    // zones disarms — the preview disappears until the cursor comes back.
-    const armed = zone !== null;
-    set({ px, py, zone: zone ?? null, armed });
+    const { nodeId } = useSnapDragStore.getState();
+    if (!nodeId) {
+      set({ px, py, hint: null });
+      return;
+    }
+    const canvas = useCanvasStore.getState();
+    const pane = canvas.paneSize;
+    if (!pane || pane.width <= 0 || pane.height <= 0) {
+      set({ px, py, hint: null });
+      return;
+    }
+    const layout =
+      canvas.layoutMode === "tile" && canvas.tileLayout
+        ? reconcile(canvas.tileLayout, canvas.nodes.map((n) => n.id))
+        : rowsFromPositions(
+            canvas.nodes.map((n) => ({
+              id: n.id,
+              x: n.position.x,
+              y: n.position.y,
+              width: Number(n.width) || 460,
+              height: Number(n.height) || 320,
+            })),
+          );
+    const boxes = computeBoxes(layout, pane.width, pane.height);
+    const hint = dropTargetAt(boxes, px * pane.width, py * pane.height, pane.width, pane.height, nodeId);
+    set({ px, py, hint });
   },
-  end: () => set({ nodeId: null, px: 0, py: 0, armed: false, zone: null }),
+  end: () => set({ nodeId: null, px: 0, py: 0, hint: null }),
 }));
 
-/** The zone currently under the cursor, if any (and the preview is armed). */
-export function activeSnapZone(): SnapZone | null {
-  const { nodeId, zone, armed } = useSnapDragStore.getState();
-  if (!nodeId || !armed) return null;
-  return zone;
+export function activeDropHint(): DropTarget | null {
+  const { nodeId, hint } = useSnapDragStore.getState();
+  return nodeId ? hint : null;
 }
 
-/**
- * Finish a snap drag. If the cursor is over a zone, tile the dragged node into it and
- * switch the canvas to tile mode so the arrangement sticks. Otherwise restore the
- * layout that was active before the drag (so a stray drag in tile mode doesn't break
- * the grid). Returns whether it snapped.
- */
+/** @deprecated use activeDropHint */
+export function activeSnapZone(): DropTarget | null {
+  return activeDropHint();
+}
+
 export function endSnapDrag(): boolean {
-  const { nodeId, px, py, count, prevLayout, prevMode } = useSnapDragStore.getState();
+  const { nodeId, hint, prevLayout, prevMode } = useSnapDragStore.getState();
   useSnapDragStore.getState().end();
   if (!nodeId) return false;
 
-  const zone = zoneAt(snapZones(count), px, py);
-  if (!zone) {
-    // Miss: restore the layout that was active when the drag started, so a stray
-    // drag in tile mode doesn't leave the grid half-rearranged.
-    useCanvasStore.setState({ layoutMode: prevMode });
-    if (prevMode === "tile" && prevLayout) {
-      useCanvasStore.setState({ tileLayout: prevLayout });
-      useCanvasStore.getState().arrangeTiles();
+  if (!hint) {
+    const canvas = useCanvasStore.getState();
+    if (prevMode === "tile") {
+      useCanvasStore.setState({ layoutMode: "tile", tileLayout: prevLayout });
+      canvas.arrangeTiles();
     }
     return false;
   }
 
   const canvas = useCanvasStore.getState();
-  const others = canvas.nodes.filter((n) => n.id !== nodeId).map((n) => n.id);
-  const layout = snapLayout(nodeId, others, zone);
-  // Switch to tile mode WITHOUT re-deriving from current positions (setLayout would
-  // call retileFromPositions and wipe the snap), then install the snapped arrangement.
-  useCanvasStore.setState({ layoutMode: "tile" });
-  useCanvasStore.setState({ tileLayout: layout });
+  const base =
+    (prevMode === "tile" && prevLayout
+      ? reconcile(prevLayout, canvas.nodes.map((n) => n.id))
+      : rowsFromPositions(
+          canvas.nodes.map((n) => ({
+            id: n.id,
+            x: n.position.x,
+            y: n.position.y,
+            width: Number(n.width) || 460,
+            height: Number(n.height) || 320,
+          })),
+        ));
+  const layout = applyDrop({ ...base, tree: base.tree ?? treeOf(base) }, nodeId, hint);
+  useCanvasStore.setState({ layoutMode: "tile", tileLayout: layout });
   useCanvasStore.getState().arrangeTiles();
   useCanvasStore.getState().focus(nodeId);
   return true;

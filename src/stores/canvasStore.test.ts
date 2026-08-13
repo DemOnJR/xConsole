@@ -208,11 +208,18 @@ describe("column tiling (side-by-side panes)", () => {
       },
     ]);
     const layoutAfter = useCanvasStore.getState().tileLayout;
-    expect(layoutAfter?.columns).toBeTruthy();
-    expect(layoutAfter?.columns?.length).toBe(2);
-    // Left column still stacks the first two, right column still has the third.
-    expect(layoutAfter?.columns?.[0].items.map((i) => i.id)).toEqual([ids[0], ids[1]]);
-    expect(layoutAfter?.columns?.[1].items.map((i) => i.id)).toEqual([ids[2]]);
+    const tree = layoutAfter?.tree;
+    expect(tree?.kind).toBe("row");
+    // Left stack still has the first two, right pane still has the third.
+    const kids = tree && tree.kind !== "leaf" ? tree.kids : [];
+    // Walk leaves of each side.
+    const leaves = (n: typeof kids[0] | undefined): string[] => {
+      if (!n) return [];
+      if (n.kind === "leaf") return [n.id];
+      return n.kids.flatMap(leaves);
+    };
+    expect(leaves(kids[0])).toEqual([ids[0], ids[1]]);
+    expect(leaves(kids[1])).toEqual([ids[2]]);
     expectColumnsGapFree();
   });
 

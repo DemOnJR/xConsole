@@ -1,3 +1,11 @@
+import {
+  computeTreeBoxes,
+  fillOfTree,
+  reconcileTree,
+  treeFromPositions,
+  treeOf,
+} from "./tileTree";
+
 /**
  * Freestyle tiling: the pure geometry layer.
  *
@@ -29,6 +37,12 @@ export interface TileRow {
 }
 
 export interface TileLayout {
+  /**
+   * Nested split tree. When set, boxes / drag / resize use this so a tall pane
+   * can sit beside several stacked rows. `rows` / `columns` stay as a flat
+   * fallback for older workspaces.
+   */
+  tree?: import("./tileTree").Split;
   rows: TileRow[];
   /**
    * When set, the layout is **column-based** (side-by-side panes) instead of the
@@ -154,12 +168,14 @@ export function layoutFromCounts(ids: string[], counts: number[]): TileLayout {
     if (rows.length > 0) rows[rows.length - 1].items.push(...rest);
     else rows.push({ weight: 1, items: rest });
   }
-  return { rows };
+  const layout = { rows };
+  return { ...layout, tree: treeOf(layout) };
 }
 
 /** The balanced layout for a set of nodes — what "Auto" gives you. */
 export function autoLayout(ids: string[]): TileLayout {
-  return layoutFromCounts(ids, defaultRowCounts(ids.length));
+  const layout = layoutFromCounts(ids, defaultRowCounts(ids.length));
+  return { ...layout, tree: treeOf(layout) };
 }
 
 /** A node as the position reader sees it. */
@@ -276,7 +292,9 @@ export function rowsFromPositions(nodes: PlacedNode[]): TileLayout {
     bandsY.reduce((s, r) => s + r.reduce((m, n) => Math.max(m, n.height), 0), 0) /
     Math.max(bandsY.length, 1);
 
+  const tree = treeFromPositions(nodes);
   return normalize({
+    tree,
     rows: bandsY.map((band) => {
       const ordered = [...band].sort(
         (a, b) => a.x + a.width / 2 - (b.x + b.width / 2),
@@ -369,7 +387,8 @@ export function reconcile(layout: TileLayout | null, ids: string[]): TileLayout 
     kept[target].items.push({ id, weight: 1 });
     placed.add(id);
   }
-  return normalize({ ...layout, rows: kept });
+  const next = normalize({ ...layout, rows: kept });
+  return { ...next, tree: reconcileTree(layout.tree ?? treeOf(next), ids) };
 }
 
 /**
@@ -385,6 +404,13 @@ export function computeBoxes(
   paneHeight: number,
 ): TileBox[] {
   if (paneWidth <= 0 || paneHeight <= 0) return [];
+
+  if (layout.tree) {
+    const fill = layout.tree.kind === "leaf" ? fillOfTree(layout) : { w: 1, h: 1 };
+    const width = Math.max(1, Math.round(paneWidth * fill.w));
+    const height = Math.max(1, Math.round(paneHeight * fill.h));
+    return computeTreeBoxes(layout.tree, 0, 0, width, height);
+  }
 
   if (layout.columns) {
     return computeColumnBoxes(layout, paneWidth, paneHeight);
@@ -747,10 +773,11 @@ export function layoutFromColumnCounts(
     else columns.push({ weight: 1, items: rest });
   }
   const rows = columns.flatMap((c) => c.items);
-  return normalize({
+  const layout = normalize({
     rows: rows.length > 0 ? [{ weight: 1, items: rows }] : [],
     columns,
   });
+  return { ...layout, tree: treeOf(layout) };
 }
 
 /** The current column shape, e.g. `[2, 1]` — empty when the layout is row-based. */

@@ -10,6 +10,12 @@ import {
 } from "./canvasStore";
 import { useSessionStore } from "./sessionStore";
 import { reconcile, type TileLayout } from "../lib/tileLayout";
+import {
+  deserializeSplit,
+  serializeSplit,
+  treeOf,
+  type SavedSplit,
+} from "../lib/tileTree";
 
 /** Deterministic node id for a workspace slot (stable across reopen). */
 export const workspaceNodeId = (workspaceId: string, index: number) =>
@@ -69,6 +75,7 @@ export function parseSavedNodes(
   edges: SavedEdge[];
   tiles: SavedTileRow[];
   columns?: SavedTileColumn[];
+  tree?: SavedSplit;
 } {
   if (!nodesJson) return { nodes: [], edges: [], tiles: [] };
   try {
@@ -79,6 +86,7 @@ export function parseSavedNodes(
       edges: raw.edges ?? [],
       tiles: raw.tiles ?? [],
       columns: raw.columns,
+      tree: raw.tree,
     };
   } catch {
     return { nodes: [], edges: [], tiles: [] };
@@ -91,12 +99,13 @@ export function parseSavedNodes(
 function serializeTiles(
   layout: TileLayout | null,
   indexOf: (nodeId: string) => number,
-): { rows: SavedTileRow[]; columns?: SavedTileColumn[] } {
+): { rows: SavedTileRow[]; columns?: SavedTileColumn[]; tree?: SavedSplit } {
   if (!layout) return { rows: [] };
   const toSaved = (items: { id: string; weight: number }[]) =>
     items
       .map((it) => ({ index: indexOf(it.id), weight: it.weight }))
       .filter((it) => it.index >= 0);
+  const tree = serializeSplit(layout.tree ?? treeOf(layout), indexOf);
   return {
     rows: layout.rows
       .map((row) => ({ weight: row.weight, items: toSaved(row.items) }))
@@ -104,6 +113,7 @@ function serializeTiles(
     columns: layout.columns
       ?.map((col) => ({ weight: col.weight, items: toSaved(col.items) }))
       .filter((col) => col.items.length > 0),
+    tree: tree ?? undefined,
   };
 }
 
@@ -112,6 +122,7 @@ function deserializeTiles(
   rows: SavedTileRow[],
   columns: SavedTileColumn[] | undefined,
   ids: string[],
+  tree?: SavedSplit,
 ): TileLayout | null {
   const toItems = (items: { index: number; weight: number }[]) =>
     items
@@ -137,7 +148,13 @@ function deserializeTiles(
     }
   }
 
-  if (!Array.isArray(rows) || rows.length === 0) return null;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    if (tree) {
+      const parsed = deserializeSplit(tree, ids);
+      if (parsed) return { rows: [{ weight: 1, items: [] }], tree: parsed };
+    }
+    return null;
+  }
   const layout: TileLayout = {
     rows: rows
       .map((row) => ({
@@ -146,7 +163,12 @@ function deserializeTiles(
       }))
       .filter((row) => row.items.length > 0),
   };
-  return layout.rows.length > 0 ? layout : null;
+  if (layout.rows.length === 0) return null;
+  if (tree) {
+    const parsed = deserializeSplit(tree, ids);
+    if (parsed) layout.tree = parsed;
+  }
+  return layout;
 }
 
 export const WORKSPACE_COLORS = [
@@ -260,6 +282,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         edges: savedEdges,
         tiles: savedTiles.rows,
         columns: savedTiles.columns,
+        tree: savedTiles.tree,
       }),
       color: color ?? existing?.color ?? null,
       icon: icon ?? existing?.icon ?? null,
@@ -300,7 +323,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     // no longer exist and silently reset to the balanced default. Re-point it.
     useCanvasStore
       .getState()
-      .setTileLayout(deserializeTiles(savedTiles.rows, savedTiles.columns, rebound.map((n) => n.id)));
+      .setTileLayout(
+        deserializeTiles(savedTiles.rows, savedTiles.columns, rebound.map((n) => n.id), savedTiles.tree),
+      );
 
     await get().load();
     set({ activeId: ws.id });
@@ -371,6 +396,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       edges: savedEdges,
       tiles: savedTiles,
       columns: savedColumns,
+      tree: savedTree,
     } = parseSavedNodes(ws.nodes_json);
     let viewport: Viewport = { x: 0, y: 0, zoom: 1 };
     if (ws.viewport_json) {
@@ -426,7 +452,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         data: { kind: "sftp-terminal" },
       };
     });
-    const tiles = deserializeTiles(savedTiles, savedColumns, nodes.map((n) => n.id));
+    const tiles = deserializeTiles(savedTiles, savedColumns, nodes.map((n) => n.id), savedTree);
     set({ activeId: id });
     return { nodes, edges, viewport, layout, tiles };
   },

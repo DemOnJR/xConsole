@@ -27,6 +27,7 @@ import {
   toggleFullWidth,
   type TileLayout,
 } from "../lib/tileLayout";
+import { moveInTree, resizeTree, treeOf } from "../lib/tileTree";
 
 // "snap" was removed: it snapped node positions to a grid while dragging, which was
 // neither freeform nor a real tiling, and nobody used it.
@@ -273,6 +274,15 @@ export const useCanvasStore = create<CanvasState>()(
                     layout,
                     Math.abs(dw) >= 1 ? dw / s.paneSize.width : 0,
                     Math.abs(dh) >= 1 ? dh / s.paneSize.height : 0,
+                  );
+                  continue;
+                }
+                if (layout.tree) {
+                  layout = resizeTree(
+                    layout,
+                    c.id,
+                    Math.abs(dw) >= 1 ? (dw / s.paneSize.width) * 2 : 0,
+                    Math.abs(dh) >= 1 ? (dh / s.paneSize.height) * 2 : 0,
                   );
                   continue;
                 }
@@ -635,23 +645,38 @@ export const useCanvasStore = create<CanvasState>()(
       moveTile: (id, dir, axis) =>
         set((s) => {
           const base = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
-          const next =
-            axis === "horizontal" ? moveWithinRow(base, id, dir) : moveToRow(base, id, dir);
+          const next = base.tree
+            ? moveInTree(base, id, dir, axis)
+            : axis === "horizontal"
+              ? moveWithinRow(base, id, dir)
+              : moveToRow(base, id, dir);
           return applyTiles({ ...s, tileLayout: next }, s.paneSize ?? undefined);
         }),
 
       growTile: (id, delta, axis) =>
         set((s) => {
           const base = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
-          const next =
-            axis === "horizontal" ? resizeTile(base, id, delta) : resizeRow(base, id, delta);
+          const next = base.tree
+            ? resizeTree(
+                base,
+                id,
+                axis === "horizontal" ? delta : 0,
+                axis === "vertical" ? delta : 0,
+              )
+            : axis === "horizontal"
+              ? resizeTile(base, id, delta)
+              : resizeRow(base, id, delta);
           return applyTiles({ ...s, tileLayout: next }, s.paneSize ?? undefined);
         }),
 
       toggleTileFullWidth: (id) =>
         set((s) => {
           const base = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
-          return applyTiles({ ...s, tileLayout: toggleFullWidth(base, id) }, s.paneSize ?? undefined);
+          const next = toggleFullWidth(base, id);
+          return applyTiles(
+            { ...s, tileLayout: { ...next, tree: treeOf(next) } },
+            s.paneSize ?? undefined,
+          );
         }),
 
       clear: () =>

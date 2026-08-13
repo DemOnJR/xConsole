@@ -1,42 +1,33 @@
-import { useSnapDragStore, activeSnapZone } from "../lib/snapDrag";
-import { snapZones } from "../lib/snapLayout";
+import { useSnapDragStore } from "../lib/snapDrag";
+import { useCanvasStore } from "../stores/canvasStore";
 
 /**
- * Windows-style snap-layout preview. Rendered inside the React Flow viewport (so it
- * inherits the pane coordinate system and zoom). While a node is being dragged, it
- * draws the translucent zones — but only once the cursor has entered a zone's trigger
- * band (Windows only shows the layout when you get close to a snap position), and it
- * highlights the zone currently under the cursor.
+ * Highlights the swap / dock target under the cursor. One rectangle — not a
+ * preset of zones that would reshuffle the whole grid.
  */
 export function SnapPreview() {
-  const armed = useSnapDragStore((s) => s.armed);
-  const count = useSnapDragStore((s) => s.count);
+  const nodeId = useSnapDragStore((s) => s.nodeId);
+  const hint = useSnapDragStore((s) => s.hint);
+  const pane = useCanvasStore((s) => s.paneSize);
 
-  if (!armed) return null;
-  const zones = snapZones(count);
-  const active = activeSnapZone();
+  if (!nodeId || !hint || !pane || pane.width <= 0 || pane.height <= 0) return null;
+
+  const label =
+    hint.kind === "swap" ? "Swap" : hint.kind === "dock" ? `Dock ${hint.edge}` : `Place ${hint.edge}`;
 
   return (
     <div className="pointer-events-none absolute inset-0 z-40">
-      {zones.map((zone) => {
-        const isActive = active?.id === zone.id;
-        return (
-          <div
-            key={zone.id}
-            className="absolute rounded-md border"
-            style={{
-              left: `${zone.x * 100}%`,
-              top: `${zone.y * 100}%`,
-              width: `${zone.w * 100}%`,
-              height: `${zone.h * 100}%`,
-              background: isActive
-                ? "rgba(59, 130, 246, 0.25)"
-                : "rgba(59, 130, 246, 0.08)",
-              borderColor: isActive ? "rgba(96, 165, 250, 0.8)" : "rgba(96, 165, 250, 0.25)",
-            }}
-          />
-        );
-      })}
+      <div
+        className="absolute flex items-center justify-center rounded-md border border-blue-400/80 bg-blue-500/25 text-[11px] font-medium text-blue-100"
+        style={{
+          left: `${(hint.x / pane.width) * 100}%`,
+          top: `${(hint.y / pane.height) * 100}%`,
+          width: `${(hint.width / pane.width) * 100}%`,
+          height: `${(hint.height / pane.height) * 100}%`,
+        }}
+      >
+        {label}
+      </div>
     </div>
   );
 }
