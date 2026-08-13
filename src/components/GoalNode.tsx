@@ -10,6 +10,43 @@ import { GoalLockCard } from "./agent/GoalLockCard";
 import { GoalTaskModal } from "./GoalTaskModal";
 
 const COLUMNS = ["backlog", "in_progress", "waiting", "testing", "blocked", "done"];
+const COL_W = 168;
+
+/** React Flow / WebView2 mark wheel listeners as passive, so overflow-auto never
+ *  receives a usable scroll. Drive the nearest [data-goal-scroll] ourselves. */
+function useGoalBoardScroll(deps: unknown) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const board = ref.current;
+    if (!board) return;
+    const onWheel = (e: WheelEvent) => {
+      e.stopPropagation();
+      const col = (e.target as HTMLElement | null)?.closest<HTMLElement>("[data-goal-col-scroll]");
+      const dx = e.shiftKey ? e.deltaY : e.deltaX;
+      const dy = e.shiftKey ? 0 : e.deltaY;
+      let moved = false;
+      if (col && dy) {
+        const before = col.scrollTop;
+        col.scrollTop += dy;
+        moved = col.scrollTop !== before;
+      }
+      if ((!moved || !col) && dy) {
+        const before = board.scrollTop;
+        board.scrollTop += dy;
+        if (board.scrollTop !== before) moved = true;
+      }
+      if (dx) {
+        const before = board.scrollLeft;
+        board.scrollLeft += dx;
+        if (board.scrollLeft !== before) moved = true;
+      }
+      e.preventDefault();
+    };
+    board.addEventListener("wheel", onWheel, { capture: true, passive: false });
+    return () => board.removeEventListener("wheel", onWheel, true);
+  }, [deps]);
+  return ref;
+}
 
 const KIND_COLOR: Record<string, string> = {
   edit: "text-amber-300",
@@ -168,12 +205,18 @@ function GoalBoard({ id, data, selected }: NodeProps<GoalNodeType>) {
   };
   const onClose = () => removeNode(id);
 
+  const boardRef = useGoalBoardScroll(tasks.length);
+
   return (
     <div
       className={`group flex h-full w-full flex-col overflow-hidden border bg-[var(--bg)] shadow-lg ${
         tiled ? "rounded-none" : "rounded-lg"
       } ${selected ? "border-blue-500" : "border-[var(--border)]"}`}
-      style={freeform ? undefined : { transform: `scale(${1 / zoom})`, transformOrigin: "top left" }}
+      style={
+        freeform || zoom === 1
+          ? undefined
+          : { transform: `scale(${1 / zoom})`, transformOrigin: "top left" }
+      }
       onMouseDown={() => focus(id)}
     >
       <NodeResizer minWidth={420} minHeight={240} isVisible lineClassName="!border-blue-500" handleClassName="!bg-blue-500" />
@@ -271,26 +314,31 @@ function GoalBoard({ id, data, selected }: NodeProps<GoalNodeType>) {
         </div>
       )}
 
-      {/* Kanban board — each column is the vertical scroller (nowheel so RF
-          zoom does not steal the wheel; overflow-y-auto is what makes the bar work). */}
+      {/* Kanban: h-0 forces a real height so overflow scrollbars exist.
+          Wheel is handled in useGoalBoardScroll — RF/WebView2 eat native wheel. */}
       <div
-        className="nodrag nopan nowheel flex min-h-0 flex-1 gap-1.5 overflow-x-auto overflow-y-hidden px-2 py-2"
-        onWheel={(e) => e.stopPropagation()}
+        ref={boardRef}
+        data-goal-scroll
+        className="nodrag nopan nowheel h-0 min-h-0 flex-1 overflow-x-auto overflow-y-auto px-2 py-2"
+        onPointerDown={(e) => e.stopPropagation()}
+        style={{ touchAction: "pan-x pan-y", overscrollBehavior: "contain" }}
       >
+        <div className="flex h-full min-w-max gap-1.5">
         {COLUMNS.map((col) => {
           const cards = byColumn.get(col) ?? [];
           return (
             <div
               key={col}
-              className="flex min-h-0 min-w-[132px] flex-1 flex-col overflow-hidden rounded border border-[var(--border)]/60 bg-[var(--surface)]/40"
+              className="flex h-full shrink-0 flex-col overflow-hidden rounded border border-[var(--border)]/60 bg-[var(--surface)]/40"
+              style={{ width: COL_W }}
             >
               <div className="shrink-0 px-1 py-1 text-center text-[9px] uppercase tracking-wide text-[var(--text-faint)]">
                 {col.replace(/_/g, " ")}
                 {cards.length > 0 ? ` · ${cards.length}` : ""}
               </div>
               <div
-                className="nowheel min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden overscroll-contain px-1 pb-1"
-                onWheel={(e) => e.stopPropagation()}
+                data-goal-col-scroll
+                className="nowheel h-0 min-h-0 flex-1 space-y-1 overflow-y-scroll overflow-x-hidden overscroll-contain px-1 pb-1"
               >
                 {cards.map((t) => {
                   const kids = goalTaskChildren(tasks, t.id);
@@ -336,6 +384,7 @@ function GoalBoard({ id, data, selected }: NodeProps<GoalNodeType>) {
             </div>
           );
         })}
+        </div>
       </div>
 
       {openTaskId && (
