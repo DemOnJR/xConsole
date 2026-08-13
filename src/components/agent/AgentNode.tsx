@@ -226,9 +226,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
     conversations,
 
-    streamingText,
-
-    activity,
+    streamingSegments,
 
     streamStats,
 
@@ -948,8 +946,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
       ) : (
         <AgentConsole
           messages={messages}
-          liveActivity={streaming ? activity : []}
-          streamingText={streamingText}
+          streamingSegments={streaming ? streamingSegments : []}
           streaming={streaming}
           expanded
           executeTarget={executeTarget}

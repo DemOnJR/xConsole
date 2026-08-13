@@ -1,13 +1,73 @@
 import { useEffect, useRef, useState } from "react";
-import type { AgentActivityItem, AgentChatMessage } from "../../stores/agentStore";
+import type { AgentChatMessage, TurnSegment } from "../../stores/agentStore";
 import { plainText } from "../../lib/plainText";
 import { AgentMarkdown } from "./AgentMarkdown";
 import { AgentActivityFeed } from "./AgentActivity";
+import { segmentsFromMessage } from "../../stores/turnSegments";
+
+function AssistantTurn({
+  segments,
+  live = false,
+  expanded,
+  executeTarget,
+  onExecute,
+}: {
+  segments: TurnSegment[];
+  live?: boolean;
+  expanded: boolean;
+  executeTarget?: { name: string; host: string } | null;
+  onExecute?: (code: string) => void;
+}) {
+  const lastActivity = live
+    ? [...segments].reverse().findIndex((s) => s.type === "activity")
+    : -1;
+  const lastActivityIdx = lastActivity >= 0 ? segments.length - 1 - lastActivity : -1;
+
+  if (live && segments.length === 0) {
+    return (
+      <div className="flex gap-2 text-[var(--text)]">
+        <span className="shrink-0 text-emerald-400">•</span>
+        <span className="text-gray-500">Thinking…</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      {segments.map((seg, i) => {
+        if (seg.type === "text") {
+          if (!seg.content.trim()) return null;
+          return (
+            <div key={`text-${i}`} className="flex gap-2 text-[var(--text)]">
+              <span className="shrink-0 text-emerald-400">•</span>
+              <div className={`min-w-0 ${expanded ? "w-full" : "w-[92%]"}`}>
+                {live ? (
+                  <div className="whitespace-pre-wrap break-words">{plainText(seg.content)}</div>
+                ) : (
+                  <AgentMarkdown
+                    content={seg.content}
+                    variant="assistant"
+                    executeTarget={executeTarget}
+                    onExecute={onExecute}
+                  />
+                )}
+              </div>
+            </div>
+          );
+        }
+        return (
+          <div key={`act-${i}`} className="pl-4">
+            <AgentActivityFeed items={seg.items} live={live && i === lastActivityIdx} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export function AgentConsole({
   messages,
-  liveActivity = [],
-  streamingText,
+  streamingSegments = [],
   streaming,
   expanded,
   executeTarget,
@@ -15,9 +75,8 @@ export function AgentConsole({
   fontSize = 11,
 }: {
   messages: AgentChatMessage[];
-  /** The in-flight turn's activity, shown live while streaming. */
-  liveActivity?: AgentActivityItem[];
-  streamingText: string;
+  /** Live turn timeline (text / tools / more text), in order. */
+  streamingSegments?: TurnSegment[];
   streaming: boolean;
   expanded: boolean;
   executeTarget?: { name: string; host: string } | null;
@@ -46,7 +105,7 @@ export function AgentConsole({
     if (!userScrolledUp && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages.length, liveActivity.length, streamingText, userScrolledUp]);
+  }, [messages.length, streamingSegments, streaming, userScrolledUp]);
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col bg-[var(--bg)] font-mono">
@@ -101,24 +160,13 @@ export function AgentConsole({
 
           if (message.role === "assistant") {
             return (
-              <div key={key} className="flex flex-col gap-2">
-                <div className="flex gap-2 text-[var(--text)]">
-                  <span className="shrink-0 text-emerald-400">•</span>
-                  <div className={`min-w-0 ${expanded ? "w-full" : "w-[92%]"}`}>
-                    <AgentMarkdown
-                      content={message.content}
-                      variant="assistant"
-                      executeTarget={executeTarget}
-                      onExecute={onExecute}
-                    />
-                  </div>
-                </div>
-                {(message.activity?.length ?? 0) > 0 && (
-                  <div className="pl-4">
-                    <AgentActivityFeed items={message.activity ?? []} />
-                  </div>
-                )}
-              </div>
+              <AssistantTurn
+                key={key}
+                segments={segmentsFromMessage(message)}
+                expanded={expanded}
+                executeTarget={executeTarget}
+                onExecute={onExecute}
+              />
             );
           }
 
@@ -126,23 +174,13 @@ export function AgentConsole({
         })}
 
         {streaming && (
-          <div className="flex flex-col gap-2">
-            <div className="flex gap-2 text-[var(--text)]">
-              <span className="shrink-0 text-emerald-400">•</span>
-              <div className={`min-w-0 ${expanded ? "w-full" : "w-[92%]"}`}>
-                {streamingText ? (
-                  <div className="whitespace-pre-wrap break-words">{plainText(streamingText)}</div>
-                ) : (
-                  <span className="text-gray-500">Thinking…</span>
-                )}
-              </div>
-            </div>
-            {liveActivity.length > 0 && (
-              <div className="pl-4">
-                <AgentActivityFeed items={liveActivity} live />
-              </div>
-            )}
-          </div>
+          <AssistantTurn
+            segments={streamingSegments}
+            live
+            expanded={expanded}
+            executeTarget={executeTarget}
+            onExecute={onExecute}
+          />
         )}
       </div>
 

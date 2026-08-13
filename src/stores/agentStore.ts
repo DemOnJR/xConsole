@@ -12,7 +12,6 @@ import {
   type AgentQuestion,
   type CanvasSnapshotNode,
   type ChatMessage,
-  type StreamEvent,
 } from "../lib/tauri";
 import { notify } from "../lib/notify";
 import { exportConversationMarkdown as renderConversationMarkdown } from "../lib/agentExport";
@@ -21,6 +20,15 @@ import { useCanvasStore } from "./canvasStore";
 import { useSessionStore } from "./sessionStore";
 import { useVoiceStore } from "./voiceStore";
 import type { PrefixTelemetry, TurnTelemetry } from "../lib/streamStats";
+import {
+  appendTextDelta,
+  applyActivityEvent,
+  flattenActivity,
+  textFromSegments,
+  type TurnSegment,
+} from "./turnSegments";
+
+export type { TurnSegment } from "./turnSegments";
 import {
   cancelSpeech,
   currentSpeechEpoch,
@@ -154,6 +162,8 @@ export type { TokenStats, ContextUsage, TurnTelemetry } from "../lib/streamStats
 
 export interface AgentChatMessage extends ChatMessage {
   activity?: AgentActivityItem[];
+  /** Chronological text / tool bursts for this turn. Prefer this when rendering. */
+  segments?: TurnSegment[];
   tokenStats?: TokenStats;
   isCompaction?: boolean;
   compactionTokensBefore?: number;
@@ -168,6 +178,8 @@ interface AgentState {
   conversations: AgentConversationMeta[];
   streamingText: string;
   activity: AgentActivityItem[];
+  /** Live turn timeline (text then tools then more text). */
+  streamingSegments: TurnSegment[];
   streaming: boolean;
   /** TTS is currently reading a reply aloud (so the user can press Stop to hush it). */
   speaking: boolean;
@@ -266,205 +278,6 @@ function canvasSnapshot(): CanvasSnapshotNode[] {
   });
 }
 
-function applyStreamEvent(
-  activity: AgentActivityItem[],
-  ev: StreamEvent,
-): AgentActivityItem[] {
-  switch (ev.kind) {
-    case "Status": {
-      // Cache hit/miss is shown on the input bar (and written to xconsole.log).
-      // Do not dump those lines into the transcript.
-      if (/^cache(?: miss)?[:\s]/i.test(ev.data)) {
-        return activity;
-      }
-      if (/parallel/i.test(ev.data)) {
-        return [
-          ...activity.filter((a) => a.id !== "parallel-batch"),
-          {
-            id: "parallel-batch",
-            kind: "status" as const,
-            label: ev.data,
-            state: "running" as const,
-          },
-        ];
-      }
-      return activity;
-    }
-    case "ToolCall":
-      if (activity.some((a) => a.id === ev.data.id)) return activity;
-      if (/mcp/i.test(ev.data.name)) return activity;
-      return [
-        ...activity,
-        {
-          id: ev.data.id,
-          kind: "tool",
-          label: ev.data.name.replace(/_/g, " "),
-          state: "running",
-        },
-      ];
-    case "ToolResult": {
-      if (ev.data.id.startsWith("snapshot-")) return activity;
-      const idx = activity.findIndex((a) => a.id === ev.data.id);
-      let next = activity;
-      if (idx >= 0) {
-        next = [...activity];
-        next[idx] = {
-          ...next[idx],
-          output: ev.data.output,
-          state: (ev.data.output.startsWith("error") ? "error" : "done") as
-            | "error"
-            | "done",
-        };
-      }
-      // When every tool in a parallel batch has finished, mark the banner done.
-      const stillRunning = next.some(
-        (a) => a.state === "running" && a.id !== "parallel-batch" && a.kind !== "status",
-      );
-      if (!stillRunning) {
-        next = next.map((a) =>
-          a.id === "parallel-batch" && a.state === "running"
-            ? ({
-                ...a,
-                state: "done" as const,
-                label: a.label.replace(/…$/, " — done"),
-              } satisfies AgentActivityItem)
-            : a,
-        );
-      }
-      return next;
-    }
-    case "Activity": {
-      const d = ev.data;
-      switch (d.type) {
-        case "ToolStart":
-          return [
-            ...activity.filter((a) => !(a.id === d.data.id && a.kind === "tool")),
-            {
-              id: d.data.id,
-              kind: "tool",
-              tool: d.data.tool,
-              label: d.data.label,
-              detail: d.data.detail,
-              state: "running",
-            },
-          ];
-        case "FileEdit":
-          return [
-            ...activity.filter((a) => a.id !== d.data.id),
-            {
-              id: d.data.id,
-              kind: "file_edit",
-              label: d.data.path,
-              path: d.data.path,
-              linesAdded: d.data.lines_added,
-              linesRemoved: d.data.lines_removed,
-              hunks: d.data.hunks,
-              state: "done",
-            },
-          ];
-        case "ToolEnd": {
-          const endState: "done" | "error" = d.data.ok ? "done" : "error";
-          const afterEnd: AgentActivityItem[] = activity.map((a) => {
-            if (a.id !== d.data.id && !a.id.startsWith(`${d.data.id}-`)) return a;
-            if (a.kind === "file_edit") {
-              return { ...a, state: endState };
-            }
-            if (
-              a.kind === "tool" &&
-              a.label.startsWith("Write file ·") &&
-              a.detail &&
-              !activity.some((x) => x.id === a.id && x.kind === "file_edit")
-            ) {
-              const fullPath = a.label.slice("Write file ·".length).trim();
-              const fileName = fullPath.split(/[/\\]/).pop() || fullPath;
-              const hunks = a.detail.split("\n").slice(0, 28).map((text) => ({
-                kind: "add" as const,
-                text,
-              }));
-              return {
-                id: a.id,
-                kind: "file_edit" as const,
-                label: fileName,
-                path: fileName,
-                linesAdded: a.detail.split("\n").length,
-                linesRemoved: 0,
-                hunks,
-                state: endState,
-              };
-            }
-            if (a.kind === "tool" || a.kind === "skill_read" || a.kind === "command") {
-              return { ...a, state: endState };
-            }
-            return a;
-          });
-          const stillRunning = afterEnd.some(
-            (a) => a.state === "running" && a.id !== "parallel-batch" && a.kind !== "status",
-          );
-          if (!stillRunning) {
-            return afterEnd.map((a) =>
-              a.id === "parallel-batch" && a.state === "running"
-                ? { ...a, state: "done" as const, label: a.label.replace(/…$/, " — done") }
-                : a,
-            );
-          }
-          return afterEnd;
-        }
-        case "SkillRead":
-          return [
-            ...activity,
-            {
-              id: `${d.data.id}-skill-read`,
-              kind: "skill_read",
-              label: `Read skill ${d.data.category}/${d.data.name}`,
-              category: d.data.category,
-              name: d.data.name,
-              state: "running",
-            },
-          ];
-        case "SkillSaved":
-          return [
-            ...activity,
-            {
-              id: `${d.data.id}-skill-save`,
-              kind: "skill_save",
-              label: `Saved skill ${d.data.category}/${d.data.name}`,
-              category: d.data.category,
-              name: d.data.name,
-              state: "done",
-            },
-          ];
-        case "Command": {
-          const idx = activity.findIndex((a) => a.id === d.data.id);
-          if (idx >= 0) {
-            const next = [...activity];
-            next[idx] = {
-              ...next[idx],
-              kind: "command",
-              label: `Run on ${d.data.vps}`,
-              detail: d.data.command,
-            };
-            return next;
-          }
-          return [
-            ...activity,
-            {
-              id: d.data.id,
-              kind: "command",
-              label: `Run on ${d.data.vps}`,
-              detail: d.data.command,
-              state: "running",
-            },
-          ];
-        }
-        default:
-          return activity;
-      }
-    }
-    default:
-      return activity;
-  }
-}
-
 async function persistConversation(state: {
   sessionId: string;
   messages: AgentChatMessage[];
@@ -484,6 +297,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   conversations: [],
   streamingText: "",
   activity: [],
+  streamingSegments: [],
   streaming: false,
   speaking: false,
   streamStats: null,
@@ -710,6 +524,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       messages: [],
       streamingText: "",
       activity: [],
+      streamingSegments: [],
       streaming: false,
       streamStats: null,
       turnTelemetry: null,
@@ -746,6 +561,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       targets,
       streamingText: "",
       activity: [],
+      streamingSegments: [],
       streaming: false,
       streamStats: null,
       turnTelemetry: null,
@@ -829,6 +645,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       streaming: true,
       streamingText: "",
       activity: [],
+      streamingSegments: [],
       streamStats: null,
       turnTelemetry: null,
       error: null,
@@ -842,6 +659,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     // store state, and every shared set() is gated on still being the live session.
     let turnText = "";
     let turnActivity: AgentActivityItem[] = [];
+    let turnSegments: TurnSegment[] = [];
 
     const { sessionId, targets, planMode } = get();
     const mySession = sessionId;
@@ -872,9 +690,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       if (ev.kind === "Text") {
         if (streamStartedAt === null) streamStartedAt = Date.now();
         turnText += ev.data;
+        turnSegments = appendTextDelta(turnSegments, ev.data);
         feedSpeech(ev.data);
         if (isCurrent()) {
-          set({ streamingText: turnText, streamStats: liveTokenStats(turnText, streamStartedAt) });
+          set({
+            streamingText: turnText,
+            streamingSegments: turnSegments,
+            streamStats: liveTokenStats(turnText, streamStartedAt),
+          });
         }
         return;
       }
@@ -956,8 +779,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         if (isCurrent()) set({ error: ev.data });
         return;
       }
-      turnActivity = applyStreamEvent(turnActivity, ev);
-      if (isCurrent()) set({ activity: turnActivity });
+      turnSegments = applyActivityEvent(turnSegments, ev);
+      turnActivity = flattenActivity(turnSegments);
+      if (isCurrent()) set({ activity: turnActivity, streamingSegments: turnSegments });
     });
 
     try {
@@ -979,12 +803,21 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         ...(compactionMarker ? [compactionMarker] : []),
         {
           ...assistant,
+          content: assistant.content || textFromSegments(turnSegments),
           activity: turnActivity.length > 0 ? [...turnActivity] : undefined,
+          segments: turnSegments.length > 0 ? [...turnSegments] : undefined,
           tokenStats,
         },
       ];
       if (isCurrent()) {
-        set({ messages, streamingText: "", activity: [], streaming: false, streamStats: null });
+        set({
+          messages,
+          streamingText: "",
+          activity: [],
+          streamingSegments: [],
+          streaming: false,
+          streamStats: null,
+        });
         if (streamVoice && streamingSpoke) {
           // Speak whatever's left after the last sentence boundary.
           const tail = speechBuf.trim();
@@ -1005,6 +838,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
               role: "assistant" as const,
               content: turnText,
               activity: turnActivity.length > 0 ? [...turnActivity] : undefined,
+              segments: turnSegments.length > 0 ? [...turnSegments] : undefined,
             },
           ]
         : compactionMarker
@@ -1017,6 +851,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           messages,
           streamingText: "",
           activity: [],
+          streamingSegments: [],
           streamStats: null,
         });
       }

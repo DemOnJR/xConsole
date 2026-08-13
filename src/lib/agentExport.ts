@@ -1,4 +1,5 @@
 import type { AgentChatMessage, AgentActivityItem } from "../stores/agentStore";
+import { segmentsFromMessage } from "../stores/turnSegments";
 
 const REDACTED = "[REDACTED]";
 const SECRET_MARKERS = [
@@ -110,9 +111,17 @@ export function exportConversationMarkdown(input: {
     }
     if (message.role !== "user" && message.role !== "assistant") continue;
     const heading = message.role === "user" ? "User" : "Assistant";
-    lines.push(`## ${heading}`, "", redactExportText(message.content), "");
-    if (message.role === "assistant" && message.activity) {
-      const activity = message.activity
+    lines.push(`## ${heading}`, "");
+    if (message.role === "user") {
+      lines.push(redactExportText(message.content), "");
+      continue;
+    }
+    for (const seg of segmentsFromMessage(message)) {
+      if (seg.type === "text") {
+        if (seg.content.trim()) lines.push(redactExportText(seg.content), "");
+        continue;
+      }
+      const activity = seg.items
         .map(exportActivityLine)
         .filter((line): line is string => line !== null);
       if (activity.length > 0) {

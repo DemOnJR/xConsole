@@ -51,6 +51,35 @@ describe("Agent Console rows", () => {
     expect(rows).toEqual([{ kind: "assistant", content: "Done" }]);
   });
 
+  it("walks interleaved segments in chronological order", () => {
+    const rows = consoleRows([
+      { role: "user", content: "check hosts" },
+      {
+        role: "assistant",
+        content: "I'll check.\n\nHealthy.",
+        segments: [
+          { type: "text", content: "I'll check." },
+          {
+            type: "activity",
+            items: [
+              {
+                id: "c1",
+                kind: "command",
+                label: "Run on fixture-host",
+                detail: "uptime",
+                state: "done",
+              },
+            ],
+          },
+          { type: "text", content: "Healthy." },
+        ],
+      },
+    ]);
+    expect(rows.map((r) => r.kind)).toEqual(["user", "assistant", "command", "assistant"]);
+    expect(rows[1]).toMatchObject({ kind: "assistant", content: "I'll check." });
+    expect(rows[3]).toMatchObject({ kind: "assistant", content: "Healthy." });
+  });
+
   it("renders compaction divider row with token reduction metrics", () => {
     const rows = consoleRows([
       { role: "user", content: "Inspect cluster" },

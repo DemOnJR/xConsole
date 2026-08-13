@@ -1,4 +1,5 @@
 import type { AgentActivityItem, AgentChatMessage } from "../../stores/agentStore";
+import { segmentsFromMessage } from "../../stores/turnSegments";
 
 export type AgentConsoleRow =
   | { kind: "user"; content: string }
@@ -41,10 +42,15 @@ export function consoleRows(messages: AgentChatMessage[]): AgentConsoleRow[] {
     } else if (message.role === "user") {
       rows.push({ kind: "user", content: message.content });
     } else if (message.role === "assistant") {
-      rows.push({ kind: "assistant", content: message.content });
-      for (const item of message.activity ?? []) {
-        const row = activityRow(item);
-        if (row) rows.push(row);
+      for (const seg of segmentsFromMessage(message)) {
+        if (seg.type === "text") {
+          if (seg.content.trim()) rows.push({ kind: "assistant", content: seg.content });
+        } else {
+          for (const item of seg.items) {
+            const row = activityRow(item);
+            if (row) rows.push(row);
+          }
+        }
       }
     }
   }
