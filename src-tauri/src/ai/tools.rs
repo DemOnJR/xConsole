@@ -245,8 +245,9 @@ Never store secrets/passwords."
         },
         ToolDef {
             name: "taste_save".into(),
-            description: "Save a user working-style preference (how they like ops done) to TASTE.md. \
-Examples: prefer systemd restarts, never apt upgrade without approval, terse replies. Keep terse."
+            description: "Save a user preference (how they like ops done, or their profile) to the \
+merged TASTE.md store. Examples: prefer systemd restarts, never apt upgrade without approval, \
+terse replies. Keep terse."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -1509,6 +1510,7 @@ async fn write_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str
         ctx.edits.record(
             &ctx.app,
             &ctx.session_id,
+            ctx.workspace_id.clone(),
             "vps",
             Some(vps_id.clone()),
             &label,
@@ -2039,6 +2041,7 @@ async fn local_write_file(ctx: &ToolContext, args: &Value) -> String {
             ctx.edits.record(
                 &ctx.app,
                 &ctx.session_id,
+                ctx.workspace_id.clone(),
                 "local",
                 None,
                 "This PC",
@@ -2272,21 +2275,43 @@ async fn present_plan(ctx: &ToolContext, args: &Value) -> String {
     };
     let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("Plan");
     let id = Uuid::new_v4().to_string();
+    let stored = crate::storage::models::AgentPlan {
+        id: id.clone(),
+        session_id: ctx.session_id.clone(),
+        workspace_id: ctx.workspace_id.clone(),
+        title: Some(title.to_string()),
+        plan: plan.to_string(),
+        status: "presented".into(),
+        created_at: None,
+        updated_at: None,
+    };
+    let _ = ctx.db.insert_agent_plan(&stored);
     let payload = json!({
         "id": id,
         "session_id": ctx.session_id,
+        "workspace_id": ctx.workspace_id,
         "title": title,
         "plan": plan,
     });
     let _ = ctx.app.emit("ai://plan", payload);
-    let rx = ctx.prompts.register(id.clone());
+    // A new presentation supersedes any still-pending one for this session.
+    ctx.prompts.cancel_superseded(&ctx.session_id, &id);
+    let rx = ctx.prompts.register_for_session(id.clone(), &ctx.session_id);
     match tokio::time::timeout(PROMPT_TIMEOUT, rx).await {
         Ok(Ok(decision)) => {
-            // The frontend sends "APPROVE" or "REJECT: <feedback>".
+            // The frontend sends "APPROVE", "REJECT: <feedback>", or "CANCEL".
             let d = decision.trim();
             if d.eq_ignore_ascii_case("approve") || d.to_ascii_uppercase().starts_with("APPROVE") {
+                let _ = ctx.db.update_agent_plan_status(&id, "applied");
                 ctx.session_state.mark_plan_approved(&ctx.session_id);
                 "The user APPROVED the plan. Proceed to execute it now.".into()
+            } else if d.to_ascii_uppercase().starts_with("CANCEL: SUPERSEDED") {
+                let _ = ctx.db.update_agent_plan_status(&id, "cancelled");
+                "This plan was superseded by a newer presentation. Continue with the latest plan."
+                    .into()
+            } else if d.eq_ignore_ascii_case("cancel") || d.to_ascii_uppercase().starts_with("CANCEL") {
+                let _ = ctx.db.update_agent_plan_status(&id, "cancelled");
+                "The user cancelled the plan. Stop and ask what they want instead.".into()
             } else {
                 let feedback = d
                     .strip_prefix("REJECT:")
@@ -2308,6 +2333,7 @@ async fn present_plan(ctx: &ToolContext, args: &Value) -> String {
         Ok(Err(_)) => "error: plan channel closed".into(),
         Err(_) => {
             ctx.prompts.cancel(&id);
+            let _ = ctx.db.update_agent_plan_status(&id, "cancelled");
             "error: the user did not respond to the plan in time".into()
         }
     }

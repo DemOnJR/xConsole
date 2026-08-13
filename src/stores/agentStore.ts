@@ -8,6 +8,7 @@ import {
   type AgentApproval,
   type AgentConversationMeta,
   type AgentPlan,
+  type AgentPlanMeta,
   type AgentQuestion,
   type CanvasSnapshotNode,
   type ChatMessage,
@@ -181,6 +182,11 @@ interface AgentState {
   pendingApprovals: AgentApproval[];
   pendingQuestions: AgentQuestion[];
   pendingPlan: AgentPlan | null;
+  /** Editable copy of the pending plan shown in the modal. */
+  planDraft: string;
+  /** Persisted plan history (presented/applied/archived/cancelled). */
+  planHistory: AgentPlanMeta[];
+  planHistoryOpen: boolean;
   planMode: boolean;
   hydrated: boolean;
   /** Running estimated cost (USD) of the current conversation. */
@@ -205,6 +211,16 @@ interface AgentState {
   resolveApproval: (id: string, approved: boolean, remember?: boolean) => Promise<void>;
   answerQuestion: (id: string, answer: string) => Promise<void>;
   resolvePlan: (id: string, approve: boolean, feedback?: string) => Promise<void>;
+  /** Modal actions: keep the plan open while the agent revises it. */
+  setPlanDraft: (draft: string) => void;
+  applyPlan: (id: string) => Promise<void>;
+  archivePlanAction: (id: string) => Promise<void>;
+  cancelPlanAction: (id: string) => Promise<void>;
+  /** Send revision feedback to the agent (plan modal chat). */
+  revisePlan: (id: string, feedback: string) => Promise<void>;
+  loadPlanHistory: () => Promise<void>;
+  setPlanHistoryOpen: (open: boolean) => void;
+  closePlanModal: () => Promise<void>;
 }
 
 const newSessionId = () =>
@@ -486,6 +502,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   pendingApprovals: [],
   pendingQuestions: [],
   pendingPlan: null,
+  planDraft: "",
+  planHistory: [],
+  planHistoryOpen: false,
   planMode:
     typeof localStorage !== "undefined" &&
     localStorage.getItem("xconsole-agent-plan-mode") === "1",
@@ -552,7 +571,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       maybeSpeak(first);
     });
     const unPlan = await onAgentPlan((plan) => {
-      set({ pendingPlan: plan });
+      set({ pendingPlan: plan, planDraft: plan.plan });
       void notify(
         "xConsole agent — plan ready for review",
         plan.title || "Review the proposed plan.",
@@ -598,7 +617,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   },
 
   resolvePlan: async (id, approve, feedback) => {
-    set({ pendingPlan: null });
+    set({ pendingPlan: null, planDraft: "" });
     const answer = approve ? "APPROVE" : `REJECT: ${feedback ?? ""}`.trim();
     await api.agentAnswerPrompt(id, answer);
     // Taste learning: plan rejection feedback becomes a lasting preference.
@@ -615,6 +634,52 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       } catch {
         /* non-fatal */
       }
+    }
+  },
+
+  setPlanDraft: (draft) => set({ planDraft: draft }),
+
+  applyPlan: async (id) => {
+    set({ pendingPlan: null, planDraft: "" });
+    await api.agentAnswerPrompt(id, "APPROVE");
+  },
+
+  archivePlanAction: async (id) => {
+    set({ pendingPlan: null, planDraft: "" });
+    await api.archivePlan(id);
+    void get().loadPlanHistory();
+  },
+
+  cancelPlanAction: async (id) => {
+    set({ pendingPlan: null, planDraft: "" });
+    await api.cancelPlan(id);
+    void get().loadPlanHistory();
+  },
+
+  revisePlan: async (id, feedback) => {
+    // Keep the modal open; the agent revises and re-presents (new ai://plan).
+    await api.agentAnswerPrompt(id, `REJECT: ${feedback}`.trim());
+  },
+
+  loadPlanHistory: async () => {
+    try {
+      const history = await api.listPlans();
+      set({ planHistory: history });
+    } catch {
+      /* non-fatal */
+    }
+  },
+
+  setPlanHistoryOpen: (open) => set({ planHistoryOpen: open }),
+
+  closePlanModal: async () => {
+    const pending = get().pendingPlan;
+    set({ pendingPlan: null, planDraft: "", planHistoryOpen: false });
+    // Closing without a decision = cancel: unblock the waiting present_plan
+    // tool and record the plan as cancelled in history.
+    if (pending) {
+      await api.cancelPlan(pending.id).catch(() => {});
+      void get().loadPlanHistory();
     }
   },
 

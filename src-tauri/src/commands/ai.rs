@@ -13,8 +13,8 @@ use crate::ai::tools::ToolContext;
 use crate::ai::AgentHome;
 use crate::ssh::SessionManager;
 use crate::storage::models::{
-    AgentApproval, AgentConversation, AgentConversationInput, AgentConversationMeta, CronJob,
-    CronJobInput,
+    AgentApproval, AgentConversation, AgentConversationInput, AgentConversationMeta,
+    AgentPlan, AgentPlanMeta, CronJob, CronJobInput,
 };
 use crate::storage::Db;
 
@@ -205,9 +205,34 @@ pub async fn ai_chat(
 #[tauri::command]
 pub fn list_file_changes(
     edits: State<'_, crate::ai::edits::EditJournal>,
+    db: State<'_, Db>,
     session_id: String,
-) -> Vec<crate::ai::edits::EditRecord> {
-    edits.list(&session_id)
+) -> Result<Vec<crate::ai::edits::EditRecord>, String> {
+    // In-memory is the fast path for the live session; DB covers history after
+    // restart. Merge: DB rows first, then any in-memory rows not yet flushed.
+    let mut out = db
+        .list_file_changes(Some(&session_id), None, 500)
+        .unwrap_or_default();
+    let mut seen: std::collections::HashSet<String> = out.iter().map(|r| r.id.clone()).collect();
+    for rec in edits.list(&session_id) {
+        if seen.insert(rec.id.clone()) {
+            out.push(rec);
+        }
+    }
+    out.sort_by_key(|r| r.ts);
+    Ok(out)
+}
+
+/// All file edits matching a workspace and/or session (history browser).
+#[tauri::command]
+pub fn list_file_changes_history(
+    db: State<'_, Db>,
+    workspace_id: Option<String>,
+    session_id: Option<String>,
+) -> Result<Vec<crate::ai::edits::EditRecord>, String> {
+    let ws = workspace_id.as_deref().filter(|s| !s.is_empty());
+    let sid = session_id.as_deref().filter(|s| !s.is_empty());
+    db.list_file_changes(sid, ws, 1000).map_err(|e| e.to_string())
 }
 
 /// Forget a session's recorded edits (e.g. when a conversation is deleted).
@@ -226,10 +251,19 @@ pub async fn revert_file_change(
     app: AppHandle,
     sessions: State<'_, SessionManager>,
     edits: State<'_, crate::ai::edits::EditJournal>,
+    db: State<'_, Db>,
     id: String,
 ) -> Result<(), String> {
     use base64::Engine;
-    let rec = edits.get(&id).ok_or("change not found")?;
+    // Live session fast path first, then the persisted history (restart case).
+    let rec = edits
+        .get(&id)
+        .or_else(|| {
+            db.list_file_changes(None, None, 5000)
+                .ok()
+                .and_then(|rows| rows.into_iter().find(|r| r.id == id))
+        })
+        .ok_or("change not found")?;
     if rec.reverted {
         return Err("this change was already reverted".into());
     }
@@ -318,7 +352,7 @@ pub fn agent_resolve_approval(
 }
 
 /// Deliver the user's answer to a pending interactive prompt (ask_user) or a
-/// plan decision (present_plan: "APPROVE" or "REJECT: <feedback>").
+/// plan decision (present_plan: "APPROVE", "REJECT: <feedback>", or "CANCEL").
 #[tauri::command]
 pub fn agent_answer_prompt(
     prompts: State<'_, PromptRegistry>,
@@ -326,6 +360,44 @@ pub fn agent_answer_prompt(
     answer: String,
 ) -> Result<(), String> {
     prompts.resolve(&id, answer);
+    Ok(())
+}
+
+// ----- Plan history (present_plan) -----
+
+#[tauri::command]
+pub fn list_plans(
+    db: State<'_, Db>,
+    session_id: Option<String>,
+    workspace_id: Option<String>,
+) -> Result<Vec<AgentPlanMeta>, String> {
+    let sid = session_id.as_deref().filter(|s| !s.is_empty());
+    let ws = workspace_id.as_deref().filter(|s| !s.is_empty());
+    db.list_agent_plans(sid, ws, 200).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_plan(db: State<'_, Db>, id: String) -> Result<Option<AgentPlan>, String> {
+    db.get_agent_plan(&id).map_err(|e| e.to_string())
+}
+
+/// Mark a presented plan as archived (kept in history, never applied).
+#[tauri::command]
+pub fn archive_plan(db: State<'_, Db>, id: String) -> Result<(), String> {
+    db.update_agent_plan_status(&id, "archived")
+        .map_err(|e| e.to_string())
+}
+
+/// Cancel a pending plan: marks it cancelled and unblocks the waiting
+/// present_plan tool with "CANCEL".
+#[tauri::command]
+pub fn cancel_plan(
+    db: State<'_, Db>,
+    prompts: State<'_, PromptRegistry>,
+    id: String,
+) -> Result<(), String> {
+    let _ = db.update_agent_plan_status(&id, "cancelled");
+    prompts.resolve(&id, "CANCEL".into());
     Ok(())
 }
 
@@ -681,6 +753,8 @@ pub fn get_agent_docs(home: State<'_, AgentHome>) -> AgentDocs {
     AgentDocs {
         soul: crate::ai::soul::load(&home),
         memory: crate::ai::memory::load_memory(&home),
+        // USER.md was consolidated into TASTE.md; `user` reflects the merged
+        // profile slice for backward compatibility.
         user: crate::ai::memory::load_user(&home),
         taste: crate::ai::taste::load(&home),
     }
@@ -698,6 +772,8 @@ pub fn save_memory_doc(home: State<'_, AgentHome>, content: String) -> Result<()
 
 #[tauri::command]
 pub fn save_user_doc(home: State<'_, AgentHome>, content: String) -> Result<(), String> {
+    // USER.md was consolidated into TASTE.md — the user-profile editor now
+    // writes the merged preferences store.
     crate::ai::memory::save_user(&home, &content)
 }
 

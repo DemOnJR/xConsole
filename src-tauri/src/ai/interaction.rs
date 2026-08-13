@@ -17,6 +17,9 @@ use tokio::sync::oneshot;
 #[derive(Clone, Default)]
 pub struct PromptRegistry {
     pending: Arc<DashMap<String, oneshot::Sender<String>>>,
+    /// session_id → latest prompt id, so a new plan presentation can supersede
+    /// the previous still-pending one.
+    by_session: Arc<DashMap<String, String>>,
 }
 
 impl PromptRegistry {
@@ -29,6 +32,26 @@ impl PromptRegistry {
         let (tx, rx) = oneshot::channel();
         self.pending.insert(id, tx);
         rx
+    }
+
+    /// Register a prompt that belongs to a session (plans), so later prompts for
+    /// the same session can supersede it.
+    pub fn register_for_session(&self, id: String, session_id: &str) -> oneshot::Receiver<String> {
+        let rx = self.register(id.clone());
+        self.by_session.insert(session_id.to_string(), id);
+        rx
+    }
+
+    /// Resolve (with "CANCEL: superseded") any pending prompt for this session
+    /// other than `keep_id`, so a newer plan presentation replaces the old one.
+    pub fn cancel_superseded(&self, session_id: &str, keep_id: &str) {
+        if let Some((_, old_id)) = self.by_session.remove(session_id) {
+            if old_id != keep_id {
+                if let Some((_, tx)) = self.pending.remove(&old_id) {
+                    let _ = tx.send("CANCEL: superseded".into());
+                }
+            }
+        }
     }
 
     /// Deliver the user's answer to a waiting prompt. Returns true if it was awaiting.

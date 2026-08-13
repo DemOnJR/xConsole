@@ -406,7 +406,24 @@ export interface AgentQuestion {
 export interface AgentPlan {
   id: string;
   session_id: string;
+  workspace_id?: string | null;
   title?: string;
+  plan: string;
+}
+
+/** A plan record from the persisted plan history (no body). */
+export interface AgentPlanMeta {
+  id: string;
+  session_id: string;
+  workspace_id?: string | null;
+  title?: string | null;
+  status: "presented" | "applied" | "archived" | "cancelled";
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+/** A single persisted plan with its full body. */
+export interface AgentPlanFull extends AgentPlanMeta {
   plan: string;
 }
 
@@ -1027,9 +1044,23 @@ export const api = {
 
   listFileChanges: (sessionId: string) =>
     invoke<FileChange[]>("list_file_changes", { sessionId }),
+  listFileChangesHistory: (workspaceId?: string | null, sessionId?: string | null) =>
+    invoke<FileChange[]>("list_file_changes_history", {
+      workspaceId: workspaceId ?? null,
+      sessionId: sessionId ?? null,
+    }),
   clearFileChanges: (sessionId: string) =>
     invoke<void>("clear_file_changes", { sessionId }),
   revertFileChange: (id: string) => invoke<void>("revert_file_change", { id }),
+
+  listPlans: (sessionId?: string | null, workspaceId?: string | null) =>
+    invoke<AgentPlanMeta[]>("list_plans", {
+      sessionId: sessionId ?? null,
+      workspaceId: workspaceId ?? null,
+    }),
+  getPlan: (id: string) => invoke<AgentPlanFull | null>("get_plan", { id }),
+  archivePlan: (id: string) => invoke<void>("archive_plan", { id }),
+  cancelPlan: (id: string) => invoke<void>("cancel_plan", { id }),
 
   agentResolveApproval: (
     id: string,
@@ -1251,6 +1282,7 @@ export interface ChannelInfo {
 export interface FileChange {
   id: string;
   session_id: string;
+  workspace_id?: string | null;
   scope: "local" | "vps";
   vps_id?: string | null;
   label: string;

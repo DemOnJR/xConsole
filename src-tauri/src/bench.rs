@@ -797,10 +797,11 @@ fn seed_variant_home(root: &std::path::Path, v: &Variant) -> (AgentHome, Option<
     let home = AgentHome::new(dir);
     // SOUL.md: realistic identity when on; explicitly emptied when off.
     let _ = std::fs::write(home.soul(), if v.soul { soul::DEFAULT_SOUL_MD } else { "" });
-    // MEMORY.md + USER.md: written only when memory is on.
+    // MEMORY.md + TASTE.md (consolidated preferences store): written only when
+    // memory is on. The user profile lives in TASTE.md after consolidation.
     if v.memory {
         let _ = std::fs::write(home.memory(), ABL_MEMORY);
-        let _ = std::fs::write(home.user(), ABL_USER);
+        let _ = std::fs::write(home.taste(), ABL_USER);
     }
     // Skills: seed the default skill set only when skills are on.
     if v.skills {

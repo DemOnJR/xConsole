@@ -23,7 +23,6 @@ import { useCanvasStore, NODE_W, NODE_H, type AgentNode as AgentNodeType } from 
 
 import { useSettingsStore } from "../../stores/settingsStore";
 
-import { AgentMarkdown } from "./AgentMarkdown";
 import { AgentConsole } from "./AgentConsole";
 import { CLIPicker, type CLIPickerOption } from "./CLIPicker";
 import {
@@ -42,7 +41,7 @@ import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useGoalStore } from "../../stores/goalStore";
 import { effectiveMode, shouldAutoRun } from "../../lib/safety";
 
-import type { AgentApproval, AgentPlan, AgentQuestion } from "../../lib/tauri";
+import type { AgentApproval, AgentQuestion } from "../../lib/tauri";
 
 /** Maximize the agent node to the whole canvas pane, or restore its default size.
  *  Shared with the NavRail double-click, which has no React access to the node. */
@@ -207,70 +206,6 @@ function QuestionCard({
   );
 }
 
-function PlanCard({
-  plan,
-  onResolve,
-}: {
-  plan: AgentPlan;
-  onResolve: (id: string, approve: boolean, feedback?: string) => void;
-}) {
-  const [showFeedback, setShowFeedback] = useState(false);
-  const [feedback, setFeedback] = useState("");
-
-  return (
-    <div className="mb-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 p-2 last:mb-0">
-      <div className="mb-1 text-[11px] font-medium text-emerald-200">
-        {plan.title ? `Plan: ${plan.title}` : "Review this plan"}
-      </div>
-      <div className="mb-2 max-h-64 overflow-auto rounded bg-[var(--bg)] px-2 py-1.5 text-[12px] text-gray-200">
-        <AgentMarkdown content={plan.plan} variant="assistant" />
-      </div>
-      {showFeedback ? (
-        <div className="flex flex-col gap-1.5">
-          <textarea
-            value={feedback}
-            onChange={(e) => setFeedback(e.target.value)}
-            rows={3}
-            placeholder="What should change?"
-            className="w-full resize-none rounded border border-[var(--border-strong)] bg-[var(--bg)] px-2 py-1 text-[11px] text-gray-200 outline-none placeholder:text-gray-600 focus:border-[#3d4a61]"
-          />
-          <div className="flex justify-end gap-2">
-            <button
-              onClick={() => setShowFeedback(false)}
-              className="rounded-md border border-[var(--border)] px-2.5 py-1 text-[11px] text-gray-300 hover:bg-[var(--border)]"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={() => onResolve(plan.id, false, feedback)}
-              className="rounded-md bg-amber-600 px-2.5 py-1 text-[11px] text-white hover:bg-amber-500"
-            >
-              Send changes
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="flex justify-end gap-2">
-          <button
-            onClick={() => setShowFeedback(true)}
-            className="rounded-md border border-[var(--border)] px-2.5 py-1 text-[11px] text-gray-300 hover:bg-[var(--border)]"
-          >
-            Request changes
-          </button>
-          <button
-            onClick={() => onResolve(plan.id, true)}
-            className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] text-white hover:bg-emerald-500"
-          >
-            Approve &amp; run
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-
-
 export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   const openSettings = useUiStore((s) => s.openSettings);
 
@@ -315,8 +250,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
     pendingQuestions,
 
-    pendingPlan,
-
     planMode,
 
     send,
@@ -337,8 +270,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     resolveApproval,
 
     answerQuestion,
-
-    resolvePlan,
 
   } = useAgentStore();
 
@@ -986,6 +917,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
       ) : (
         <AgentConsole
           messages={messages}
+          liveActivity={streaming ? activity : []}
           streamingText={streamingText}
           streaming={streaming}
           streamStats={streamStats}
@@ -1020,10 +952,8 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
         </div>
       )}
 
-      {/* Interactive prompts: approvals, questions, plan review */}
-      {(pendingApprovals.length > 0 ||
-        pendingQuestions.length > 0 ||
-        pendingPlan) && (
+      {/* Interactive prompts: approvals, questions (plans open in the PlanModal) */}
+      {(pendingApprovals.length > 0 || pendingQuestions.length > 0) && (
         <div className="border-t border-[var(--border)] bg-[var(--bg)] px-3 py-2">
           {pendingApprovals.map((a) => (
             <ApprovalCard key={a.id} approval={a} onResolve={resolveApproval} />
@@ -1031,9 +961,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
           {pendingQuestions.map((q) => (
             <QuestionCard key={q.id} question={q} onAnswer={answerQuestion} />
           ))}
-          {pendingPlan && (
-            <PlanCard plan={pendingPlan} onResolve={resolvePlan} />
-          )}
         </div>
       )}
 

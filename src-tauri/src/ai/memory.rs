@@ -1,20 +1,19 @@
-//! Built-in compact memory: `MEMORY.md` (durable facts) and `USER.md` (profile),
-//! mirroring Hermes' always-on built-in memory store. Injected into the volatile
-//! tier of the system prompt.
+//! Built-in compact memory: `MEMORY.md` (durable facts) plus the user-profile
+//! view of the consolidated `TASTE.md` store, mirroring Hermes' always-on
+//! built-in memory. Injected into the volatile tier of the system prompt.
 
 use crate::ai::AgentHome;
 
 /// Keep the injected memory block compact (Hermes-style). Content beyond this is
 /// truncated in the prompt (the file keeps everything; the agent compacts it).
 pub const MEMORY_MAX_CHARS: usize = 6000;
-pub const USER_MAX_CHARS: usize = 3000;
 
 pub fn load_memory(home: &AgentHome) -> String {
     read(home.memory().as_path())
 }
 
 pub fn load_user(home: &AgentHome) -> String {
-    read(home.user().as_path())
+    crate::ai::taste::load_user_profile(home)
 }
 
 pub fn save_memory(home: &AgentHome, content: &str) -> Result<(), String> {
@@ -22,7 +21,7 @@ pub fn save_memory(home: &AgentHome, content: &str) -> Result<(), String> {
 }
 
 pub fn save_user(home: &AgentHome, content: &str) -> Result<(), String> {
-    std::fs::write(home.user(), content).map_err(|e| e.to_string())
+    crate::ai::taste::save(home, content)
 }
 
 /// Append a memory entry as a single bullet line, then return the new contents.
@@ -51,24 +50,44 @@ pub fn append_memory(home: &AgentHome, entry: &str) -> Result<String, String> {
     Ok(content)
 }
 
-/// Render the memory + user blocks for the volatile prompt tier.
+/// One-time migration: fold any existing `USER.md` content into `TASTE.md`
+/// (consolidated preferences store), then delete `USER.md`. Idempotent — no-op
+/// when USER.md is absent. Call at startup before any prompt assembly.
+pub fn migrate_user_into_taste(home: &AgentHome) {
+    let user_path = home.user();
+    if !user_path.exists() {
+        return;
+    }
+    let content = read(&user_path);
+    let _ = std::fs::remove_file(&user_path);
+    if content.trim().is_empty() {
+        return;
+    }
+    let taste = crate::ai::taste::load(home);
+    if taste.trim().is_empty() {
+        let _ = crate::ai::taste::save(home, &content);
+        return;
+    }
+    if !taste.ends_with('\n') {
+        let mut t = taste;
+        t.push('\n');
+        let _ = crate::ai::taste::save(home, &t);
+    }
+    let _ = crate::ai::taste::append(home, &content);
+}
+
+/// Render the memory block for the volatile prompt tier. User-profile content
+/// was consolidated into TASTE.md and is injected once via `taste::format_for_prompt`;
+/// duplicating it here would send the same content twice per turn.
 pub fn format_for_prompt(home: &AgentHome) -> String {
-    let mut parts: Vec<String> = Vec::new();
     let mem = load_memory(home);
-    if !mem.trim().is_empty() {
-        parts.push(format!(
-            "# Persistent memory (MEMORY.md)\n{}",
-            truncate(&mem, MEMORY_MAX_CHARS)
-        ));
+    if mem.trim().is_empty() {
+        return String::new();
     }
-    let user = load_user(home);
-    if !user.trim().is_empty() {
-        parts.push(format!(
-            "# User profile (USER.md)\n{}",
-            truncate(&user, USER_MAX_CHARS)
-        ));
-    }
-    parts.join("\n\n")
+    format!(
+        "# Persistent memory (MEMORY.md)\n{}",
+        truncate(&mem, MEMORY_MAX_CHARS)
+    )
 }
 
 fn read(path: &std::path::Path) -> String {

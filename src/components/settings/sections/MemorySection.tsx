@@ -4,13 +4,11 @@ import { Card, DocEditor, Field, SectionHeader } from "../ui";
 
 export function MemorySection() {
   const [memory, setMemory] = useState("");
-  const [user, setUser] = useState("");
   const [taste, setTaste] = useState("");
 
   const load = () =>
     api.getAgentDocs().then((d) => {
       setMemory(d.memory);
-      setUser(d.user);
       setTaste(d.taste ?? "");
     });
 
@@ -22,7 +20,7 @@ export function MemorySection() {
     <div>
       <SectionHeader
         title="Memory"
-        description="Persistent knowledge injected every session. MEMORY is facts; USER is who you are; TASTE is how you like ops done. Keep entries terse; never store secrets."
+        description="Persistent knowledge injected every session. MEMORY is facts; TASTE is who you are and how you like ops done (user profile + working style merged). Keep entries terse; never store secrets."
       />
 
       <Card className="mb-3">
@@ -42,32 +40,17 @@ export function MemorySection() {
         </Field>
       </Card>
 
-      <Card className="mb-3">
-        <Field
-          label="User profile (USER.md)"
-          hint="Who you are and how you like the agent to work with you."
-        >
-          <DocEditor
-            value={user}
-            rows={6}
-            placeholder="- Prefer concise answers and minimal, reversible changes."
-            onSave={async (next) => {
-              await api.saveUserDoc(next);
-              setUser(next);
-            }}
-          />
-        </Field>
-      </Card>
-
       <Card>
         <Field
-          label="Working style (TASTE.md)"
-          hint="Ops preferences the agent should follow (restarts, approvals, verbosity)."
+          label="Preferences (TASTE.md)"
+          hint="Your profile + how you like ops done: restarts, approvals, verbosity, preferred tools."
         >
           <DocEditor
             value={taste}
-            rows={6}
-            placeholder={"- Prefer systemctl restart over docker-compose down/up\n- Never apt upgrade without approval\n- Keep replies terse"}
+            rows={10}
+            placeholder={
+              "- Prefer systemctl restart over docker-compose down/up\n- Never apt upgrade without approval\n- Keep replies terse"
+            }
             onSave={async (next) => {
               await api.saveTasteDoc(next);
               setTaste(next);

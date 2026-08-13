@@ -1,34 +1,78 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { useEditsStore } from "../../stores/editsStore";
+import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { lineDiff, type DiffResult } from "../../lib/diff";
+import type { FileChange } from "../../lib/tauri";
 
 function baseName(path: string): string {
   const parts = path.split(/[\\/]/);
   return parts[parts.length - 1] || path;
 }
 
-/** Right-docked drawer showing the files the agent edited this session, with a
+/** Right-docked drawer showing the files the agent edited — the live session's
+ * changes, or persisted history filtered by workspace/session — with a
  * GitHub-style diff per file and one-click revert. */
 export function ChangesPanel() {
   const open = useEditsStore((s) => s.open);
+  const mode = useEditsStore((s) => s.mode);
+  const setMode = useEditsStore((s) => s.setMode);
   const changes = useEditsStore((s) => s.changes);
+  const historyGroups = useEditsStore((s) => s.historyGroups);
+  const historyWorkspace = useEditsStore((s) => s.historyWorkspace);
+  const historySession = useEditsStore((s) => s.historySession);
+  const setHistoryFilters = useEditsStore((s) => s.setHistoryFilters);
+  const loadHistory = useEditsStore((s) => s.loadHistory);
   const selectedId = useEditsStore((s) => s.selectedId);
   const reverting = useEditsStore((s) => s.reverting);
   const setOpen = useEditsStore((s) => s.setOpen);
   const select = useEditsStore((s) => s.select);
   const revert = useEditsStore((s) => s.revert);
 
-  // Diff (and +/- counts) per change, memoized so we don't recompute on every render.
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  const workspaceId = useWorkspaceStore((s) => s.activeId);
+
+  // Load history whenever it opens or filters change.
+  useEffect(() => {
+    if (open && mode === "history") void loadHistory();
+  }, [open, mode, historyWorkspace, historySession, loadHistory]);
+
+  // Flat list of visible changes in the current mode.
+  const visible: FileChange[] =
+    mode === "live" ? changes : historyGroups.flatMap((g) => g.changes);
+
   const diffs = useMemo(() => {
     const map = new Map<string, DiffResult>();
-    for (const c of changes) map.set(c.id, lineDiff(c.before, c.after));
+    for (const c of visible) map.set(c.id, lineDiff(c.before, c.after));
     return map;
-  }, [changes]);
+  }, [visible]);
 
   if (!open) return null;
 
-  const selected = changes.find((c) => c.id === selectedId) ?? null;
+  const selected = visible.find((c) => c.id === selectedId) ?? null;
   const selectedDiff = selected ? diffs.get(selected.id) ?? null : null;
+
+  const filterInput = (id: string, label: string, value: string | null) => (
+    <label className="flex flex-col gap-0.5 text-[10px] text-gray-500">
+      {label}
+      <select
+        value={value ?? ""}
+        onChange={(e) => {
+          if (id === "workspace") setHistoryFilters(e.target.value || null, historySession);
+          else setHistoryFilters(historyWorkspace, e.target.value || null);
+        }}
+        className="rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-1 text-[11px] text-gray-200 outline-none"
+      >
+        <option value="">All</option>
+        {id === "workspace"
+          ? workspaces.map((w) => (
+              <option key={w.id} value={w.id}>
+                {w.name}
+              </option>
+            ))
+          : null}
+      </select>
+    </label>
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
@@ -40,79 +84,106 @@ export function ChangesPanel() {
       <div className="relative flex h-full w-[min(960px,82vw)] flex-col border-l border-[var(--border)] bg-[var(--surface-2)] shadow-2xl">
         {/* Header */}
         <div className="flex items-center gap-2 border-b border-[var(--border)] px-4 py-2.5">
-          <span className="text-sm font-semibold text-gray-100">Changes</span>
+          <span className="text-sm font-semibold text-gray-100">Agent Changes</span>
           <span className="rounded-full bg-[var(--border)] px-2 py-0.5 text-xs text-gray-300">
-            {changes.length}
+            {visible.length}
           </span>
-          <span className="text-xs text-gray-500">files the agent edited this session</span>
+          <div className="ml-2 flex overflow-hidden rounded border border-[var(--border)] text-[11px]">
+            <button
+              onClick={() => setMode("live")}
+              className={`px-2 py-0.5 ${
+                mode === "live"
+                  ? "bg-[var(--accent-muted)] text-[var(--accent)]"
+                  : "text-gray-400 hover:text-gray-200"
+              }`}
+            >
+              This session
+            </button>
+            <button
+              onClick={() => setMode("history")}
+              className={`px-2 py-0.5 ${
+                mode === "history"
+                  ? "bg-[var(--accent-muted)] text-[var(--accent)]"
+                  : "text-gray-400 hover:text-gray-200"
+              }`}
+            >
+              History
+            </button>
+          </div>
+          {mode === "history" && (
+            <div className="ml-2 flex items-end gap-2">
+              {filterInput("workspace", "Workspace", historyWorkspace)}
+              {workspaceId ? (
+                <button
+                  onClick={() => setHistoryFilters(workspaceId, null)}
+                  className="text-[10px] text-cyan-400 hover:underline"
+                >
+                  filter to current
+                </button>
+              ) : null}
+            </div>
+          )}
+          <span className="ml-auto text-xs text-gray-500">
+            {mode === "live"
+              ? "files the agent edited this session"
+              : "everything the agent changed, grouped by session"}
+          </span>
           <button
             onClick={() => setOpen(false)}
             data-tooltip="Close"
-            className="ml-auto rounded-md px-2 py-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+            className="rounded-md px-2 py-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
           >
             ✕
           </button>
         </div>
 
-        {changes.length === 0 ? (
+        {visible.length === 0 ? (
           <div className="flex flex-1 items-center justify-center px-6 text-center">
             <div>
-              <p className="text-sm text-gray-400">No edits yet.</p>
+              <p className="text-sm text-gray-400">
+                {mode === "live" ? "No edits yet." : "No history yet."}
+              </p>
               <p className="mt-1 text-xs text-gray-600">
                 When the agent writes a file (local or on a server), it shows up here with a
-                diff and a one-click revert.
+                diff and a one-click revert. History persists across restarts.
               </p>
             </div>
           </div>
         ) : (
           <div className="flex min-h-0 flex-1">
             {/* File list */}
-            <div className="w-72 shrink-0 overflow-y-auto border-r border-[var(--border)] py-1">
-              {changes.map((c) => {
-                const d = diffs.get(c.id);
-                const active = c.id === selectedId;
-                return (
-                  <button
+            <div className="w-80 shrink-0 overflow-y-auto border-r border-[var(--border)] py-1">
+              {mode === "history" ? (
+                historyGroups.map((g) => (
+                  <div key={`${g.sessionId}::${g.workspaceId ?? ""}`} className="mb-1">
+                    <div className="px-3 py-1 text-[10px] font-medium uppercase tracking-wide text-gray-500">
+                      {g.workspaceId
+                        ? workspaces.find((w) => w.id === g.workspaceId)?.name ?? g.workspaceId
+                        : "Session"}{" "}
+                      · {g.changes.length} file{g.changes.length > 1 ? "s" : ""}
+                    </div>
+                    {g.changes.map((c) => (
+                      <ChangeRow
+                        key={c.id}
+                        c={c}
+                        active={c.id === selectedId}
+                        diff={diffs.get(c.id)}
+                        onSelect={select}
+                      />
+                    ))}
+                  </div>
+                ))
+              ) : (
+                changes.map((c) => (
+                  <ChangeRow
                     key={c.id}
-                    onClick={() => select(c.id)}
-                    className={`flex w-full flex-col gap-0.5 border-l-2 px-3 py-1.5 text-left ${
-                      active
-                        ? "border-blue-500 bg-[var(--surface)]"
-                        : "border-transparent hover:bg-[var(--surface)]"
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <span
-                        className={`truncate text-xs font-medium ${
-                          c.reverted ? "text-gray-500 line-through" : "text-gray-200"
-                        }`}
-                        data-tooltip={c.path}
-                      >
-                        {baseName(c.path)}
-                      </span>
-                      {c.is_new && (
-                        <span className="rounded bg-green-900/50 px-1 text-[9px] uppercase text-green-300">
-                          new
-                        </span>
-                      )}
-                      {c.reverted && (
-                        <span className="rounded bg-gray-700 px-1 text-[9px] uppercase text-gray-300">
-                          reverted
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2 text-[10px] text-gray-500">
-                      <span className="truncate">{c.label}</span>
-                      {d && (
-                        <span className="ml-auto shrink-0 font-mono">
-                          <span className="text-green-400">+{d.added}</span>{" "}
-                          <span className="text-red-400">−{d.removed}</span>
-                        </span>
-                      )}
-                    </div>
-                  </button>
-                );
-              })}
+                    c={c}
+                    active={c.id === selectedId}
+                    diff={diffs.get(c.id)}
+                    onSelect={select}
+                  />
+                ))
+              )}
             </div>
 
             {/* Diff view */}
@@ -158,6 +229,59 @@ export function ChangesPanel() {
         )}
       </div>
     </div>
+  );
+}
+
+function ChangeRow({
+  c,
+  active,
+  diff,
+  onSelect,
+}: {
+  c: FileChange;
+  active: boolean;
+  diff?: DiffResult;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <button
+      onClick={() => onSelect(c.id)}
+      className={`flex w-full flex-col gap-0.5 border-l-2 px-3 py-1.5 text-left ${
+        active
+          ? "border-blue-500 bg-[var(--surface)]"
+          : "border-transparent hover:bg-[var(--surface)]"
+      }`}
+    >
+      <div className="flex items-center gap-1.5">
+        <span
+          className={`truncate text-xs font-medium ${
+            c.reverted ? "text-gray-500 line-through" : "text-gray-200"
+          }`}
+          data-tooltip={c.path}
+        >
+          {baseName(c.path)}
+        </span>
+        {c.is_new && (
+          <span className="rounded bg-green-900/50 px-1 text-[9px] uppercase text-green-300">
+            new
+          </span>
+        )}
+        {c.reverted && (
+          <span className="rounded bg-gray-700 px-1 text-[9px] uppercase text-gray-300">
+            reverted
+          </span>
+        )}
+      </div>
+      <div className="flex items-center gap-2 text-[10px] text-gray-500">
+        <span className="truncate">{c.label}</span>
+        {diff && (
+          <span className="ml-auto shrink-0 font-mono">
+            <span className="text-green-400">+{diff.added}</span>{" "}
+            <span className="text-red-400">−{diff.removed}</span>
+          </span>
+        )}
+      </div>
+    </button>
   );
 }
 

@@ -46,7 +46,7 @@ pub mod web_tools;
 pub mod workspace_context;
 
 /// Filesystem home for the agent's editable, Hermes-format files
-/// (SOUL.md / MEMORY.md / USER.md / skills/ / cron/). Managed as Tauri state.
+/// (SOUL.md / MEMORY.md / TASTE.md / skills/ / cron/). Managed as Tauri state.
 #[derive(Clone)]
 pub struct AgentHome(pub PathBuf);
 
@@ -61,10 +61,10 @@ impl AgentHome {
     pub fn memory(&self) -> PathBuf {
         self.0.join("MEMORY.md")
     }
+    /// Legacy USER.md path — read only by the one-time consolidation migration.
     pub fn user(&self) -> PathBuf {
         self.0.join("USER.md")
     }
-    #[allow(dead_code)]
     pub fn taste(&self) -> PathBuf {
         self.0.join("TASTE.md")
     }

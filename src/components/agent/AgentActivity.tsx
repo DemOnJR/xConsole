@@ -1,9 +1,10 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { SettingsIcon, TerminalIcon } from "../icons";
 import type { AgentActivityItem } from "../../stores/agentStore";
 import { CodeHighlight, ConsoleOutput, langFromPath, ShellCommand } from "./SyntaxHighlight";
 import { useVpsStore } from "../../stores/vpsStore";
 import { useCanvasStore } from "../../stores/canvasStore";
+import { redactExportText } from "../../lib/agentExport";
 
 function truncate(s: string, max: number): string {
   const flat = s.replace(/\s+/g, " ").trim();
@@ -227,10 +228,11 @@ function hostFromCommandLabel(label: string): string | null {
   return m?.[1]?.trim() || null;
 }
 
-function CommandCard({ item }: { item: AgentActivityItem }) {
+function CommandCard({ item, defaultCollapsed = false }: { item: AgentActivityItem; defaultCollapsed?: boolean }) {
   const running = item.state === "running";
   const failed = item.state === "error";
-  const cmd = commandBody(item);
+  const [expanded, setExpanded] = useState(!defaultCollapsed || running || failed);
+  const cmd = redactExportText(commandBody(item));
   const output = item.output?.trim();
   const hostLabel = hostFromCommandLabel(item.label);
   const vpsList = useVpsStore((s) => s.vpsList);
@@ -266,7 +268,12 @@ function CommandCard({ item }: { item: AgentActivityItem }) {
             : "border-[var(--border)]"
       }`}
     >
-      <div className="flex items-center gap-2 border-b border-[var(--border)]/80 px-2.5 py-1.5">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 border-b border-[var(--border)]/80 px-2.5 py-1.5 text-left hover:bg-[var(--surface-hover)]"
+        onClick={() => setExpanded((v) => !v)}
+        data-tooltip={expanded ? "Collapse" : "Expand command"}
+      >
         <TerminalIcon size={12} className="shrink-0 text-[var(--text-faint)]" />
         <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--text-dim)]">
           {hostLabel ? (
@@ -284,7 +291,10 @@ function CommandCard({ item }: { item: AgentActivityItem }) {
             type="button"
             className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-[var(--text-faint)] transition hover:bg-[var(--surface-hover)] hover:text-[var(--accent)]"
             data-tooltip="Open this host on the canvas"
-            onClick={openOnCanvas}
+            onClick={(e) => {
+              e.stopPropagation();
+              openOnCanvas();
+            }}
           >
             Canvas
           </button>
@@ -299,23 +309,25 @@ function CommandCard({ item }: { item: AgentActivityItem }) {
         ) : (
           <span className="h-1.5 w-1.5 rounded-full bg-[var(--success)]" title="Done" />
         )}
-      </div>
-      <div className="agent-activity-scroll max-h-[280px] overflow-y-auto px-2.5 py-2 font-[family-name:var(--font-mono)]">
-        <div className="flex gap-1.5">
-          <span className="shrink-0 select-none font-mono text-[10px] text-[var(--success)]">
-            $
-          </span>
-          <ShellCommand code={cmd} className="min-w-0 flex-1" />
-        </div>
-        {output && !running ? (
-          <div className="mt-2 border-t border-[var(--border)]/60 pt-2">
-            <ConsoleOutput text={output} />
+      </button>
+      {expanded && (
+        <div className="agent-activity-scroll max-h-[280px] overflow-y-auto px-2.5 py-2 font-[family-name:var(--font-mono)]">
+          <div className="flex gap-1.5">
+            <span className="shrink-0 select-none font-mono text-[10px] text-[var(--success)]">
+              $
+            </span>
+            <ShellCommand code={cmd} className="min-w-0 flex-1" />
           </div>
-        ) : null}
-        {running && !output ? (
-          <div className="mt-2 text-[10px] text-[var(--text-faint)]">Running on host…</div>
-        ) : null}
-      </div>
+          {output && !running ? (
+            <div className="mt-2 border-t border-[var(--border)]/60 pt-2">
+              <ConsoleOutput text={redactExportText(output)} />
+            </div>
+          ) : null}
+          {running && !output ? (
+            <div className="mt-2 text-[10px] text-[var(--text-faint)]">Running on host…</div>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }
@@ -370,6 +382,7 @@ export function AgentActivityFeed({
   live?: boolean;
 }) {
   const visible = useMemo(() => visibleActivityItems(items), [items]);
+  const [expandAll, setExpandAll] = useState(false);
 
   const parallelMeta = useMemo(() => {
     const banner = visible.find(
@@ -408,41 +421,75 @@ export function AgentActivityFeed({
     [visible],
   );
 
-  // Collapse long finished meta lines so command/edit cards stay scannable.
+  // Collapse finished noise so the feed stays scannable:
+  //   * long meta lines → "N earlier steps"
+  //   * done (non-failed) commands → "N commands run" summary line
+  // Failed commands always stay expanded for visibility.
   const META_KEEP_TAIL = 4;
   const collapsedBlocks = useMemo(() => {
-    if (live) return blocks;
+    if (live || expandAll) return blocks;
+    const isCollapsible = (item: AgentActivityItem) =>
+      item.state === "done" && !item.kind.includes("file_edit") && isCommandItem(item);
     const isMetaDone = (item: AgentActivityItem) =>
       item.state !== "running" &&
       item.kind !== "file_edit" &&
-      item.kind !== "command" &&
       !isCommandItem(item);
-    const metaDoneIdxs = blocks
-      .map((b, i) => (isMetaDone(b) ? i : -1))
+    const collapseIdxs = blocks
+      .map((b, i) => {
+        if (isCollapsible(b)) return i;
+        if (isMetaDone(b)) return i;
+        return -1;
+      })
       .filter((i) => i >= 0);
-    if (metaDoneIdxs.length <= META_KEEP_TAIL + 2) return blocks;
-    const drop = new Set(metaDoneIdxs.slice(0, metaDoneIdxs.length - META_KEEP_TAIL));
+    const collapsibleCount = collapseIdxs.filter((i) => isCollapsible(blocks[i])).length;
+    const metaCount = collapseIdxs.length - collapsibleCount;
+    // Only collapse when there are enough items to make it worth hiding.
+    if (collapsibleCount <= 1 && metaCount <= META_KEEP_TAIL + 2) return blocks;
+    const drop = new Set(collapseIdxs.slice(0, collapseIdxs.length - META_KEEP_TAIL));
     const kept: AgentActivityItem[] = [];
-    let collapsed = 0;
-    let inserted = false;
+    let collapsedCmds = 0;
+    let collapsedMeta = 0;
+    let cmdSummaryInserted = false;
+    let metaSummaryInserted = false;
     for (let i = 0; i < blocks.length; i++) {
       if (drop.has(i)) {
-        collapsed += 1;
-        if (!inserted) {
-          kept.push({
-            id: "collapsed-meta",
-            kind: "status",
-            label: `${collapsed} earlier steps`,
-            state: "done",
-          });
-          inserted = true;
+        if (isCollapsible(blocks[i])) {
+          collapsedCmds += 1;
+          if (!cmdSummaryInserted) {
+            kept.push({
+              id: "collapsed-commands",
+              kind: "status",
+              label: `${collapsedCmds} commands run`,
+              state: "done",
+            } as AgentActivityItem);
+            cmdSummaryInserted = true;
+          } else {
+            const last = kept[kept.length - 1];
+            if (last.id === "collapsed-commands") {
+              kept[kept.length - 1] = {
+                ...last,
+                label: `${collapsedCmds} commands run`,
+              };
+            }
+          }
         } else {
-          const last = kept[kept.length - 1];
-          if (last.id === "collapsed-meta") {
-            kept[kept.length - 1] = {
-              ...last,
-              label: `${collapsed} earlier steps`,
-            };
+          collapsedMeta += 1;
+          if (!metaSummaryInserted) {
+            kept.push({
+              id: "collapsed-meta",
+              kind: "status",
+              label: `${collapsedMeta} earlier steps`,
+              state: "done",
+            } as AgentActivityItem);
+            metaSummaryInserted = true;
+          } else {
+            const last = kept[kept.length - 1];
+            if (last.id === "collapsed-meta") {
+              kept[kept.length - 1] = {
+                ...last,
+                label: `${collapsedMeta} earlier steps`,
+              };
+            }
           }
         }
         continue;
@@ -450,7 +497,7 @@ export function AgentActivityFeed({
       kept.push(blocks[i]);
     }
     return kept;
-  }, [blocks, live]);
+  }, [blocks, live, expandAll]);
 
   if (visible.length === 0 && !live) return null;
 
@@ -489,6 +536,18 @@ export function AgentActivityFeed({
       {collapsedBlocks.map((item) =>
         item.id === "collapsed-meta" ? (
           <MetaLine key="collapsed-meta" text={item.label} dimmed />
+        ) : item.id === "collapsed-commands" ? (
+          <button
+            key="collapsed-commands"
+            type="button"
+            onClick={() => setExpandAll(true)}
+            className="flex items-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--surface)]/40 px-2.5 py-1 text-[11px] text-gray-500 hover:bg-[var(--border)] hover:text-gray-300"
+            data-tooltip="Show every command"
+          >
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)]" />
+            <span className="min-w-0 truncate">{item.label}</span>
+            <span className="text-[10px] text-gray-600">show</span>
+          </button>
         ) : (
           <ActivityBlock key={`${item.id}-${item.kind}`} item={item} />
         ),

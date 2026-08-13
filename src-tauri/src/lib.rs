@@ -186,6 +186,8 @@ pub fn run() {
             // Agent home: editable Hermes-format files (SOUL.md / MEMORY.md / ...).
             let agent_home = AgentHome::new(dir.join("agent"));
             ai::skills::seed_defaults(&agent_home);
+            // One-time: fold legacy USER.md into the consolidated TASTE.md store.
+            ai::memory::migrate_user_into_taste(&agent_home);
 
             let approvals = ApprovalRegistry::new();
             let prompts = PromptRegistry::new();
@@ -216,6 +218,7 @@ pub fn run() {
 
             app.manage(commands::lock::DataKey(std::sync::Mutex::new(initial_data_key)));
             app.manage(commands::lock::AutoLock::default());
+            app.manage(ai::edits::EditJournal::with_db(db.clone()));
             app.manage(db);
             app.manage(sessions);
             app.manage(sftp);
@@ -233,7 +236,6 @@ pub fn run() {
             app.manage(session_state);
             app.manage(llama_server);
             app.manage(cron_running);
-            app.manage(ai::edits::EditJournal::new());
 
             // Idle auto-lock. The timer lives in the backend on purpose: a JS timer stops
             // with a hung or crashed webview, and "the lock quietly stopped working" is the
@@ -414,8 +416,13 @@ pub fn run() {
             commands::ai::agent_answer_prompt,
             commands::ai::agent_cancel,
             commands::ai::list_file_changes,
+            commands::ai::list_file_changes_history,
             commands::ai::clear_file_changes,
             commands::ai::revert_file_change,
+            commands::ai::list_plans,
+            commands::ai::get_plan,
+            commands::ai::archive_plan,
+            commands::ai::cancel_plan,
             commands::ai::scan_skill_path,
             commands::ai::skill_scanner_status,
             commands::ai::install_skill_scanner,

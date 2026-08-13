@@ -6,11 +6,12 @@ use uuid::Uuid;
 
 use super::models::{
     AgentApproval, AgentConversation, AgentConversationInput, AgentConversationMeta,
-    AiProvider, AiProviderInput, AuthType, CloudAccount, CloudAccountInput,
-    CronJob, CronJobInput, GoalSession, InfraProject, InfraProjectInput, KnownHost, Vps, VpsInput,
-    Workspace, WorkspaceInput,
+    AgentPlan, AgentPlanMeta, AiProvider, AiProviderInput, AuthType, CloudAccount,
+    CloudAccountInput, CronJob, CronJobInput, GoalSession, InfraProject, InfraProjectInput,
+    KnownHost, Vps, VpsInput, Workspace, WorkspaceInput,
 };
 use crate::ai::conversations;
+use crate::ai::edits::EditRecord;
 use crate::ai::provider::ChatMessage;
 use crate::secrets;
 
@@ -500,6 +501,36 @@ impl Db {
                 messages_json TEXT NOT NULL DEFAULT '[]',
                 created_at    TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Plans the agent presents via present_plan, for review history.
+            -- status: presented | applied | archived | cancelled
+            CREATE TABLE IF NOT EXISTS agent_plan (
+                id           TEXT PRIMARY KEY,
+                session_id   TEXT NOT NULL,
+                workspace_id TEXT,
+                title        TEXT,
+                plan         TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'presented',
+                created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Files the agent changed (before/after), for per-session and
+            -- per-workspace diff history.
+            CREATE TABLE IF NOT EXISTS agent_file_change (
+                id           TEXT PRIMARY KEY,
+                session_id   TEXT NOT NULL,
+                workspace_id TEXT,
+                scope        TEXT NOT NULL,
+                vps_id       TEXT,
+                label        TEXT,
+                path         TEXT NOT NULL,
+                before       TEXT,
+                after        TEXT,
+                is_new       INTEGER NOT NULL DEFAULT 0,
+                reverted     INTEGER NOT NULL DEFAULT 0,
+                ts           INTEGER NOT NULL
             );
             "#,
         )?;
@@ -1548,6 +1579,227 @@ impl Db {
     pub fn delete_agent_conversation(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM agent_conversation WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    // ----- Agent plans (present_plan history) -----
+
+    pub fn insert_agent_plan(&self, plan: &AgentPlan) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agent_plan (id, session_id, workspace_id, title, plan, status, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))
+             ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                plan = excluded.plan,
+                status = excluded.status,
+                updated_at = datetime('now')",
+            params![
+                plan.id,
+                plan.session_id,
+                plan.workspace_id,
+                plan.title,
+                plan.plan,
+                plan.status,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_agent_plan(&self, id: &str) -> Result<Option<AgentPlan>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, workspace_id, title, plan, status, created_at, updated_at
+             FROM agent_plan WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map([id], |r| {
+            Ok(AgentPlan {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                workspace_id: r.get(2)?,
+                title: r.get(3)?,
+                plan: r.get(4)?,
+                status: r.get(5)?,
+                created_at: r.get(6)?,
+                updated_at: r.get(7)?,
+            })
+        })?;
+        match rows.next() {
+            Some(v) => Ok(Some(v?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_agent_plans(
+        &self,
+        session_id: Option<&str>,
+        workspace_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<AgentPlanMeta>> {
+        let conn = self.conn.lock().unwrap();
+        let (sql, params_vec): (String, Vec<String>) = match (session_id, workspace_id) {
+            (Some(s), Some(w)) => (
+                "SELECT id, session_id, workspace_id, title, status, created_at, updated_at
+                 FROM agent_plan WHERE session_id = ?1 AND workspace_id = ?2
+                 ORDER BY updated_at DESC LIMIT ?3"
+                    .into(),
+                vec![s.to_string(), w.to_string(), limit.to_string()],
+            ),
+            (Some(s), None) => (
+                "SELECT id, session_id, workspace_id, title, status, created_at, updated_at
+                 FROM agent_plan WHERE session_id = ?1
+                 ORDER BY updated_at DESC LIMIT ?2"
+                    .into(),
+                vec![s.to_string(), limit.to_string()],
+            ),
+            (None, Some(w)) => (
+                "SELECT id, session_id, workspace_id, title, status, created_at, updated_at
+                 FROM agent_plan WHERE workspace_id = ?1
+                 ORDER BY updated_at DESC LIMIT ?2"
+                    .into(),
+                vec![w.to_string(), limit.to_string()],
+            ),
+            (None, None) => (
+                "SELECT id, session_id, workspace_id, title, status, created_at, updated_at
+                 FROM agent_plan ORDER BY updated_at DESC LIMIT ?1"
+                    .into(),
+                vec![limit.to_string()],
+            ),
+        };
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec
+            .iter()
+            .map(|p| p as &dyn rusqlite::ToSql)
+            .collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_refs.as_slice(), |r| {
+            Ok(AgentPlanMeta {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                workspace_id: r.get(2)?,
+                title: r.get(3)?,
+                status: r.get(4)?,
+                created_at: r.get(5)?,
+                updated_at: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn update_agent_plan_status(&self, id: &str, status: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE agent_plan SET status = ?2, updated_at = datetime('now') WHERE id = ?1",
+            params![id, status],
+        )?;
+        Ok(())
+    }
+
+    // ----- Agent file changes (diff history) -----
+
+    /// Insert or replace a file-change record (same id = replace, for revert updates).
+    pub fn insert_file_change(&self, rec: &EditRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agent_file_change
+                (id, session_id, workspace_id, scope, vps_id, label, path, before, after, is_new, reverted, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(id) DO UPDATE SET
+                before = excluded.before,
+                after = excluded.after,
+                reverted = excluded.reverted",
+            params![
+                rec.id,
+                rec.session_id,
+                rec.workspace_id,
+                rec.scope,
+                rec.vps_id,
+                rec.label,
+                rec.path,
+                rec.before,
+                rec.after,
+                rec.is_new as i64,
+                rec.reverted as i64,
+                rec.ts,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_file_changes(
+        &self,
+        session_id: Option<&str>,
+        workspace_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<EditRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let (sql, params_vec): (String, Vec<String>) = match (session_id, workspace_id) {
+            (Some(s), Some(w)) => (
+                "SELECT id, session_id, workspace_id, scope, vps_id, label, path, before, after, is_new, reverted, ts
+                 FROM agent_file_change WHERE session_id = ?1 AND workspace_id = ?2
+                 ORDER BY ts ASC LIMIT ?3"
+                    .into(),
+                vec![s.to_string(), w.to_string(), limit.to_string()],
+            ),
+            (Some(s), None) => (
+                "SELECT id, session_id, workspace_id, scope, vps_id, label, path, before, after, is_new, reverted, ts
+                 FROM agent_file_change WHERE session_id = ?1
+                 ORDER BY ts ASC LIMIT ?2"
+                    .into(),
+                vec![s.to_string(), limit.to_string()],
+            ),
+            (None, Some(w)) => (
+                "SELECT id, session_id, workspace_id, scope, vps_id, label, path, before, after, is_new, reverted, ts
+                 FROM agent_file_change WHERE workspace_id = ?1
+                 ORDER BY ts ASC LIMIT ?2"
+                    .into(),
+                vec![w.to_string(), limit.to_string()],
+            ),
+            (None, None) => (
+                "SELECT id, session_id, workspace_id, scope, vps_id, label, path, before, after, is_new, reverted, ts
+                 FROM agent_file_change ORDER BY ts ASC LIMIT ?1"
+                    .into(),
+                vec![limit.to_string()],
+            ),
+        };
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec
+            .iter()
+            .map(|p| p as &dyn rusqlite::ToSql)
+            .collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_refs.as_slice(), |r| {
+            Ok(EditRecord {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                workspace_id: r.get(2)?,
+                scope: r.get(3)?,
+                vps_id: r.get(4)?,
+                label: r.get(5)?,
+                path: r.get(6)?,
+                before: r.get(7)?,
+                after: r.get(8)?,
+                is_new: r.get::<_, i64>(9)? != 0,
+                reverted: r.get::<_, i64>(10)? != 0,
+                ts: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn mark_file_change_reverted(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE agent_file_change SET reverted = 1 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_file_changes(&self, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM agent_file_change WHERE session_id = ?1",
+            params![session_id],
+        )?;
         Ok(())
     }
 }

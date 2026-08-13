@@ -11,6 +11,7 @@ import { AppToolbar } from "./components/AppToolbar";
 import { NavRail } from "./components/NavRail";
 import { StatusStrip } from "./components/StatusStrip";
 import { ChangesPanel } from "./components/agent/ChangesPanel";
+import { PlanModal } from "./components/agent/PlanModal";
 import { UpdateNotice } from "./components/UpdateNotice";
 import { TransfersPanel } from "./components/TransfersPanel";
 import { useUpdateStore } from "./stores/updateStore";
@@ -254,6 +255,7 @@ function UnlockedApp() {
         <StatusStrip />
       </div>
       <SettingsModal />
+      <PlanModal />
       <ChangesPanel />
       <TransfersPanel />
       <UpdateNotice />

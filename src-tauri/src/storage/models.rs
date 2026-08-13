@@ -336,6 +336,42 @@ pub struct AgentConversationInput {
     pub messages_json: String,
 }
 
+/// A plan the agent presented via `present_plan` (persisted for history).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPlan {
+    pub id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    pub plan: String,
+    /// presented | applied | archived | cancelled
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+/// List row for the plan history picker (no plan body).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPlanMeta {
+    pub id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
 fn default_true() -> bool {
     true
 }

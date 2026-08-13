@@ -6,6 +6,9 @@ use crate::ai::AgentHome;
 
 pub const TASTE_MAX_CHARS: usize = 4000;
 
+/// Merge cap for the user-profile slice of TASTE.md (matches the old USER.md cap).
+pub const USER_MAX_CHARS: usize = 3000;
+
 pub fn path(home: &AgentHome) -> std::path::PathBuf {
     home.0.join("TASTE.md")
 }
@@ -60,7 +63,28 @@ pub fn format_for_prompt(home: &AgentHome) -> String {
         format!("{}\n…(truncated)", t[..cut].trim())
     };
     format!(
-        "# Working style (TASTE.md)\n\
-         Follow these preferences when choosing commands, paths, and how you report results:\n{body}"
+        "# Preferences (TASTE.md)\n\
+         User profile + working style. Follow these preferences when choosing commands, paths, \
+         and how you report results:\n{body}"
     )
+}
+
+/// Read the merged user-profile slice of TASTE.md (the first `USER_MAX_CHARS`
+/// chars, like the old USER.md). After consolidation, USER.md content lives in
+/// TASTE.md; this keeps `memory::load_user` working for backward compatibility.
+pub fn load_user_profile(home: &AgentHome) -> String {
+    let raw = load(home);
+    let t = raw.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    if t.len() <= USER_MAX_CHARS {
+        t.to_string()
+    } else {
+        let mut cut = USER_MAX_CHARS;
+        while !t.is_char_boundary(cut) && cut > 0 {
+            cut -= 1;
+        }
+        format!("{}\n…(truncated)", t[..cut].trim())
+    }
 }

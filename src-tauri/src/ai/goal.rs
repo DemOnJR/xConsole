@@ -164,7 +164,7 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
         plan_mode: false,
         workspace_id: None,
         canvas: Vec::new(),
-        edits: crate::ai::edits::EditJournal::new(),
+        edits: crate::ai::edits::EditJournal::with_db(ctx.db.clone()),
         hooks: hooks_cfg,
     };
 
