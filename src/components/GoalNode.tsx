@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { NodeResizer, useStore, type NodeProps } from "@xyflow/react";
 import { api, onGoalEvent, type GoalMemory, type GoalSession, type GoalSpec, type GoalTask } from "../lib/tauri";
+import { parseGoalSessionViews } from "../lib/goalParse";
 import { useCanvasStore, type GoalNode as GoalNodeType } from "../stores/canvasStore";
 import { useGoalStore } from "../stores/goalStore";
 import { useAgentStore } from "../stores/agentStore";
+import { NodeErrorBoundary } from "./NodeErrorBoundary";
 
 const COLUMNS = ["backlog", "in_progress", "waiting", "testing", "blocked", "done"];
 
@@ -15,38 +17,34 @@ const KIND_COLOR: Record<string, string> = {
   check: "text-cyan-300",
 };
 
-function parseSpec(s: GoalSession): GoalSpec | null {
-  try {
-    return JSON.parse(s.spec_json) as GoalSpec;
-  } catch {
-    return null;
-  }
-}
-
-function parseTasks(s: GoalSession): GoalTask[] {
-  try {
-    return JSON.parse(s.kanban_json) as GoalTask[];
-  } catch {
-    return [];
-  }
-}
-
-function parseMemory(s: GoalSession): GoalMemory {
-  try {
-    return JSON.parse(s.memory_json) as GoalMemory;
-  } catch {
-    return { learned: [] };
-  }
+function applySession(
+  s: GoalSession,
+  setSpec: (v: GoalSpec | null) => void,
+  setTasks: (v: GoalTask[]) => void,
+  setMemory: (v: GoalMemory) => void,
+) {
+  const views = parseGoalSessionViews(s);
+  setSpec(views.spec);
+  setTasks(views.tasks);
+  setMemory(views.memory);
 }
 
 /** Kanban board node for a /goal session. Live-updates via goal:// events. */
-export function GoalNode({ id, data, selected }: NodeProps<GoalNodeType>) {
+export function GoalNode(props: NodeProps<GoalNodeType>) {
+  return (
+    <NodeErrorBoundary label="Goal">
+      <GoalBoard {...props} />
+    </NodeErrorBoundary>
+  );
+}
+
+function GoalBoard({ id, data, selected }: NodeProps<GoalNodeType>) {
   const focus = useCanvasStore((s) => s.focus);
   const removeNode = useCanvasStore((s) => s.removeNode);
   const layoutMode = useCanvasStore((s) => s.layoutMode);
   const freeform = layoutMode === "freeform";
   const tiled = layoutMode === "tile";
-  const zoom = useStore((s) => s.transform[2]);
+  const zoom = useStore((s) => s.transform[2]) || 1;
 
   const goalId = data.goalId;
   const [session, setSession] = useState<GoalSession | null>(null);
@@ -66,9 +64,7 @@ export function GoalNode({ id, data, selected }: NodeProps<GoalNodeType>) {
         const s = await api.getGoal(goalId);
         if (!alive) return;
         setSession(s);
-        setSpec(parseSpec(s));
-        setTasks(parseTasks(s));
-        setMemory(parseMemory(s));
+        applySession(s, setSpec, setTasks, setMemory);
       } catch (e) {
         if (alive) setError(String(e));
       }
@@ -78,9 +74,7 @@ export function GoalNode({ id, data, selected }: NodeProps<GoalNodeType>) {
           .then((s) => {
             if (!alive) return;
             setSession(s);
-            setSpec(parseSpec(s));
-            setTasks(parseTasks(s));
-            setMemory(parseMemory(s));
+            applySession(s, setSpec, setTasks, setMemory);
           })
           .catch(() => {});
       });
@@ -215,7 +209,7 @@ export function GoalNode({ id, data, selected }: NodeProps<GoalNodeType>) {
         <div className="border-b border-[var(--border)]/60 px-3 py-1.5 text-[10px] text-[var(--text-dim)]">
           <span className="text-[var(--text-faint)]">objective: </span>
           {spec.objective}
-          {spec.success_criteria.length > 0 && (
+          {(spec.success_criteria ?? []).length > 0 && (
             <span className="text-[var(--text-faint)]">
               {" "}· done when: {spec.success_criteria.join("; ")}
             </span>
@@ -258,7 +252,7 @@ export function GoalNode({ id, data, selected }: NodeProps<GoalNodeType>) {
       </div>
 
       {/* Constraint memory strip */}
-      {memory.learned.length > 0 && (
+      {(memory.learned ?? []).length > 0 && (
         <div className="border-t border-[var(--border)]/60 px-3 py-1 text-[9px] text-[var(--text-faint)]">
           {memory.learned.map((l) => (
             <span key={l.key} className="mr-2" data-tooltip={l.evidence}>
