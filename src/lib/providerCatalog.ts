@@ -32,12 +32,24 @@ export interface CatalogProvider {
   group: string;
 }
 
+/** Match a saved provider to its catalog row (kind, id, or name). */
+export function catalogForProvider(p: { id?: string; kind: string; name: string }): CatalogProvider | undefined {
+  const name = p.name.toLowerCase();
+  return PROVIDER_CATALOG.find(
+    (c) =>
+      c.kind === p.kind ||
+      c.id === p.id ||
+      c.id === p.kind ||
+      c.name.toLowerCase() === name,
+  );
+}
+
 export const PROVIDER_CATALOG: CatalogProvider[] = [
   // A
   { id: "alibaba", name: "Alibaba (Qwen)", kind: "openai", flavor: "openai", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", defaultModel: "qwen-plus", models: ["qwen-plus", "qwen-max", "qwen-turbo", "qwen3-max", "qwen3-flash"], needsKey: true, group: "A" },
   { id: "amazon-bedrock", name: "Amazon Bedrock", kind: "openai", flavor: "openai", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", defaultModel: "anthropic.claude-sonnet-4-5", models: ["anthropic.claude-sonnet-4-5", "anthropic.claude-opus-4-5", "meta.llama3-70b"], needsKey: true, group: "A" },
   { id: "anthropic", name: "Anthropic (Claude)", kind: "anthropic", flavor: "anthropic", baseUrl: "https://api.anthropic.com", defaultModel: "claude-sonnet-4-5", models: ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5", "claude-3-5-haiku"], needsKey: true, group: "A" },
-  { id: "antigravity", name: "Antigravity CLI (agy)", kind: "antigravity_cli", flavor: "cli", baseUrl: "antigravity-ide", defaultModel: "agent", models: [], needsKey: false, binPath: "antigravity-ide", group: "A" },
+  { id: "antigravity", name: "Antigravity CLI (agy)", kind: "antigravity_cli", flavor: "cli", baseUrl: "agy", defaultModel: "gemini-3.7-flash-high", models: ["gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low", "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low", "gemini-3.5-flash-high", "gemini-3.5-flash-medium", "gemini-3.5-flash-low", "gemini-3.1-pro-high", "gemini-3.1-pro-low", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium"], needsKey: false, binPath: "agy", group: "A" },
   { id: "arcee", name: "Arcee AI", kind: "openai", flavor: "openai", baseUrl: "https://api.arcee.ai/v1", defaultModel: "arcee-lite", models: ["arcee-lite", "arcee-mini"], needsKey: true, group: "A" },
   { id: "azure", name: "Azure OpenAI", kind: "openai", flavor: "openai", baseUrl: "https://YOUR_RESOURCE.openai.azure.com/openai/v1", defaultModel: "gpt-4o", models: ["gpt-4o", "gpt-4o-mini", "gpt-5"], needsKey: true, group: "A" },
 

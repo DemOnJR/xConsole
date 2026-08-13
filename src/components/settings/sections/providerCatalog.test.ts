@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { catalogGroups, PROVIDER_CATALOG, searchCatalog } from "../../../lib/providerCatalog";
+import { catalogForProvider, catalogGroups, PROVIDER_CATALOG, searchCatalog } from "../../../lib/providerCatalog";
 
 describe("provider catalog", () => {
   it("is sorted and grouped alphabetically A-Z", () => {
@@ -39,6 +39,16 @@ describe("provider catalog", () => {
     ]) {
       expect(ids).toContain(id);
     }
+  });
+
+  it("lists Gemini models for Antigravity CLI (agy)", () => {
+    const agy = PROVIDER_CATALOG.find((p) => p.id === "antigravity");
+    expect(agy?.kind).toBe("antigravity_cli");
+    expect(agy?.binPath).toBe("agy");
+    expect(agy?.models.some((m) => m.startsWith("gemini-"))).toBe(true);
+    expect(
+      catalogForProvider({ kind: "antigravity_cli", name: "anything" })?.id,
+    ).toBe("antigravity");
   });
 
   it("fuzzy-searches by name and id", () => {

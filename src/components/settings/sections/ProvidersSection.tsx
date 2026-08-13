@@ -56,7 +56,7 @@ const KIND_DEFAULTS: Record<ProviderKind, Partial<AiProviderInput>> = {
   cursor: { model: "auto", bin_path: "agent" },
   codex_cli: { bin_path: "codex" },
   opencode_cli: { bin_path: "opencode" },
-  antigravity_cli: { bin_path: "antigravity-ide", model: "agent" },
+  antigravity_cli: { bin_path: "agy", model: "gemini-3.7-flash-high" },
 };
 
 // One-click presets for popular providers. Most are OpenAI-compatible, so they
@@ -106,7 +106,7 @@ export const PROVIDER_PRESETS: {
     label: "Antigravity CLI (agy)",
     kind: "antigravity_cli",
     base_url: "",
-    model: "agent",
+    model: "gemini-3.7-flash-high",
   },
 ];
 
@@ -285,7 +285,10 @@ function ProviderForm({
         } else if (form.kind === "llamacpp") {
           const files = await api.listLocalFiles();
           if (alive) setLocalModels(files.map((f) => f.file));
-        } else if (form.kind === "opencode_cli" && form.id) {
+        } else if (
+          (form.kind === "opencode_cli" || form.kind === "antigravity_cli") &&
+          form.id
+        ) {
           const models = await api.aiCliModels(form.id);
           if (alive) setLocalModels(models);
         } else if (alive) {
@@ -740,7 +743,7 @@ function ProviderForm({
                 onChange={(e) => patch({ bin_path: e.target.value })}
                 placeholder={
                   form.kind === "antigravity_cli"
-                    ? "antigravity-ide"
+                    ? "agy"
                     : form.kind === "codex_cli"
                     ? "codex"
                     : "opencode"
@@ -750,27 +753,33 @@ function ProviderForm({
             <Field
               label="Model"
               hint={
-                form.kind === "opencode_cli"
+                form.kind === "opencode_cli" || form.kind === "antigravity_cli"
                   ? localModels.length > 0
-                    ? "Pick a model or type a provider/model ID."
+                    ? "Pick a model from the CLI list or type an id."
                     : form.id
-                      ? "Type a provider/model ID (e.g. opencode/big-pickle)."
+                      ? form.kind === "antigravity_cli"
+                        ? "Type a Gemini model id (e.g. gemini-3.7-flash-high)."
+                        : "Type a provider/model ID (e.g. opencode/big-pickle)."
                       : "Save the provider first, then re-edit to load available models."
                   : undefined
               }
             >
-              {form.kind === "opencode_cli" ? (
+              {form.kind === "opencode_cli" || form.kind === "antigravity_cli" ? (
                 <ModelCombo
                   value={form.model ?? ""}
                   onChange={(v) => patch({ model: v })}
                   options={localModels}
-                  placeholder="opencode/big-pickle"
+                  placeholder={
+                    form.kind === "antigravity_cli"
+                      ? "gemini-3.7-flash-high"
+                      : "opencode/big-pickle"
+                  }
                 />
               ) : (
                 <TextInput
                   value={form.model ?? ""}
                   onChange={(e) => patch({ model: e.target.value })}
-                  placeholder={form.kind === "antigravity_cli" ? "agent (or ask / edit)" : "default"}
+                  placeholder="default"
                 />
               )}
             </Field>

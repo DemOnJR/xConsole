@@ -41,13 +41,17 @@ impl CliProvider {
                 #[cfg(windows)]
                 {
                     if let Ok(local) = std::env::var("LOCALAPPDATA") {
-                        let cmd = format!(r"{local}\Programs\Antigravity IDE\bin\antigravity-ide.cmd");
-                        if Path::new(&cmd).exists() {
-                            return cmd;
+                        let agy = format!(r"{local}\agy\bin\agy.exe");
+                        if Path::new(&agy).exists() {
+                            return agy;
+                        }
+                        let ide = format!(r"{local}\Programs\Antigravity IDE\bin\antigravity-ide.cmd");
+                        if Path::new(&ide).exists() {
+                            return ide;
                         }
                     }
                 }
-                "antigravity-ide".into()
+                "agy".into()
             }
             "cursor" => {
                 #[cfg(windows)]
@@ -77,9 +81,15 @@ impl CliProvider {
                 a
             }
             "antigravity_cli" => {
-                let mut a = vec!["chat".to_string(), "-".to_string()];
+                // `agy` (not the IDE) is the agent CLI: print mode + --model.
+                // --mode is accept-edits|plan, not a model id.
+                let mut a = vec![
+                    "-p".to_string(),
+                    "--output-format".to_string(),
+                    "text".to_string(),
+                ];
                 if let Some(m) = &self.model {
-                    a.push("--mode".into());
+                    a.push("--model".into());
                     a.push(m.clone());
                 }
                 a
@@ -985,8 +995,9 @@ impl Provider for CliProvider {
 
         let flags = self.run_flags(req.xconsole.as_ref(), workspace.as_deref());
         let key = self.api_key.as_deref();
+        let bin = resolve_models_bin(&self.kind, &self.bin);
 
-        let child = spawn_with_stdin(&self.kind, &self.bin, &flags, &prompt, key).await?;
+        let child = spawn_with_stdin(&self.kind, &bin, &flags, &prompt, key).await?;
 
         let started = std::time::Instant::now();
         let resp =
@@ -1028,16 +1039,15 @@ pub fn is_cli_kind(kind: &str) -> bool {
     matches!(kind, "codex_cli" | "opencode_cli" | "cursor" | "antigravity_cli")
 }
 
-/// Run `opencode models` (or the equivalent for other CLIs) and return the
-/// list of available model IDs.
+/// Run `opencode models` / `agy models` and return available model IDs.
 pub async fn list_models(kind: &str, bin: &str) -> Result<Vec<String>, String> {
     let args: Vec<String> = match kind {
-        "opencode_cli" => vec!["models".into()],
-        // Other CLI providers don't have a models command yet.
+        "opencode_cli" | "antigravity_cli" => vec!["models".into()],
         _ => return Ok(Vec::new()),
     };
+    let bin = resolve_models_bin(kind, bin);
 
-    let mut cmd = spawn_cli_program(bin)?;
+    let mut cmd = spawn_cli_program(&bin)?;
     cmd.args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1054,13 +1064,47 @@ pub async fn list_models(kind: &str, bin: &str) -> Result<Vec<String>, String> {
         .map_err(|e| format!("failed to read output from '{bin}': {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let models: Vec<String> = stdout
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
+    Ok(parse_cli_model_ids(&stdout))
+}
 
-    Ok(models)
+/// Saved providers may still point at the IDE (`antigravity-ide`). Model listing
+/// and print-mode chat live on `agy`.
+fn resolve_models_bin(kind: &str, bin: &str) -> String {
+    if kind == "antigravity_cli" {
+        let lower = bin.to_ascii_lowercase();
+        if lower.contains("antigravity-ide") || bin.trim().is_empty() {
+            return CliProvider::default_bin(kind);
+        }
+    }
+    bin.to_string()
+}
+
+/// `agy models` prints `id<TAB>Display Name`. `opencode models` prints one id per line.
+pub fn parse_cli_model_ids(stdout: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in stdout.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("fetching")
+            || lower.starts_with("usage")
+            || lower.starts_with("available")
+            || lower.starts_with("id")
+            || line.starts_with('-')
+        {
+            continue;
+        }
+        let id = line.split('\t').next().unwrap_or(line).trim();
+        if id.is_empty() || id.contains(' ') {
+            continue;
+        }
+        if !out.iter().any(|e| e == id) {
+            out.push(id.to_string());
+        }
+    }
+    out
 }
 
 pub async fn login(kind: &str, bin: &str, sink: Option<&EventSink>) -> Result<String, String> {
@@ -1123,4 +1167,33 @@ pub async fn login(kind: &str, bin: &str, sink: Option<&EventSink>) -> Result<St
         ));
     }
     Ok(combined)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_cli_model_ids;
+
+    #[test]
+    fn parses_agy_tab_separated_gemini_ids() {
+        let out = "Fetching available models...\n\
+gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n\
+gemini-3.1-pro-low\tGemini 3.1 Pro (Low)\n\
+claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n";
+        assert_eq!(
+            parse_cli_model_ids(out),
+            vec![
+                "gemini-3.7-flash-high",
+                "gemini-3.1-pro-low",
+                "claude-sonnet-4-6",
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_opencode_one_id_per_line() {
+        assert_eq!(
+            parse_cli_model_ids("opencode/big-pickle\nanthropic/claude-sonnet-4-5\n"),
+            vec!["opencode/big-pickle", "anthropic/claude-sonnet-4-5"]
+        );
+    }
 }

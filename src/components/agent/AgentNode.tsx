@@ -56,7 +56,7 @@ import {
   type SlashCommandDef,
 } from "./agentCommands";
 import { notify } from "../../lib/notify";
-import { PROVIDER_CATALOG } from "../../lib/providerCatalog";
+import { catalogForProvider } from "../../lib/providerCatalog";
 import { InputBar, type ReasoningLevel } from "./InputBar";
 import { QueuedMessages } from "./QueuedMessages";
 import { useGitBranch } from "../../hooks/useGitBranch";
@@ -823,9 +823,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   const visionModelOptions = useMemo<CLIPickerOption[]>(() => {
     const p = providers.find((x) => x.id === pendingProviderId);
     if (!p) return [];
-    const catalog = PROVIDER_CATALOG.find(
-      (c) => c.id === p.kind || c.name.toLowerCase() === p.name.toLowerCase(),
-    );
+    const catalog = catalogForProvider(p);
     const ids = new Set<string>();
     const opts: CLIPickerOption[] = [];
     const add = (id: string, detail: string) => {
@@ -847,24 +845,59 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     [],
   );
 
+  const [cliModels, setCliModels] = useState<string[]>([]);
+  useEffect(() => {
+    if (picker?.kind !== "model-models" || !pendingProviderId) {
+      setCliModels([]);
+      return;
+    }
+    const p = providers.find((x) => x.id === pendingProviderId);
+    const cli =
+      p &&
+      (p.kind === "opencode_cli" ||
+        p.kind === "antigravity_cli" ||
+        p.kind === "cursor" ||
+        p.kind === "codex_cli");
+    if (!cli) {
+      setCliModels([]);
+      return;
+    }
+    let alive = true;
+    api
+      .aiCliModels(p.id)
+      .then((list) => {
+        if (alive) setCliModels(list);
+      })
+      .catch(() => {
+        if (alive) setCliModels([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [picker?.kind, pendingProviderId, providers]);
+
   /** Options for the /model picker's SECOND level: models of the chosen provider. */
   const providerModelOptions = useMemo<CLIPickerOption[]>(() => {
     const p = providers.find((x) => x.id === pendingProviderId);
     if (!p) return [];
-    const catalog = PROVIDER_CATALOG.find((c) => c.id === p.kind || c.name.toLowerCase() === p.name.toLowerCase());
+    const catalog = catalogForProvider(p);
     const ids = new Set<string>();
     const opts: CLIPickerOption[] = [];
-    if (p.model) {
-      ids.add(p.model);
-      opts.push({ id: p.model, label: p.model, detail: "configured", selected: p.model === activeModel });
-    }
-    for (const m of catalog?.models ?? []) {
-      if (ids.has(m)) continue;
-      ids.add(m);
-      opts.push({ id: m, label: m, detail: "catalog" });
-    }
+    const add = (id: string, detail: string) => {
+      if (!id || ids.has(id)) return;
+      ids.add(id);
+      opts.push({
+        id,
+        label: id,
+        detail,
+        selected: id === activeModel || id === p.model,
+      });
+    };
+    add(p.model || "", "configured");
+    for (const m of cliModels) add(m, "agy / cli");
+    for (const m of catalog?.models ?? []) add(m, "catalog");
     return opts;
-  }, [providers, pendingProviderId, activeModel]);
+  }, [providers, pendingProviderId, activeModel, cliModels]);
 
   /** Handle a picker selection. */
   const onPickerPick = (opt: CLIPickerOption) => {

@@ -30,7 +30,7 @@ describe("Command Code provider presets", () => {
       label: "Antigravity CLI (agy)",
       kind: "antigravity_cli",
       base_url: "",
-      model: "agent",
+      model: "gemini-3.7-flash-high",
     });
   });
 });
