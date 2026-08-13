@@ -1160,7 +1160,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
           )}
 
           <div className="flex items-start gap-2 px-2.5 py-2 font-mono">
-            <span className="shrink-0 select-none pt-1.5 font-mono text-[13px] text-[var(--text-faint)]">
+            <span className="shrink-0 select-none font-mono text-[13px] leading-[21px] text-[var(--text-faint)]">
               ~#
             </span>
             <textarea
@@ -1291,7 +1291,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
               }
               spellCheck={false}
               autoComplete="off"
-              className="max-h-[132px] min-w-0 flex-1 resize-none border-0 bg-transparent text-[13px] leading-relaxed text-[var(--text)] outline-none placeholder:text-[var(--text-faint)] disabled:opacity-50"
+              className="max-h-[132px] min-w-0 flex-1 resize-none border-0 bg-transparent p-0 text-[13px] leading-[21px] text-[var(--text)] outline-none placeholder:text-[var(--text-faint)] disabled:opacity-50"
             />
           </div>
 

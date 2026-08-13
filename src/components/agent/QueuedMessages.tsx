@@ -28,7 +28,7 @@ export function QueuedMessages({
             key={item.id}
             className="flex items-start gap-2 rounded-md border border-dashed border-[var(--border-strong)] bg-[var(--bg)] px-2 py-1.5"
           >
-            <span className="shrink-0 select-none pt-1 font-mono text-[12px] text-[var(--text-faint)]">
+            <span className="shrink-0 select-none font-mono text-[12px] leading-[20px] text-[var(--text-faint)]">
               ~#
             </span>
             <textarea
@@ -36,7 +36,7 @@ export function QueuedMessages({
               rows={Math.min(4, Math.max(1, item.text.split("\n").length))}
               onChange={(e) => onChange(item.id, e.target.value)}
               aria-label={`Queued message ${index + 1}`}
-              className="max-h-24 min-w-0 flex-1 resize-none border-0 bg-transparent font-mono text-[12px] leading-relaxed text-[var(--text)] outline-none"
+              className="max-h-24 min-w-0 flex-1 resize-none border-0 bg-transparent p-0 font-mono text-[12px] leading-[20px] text-[var(--text)] outline-none"
             />
             <div className="flex shrink-0 flex-col gap-1">
               {canSendNow && onSendNow && index === 0 ? (
