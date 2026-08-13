@@ -12,9 +12,10 @@ use crate::ai::registry;
 use serde_json::json;
 use tauri::{Emitter, Manager};
 
-/// Maximum tool-execution iterations before we stop.
-/// Raised for multi-host infra tasks; UI/status still surfaces when the cap is hit.
-const MAX_ITERS: usize = 20;
+// No tool-round cap. Claude / Grok / OpenAI do not limit how many tools a
+// turn may run — they stop when the model returns text (or the user hits Stop).
+// A 20-iter ceiling left unfinished `tool_calls` in history and the next
+// request 400'd ("assistant message with tool_calls must be followed by tool messages").
 
 /// Write cache hit/miss to `xconsole.log` + `cache.jsonl`.
 ///
@@ -753,11 +754,15 @@ pub async fn run_turn(
     if !messages.last().is_some_and(context::is_runtime_message) {
         context::inject_dynamic_into_last_user(&mut messages, &dynamic_block);
     }
+    // Repair history from a previous stop/cap so DeepSeek/OpenAI accept this turn.
+    crate::ai::provider::close_unanswered_tool_calls(&mut messages);
 
-    for iter in 0..MAX_ITERS {
+    let mut iter: usize = 0;
+    loop {
         // User pressed Stop — halt before the next model call.
         if tc.session_state.is_cancelled(&tc.session_id) {
             emit(Some(sink), StreamEvent::Status("Stopped.".into()));
+            crate::ai::provider::close_unanswered_tool_calls(&mut messages);
             break;
         }
         iters_used = iter + 1;
@@ -940,15 +945,9 @@ pub async fn run_turn(
             }
         }
 
-        if iter == MAX_ITERS - 1 && !resp.tool_calls.is_empty() {
-            emit(
-                Some(sink),
-                StreamEvent::Error(format!(
-                    "Agent stopped after {MAX_ITERS} tool iterations; task may be incomplete."
-                )),
-            );
-        }
+        iter += 1;
     }
+    crate::ai::provider::close_unanswered_tool_calls(&mut messages);
 
     // Self-improvement loop (ETAPA 29): before finishing, look at what went wrong this
     // turn (failed/retried tool calls, hitting the iteration cap), distill a short
@@ -969,7 +968,7 @@ pub async fn run_turn(
             &messages,
             &tc.targets,
             iters_used,
-            MAX_ITERS,
+            0,
         );
         if !lessons.is_empty() {
             emit(
@@ -992,7 +991,7 @@ pub async fn run_turn(
             .iter()
             .any(|m| m.role == "assistant" && !m.tool_calls.is_empty());
         if acted {
-            let outcome = crate::ai::reflection::analyze_turn(&messages, iters_used, MAX_ITERS);
+            let outcome = crate::ai::reflection::analyze_turn(&messages, iters_used, 0);
             let new_status =
                 crate::ai::autoresearch::record_outcome(&tc.home, &skill, !outcome.had_trouble());
             emit(

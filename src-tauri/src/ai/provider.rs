@@ -80,6 +80,47 @@ impl ChatMessage {
     }
 }
 
+/// OpenAI / DeepSeek reject a request if an assistant `tool_calls` message is
+/// not followed by a `tool` result for every id. That happens when a previous
+/// turn was stopped mid-loop (or used to hit a 20-iter cap). Insert stubs so
+/// the next user message can proceed.
+pub fn close_unanswered_tool_calls(messages: &mut Vec<ChatMessage>) -> usize {
+    let mut added = 0;
+    let mut i = 0;
+    while i < messages.len() {
+        if messages[i].role != "assistant" || messages[i].tool_calls.is_empty() {
+            i += 1;
+            continue;
+        }
+        let calls = messages[i].tool_calls.clone();
+        let mut have = std::collections::HashSet::new();
+        let mut j = i + 1;
+        while j < messages.len() && messages[j].role == "tool" {
+            if let Some(id) = &messages[j].tool_call_id {
+                have.insert(id.clone());
+            }
+            j += 1;
+        }
+        let mut insert_at = j;
+        for call in calls {
+            if have.contains(&call.id) {
+                continue;
+            }
+            messages.insert(
+                insert_at,
+                ChatMessage::tool_result(
+                    call.id,
+                    "error: tool call was interrupted before a result was recorded",
+                ),
+            );
+            insert_at += 1;
+            added += 1;
+        }
+        i = insert_at;
+    }
+    added
+}
+
 /// VPS execution context passed to Cursor CLI (MCP bridge).
 #[derive(Debug, Clone)]
 pub struct XConsoleExec {
@@ -314,5 +355,52 @@ pub trait Provider: Send + Sync {
     /// (CLI providers). The agent loop skips our tool loop for these.
     fn is_autonomous_cli(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod close_tool_tests {
+    use super::*;
+
+    fn call(id: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: "run_command".into(),
+            arguments: serde_json::json!({"command": "true"}),
+        }
+    }
+
+    #[test]
+    fn inserts_missing_results_before_the_next_user_message() {
+        let mut msgs = vec![
+            ChatMessage::user("harden ssh"),
+            {
+                let mut a = ChatMessage::assistant("checking");
+                a.tool_calls = vec![call("a"), call("b")];
+                a
+            },
+            ChatMessage::user("re check the vps"),
+        ];
+        assert_eq!(close_unanswered_tool_calls(&mut msgs), 2);
+        assert_eq!(msgs[2].role, "tool");
+        assert_eq!(msgs[2].tool_call_id.as_deref(), Some("a"));
+        assert_eq!(msgs[3].role, "tool");
+        assert_eq!(msgs[3].tool_call_id.as_deref(), Some("b"));
+        assert_eq!(msgs[4].role, "user");
+        assert_eq!(close_unanswered_tool_calls(&mut msgs), 0);
+    }
+
+    #[test]
+    fn keeps_existing_results_and_fills_only_the_gap() {
+        let mut msgs = vec![
+            {
+                let mut a = ChatMessage::assistant("go");
+                a.tool_calls = vec![call("a"), call("b")];
+                a
+            },
+            ChatMessage::tool_result("a", "ok"),
+        ];
+        assert_eq!(close_unanswered_tool_calls(&mut msgs), 1);
+        assert_eq!(msgs[2].tool_call_id.as_deref(), Some("b"));
     }
 }
