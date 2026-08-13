@@ -232,10 +232,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
     streamStats,
 
-    turnTelemetry,
-
-    prefixTelemetry,
-
     contextUsage,
 
     conversationCostUsd,
@@ -546,6 +542,10 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   const [picker, setPicker] = useState<{ kind: PickerKind } | null>(null);
   /** Provider id chosen in the first /model level — second level lists its models. */
   const [pendingProviderId, setPendingProviderId] = useState<string | null>(null);
+  const pickerRef = useRef(picker);
+  const pendingProviderRef = useRef(pendingProviderId);
+  pickerRef.current = picker;
+  pendingProviderRef.current = pendingProviderId;
   // Keep the Escape handler's ref in sync with the picker state.
   useEffect(() => {
     pickerOpenRef.current = picker !== null;
@@ -708,8 +708,9 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
   /** Handle a picker selection. */
   const onPickerPick = (opt: CLIPickerOption) => {
-    if (!picker) return;
-    switch (picker.kind) {
+    const kind = pickerRef.current?.kind;
+    if (!kind) return;
+    switch (kind) {
       case "model": {
         // First level: provider chosen → second level lists its models.
         setPendingProviderId(opt.id);
@@ -718,7 +719,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
       }
       case "model-models": {
         // Second level: model chosen → set provider + model.
-        void useSettingsStore.getState().set("agent.active_provider", pendingProviderId ?? "");
+        void useSettingsStore.getState().set("agent.active_provider", pendingProviderRef.current ?? "");
         void useSettingsStore.getState().set("agent.active_model", opt.id);
         setPendingProviderId(null);
         setPicker(null);
@@ -863,7 +864,11 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
         tiled ? "rounded-none" : "rounded-lg"
       } ${selected ? "border-blue-500" : "border-[var(--border)]"}`}
       style={freeform ? undefined : { transform: `scale(${1 / zoom})`, transformOrigin: "top left" }}
-      onMouseDown={() => focus(id)}
+      onMouseDown={(e) => {
+        const t = e.target as HTMLElement;
+        if (t.closest("button, input, textarea, select, [data-picker]")) return;
+        focus(id);
+      }}
     >
       <NodeResizer
         minWidth={340}
@@ -946,9 +951,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
           liveActivity={streaming ? activity : []}
           streamingText={streamingText}
           streaming={streaming}
-          streamStats={streamStats}
-          turnTelemetry={turnTelemetry}
-          prefixTelemetry={prefixTelemetry}
           expanded
           executeTarget={executeTarget}
           onExecute={executeCommand}
@@ -992,7 +994,12 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
       {/* In-console picker (CLI style) */}
       {picker && (
-        <div className="border-t border-[var(--border)] px-3 pb-2 pt-2">
+        <div
+          data-picker
+          className="nodrag nopan nowheel border-t border-[var(--border)] px-3 pb-2 pt-2"
+          onPointerDown={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
           {picker.kind === "model" && (
             <CLIPicker
               title="Model — provider"
@@ -1137,7 +1144,9 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
           )}
 
           <div className="flex items-start gap-2 px-2.5 py-2 font-mono">
-            <span className="shrink-0 pt-1.5 text-[13px] text-[var(--text-faint)]">›</span>
+            <span className="shrink-0 select-none pt-1.5 font-mono text-[13px] text-[var(--text-faint)]">
+              ~#
+            </span>
             <textarea
               ref={inputRef}
               value={input}
@@ -1314,6 +1323,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
               void stop();
             }}
             onPickModel={() => setPicker({ kind: "model" })}
+            onPickContext={() => setPicker({ kind: "ctx" })}
           />
 
         </div>

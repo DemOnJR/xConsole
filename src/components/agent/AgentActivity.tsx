@@ -17,14 +17,10 @@ export function visibleActivityItems(items: AgentActivityItem[]): AgentActivityI
   const fileEditIds = new Set(items.filter((i) => i.kind === "file_edit").map((i) => i.id));
   return items.filter((item) => {
     if (!item.label.trim() && item.kind !== "file_edit") return false;
-    // Parallel-batch + cache hit/miss lines stay visible in the transcript.
+    // Parallel-batch stays in the feed. Cache hit/miss lives on the input bar.
     if (item.kind === "status") {
-      return (
-        item.id === "parallel-batch" ||
-        item.id.startsWith("cache-") ||
-        /parallel/i.test(item.label) ||
-        /^cache /i.test(item.label)
-      );
+      if (item.id.startsWith("cache-") || /^cache /i.test(item.label)) return false;
+      return item.id === "parallel-batch" || /parallel/i.test(item.label);
     }
     if (item.id.startsWith("snapshot-")) return false;
     if (item.kind === "tool" && fileEditIds.has(item.id)) return false;
@@ -234,10 +230,26 @@ function hostFromCommandLabel(label: string): string | null {
   return m?.[1]?.trim() || null;
 }
 
-function CommandCard({ item, defaultCollapsed = false }: { item: AgentActivityItem; defaultCollapsed?: boolean }) {
+function CommandCard({
+  item,
+  defaultCollapsed = false,
+  open,
+  onOpenChange,
+}: {
+  item: AgentActivityItem;
+  defaultCollapsed?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}) {
   const running = item.state === "running";
   const failed = item.state === "error";
-  const [expanded, setExpanded] = useState(!defaultCollapsed || running || failed);
+  const [internal, setInternal] = useState(!defaultCollapsed || running || failed);
+  const expanded = open ?? internal;
+  const setExpanded = (next: boolean | ((v: boolean) => boolean)) => {
+    const value = typeof next === "function" ? next(expanded) : next;
+    onOpenChange?.(value);
+    if (open === undefined) setInternal(value);
+  };
   const cmd = redactExportText(commandBody(item));
   const output = item.output?.trim();
   const hostLabel = hostFromCommandLabel(item.label);
@@ -339,19 +351,6 @@ function CommandCard({ item, defaultCollapsed = false }: { item: AgentActivityIt
 }
 
 function ActivityBlock({ item, defaultCollapsed = false }: { item: AgentActivityItem; defaultCollapsed?: boolean }) {
-  if (item.kind === "status" && (item.id === "cache-line" || item.id === "cache-miss" || /^cache /i.test(item.label))) {
-    const miss = item.id === "cache-miss" || item.label.startsWith("cache miss");
-    return (
-      <div
-        className={`font-mono text-[10px] tabular-nums ${
-          miss ? "text-amber-300/90" : "text-emerald-400/80"
-        }`}
-        title="Provider prompt-cache accounting for this model request"
-      >
-        {item.label}
-      </div>
-    );
-  }
   if (item.kind === "status" && (item.id === "parallel-batch" || /parallel/i.test(item.label))) {
     // Banner is rendered once by the feed when grouping; skip duplicate rows.
     return null;
@@ -401,7 +400,8 @@ export function AgentActivityFeed({
   live?: boolean;
 }) {
   const visible = useMemo(() => visibleActivityItems(items), [items]);
-  const [expandAll, setExpandAll] = useState(false);
+  const [commandsOpen, setCommandsOpen] = useState(false);
+  const [openCommandId, setOpenCommandId] = useState<string | null>(null);
 
   const parallelMeta = useMemo(() => {
     const banner = visible.find(
@@ -410,7 +410,6 @@ export function AgentActivityFeed({
     const running = visible.filter(
       (i) => i.state === "running" && i.kind !== "status" && i.id !== "parallel-batch",
     );
-    // Show banner when backend announced parallel, or live with 2+ concurrent tools.
     const show = Boolean(banner) || (live && running.length >= 2);
     const done = banner ? banner.state === "done" : false;
     return {
@@ -418,7 +417,6 @@ export function AgentActivityFeed({
       done,
       count: running.length,
       label: banner?.label,
-      // Prefer live running count; fall back to parsing "Running N …" from status.
       displayCount:
         running.length ||
         (() => {
@@ -440,75 +438,26 @@ export function AgentActivityFeed({
     [visible],
   );
 
-  // Collapse finished noise so the feed stays scannable:
-  //   * long meta lines → "N earlier steps"
-  //   * done (non-failed) commands → "N commands run" summary line
-  // Failed commands always stay expanded for visibility.
-  const META_KEEP_TAIL = 4;
-  const collapsedBlocks = useMemo(() => {
-    if (live || expandAll) return blocks;
-    const isCollapsible = (item: AgentActivityItem) =>
-      item.state === "done" && !item.kind.includes("file_edit") && isCommandItem(item);
-    const isMetaDone = (item: AgentActivityItem) =>
-      item.state !== "running" &&
-      item.kind !== "file_edit" &&
-      !isCommandItem(item);
-    const collapseIdxs = blocks
-      .map((b, i) => {
-        if (isCollapsible(b)) return i;
-        if (isMetaDone(b)) return i;
-        return -1;
-      })
-      .filter((i) => i >= 0);
-    const collapsibleCount = collapseIdxs.filter((i) => isCollapsible(blocks[i])).length;
-    const metaCount = collapseIdxs.length - collapsibleCount;
-    // Only collapse when there are enough items to make it worth hiding.
-    if (collapsibleCount <= 1 && metaCount <= META_KEEP_TAIL + 2) return blocks;
-    const drop = new Set(collapseIdxs.slice(0, collapseIdxs.length - META_KEEP_TAIL));
-    // Pre-count dropped items so the summary labels are correct even when a
-    // non-collapsible block (file_edit, running tool) sits between them.
-    let droppedCmds = 0;
-    let droppedMeta = 0;
-    for (const i of drop) {
-      if (isCollapsible(blocks[i])) droppedCmds += 1;
-      else droppedMeta += 1;
-    }
-    const kept: AgentActivityItem[] = [];
-    let cmdSummaryInserted = false;
-    let metaSummaryInserted = false;
-    for (let i = 0; i < blocks.length; i++) {
-      if (drop.has(i)) {
-        if (isCollapsible(blocks[i])) {
-          if (!cmdSummaryInserted) {
-            kept.push({
-              id: "collapsed-commands",
-              kind: "status",
-              label: `${droppedCmds} commands run`,
-              state: "done",
-            } as AgentActivityItem);
-            cmdSummaryInserted = true;
-          }
-        } else if (!metaSummaryInserted) {
-          kept.push({
-            id: "collapsed-meta",
-            kind: "status",
-            label: `${droppedMeta} earlier steps`,
-            state: "done",
-          } as AgentActivityItem);
-          metaSummaryInserted = true;
-        }
-        continue;
-      }
-      kept.push(blocks[i]);
-    }
-    return kept;
-  }, [blocks, live, expandAll]);
+  const doneCommands = useMemo(
+    () =>
+      blocks.filter(
+        (item) => isCommandItem(item) && item.state !== "running" && item.state !== "error",
+      ),
+    [blocks],
+  );
+  const rest = useMemo(
+    () =>
+      blocks.filter(
+        (item) => !(isCommandItem(item) && item.state !== "running" && item.state !== "error"),
+      ),
+    [blocks],
+  );
 
   if (visible.length === 0 && !live) return null;
 
   const copyActivity = () => {
-    const lines = collapsedBlocks.map((item) => {
-      if (item.kind === "command") {
+    const lines = blocks.map((item) => {
+      if (isCommandItem(item)) {
         const cmd = redactExportText(item.detail || item.label);
         const out = item.output ? redactExportText(item.output) : "";
         return `$ ${cmd}${out ? `\n${out}` : ""}`;
@@ -521,6 +470,9 @@ export function AgentActivityFeed({
     void navigator.clipboard.writeText(lines.join("\n"));
   };
 
+  const n = doneCommands.length;
+  const summary = `${n} command${n === 1 ? "" : "s"} used`;
+
   return (
     <div className="flex w-full flex-col gap-2">
       {parallelMeta.show ? (
@@ -530,7 +482,7 @@ export function AgentActivityFeed({
           done={parallelMeta.done && !live}
         />
       ) : null}
-      {!live && collapsedBlocks.length > 2 ? (
+      {!live && blocks.length > 2 ? (
         <button
           type="button"
           onClick={copyActivity}
@@ -540,25 +492,40 @@ export function AgentActivityFeed({
           Copy activity
         </button>
       ) : null}
-      {collapsedBlocks.map((item) =>
-        item.id === "collapsed-meta" ? (
-          <MetaLine key="collapsed-meta" text={item.label} dimmed />
-        ) : item.id === "collapsed-commands" ? (
+      {n > 0 && (
+        <div className="overflow-hidden rounded-md border border-[var(--border)] bg-[var(--surface)]/40">
           <button
-            key="collapsed-commands"
             type="button"
-            onClick={() => setExpandAll(true)}
-            className="flex items-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--surface)]/40 px-2.5 py-1 text-[11px] text-gray-500 hover:bg-[var(--border)] hover:text-gray-300"
-            data-tooltip="Show every command"
+            onClick={() => {
+              setCommandsOpen((v) => !v);
+              if (commandsOpen) setOpenCommandId(null);
+            }}
+            className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] text-gray-500 hover:bg-[var(--border)] hover:text-gray-300"
+            data-tooltip={commandsOpen ? "Hide commands" : "Show commands"}
+            aria-expanded={commandsOpen}
           >
             <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)]" />
-            <span className="min-w-0 truncate">{item.label}</span>
-            <span className="text-[10px] text-gray-600">show</span>
+            <span className="min-w-0 flex-1 truncate">{summary}</span>
+            <span className="text-[10px] text-gray-600">{commandsOpen ? "hide" : "show"}</span>
           </button>
-        ) : (
-          <ActivityBlock key={`${item.id}-${item.kind}`} item={item} defaultCollapsed={!live} />
-        ),
+          {commandsOpen && (
+            <div className="flex flex-col gap-1.5 border-t border-[var(--border)]/70 p-1.5">
+              {doneCommands.map((item) => (
+                <CommandCard
+                  key={`${item.id}-${item.kind}`}
+                  item={item}
+                  defaultCollapsed
+                  open={openCommandId === item.id}
+                  onOpenChange={(next) => setOpenCommandId(next ? item.id : null)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
       )}
+      {rest.map((item) => (
+        <ActivityBlock key={`${item.id}-${item.kind}`} item={item} defaultCollapsed={!live} />
+      ))}
       {live && blocks.length > 0 && !parallelMeta.show && (
         <MetaLine text="Planning next moves" dimmed />
       )}

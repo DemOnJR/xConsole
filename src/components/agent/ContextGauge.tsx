@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type PointerEvent } from "react";
 import type { ContextUsage } from "../../lib/streamStats";
 
 /** t3code-style circular context-window gauge: donut of % used, hover popover with
@@ -7,9 +7,11 @@ import type { ContextUsage } from "../../lib/streamStats";
 export function ContextGauge({
   usage,
   onClick,
+  onPointerDown,
 }: {
   usage: ContextUsage | null;
   onClick?: () => void;
+  onPointerDown?: (e: PointerEvent<HTMLButtonElement>) => void;
 }) {
   const [hover, setHover] = useState(false);
   const pct = usage ? Math.min(100, Math.round(usage.percent)) : 0;
@@ -27,6 +29,8 @@ export function ContextGauge({
       <button
         type="button"
         onClick={onClick}
+        onPointerDown={onPointerDown}
+        onMouseDown={(e) => e.stopPropagation()}
         aria-label={usage ? `Context window ${pct}% used` : "Context usage"}
         className="flex items-center gap-1 rounded px-1 py-0.5 text-[10px] text-[var(--text-faint)] hover:text-[var(--text)]"
       >

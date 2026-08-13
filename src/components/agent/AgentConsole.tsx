@@ -2,18 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import type { AgentActivityItem, AgentChatMessage } from "../../stores/agentStore";
 import { plainText } from "../../lib/plainText";
 import { AgentMarkdown } from "./AgentMarkdown";
-import { AgentTokenStats } from "./AgentTokenStats";
 import { AgentActivityFeed } from "./AgentActivity";
-import type { PrefixTelemetry, TurnTelemetry, TokenStats } from "../../lib/streamStats";
 
 export function AgentConsole({
   messages,
   liveActivity = [],
   streamingText,
   streaming,
-  streamStats,
-  turnTelemetry,
-  prefixTelemetry,
   expanded,
   executeTarget,
   onExecute,
@@ -24,9 +19,6 @@ export function AgentConsole({
   liveActivity?: AgentActivityItem[];
   streamingText: string;
   streaming: boolean;
-  streamStats: TokenStats | null;
-  turnTelemetry: TurnTelemetry | null;
-  prefixTelemetry: PrefixTelemetry | null;
   expanded: boolean;
   executeTarget?: { name: string; host: string } | null;
   onExecute?: (code: string) => void;
@@ -99,7 +91,7 @@ export function AgentConsole({
           if (message.role === "user") {
             return (
               <div key={key} className="flex gap-2 text-[var(--text)]">
-                <span className="shrink-0 font-bold text-cyan-400">›</span>
+                <span className="shrink-0 font-bold text-cyan-400">~#</span>
                 <div className="min-w-0 flex-1 whitespace-pre-wrap break-words">
                   {plainText(message.content)}
                 </div>
@@ -126,11 +118,6 @@ export function AgentConsole({
                     <AgentActivityFeed items={message.activity ?? []} />
                   </div>
                 )}
-                {message.tokenStats && (
-                  <div className="pl-4">
-                    <AgentTokenStats stats={message.tokenStats} />
-                  </div>
-                )}
               </div>
             );
           }
@@ -148,16 +135,6 @@ export function AgentConsole({
                 ) : (
                   <span className="text-gray-500">Thinking…</span>
                 )}
-                {streamStats && (
-                  <div className="mt-1">
-                    <AgentTokenStats stats={streamStats} telemetry={turnTelemetry} live />
-                  </div>
-                )}
-                {prefixTelemetry && prefixTelemetry.classification !== "append_only" ? (
-                  <div className="mt-1 text-[9px] text-gray-600">
-                    prefix {prefixTelemetry.classification} · {prefixTelemetry.source}
-                  </div>
-                ) : null}
               </div>
             </div>
             {liveActivity.length > 0 && (

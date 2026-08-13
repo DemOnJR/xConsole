@@ -1,6 +1,7 @@
+import type { MouseEvent, PointerEvent } from "react";
 import type { AiProvider } from "../../lib/tauri";
 import type { ContextUsage, TokenStats } from "../../lib/streamStats";
-import { cacheBreakdown, formatTokenCount } from "../../lib/streamStats";
+import { cacheBreakdown, formatTokenCount, formatTokensPerSec } from "../../lib/streamStats";
 import { ContextGauge } from "./ContextGauge";
 
 export type ReasoningLevel = "off" | "low" | "medium" | "high";
@@ -36,6 +37,7 @@ export function InputBar({
   onSend,
   onStop,
   onPickModel,
+  onPickContext,
 }: {
   activeProvider?: AiProvider;
   activeModel?: string;
@@ -53,11 +55,21 @@ export function InputBar({
   onSend: () => void;
   onStop: () => void;
   onPickModel: () => void;
+  onPickContext: () => void;
 }) {
   const model = activeModel || activeProvider?.model;
   const canReason = reasoningCapable(activeProvider?.kind, model ?? undefined);
   const cache = streamStats ? cacheBreakdown(streamStats) : null;
   const hitRate = cache != null ? Math.round(cache.rate * 100) : null;
+  const tps =
+    streamStats && streamStats.tokensPerSec > 0
+      ? formatTokensPerSec(streamStats.tokensPerSec)
+      : null;
+  const toks =
+    streamStats && streamStats.completionTokens > 0
+      ? `${streamStats.source === "estimate" ? "~" : ""}${streamStats.completionTokens} tok`
+      : null;
+  const stopNode = (e: PointerEvent | MouseEvent) => e.stopPropagation();
   const cacheTone =
     hitRate == null
       ? "text-[var(--text-faint)]"
@@ -73,7 +85,14 @@ export function InputBar({
   return (
     <div className="flex select-none flex-wrap items-center gap-1.5 border-t border-[var(--border)]/60 px-2 pb-2 pt-1.5">
       {/* Provider · model */}
-      <button type="button" className={pill} onClick={onPickModel} data-tooltip="Switch provider/model (/model)">
+      <button
+        type="button"
+        className={pill}
+        onClick={onPickModel}
+        onPointerDown={stopNode}
+        onMouseDown={stopNode}
+        data-tooltip="Switch provider/model (/model)"
+      >
         <span className="max-w-[120px] truncate text-gray-300">
           {activeProvider?.name ?? "no provider"}
         </span>
@@ -133,18 +152,31 @@ export function InputBar({
           </span>
         )}
 
-        {/* Cost + cache hit / miss */}
-        {(costUsd > 0 || cache) && (
-          <span className={`text-[10px] ${cacheTone}`} data-tooltip="Prompt cache: hit / miss / percent (this request)">
-            {costUsd > 0 ? `$${costUsd.toFixed(4)} · ` : ""}
-            {cache && hitRate != null
-              ? `${formatTokenCount(cache.hit)} hit · ${formatTokenCount(cache.miss)} miss · ${hitRate}%`
-              : null}
+        {/* Speed · tokens · cost · cache — lives here, not in the transcript */}
+        {(tps || toks || costUsd > 0 || cache) && (
+          <span
+            className={`max-w-[280px] truncate text-[10px] tabular-nums ${cacheTone}`}
+            data-tooltip="Last request: speed, tokens, prompt-cache hit / miss"
+          >
+            {[
+              tps,
+              toks,
+              costUsd > 0 ? `$${costUsd.toFixed(4)}` : null,
+              cache && hitRate != null
+                ? `${formatTokenCount(cache.hit)} hit · ${formatTokenCount(cache.miss)} miss · ${hitRate}%`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
           </span>
         )}
 
-        {/* Context gauge */}
-        <ContextGauge usage={contextUsage} onClick={onPickModel} />
+        {/* Context gauge — opens the /ctx breakdown, not the model list */}
+        <ContextGauge
+          usage={contextUsage}
+          onClick={onPickContext}
+          onPointerDown={stopNode}
+        />
 
         {/* Send / Stop */}
         {streaming ? (

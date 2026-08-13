@@ -272,28 +272,10 @@ function applyStreamEvent(
 ): AgentActivityItem[] {
   switch (ev.kind) {
     case "Status": {
-      // Cache hit/miss lines and parallel batches are user-visible.
-      if (/^cache miss/i.test(ev.data)) {
-        return [
-          ...activity.filter((a) => a.id !== "cache-miss"),
-          {
-            id: "cache-miss",
-            kind: "status" as const,
-            label: ev.data,
-            state: "error" as const,
-          },
-        ];
-      }
-      if (/^cache /i.test(ev.data)) {
-        return [
-          ...activity.filter((a) => a.id !== "cache-line"),
-          {
-            id: "cache-line",
-            kind: "status" as const,
-            label: ev.data,
-            state: "done" as const,
-          },
-        ];
+      // Cache hit/miss is shown on the input bar (and written to xconsole.log).
+      // Do not dump those lines into the transcript.
+      if (/^cache(?: miss)?[:\s]/i.test(ev.data)) {
+        return activity;
       }
       if (/parallel/i.test(ev.data)) {
         return [

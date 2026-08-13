@@ -86,7 +86,12 @@ export function CLIPicker({
   const visible = filtered.slice(0, 12);
 
   return (
-    <div className="rounded-md border border-[var(--border-strong)] bg-[var(--surface)] shadow-2xl">
+    <div
+      data-picker
+      className="nodrag nopan nowheel rounded-md border border-[var(--border-strong)] bg-[var(--surface)] shadow-2xl"
+      onPointerDown={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
       <div className="flex items-center gap-2 border-b border-[var(--border)] px-2.5 py-1.5">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-dim)]">
           {title}
@@ -113,19 +118,19 @@ export function CLIPicker({
           return (
             <div
               key={o.id}
+              role="option"
+              aria-selected={active}
               onMouseEnter={() => {
                 const i = filtered.findIndex((x) => x.id === o.id);
                 if (i >= 0) setIndex(i);
               }}
-              // stopPropagation so React Flow's d3-drag (on the node wrapper) never
-              // sees the mousedown and swallows the mouseup — which made clicking an
-              // option unreliable. Selection happens on click.
-              onMouseDown={(e) => {
+              // Pick on pointerdown: React Flow's drag listens for pointer events
+              // in capture and swallows click/mouseup, so mouse-select never fired
+              // while keyboard Enter (which does not go through RF) worked.
+              onPointerDown={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
-              }}
-              onClick={(e) => {
-                e.stopPropagation();
+                if (e.button !== 0) return;
                 if (multi) {
                   const next = new Set(selected);
                   if (next.has(o.id)) next.delete(o.id);
@@ -134,6 +139,14 @@ export function CLIPicker({
                 } else {
                   onPick(o);
                 }
+              }}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
               }}
               className={`flex cursor-pointer items-center gap-2 px-2.5 py-1 font-mono text-[11px] ${
                 active ? "bg-[var(--border)] text-[var(--text)]" : "text-[var(--text-dim)]"
@@ -158,13 +171,19 @@ export function CLIPicker({
         <div className="border-t border-[var(--border)] px-2.5 py-1.5">
           <button
             type="button"
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (e.button !== 0) return;
+              onPick({ id: "__done__", label: "Done", selected: selected.size > 0 });
+            }}
             onMouseDown={(e) => {
               e.preventDefault();
               e.stopPropagation();
             }}
             onClick={(e) => {
+              e.preventDefault();
               e.stopPropagation();
-              onPick({ id: "__done__", label: "Done", selected: selected.size > 0 });
             }}
             className="w-full rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-1 text-center text-[10px] text-[var(--text-dim)] hover:text-[var(--text)]"
           >
