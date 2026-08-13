@@ -69,6 +69,22 @@ describe("safe Markdown export", () => {
     expect(redactExportText(output)).toBe(output);
   });
 
+  it("mentions attached images without dumping pixels", () => {
+    const markdown = exportConversationMarkdown({
+      title: "Shot",
+      messages: [
+        {
+          role: "user",
+          content: "what is this\n[Image #1]",
+          images: [{ media_type: "image/png", data: "SECRETPIXELS", name: "shot.png" }],
+        },
+      ],
+    });
+    expect(markdown).toContain("[Image #1]");
+    expect(markdown).toContain("(1 image attached)");
+    expect(markdown).not.toContain("SECRETPIXELS");
+  });
+
   it("skips tool-role messages and empty activity", () => {
     const markdown = exportConversationMarkdown({
       title: "Test",

@@ -1,16 +1,24 @@
+import type { ChatImage } from "../lib/tauri";
+
 export interface QueuedMessage {
   id: string;
   text: string;
+  images?: ChatImage[];
 }
 
 export function newQueuedId(): string {
   return (crypto.randomUUID && crypto.randomUUID()) || Math.random().toString(36).slice(2);
 }
 
-export function enqueueMessage(list: QueuedMessage[], text: string): QueuedMessage[] {
+export function enqueueMessage(
+  list: QueuedMessage[],
+  text: string,
+  images?: ChatImage[],
+): QueuedMessage[] {
   const trimmed = text.trim();
-  if (!trimmed) return list;
-  return [...list, { id: newQueuedId(), text: trimmed }];
+  const pics = images?.length ? images : undefined;
+  if (!trimmed && !pics) return list;
+  return [...list, { id: newQueuedId(), text: trimmed, images: pics }];
 }
 
 export function updateQueuedMessage(

@@ -386,6 +386,7 @@ pub fn run() {
             commands::sftp::local_fs_list,
             commands::sftp::local_fs_home,
             commands::sftp::local_fs_read_text,
+            commands::sftp::local_fs_read_bytes,
             commands::sftp::local_git_branch,
             commands::sftp::sftp_transfer_start,
             commands::sftp::sftp_archive_start,

@@ -47,6 +47,9 @@ pub struct ToolContext {
     pub edits: crate::ai::edits::EditJournal,
     /// Claude Code–style lifecycle hooks (snapshotted at startup). Empty = disabled.
     pub hooks: crate::ai::hooks::HooksConfig,
+    /// Images from the latest user turn (for the `vision` side-call). Empty when
+    /// the session model already received native image blocks.
+    pub turn_images: Vec<crate::ai::provider::ChatImage>,
 }
 
 /// Tool schemas advertised to the model.
@@ -840,6 +843,7 @@ pub async fn dispatch_with_telemetry(
         {
             infra_tools::dispatch(ctx, call.name.as_str(), args, sink).await
         }
+        "vision" => vision_tool(ctx, args).await,
         other => format!("error: unknown tool '{other}'"),
         }
     };
@@ -1048,6 +1052,10 @@ fn tool_activity_label(ctx: &ToolContext, call: &ToolCall) -> String {
             format!("Web fetch · {url}")
         }
         "geo_locate" => "Locate (by IP)".into(),
+        "vision" => {
+            let n = args.get("image").and_then(|v| v.as_i64()).unwrap_or(1);
+            format!("Look at image #{n}")
+        }
         other => other.replace('_', " "),
     }
 }
@@ -1144,7 +1152,7 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
         "read_file" | "local_read_file" | "local_list_dir" | "list_vps_targets"
         | "ssh_key_status" | "memory_save" | "skills_list" | "skill_view"
         | "learn_skill" | "ask_user" | "present_plan" | "terminal_capture" | "canvas_open_terminal"
-        | "canvas_open_sftp" | "canvas_tile" | "canvas_close" | "canvas_refresh" => false,
+        | "canvas_open_sftp" | "canvas_tile" | "canvas_close" | "canvas_refresh" | "vision" => false,
         // Typing into a live shell runs commands → mutating.
         "terminal_send" => true,
         // Shell tools: mutating only when the command isn't read-only.
@@ -1224,6 +1232,31 @@ pub fn resolve_target(ctx: &ToolContext, args: &Value) -> Result<String, String>
     }
 }
 
+async fn vision_tool(ctx: &ToolContext, args: &Value) -> String {
+    let index = args
+        .get("image")
+        .and_then(|v| v.as_i64())
+        .or_else(|| {
+            args.get("image")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok())
+        })
+        .unwrap_or(1);
+    let question = args
+        .get("question")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let image = match crate::ai::vision::lookup_turn_image(&ctx.turn_images, index) {
+        Ok(img) => img,
+        Err(e) => return format!("error: {e}"),
+    };
+    match crate::ai::vision::describe_one(&ctx.db, image, &question).await {
+        Ok(text) => text,
+        Err(e) => format!("error: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1244,6 +1277,7 @@ mod tests {
         assert!(!tool_is_mutating("ssh_key_status", &json!({})));
         assert!(!tool_is_mutating("ask_user", &json!({})));
         assert!(!tool_is_mutating("present_plan", &json!({})));
+        assert!(!tool_is_mutating("vision", &json!({"image": 1, "question": "what"})));
         // Shell tools depend on whether the command is read-only.
         assert!(!tool_is_mutating("run_command", &json!({"command": "ls -la"})));
         assert!(tool_is_mutating("run_command", &json!({"command": "rm -rf /tmp/x"})));

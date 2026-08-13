@@ -14,7 +14,20 @@ import {
   type Conversation,
 } from "../../lib/voice";
 
-import { api } from "../../lib/tauri";
+import { api, type ChatImage } from "../../lib/tauri";
+import { clipboardImagePng } from "../../lib/terminalClipboard";
+import { onOsFilesDropped } from "../../hooks/useOsFileDrop";
+import {
+  bytesToChatImage,
+  defaultVisionModel,
+  fileBaseName,
+  fileToChatImage,
+  isGeminiProvider,
+  isImagePath,
+  parseVisionMode,
+  previewSrc,
+  visionLabel,
+} from "../../lib/vision";
 
 import { useUiStore } from "../../stores/uiStore";
 
@@ -285,6 +298,9 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
   const activeProviderId = useSettingsStore((s) => s.settings["agent.active_provider"]);
   const activeModel = useSettingsStore((s) => s.settings["agent.active_model"]);
+  const visionMode = parseVisionMode(useSettingsStore((s) => s.settings["agent.vision_mode"]));
+  const visionProviderId = useSettingsStore((s) => s.settings["agent.vision_provider"]) ?? "";
+  const visionModel = useSettingsStore((s) => s.settings["agent.vision_model"]) ?? "";
 
   // Reasoning effort (t3code-style capability control), persisted.
   const [reasoning, setReasoning] = useState<ReasoningLevel>(() => {
@@ -378,6 +394,11 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
 
 
   const [input, setInput] = useState("");
+  const [pendingImages, setPendingImages] = useState<ChatImage[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const pendingImagesRef = useRef(pendingImages);
+  pendingImagesRef.current = pendingImages;
+  const askDraftRef = useRef("");
 
   // Persist draft per conversation so switching sessions does not lose typed text.
   useEffect(() => {
@@ -542,7 +563,11 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     | "history"
     | "ctx"
     | "cost"
-    | "help";
+    | "help"
+    | "vision"
+    | "vision-provider"
+    | "vision-models"
+    | "vision-ask";
   const [picker, setPicker] = useState<{ kind: PickerKind } | null>(null);
   /** Provider id chosen in the first /model level — second level lists its models. */
   const [pendingProviderId, setPendingProviderId] = useState<string | null>(null);
@@ -691,6 +716,81 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     [],
   );
 
+  const visionProvider = useMemo(
+    () => providers.find((p) => p.id === visionProviderId) ?? providers.find(isGeminiProvider),
+    [providers, visionProviderId],
+  );
+  const visionModelLabel = visionModel || (visionProvider ? defaultVisionModel(visionProvider) : "");
+  const visionOptions = useMemo<CLIPickerOption[]>(
+    () => [
+      {
+        id: "ask",
+        label: "Ask before sending images",
+        detail: "Command Code default",
+        selected: visionMode === "ask",
+      },
+      {
+        id: "enabled",
+        label: "Always send images",
+        detail: "Native if the session model can see, else the vision model",
+        selected: visionMode === "enabled",
+      },
+      {
+        id: "disabled",
+        label: "Don't send images",
+        detail: "Keep [Image #n] text only",
+        selected: visionMode === "disabled",
+      },
+      {
+        id: "__model__",
+        label: "Choose vision model…",
+        detail: visionProvider
+          ? `${visionProvider.name} · ${visionModelLabel || "default"}`
+          : "Auto — Gemini if a key is configured",
+      },
+    ],
+    [visionMode, visionProvider, visionModelLabel],
+  );
+  const visionProviderOptions = useMemo<CLIPickerOption[]>(() => {
+    const enabled = providers.filter((p) => p.enabled);
+    const gemini = enabled.filter(isGeminiProvider);
+    const rest = enabled.filter((p) => !isGeminiProvider(p));
+    return [...gemini, ...rest].map((p) => ({
+      id: p.id,
+      label: p.name || p.kind,
+      detail: isGeminiProvider(p)
+        ? `recommended · ${defaultVisionModel(p, p.id === visionProviderId ? visionModel : undefined)}`
+        : p.model || p.kind,
+      selected: p.id === (visionProviderId || visionProvider?.id),
+    }));
+  }, [providers, visionProviderId, visionModel, visionProvider]);
+  const visionModelOptions = useMemo<CLIPickerOption[]>(() => {
+    const p = providers.find((x) => x.id === pendingProviderId);
+    if (!p) return [];
+    const catalog = PROVIDER_CATALOG.find(
+      (c) => c.id === p.kind || c.name.toLowerCase() === p.name.toLowerCase(),
+    );
+    const ids = new Set<string>();
+    const opts: CLIPickerOption[] = [];
+    const add = (id: string, detail: string) => {
+      if (!id || ids.has(id)) return;
+      ids.add(id);
+      opts.push({ id, label: id, detail, selected: id === visionModel });
+    };
+    if (isGeminiProvider(p)) add("gemini-2.5-flash", "recommended");
+    add(p.model || "", "configured");
+    for (const m of catalog?.models ?? []) add(m, "catalog");
+    return opts;
+  }, [providers, pendingProviderId, visionModel]);
+  const visionAskOptions = useMemo<CLIPickerOption[]>(
+    () => [
+      { id: "once", label: "Send with vision", detail: "This message only" },
+      { id: "enable", label: "Always send images", detail: "Remember in settings" },
+      { id: "skip", label: "Send without pixels", detail: "Keep [Image #n] text only" },
+    ],
+    [],
+  );
+
   /** Options for the /model picker's SECOND level: models of the chosen provider. */
   const providerModelOptions = useMemo<CLIPickerOption[]>(() => {
     const p = providers.find((x) => x.id === pendingProviderId);
@@ -745,6 +845,46 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
         if (opt.id !== sessionId) void openConversation(opt.id);
         setPicker(null);
         break;
+      case "vision": {
+        if (opt.id === "__model__") {
+          setPicker({ kind: "vision-provider" });
+          break;
+        }
+        void useSettingsStore.getState().set("agent.vision_mode", opt.id);
+        setPicker(null);
+        break;
+      }
+      case "vision-provider": {
+        void useSettingsStore.getState().set("agent.vision_provider", opt.id);
+        const p = providers.find((x) => x.id === opt.id);
+        if (p) {
+          void useSettingsStore.getState().set("agent.vision_model", defaultVisionModel(p));
+        }
+        setPendingProviderId(opt.id);
+        setPicker({ kind: "vision-models" });
+        break;
+      }
+      case "vision-models": {
+        void useSettingsStore.getState().set("agent.vision_model", opt.id);
+        setPendingProviderId(null);
+        setPicker(null);
+        break;
+      }
+      case "vision-ask": {
+        const mode = opt.id;
+        if (mode === "enable") {
+          void useSettingsStore.getState().set("agent.vision_mode", "enabled");
+        }
+        const sendImages = mode !== "skip";
+        const text = askDraftRef.current;
+        const imgs = sendImages ? pendingImagesRef.current : undefined;
+        setInput("");
+        history.reset("");
+        setPendingImages([]);
+        setPicker(null);
+        enqueueOrSend(text, imgs);
+        break;
+      }
       default:
         setPicker(null);
     }
@@ -789,12 +929,55 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
       void toggleConversation();
     } else if (cmd.actionKey === "help") {
       setPicker({ kind: "help" });
+    } else if (cmd.actionKey === "vision") {
+      setPicker({ kind: "vision" });
     }
   };
 
+  const addImages = (imgs: ChatImage[]) => {
+    if (imgs.length === 0) return;
+    setPendingImages((cur) => [...cur, ...imgs].slice(0, 8));
+  };
+
+  const loadImagePath = async (path: string): Promise<ChatImage | null> => {
+    try {
+      const b64 = await api.localFsReadBytes(path, 10 * 1024 * 1024);
+      const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      return await bytesToChatImage(bin, fileBaseName(path));
+    } catch (e) {
+      void notify("Vision", String(e));
+      return null;
+    }
+  };
+
+  const attachPaths = async (paths: string[]) => {
+    const imgs: ChatImage[] = [];
+    for (const path of paths) {
+      if (!isImagePath(path)) continue;
+      const img = await loadImagePath(path);
+      if (img) imgs.push(img);
+    }
+    if (imgs.length) addImages(imgs);
+    else if (paths.length) void notify("Vision", "Drop a PNG, JPEG, GIF, or WebP.");
+  };
+
+  useEffect(() => {
+    return onOsFilesDropped((target, paths) => {
+      if (target !== "agent-composer") return;
+      void attachPaths(paths);
+    });
+  }, []);
+
   const submit = () => {
     const trimmed = input.trim();
-    if (!trimmed) return;
+    const visionPath = trimmed.match(/^\/vision(?:\s+(.+))?$/i);
+    if (visionPath && visionPath[1] && isImagePath(visionPath[1])) {
+      setInput("");
+      history.reset("");
+      void attachPaths([visionPath[1].trim()]);
+      return;
+    }
+    if (!trimmed && pendingImages.length === 0) return;
     // /goal <objective> — start an autonomous goal session + open its kanban board.
     const goalMatch = trimmed.match(/^\/goal(?:\s+(.+))?$/i);
     if (goalMatch) {
@@ -838,9 +1021,16 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
       void executeSlashAction(exact);
       return;
     }
-    enqueueOrSend(input);
+    const imgs = pendingImages.length > 0 ? pendingImages : undefined;
+    if (imgs && visionMode === "ask") {
+      askDraftRef.current = input;
+      setPicker({ kind: "vision-ask" });
+      return;
+    }
+    enqueueOrSend(input, visionMode === "disabled" ? undefined : imgs);
     setInput("");
     history.reset("");
+    setPendingImages([]);
     recallIdx.current = null;
   };
 
@@ -944,8 +1134,8 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
           <div className="space-y-2 font-mono">
             <p className="text-[var(--text-dim)]">agent@xconsole:~$</p>
             <p className="text-[10px] text-gray-700">
-              Type a task, or /help for commands. /model picks the provider · /targets
-              selects hosts · Shift+Tab toggles plan mode.
+              Type a task, or /help for commands. /model picks the provider · /vision
+              picks the image model · /targets selects hosts · Shift+Tab toggles plan mode.
             </p>
           </div>
         </div>
@@ -1102,6 +1292,44 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
               onCancel={() => setPicker(null)}
             />
           )}
+          {picker.kind === "vision" && (
+            <CLIPicker
+              title="Vision"
+              options={visionOptions}
+              onPick={onPickerPick}
+              onCancel={() => setPicker(null)}
+              placeholder="Filter…"
+            />
+          )}
+          {picker.kind === "vision-provider" && (
+            <CLIPicker
+              title="Vision — provider (Gemini recommended)"
+              options={visionProviderOptions}
+              onPick={onPickerPick}
+              onCancel={() => setPicker(null)}
+              placeholder="Filter providers…"
+            />
+          )}
+          {picker.kind === "vision-models" && (
+            <CLIPicker
+              title="Vision — model"
+              options={visionModelOptions}
+              onPick={onPickerPick}
+              onCancel={() => {
+                setPendingProviderId(null);
+                setPicker(null);
+              }}
+              placeholder="Filter models…"
+            />
+          )}
+          {picker.kind === "vision-ask" && (
+            <CLIPicker
+              title="Send images with this message?"
+              options={visionAskOptions}
+              onPick={onPickerPick}
+              onCancel={() => setPicker(null)}
+            />
+          )}
         </div>
       )}
 
@@ -1114,7 +1342,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
           const item = queued.find((q) => q.id === id);
           if (!item) return;
           removeQueued(id);
-          enqueueOrSend(item.text);
+          enqueueOrSend(item.text, item.images);
         }}
       />
 
@@ -1130,7 +1358,19 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
           </div>
         )}
 
-        <div className="relative rounded-md border border-[var(--border-strong)] bg-[var(--surface)] focus-within:border-[var(--accent)]">
+        <div
+          data-drop="agent-composer"
+          className="relative rounded-md border border-[var(--border-strong)] bg-[var(--surface)] focus-within:border-[var(--accent)]"
+          onDragOver={(e) => {
+            if (e.dataTransfer.types.includes("Files")) e.preventDefault();
+          }}
+          onDrop={(e) => {
+            const files = [...e.dataTransfer.files].filter((f) => f.type.startsWith("image/"));
+            if (!files.length) return;
+            e.preventDefault();
+            void Promise.all(files.map((f) => fileToChatImage(f))).then((imgs) => addImages(imgs));
+          }}
+        >
           {/* Slash Commands Suggestion Menu */}
           {slashSuggestions.length > 0 && (
             <div className="absolute bottom-full left-0 right-0 z-30 mb-1.5 max-h-52 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1.5 shadow-2xl font-mono">
@@ -1159,6 +1399,31 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
             </div>
           )}
 
+          {pendingImages.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 border-b border-[var(--border)]/60 px-2.5 py-1.5">
+              {pendingImages.map((img, i) => (
+                <div key={`${img.name}-${i}`} className="group relative">
+                  <img
+                    src={previewSrc(img)}
+                    alt={img.name || `Image #${i + 1}`}
+                    className="h-12 max-w-[88px] rounded border border-[var(--border)] object-cover"
+                  />
+                  <span className="absolute bottom-0 left-0 rounded-tr bg-black/60 px-1 text-[9px] text-white">
+                    #{i + 1}
+                  </span>
+                  <button
+                    type="button"
+                    className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-[var(--surface)] text-[10px] text-red-300 group-hover:flex"
+                    onClick={() => setPendingImages((cur) => cur.filter((_, j) => j !== i))}
+                    aria-label="Remove image"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="flex items-start gap-2 px-2.5 py-2 font-mono">
             <span className="shrink-0 select-none font-mono text-[13px] leading-[21px] text-[var(--text-faint)]">
               ~#
@@ -1167,6 +1432,27 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
               ref={inputRef}
               value={input}
               rows={1}
+              onPaste={(e) => {
+                const items = e.clipboardData?.items;
+                const files: File[] = [];
+                if (items) {
+                  for (const item of items) {
+                    if (item.type.startsWith("image/")) {
+                      const f = item.getAsFile();
+                      if (f) files.push(f);
+                    }
+                  }
+                }
+                if (files.length) {
+                  e.preventDefault();
+                  void Promise.all(files.map((f) => fileToChatImage(f))).then((imgs) => addImages(imgs));
+                  return;
+                }
+                void clipboardImagePng().then((png) => {
+                  if (!png) return;
+                  void bytesToChatImage(png, "clipboard.png").then((img) => addImages([img]));
+                });
+              }}
               onChange={(e) => {
                 setInput(e.target.value);
                 history.record(e.target.value);
@@ -1293,6 +1579,27 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
               autoComplete="off"
               className="max-h-[132px] min-w-0 flex-1 resize-none border-0 bg-transparent p-0 text-[13px] leading-[21px] text-[var(--text)] outline-none placeholder:text-[var(--text-faint)] disabled:opacity-50"
             />
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/gif,image/webp"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                const files = [...(e.target.files ?? [])];
+                e.target.value = "";
+                if (!files.length) return;
+                void Promise.all(files.map((f) => fileToChatImage(f))).then((imgs) => addImages(imgs));
+              }}
+            />
+            <button
+              type="button"
+              className="shrink-0 rounded px-1 py-0.5 text-[12px] text-[var(--text-faint)] hover:bg-[var(--border)] hover:text-[var(--text)]"
+              data-tooltip="Attach image (paste, drop, or /vision path)"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              +img
+            </button>
           </div>
 
           {/* Voice status line (only when relevant). */}
@@ -1343,6 +1650,12 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
             }}
             onPickModel={() => setPicker({ kind: "model" })}
             onPickContext={() => setPicker({ kind: "ctx" })}
+            visionLabel={visionLabel(
+              visionMode,
+              visionProvider?.name,
+              visionModelLabel || undefined,
+            )}
+            onPickVision={() => setPicker({ kind: "vision" })}
           />
 
         </div>

@@ -17,7 +17,8 @@ export interface SlashCommandDef {
     | "voice"
     | "conversation"
     | "loop"
-    | "goal";
+    | "goal"
+    | "vision";
 }
 
 export const SLASH_COMMANDS: SlashCommandDef[] = [
@@ -104,6 +105,12 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     syntax: "/goal <objective>",
     description: "Set an autonomous goal — the agent asks what it needs once, then works until it's done",
     actionKey: "goal",
+  },
+  {
+    name: "vision",
+    syntax: "/vision",
+    description: "Image vision: on/ask/off and pick the vision model (Gemini recommended)",
+    actionKey: "vision",
   },
   {
     name: "help",

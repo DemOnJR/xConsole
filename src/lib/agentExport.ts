@@ -114,6 +114,12 @@ export function exportConversationMarkdown(input: {
     lines.push(`## ${heading}`, "");
     if (message.role === "user") {
       lines.push(redactExportText(message.content), "");
+      if (message.images?.length) {
+        lines.push(
+          `*(${message.images.length} image${message.images.length === 1 ? "" : "s"} attached)*`,
+          "",
+        );
+      }
       continue;
     }
     for (const seg of segmentsFromMessage(message)) {

@@ -357,6 +357,7 @@ mod tests {
             content: String::new(),
             tool_calls: vec![ToolCall { id: id.into(), name: name.into(), arguments: args }],
             tool_call_id: None,
+            images: vec![],
         }
     }
     fn tool_result(id: &str, content: &str) -> ChatMessage {

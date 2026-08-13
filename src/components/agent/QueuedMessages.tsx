@@ -1,4 +1,5 @@
 import type { QueuedMessage } from "../../stores/agentStore";
+import { previewSrc } from "../../lib/vision";
 
 export function QueuedMessages({
   items,
@@ -31,13 +32,27 @@ export function QueuedMessages({
             <span className="shrink-0 select-none font-mono text-[12px] leading-[20px] text-[var(--text-faint)]">
               ~#
             </span>
-            <textarea
-              value={item.text}
-              rows={Math.min(4, Math.max(1, item.text.split("\n").length))}
-              onChange={(e) => onChange(item.id, e.target.value)}
-              aria-label={`Queued message ${index + 1}`}
-              className="max-h-24 min-w-0 flex-1 resize-none border-0 bg-transparent p-0 font-mono text-[12px] leading-[20px] text-[var(--text)] outline-none"
-            />
+            <div className="min-w-0 flex-1">
+              <textarea
+                value={item.text}
+                rows={Math.min(4, Math.max(1, item.text.split("\n").length))}
+                onChange={(e) => onChange(item.id, e.target.value)}
+                aria-label={`Queued message ${index + 1}`}
+                className="max-h-24 w-full resize-none border-0 bg-transparent p-0 font-mono text-[12px] leading-[20px] text-[var(--text)] outline-none"
+              />
+              {item.images && item.images.length > 0 ? (
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {item.images.map((img, i) => (
+                    <img
+                      key={`${item.id}-${i}`}
+                      src={previewSrc(img)}
+                      alt={img.name || `Image #${i + 1}`}
+                      className="h-10 max-w-[72px] rounded border border-[var(--border)] object-cover"
+                    />
+                  ))}
+                </div>
+              ) : null}
+            </div>
             <div className="flex shrink-0 flex-col gap-1">
               {canSendNow && onSendNow && index === 0 ? (
                 <button

@@ -11,6 +11,9 @@ export const SK = {
   externalEditor: "sftp.external_editor",
   toolResultMaxChars: "agent.tool_result_max_chars",
   cacheRetention: "agent.cache_retention",
+  visionMode: "agent.vision_mode",
+  visionProvider: "agent.vision_provider",
+  visionModel: "agent.vision_model",
 } as const;
 
 export function GeneralSection() {

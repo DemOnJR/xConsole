@@ -45,7 +45,10 @@ impl OpenAiProvider {
         }
         for m in &req.messages {
             match m.role.as_str() {
-                "user" => out.push(json!({"role": "user", "content": m.content})),
+                "user" => out.push(json!({
+                    "role": "user",
+                    "content": crate::ai::vision::openai_user_content(&m.content, &m.images),
+                })),
                 "assistant" => {
                     let mut msg = json!({"role": "assistant", "content": m.content});
                     if !m.tool_calls.is_empty() {

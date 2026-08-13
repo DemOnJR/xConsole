@@ -588,12 +588,19 @@ export interface ToolCall {
 
 export type ChatRole = "user" | "assistant" | "tool" | "system";
 
+export interface ChatImage {
+  media_type: string;
+  data: string;
+  name?: string;
+}
+
 export interface ChatMessage {
   role: ChatRole;
   content: string;
   tool_calls?: ToolCall[];
   tool_call_id?: string | null;
   activity?: AgentActivityItem[];
+  images?: ChatImage[];
 }
 
 export interface DiffLine {
@@ -758,6 +765,8 @@ export const api = {
   pickFile: (title: string) => invoke<string | null>("pick_file", { title }),
   localFsReadText: (path: string, maxBytes?: number) =>
     invoke<string>("local_fs_read_text", { path, maxBytes: maxBytes ?? null }),
+  localFsReadBytes: (path: string, maxBytes?: number) =>
+    invoke<string>("local_fs_read_bytes", { path, maxBytes: maxBytes ?? null }),
   sftpTransferStart: (
     sessionId: string,
     direction: TransferDirection,

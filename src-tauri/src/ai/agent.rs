@@ -201,11 +201,63 @@ pub async fn run_turn(
     // web_fetch / geo_locate are ALWAYS included (so "what's the weather?" works), plus
     // local_* tools, plus VPS tools when targets are selected. The voice prompt stays
     // fast by trimming PROSE (see voice_tiers), not by removing the agent's hands.
-    let tool_defs_for_turn = if ollama_mode {
+    let mut tool_defs_for_turn = if ollama_mode {
         tools::definitions_for_ollama(&tc.home, tc.targets.len(), casual_turn)
     } else {
         tool_defs.clone()
     };
+
+    let session_url = tc
+        .db
+        .get_provider(&preferred_id)
+        .ok()
+        .flatten()
+        .and_then(|p| p.base_url)
+        .unwrap_or_default();
+    let vision_provider_setting = tc
+        .db
+        .get_setting(crate::ai::vision::SETTING_PROVIDER)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let vision_model_setting = tc
+        .db
+        .get_setting(crate::ai::vision::SETTING_MODEL)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let vision_native = crate::ai::vision::use_native(
+        &resolved.kind,
+        &resolved.model,
+        &session_url,
+        &preferred_id,
+        &vision_provider_setting,
+        &vision_model_setting,
+        !tc.turn_images.is_empty(),
+    );
+    let vision_via_tool = !tc.turn_images.is_empty() && !vision_native && !cli_mode;
+    if vision_via_tool {
+        tool_defs_for_turn.push(crate::ai::vision::tool_def());
+        emit(
+            Some(sink),
+            StreamEvent::Status(format!(
+                "Images attached — session model cannot see pixels; use the vision tool ({}).",
+                if vision_model_setting.is_empty() {
+                    "Gemini if configured"
+                } else {
+                    vision_model_setting.as_str()
+                }
+            )),
+        );
+    } else if vision_native {
+        emit(
+            Some(sink),
+            StreamEvent::Status(format!(
+                "Sending {} image(s) to the session model.",
+                tc.turn_images.len()
+            )),
+        );
+    }
 
     let data_dir = tc
         .app
@@ -396,6 +448,49 @@ pub async fn run_turn(
 
     let (mut system, mut dynamic_block, mut snapshot_text) =
         build_system(false, &thread_summary);
+
+    if vision_via_tool {
+        if !dynamic_block.is_empty() {
+            dynamic_block.push_str("\n\n");
+        }
+        dynamic_block.push_str(&crate::ai::vision::tool_hint(tc.turn_images.len()));
+    }
+    if cli_mode && !tc.turn_images.is_empty() {
+        emit(
+            Some(sink),
+            StreamEvent::Status(format!(
+                "Looking at {} image(s) with the vision model…",
+                tc.turn_images.len()
+            )),
+        );
+        match crate::ai::vision::describe_all(
+            &tc.db,
+            &tc.turn_images,
+            "Describe this image for a coding agent. Transcribe visible text. Note UI, errors, code, and layout.",
+        )
+        .await
+        {
+            Ok(text) if !text.is_empty() => {
+                if let Some(user) = messages
+                    .iter_mut()
+                    .rev()
+                    .find(|m| m.role == "user" && !context::is_runtime_message(m))
+                {
+                    user.content.push_str("\n\n");
+                    user.content.push_str(&text);
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                emit(
+                    Some(sink),
+                    StreamEvent::Status(format!(
+                        "Vision unavailable ({e}) — continuing without pixels."
+                    )),
+                );
+            }
+        }
+    }
 
     let context_limit =
         context_usage::default_context_limit(&resolved.kind, &resolved.model, ollama_num_ctx);
@@ -652,6 +747,9 @@ pub async fn run_turn(
     }
     // Freeze runtime once per user turn. Tool-loop iters must not move or
     // replace it — that would bust the prefix we just paid to write.
+    if vision_native {
+        crate::ai::vision::attach_images_to_latest_user(&mut messages, tc.turn_images.clone());
+    }
     if !messages.last().is_some_and(context::is_runtime_message) {
         context::inject_dynamic_into_last_user(&mut messages, &dynamic_block);
     }
@@ -718,7 +816,10 @@ pub async fn run_turn(
         tc.session_state
             .store_prefix(&tc.session_id, current_prefix);
         tc.session_state
-            .store_request_messages(&tc.session_id, req.messages.clone());
+            .store_request_messages(
+                &tc.session_id,
+                crate::ai::vision::strip_all_images(req.messages.clone()),
+            );
 
         let resp = match resolved.provider.chat(&req, Some(sink)).await {
             Ok(r) => r,
@@ -757,6 +858,7 @@ pub async fn run_turn(
             content: resp.content.clone(),
             tool_calls: resp.tool_calls.clone(),
             tool_call_id: None,
+            images: vec![],
         };
         messages.push(assistant.clone());
         last = assistant;

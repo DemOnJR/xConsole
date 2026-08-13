@@ -13,6 +13,7 @@ import {
   type CanvasSnapshotNode,
   type ChatMessage,
 } from "../lib/tauri";
+import { appendImageMarkers } from "../lib/vision";
 import { notify } from "../lib/notify";
 import { exportConversationMarkdown as renderConversationMarkdown } from "../lib/agentExport";
 import { useWorkspaceStore } from "./workspaceStore";
@@ -221,10 +222,13 @@ interface AgentState {
   setTargets: (ids: string[]) => void;
   setSpeaking: (v: boolean) => void;
   togglePlanMode: () => void;
-  send: (text: string, opts?: { providerId?: string; conversation?: boolean }) => Promise<void>;
+  send: (
+    text: string,
+    opts?: { providerId?: string; conversation?: boolean; images?: import("../lib/tauri").ChatImage[] },
+  ) => Promise<void>;
   /** Queue a follow-up if a turn is running; otherwise send now. */
-  enqueueOrSend: (text: string) => void;
-  enqueue: (text: string) => void;
+  enqueueOrSend: (text: string, images?: import("../lib/tauri").ChatImage[]) => void;
+  enqueue: (text: string, images?: import("../lib/tauri").ChatImage[]) => void;
   updateQueued: (id: string, text: string) => void;
   removeQueued: (id: string) => void;
   /** Re-send the last user message (after an error or aborted turn). */
@@ -296,6 +300,21 @@ function canvasSnapshot(): CanvasSnapshotNode[] {
   });
 }
 
+function persistableMessages(messages: AgentChatMessage[]): AgentChatMessage[] {
+  let lastUser = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      lastUser = i;
+      break;
+    }
+  }
+  return messages.map((m, i) => {
+    if (i === lastUser || !m.images?.length) return m;
+    const { images: _drop, ...rest } = m;
+    return rest;
+  });
+}
+
 async function persistConversation(state: {
   sessionId: string;
   messages: AgentChatMessage[];
@@ -305,7 +324,7 @@ async function persistConversation(state: {
   await api.saveAgentConversation({
     id: state.sessionId,
     targets: state.targets,
-    messagesJson: JSON.stringify(state.messages),
+    messagesJson: JSON.stringify(persistableMessages(state.messages)),
   });
 }
 
@@ -643,8 +662,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   setSpeaking: (speaking) => set({ speaking }),
 
-  enqueue: (text) => {
-    set((s) => ({ queued: enqueueMessage(s.queued, text) }));
+  enqueue: (text, images) => {
+    set((s) => ({ queued: enqueueMessage(s.queued, text, images) }));
   },
 
   updateQueued: (id, text) => {
@@ -655,14 +674,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set((s) => ({ queued: removeQueuedMessage(s.queued, id) }));
   },
 
-  enqueueOrSend: (text) => {
+  enqueueOrSend: (text, images) => {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!trimmed && !images?.length) return;
     if (get().streaming) {
-      get().enqueue(trimmed);
+      get().enqueue(trimmed, images);
       return;
     }
-    void get().send(trimmed);
+    void get().send(trimmed, { images });
   },
 
   stop: async () => {
@@ -683,9 +702,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   send: async (text, opts) => {
     const trimmed = text.trim();
-    if (!trimmed || get().streaming) return;
+    const images = opts?.images?.length ? opts.images : undefined;
+    if ((!trimmed && !images) || get().streaming) return;
 
-    const userMsg: AgentChatMessage = { role: "user", content: trimmed };
+    const userMsg: AgentChatMessage = {
+      role: "user",
+      content: appendImageMarkers(trimmed, images?.length ?? 0),
+      images,
+    };
     const history = [...get().messages, userMsg];
     set({
       messages: history,
@@ -881,7 +905,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         const { next, rest } = takeNextQueued(get().queued);
         if (next) {
           set({ queued: rest });
-          void get().send(next.text);
+          void get().send(next.text, { images: next.images });
         }
       }
     } catch (e) {
@@ -933,8 +957,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
     if (lastUserIdx < 0) return;
     const text = msgs[lastUserIdx].content;
+    const images = msgs[lastUserIdx].images;
     // Drop the failed user turn and any trailing assistant so send() re-appends cleanly.
     set({ messages: msgs.slice(0, lastUserIdx), error: null });
-    await get().send(text);
+    await get().send(text, { images });
   },
 }));

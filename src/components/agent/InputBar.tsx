@@ -38,6 +38,8 @@ export function InputBar({
   onStop,
   onPickModel,
   onPickContext,
+  visionLabel,
+  onPickVision,
 }: {
   activeProvider?: AiProvider;
   activeModel?: string;
@@ -56,6 +58,8 @@ export function InputBar({
   onStop: () => void;
   onPickModel: () => void;
   onPickContext: () => void;
+  visionLabel?: string;
+  onPickVision?: () => void;
 }) {
   const model = activeModel || activeProvider?.model;
   const canReason = reasoningCapable(activeProvider?.kind, model ?? undefined);
@@ -123,6 +127,19 @@ export function InputBar({
       >
         plan
       </button>
+
+      {onPickVision && (
+        <button
+          type="button"
+          className={pill}
+          onClick={onPickVision}
+          onPointerDown={stopNode}
+          onMouseDown={stopNode}
+          data-tooltip="Image vision — model used to look at screenshots (/vision)"
+        >
+          <span className="max-w-[180px] truncate">{visionLabel || "vision"}</span>
+        </button>
+      )}
 
       {/* Permissions (safety mode) */}
       <button

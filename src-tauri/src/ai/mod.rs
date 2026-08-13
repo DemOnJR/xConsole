@@ -42,6 +42,7 @@ pub mod piper;
 pub mod prefix_telemetry;
 pub mod text;
 pub mod tools;
+pub mod vision;
 pub mod voice;
 pub mod web_tools;
 pub mod workspace_context;

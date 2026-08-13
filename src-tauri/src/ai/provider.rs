@@ -24,6 +24,15 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
+/// An image attached to a user turn (base64, latest message only).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatImage {
+    pub media_type: String,
+    pub data: String,
+    #[serde(default)]
+    pub name: String,
+}
+
 /// One message in a conversation. `role` is "system" | "user" | "assistant" | "tool".
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -36,14 +45,29 @@ pub struct ChatMessage {
     /// For role == "tool": the id of the tool call this result answers.
     #[serde(default)]
     pub tool_call_id: Option<String>,
+    /// Pixels for this turn. Only the latest user message is sent to the model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ChatImage>,
 }
 
 impl ChatMessage {
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: "user".into(), content: content.into(), tool_calls: vec![], tool_call_id: None }
+        Self {
+            role: "user".into(),
+            content: content.into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            images: vec![],
+        }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: "assistant".into(), content: content.into(), tool_calls: vec![], tool_call_id: None }
+        Self {
+            role: "assistant".into(),
+            content: content.into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            images: vec![],
+        }
     }
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
@@ -51,6 +75,7 @@ impl ChatMessage {
             content: content.into(),
             tool_calls: vec![],
             tool_call_id: Some(tool_call_id.into()),
+            images: vec![],
         }
     }
 }

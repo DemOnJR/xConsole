@@ -2708,6 +2708,7 @@ fn selftest() -> i32 {
         content: String::new(),
         tool_calls: vec![ToolCall { id: id.into(), name: name.into(), arguments: args }],
         tool_call_id: None,
+        images: vec![],
     };
 
     println!("\n=== SELFTEST: prompt-cache miss hunt (74 unique cases) ===");

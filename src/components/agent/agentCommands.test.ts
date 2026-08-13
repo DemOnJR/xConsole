@@ -35,6 +35,12 @@ describe("Agent Slash Commands", () => {
     expect(parseExactSlashCommand("/new")?.actionKey).toBe("new");
     expect(parseExactSlashCommand("/plan")?.actionKey).toBe("plan");
     expect(parseExactSlashCommand("/compact")?.actionKey).toBe("compact");
+    expect(parseExactSlashCommand("/vision")?.actionKey).toBe("vision");
     expect(parseExactSlashCommand("/unknown")).toBeNull();
+  });
+
+  it("finds /vision by name and description", () => {
+    expect(filterSlashCommands("/vis").map((m) => m.name)).toContain("vision");
+    expect(filterSlashCommands("/gemini").map((m) => m.name)).toContain("vision");
   });
 });

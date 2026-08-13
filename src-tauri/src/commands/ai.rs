@@ -43,7 +43,7 @@ pub async fn ai_chat(
     edits: State<'_, crate::ai::edits::EditJournal>,
     hooks_state: State<'_, crate::ai::hooks::HooksState>,
     session_id: String,
-    messages: Vec<ChatMessage>,
+    mut messages: Vec<ChatMessage>,
     provider_id: Option<String>,
     targets: Vec<String>,
     #[allow(non_snake_case)] plan_mode: Option<bool>,
@@ -88,6 +88,11 @@ pub async fn ai_chat(
         hooks_state.snapshot()
     };
 
+    let mut turn_images = crate::ai::vision::take_latest_user_images(&mut messages);
+    if crate::ai::vision::mode_from_db(&db_inner) == crate::ai::vision::VisionMode::Disabled {
+        turn_images.clear();
+    }
+
     let tc = ToolContext {
         app: app.clone(),
         db: db_inner.clone(),
@@ -104,6 +109,7 @@ pub async fn ai_chat(
         canvas,
         edits: edits.inner().clone(),
         hooks: hooks_cfg,
+        turn_images,
     };
 
     // If the chosen provider runs a local server, make sure it's up first so the

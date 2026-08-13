@@ -4,6 +4,7 @@ import { plainText } from "../../lib/plainText";
 import { AgentMarkdown } from "./AgentMarkdown";
 import { AgentActivityFeed } from "./AgentActivity";
 import { segmentsFromMessage } from "../../stores/turnSegments";
+import { previewSrc } from "../../lib/vision";
 
 function AssistantTurn({
   segments,
@@ -151,8 +152,20 @@ export function AgentConsole({
             return (
               <div key={key} className="flex gap-2 text-[var(--text)]">
                 <span className="shrink-0 font-bold text-cyan-400">~#</span>
-                <div className="min-w-0 flex-1 whitespace-pre-wrap break-words">
-                  {plainText(message.content)}
+                <div className="min-w-0 flex-1">
+                  <div className="whitespace-pre-wrap break-words">{plainText(message.content)}</div>
+                  {message.images && message.images.length > 0 ? (
+                    <div className="mt-1.5 flex flex-wrap gap-1.5">
+                      {message.images.map((img, i) => (
+                        <img
+                          key={`${img.name ?? "img"}-${i}`}
+                          src={previewSrc(img)}
+                          alt={img.name || `Image #${i + 1}`}
+                          className="h-16 max-w-[128px] rounded border border-[var(--border)] object-cover"
+                        />
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               </div>
             );

@@ -18,6 +18,14 @@ describe("message queue", () => {
     expect(list[0].id).toBeTruthy();
   });
 
+  it("keeps attached images on a queued follow-up", () => {
+    const list = enqueueMessage([], "look", [
+      { media_type: "image/png", data: "AAAA", name: "shot.png" },
+    ]);
+    expect(list[0].images).toHaveLength(1);
+    expect(list[0].images?.[0].name).toBe("shot.png");
+  });
+
   it("lets the user edit a queued item before send", () => {
     const list = enqueueMessage([], "old");
     const edited = updateQueuedMessage(list, list[0].id, "new wording");

@@ -94,7 +94,13 @@ impl OllamaProvider {
         let history = &req.messages;
         for (idx, m) in history.iter().enumerate() {
             match m.role.as_str() {
-                "user" => out.push(json!({"role": "user", "content": m.content})),
+                "user" => {
+                    let mut msg = json!({"role": "user", "content": m.content});
+                    if !m.images.is_empty() {
+                        msg["images"] = json!(crate::ai::vision::ollama_image_payloads(&m.images));
+                    }
+                    out.push(msg);
+                }
                 "assistant" => {
                     let mut msg = json!({"role": "assistant", "content": m.content});
                     if !m.tool_calls.is_empty() {

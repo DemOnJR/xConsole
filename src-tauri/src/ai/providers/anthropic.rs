@@ -39,7 +39,10 @@ impl AnthropicProvider {
         for m in messages {
             match m.role.as_str() {
                 "user" => {
-                    out.push(json!({"role": "user", "content": m.content}));
+                    out.push(json!({
+                        "role": "user",
+                        "content": crate::ai::vision::anthropic_user_content(&m.content, &m.images),
+                    }));
                 }
                 "assistant" => {
                     let mut blocks: Vec<Value> = Vec::new();
