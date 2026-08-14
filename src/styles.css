@@ -472,6 +472,7 @@ body,
   height: 18px;
   padding: 0 4px;
   border-radius: 4px;
+  cursor: default;
 }
 .xc-cache-rail {
   position: relative;
@@ -490,6 +491,19 @@ body,
   height: var(--xc-cache-pct, 0%);
   border-radius: inherit;
   background: currentColor;
+}
+
+/*
+ * Agent window: never the pointing hand. Tailwind preflight puts
+ * `cursor: pointer` on every button; this window uses the arrow instead.
+ * Text fields and the transcript keep the I-beam. The title bar keeps move.
+ */
+[data-agent-root] :is(button, a, label, select, summary, [role="button"], [data-tooltip]) {
+  cursor: default;
+}
+[data-agent-root] :is(textarea, input:not([type="button"]):not([type="submit"]), [contenteditable="true"]),
+[data-agent-root] .cursor-text {
+  cursor: text;
 }
 
 /*

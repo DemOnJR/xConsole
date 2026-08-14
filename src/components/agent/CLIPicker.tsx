@@ -148,7 +148,7 @@ export function CLIPicker({
                 e.preventDefault();
                 e.stopPropagation();
               }}
-              className={`flex cursor-pointer items-center gap-2 px-2.5 py-1 font-mono text-[11px] ${
+              className={`flex items-center gap-2 px-2.5 py-1 font-mono text-[11px] ${
                 active ? "bg-[var(--border)] text-[var(--text)]" : "text-[var(--text-dim)]"
               }`}
             >
