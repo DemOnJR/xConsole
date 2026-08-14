@@ -146,6 +146,8 @@ async function speakSentenceQueued(raw: string) {
   }
 }
 import {
+  estimateTokens,
+  liveGenerationStats,
   liveTokenStats,
   sessionCostFromMessages,
   type ContextUsage,
@@ -812,6 +814,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     });
 
     let streamStartedAt: number | null = null;
+    let tokensBeforeBurst = 0;
     let latestStats: TokenStats | null = null;
     // Session-scoped turn state. If the user switches conversations mid-stream we
     // must not read or clobber the now-visible thread, so the turn tracks its own
@@ -848,12 +851,15 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
     const unlisten = await onAiChatOutput(mySession, (ev) => {
       if (ev.kind === "Text") {
-        if (streamStartedAt === null) streamStartedAt = Date.now();
+        if (streamStartedAt === null) {
+          streamStartedAt = Date.now();
+          tokensBeforeBurst = estimateTokens(turnText);
+        }
         turnText += ev.data;
         turnSegments = appendTextDelta(turnSegments, ev.data);
         feedSpeech(ev.data);
         if (isCurrent()) {
-          const live = liveTokenStats(turnText, streamStartedAt);
+          const live = liveGenerationStats(turnText, streamStartedAt, tokensBeforeBurst);
           set((s) => ({
             streamingText: turnText,
             streamingSegments: turnSegments,
@@ -870,6 +876,11 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           }));
         }
         return;
+      }
+      // Next text burst (after tools) gets a fresh generation clock so tok/s
+      // does not include SSH/tool wait time.
+      if (ev.kind === "ToolCall" || ev.kind === "Activity" || ev.kind === "Status") {
+        streamStartedAt = null;
       }
       if (ev.kind === "Stats") {
         latestStats = {

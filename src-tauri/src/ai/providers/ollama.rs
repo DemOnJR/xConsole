@@ -299,6 +299,7 @@ impl OllamaProvider {
             out.tool_calls.push(call);
         }
         out.stop_reason = parsed.done_reason.unwrap_or_else(|| "stop".into());
+        out.completion_tokens = parsed.eval_count.map(|n| n as u32);
         Ok(out)
     }
 }
@@ -428,6 +429,7 @@ impl Provider for OllamaProvider {
                 }
 
                 if chunk.done {
+                    out.completion_tokens = chunk.eval_count.map(|n| n as u32);
                     if let Some(ev) =
                         stats_event(chunk.eval_count, chunk.eval_duration, chunk.prompt_eval_count)
                     {

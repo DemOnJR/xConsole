@@ -163,7 +163,7 @@ impl ChatRequest {
             system: String::new(),
             messages: vec![],
             tools: vec![],
-            max_tokens: 4096,
+            max_tokens: 16_384,
             temperature: 0.7,
             xconsole: None,
             cancel: None,
@@ -192,6 +192,63 @@ pub struct ChatResponse {
     pub prompt_tokens: Option<u32>,
     /// Cached prompt tokens for this HTTP request.
     pub cached_tokens: Option<u32>,
+    /// Completion tokens when the provider reported usage (used to detect a cap hit).
+    pub completion_tokens: Option<u32>,
+}
+
+/// True when the model stopped because it hit the output-token cap, not because
+/// it finished. A truncated reply often has no tool_calls even though work is
+/// unfinished — the agent loop must continue, not treat it as "done".
+pub fn is_output_truncated(stop_reason: &str, completion_tokens: Option<u32>, max_tokens: u32) -> bool {
+    let r = stop_reason.trim().to_ascii_lowercase();
+    if matches!(
+        r.as_str(),
+        "length" | "max_tokens" | "max_output_tokens" | "max_output" | "token_limit"
+    ) {
+        return true;
+    }
+    if r.contains("max_token") || r.contains("token limit") {
+        return true;
+    }
+    match completion_tokens {
+        Some(n) if max_tokens > 0 && n >= max_tokens.saturating_sub(1) => true,
+        // Many OpenAI-compat hosts ignore our max_tokens and silently cap at 4K/8K
+        // while still sending finish_reason=stop. The UI showed exactly 4096 tok.
+        Some(n) if n == 4096 || n == 8192 => true,
+        _ => false,
+    }
+}
+
+/// Prose that still has open checklist rows — the model talked instead of calling tools.
+pub fn reply_has_open_checklist(content: &str) -> bool {
+    content.lines().any(|line| {
+        let t = line.trim();
+        t.starts_with("[ ]")
+            || t.starts_with("[>]")
+            || t.contains("[pending]")
+            || t.contains("[in_progress]")
+    })
+}
+
+#[cfg(test)]
+mod truncated_tests {
+    use super::{is_output_truncated, reply_has_open_checklist};
+
+    #[test]
+    fn detects_length_and_cap() {
+        assert!(is_output_truncated("length", None, 4096));
+        assert!(is_output_truncated("max_tokens", None, 4096));
+        assert!(is_output_truncated("stop", Some(4096), 4096));
+        assert!(is_output_truncated("stop", Some(4096), 16_384));
+        assert!(!is_output_truncated("stop", Some(200), 4096));
+        assert!(!is_output_truncated("", None, 4096));
+    }
+
+    #[test]
+    fn open_checklist_in_prose() {
+        assert!(reply_has_open_checklist("[>] Inspect ufw\n[ ] Write jail"));
+        assert!(!reply_has_open_checklist("[x] Inspect ufw\n[x] Write jail"));
+    }
 }
 
 /// One line in a compact file diff (Cursor-style).

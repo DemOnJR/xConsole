@@ -167,11 +167,21 @@ export function formatTokensPerSec(tps: number): string {
 }
 
 export function liveTokenStats(text: string, startedAtMs: number): TokenStats {
-  const elapsedSec = Math.max((Date.now() - startedAtMs) / 1000, 0.05);
-  const completionTokens = estimateTokens(text);
+  return liveGenerationStats(text, startedAtMs, 0);
+}
+
+/** tok/s for the current generation burst only (excludes earlier tool-wait time). */
+export function liveGenerationStats(
+  fullText: string,
+  burstStartedAtMs: number,
+  tokensBeforeBurst: number,
+): TokenStats {
+  const elapsedSec = Math.max((Date.now() - burstStartedAtMs) / 1000, 0.05);
+  const completionTokens = estimateTokens(fullText);
+  const burstTokens = Math.max(1, completionTokens - tokensBeforeBurst);
   return {
     completionTokens,
-    tokensPerSec: completionTokens / elapsedSec,
+    tokensPerSec: burstTokens / elapsedSec,
     source: "estimate",
   };
 }

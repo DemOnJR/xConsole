@@ -347,6 +347,7 @@ impl Provider for OpenAiProvider {
 
         out.prompt_tokens = usage.prompt_tokens;
         out.cached_tokens = usage.cached_tokens;
+        out.completion_tokens = usage.completion_tokens;
 
         if let Some(completion_tokens) = usage.completion_tokens {
             let duration_ms = started.elapsed().as_millis() as u64;

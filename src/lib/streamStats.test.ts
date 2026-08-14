@@ -9,6 +9,7 @@ import {
   formatSessionCache,
   formatUsd,
   formatTokenCount,
+  liveGenerationStats,
   sessionCacheFromMessages,
   sessionCostFromMessages,
 } from "./streamStats";
@@ -61,6 +62,17 @@ describe("cacheHitRate", () => {
         source: "provider",
       }),
     ).toBe("cache 1.7K hit · 68 miss · 96%");
+  });
+});
+
+describe("liveGenerationStats", () => {
+  it("rates only the new burst, not earlier text", () => {
+    const started = Date.now() - 1000;
+    const s = liveGenerationStats("xxxx".repeat(50), started, 10);
+    // 200 chars ≈ 50 tokens; 50 - 10 = 40 new tokens in ~1s
+    expect(s.completionTokens).toBe(50);
+    expect(s.tokensPerSec).toBeGreaterThan(20);
+    expect(s.source).toBe("estimate");
   });
 });
 

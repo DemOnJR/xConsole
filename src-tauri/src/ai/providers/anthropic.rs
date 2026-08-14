@@ -286,6 +286,7 @@ impl Provider for AnthropicProvider {
 
         out.prompt_tokens = input_tokens;
         out.cached_tokens = cache_read_tokens;
+        out.completion_tokens = output_tokens;
 
         if let Some(completion) = output_tokens {
             let ms = started.elapsed().as_millis() as u64;

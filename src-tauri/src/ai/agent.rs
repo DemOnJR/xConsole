@@ -770,6 +770,7 @@ pub async fn run_turn(
 
     let mut iter: usize = 0;
     let mut execution_nudge = false;
+    let mut truncate_continues: u8 = 0;
     loop {
         // User pressed Stop — halt before the next model call.
         if tc.session_state.is_cancelled(&tc.session_id) {
@@ -787,6 +788,14 @@ pub async fn run_turn(
         req.system = system.clone();
         req.messages = messages.clone();
         req.tools = tool_defs_for_turn.clone();
+        req.max_tokens = tc
+            .db
+            .get_setting("agent.max_tokens")
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .filter(|n: &u32| *n >= 256)
+            .unwrap_or(16_384);
         req.xconsole = xconsole_exec.clone();
         // Opt-in extended cache TTL (1h) when the user enables it — 2× write price
         // but the prefix survives idle gaps that would evict the 5-min cache.
@@ -943,6 +952,40 @@ pub async fn run_turn(
                     messages.push(ChatMessage::user(
                         "[system] The user approved the plan. Execute it now with tools. \
                          Do not wait and do not re-present the plan."
+                            .to_string(),
+                    ));
+                    iter += 1;
+                    continue;
+                }
+                // Hit max_tokens mid-reply (often mid-checklist, no tool_calls
+                // parsed). Stopping here looks like a hang. Continue a few times.
+                let truncated = crate::ai::provider::is_output_truncated(
+                    &resp.stop_reason,
+                    resp.completion_tokens,
+                    req.max_tokens,
+                );
+                let todos_open = tc
+                    .session_state
+                    .todos(&tc.session_id)
+                    .iter()
+                    .any(|t| t.status != "completed")
+                    || crate::ai::provider::reply_has_open_checklist(&resp.content);
+                if (truncated || todos_open) && truncate_continues < 4 {
+                    truncate_continues += 1;
+                    let why = if truncated {
+                        format!(
+                            "Output hit the token cap ({}) — continuing from where it stopped…",
+                            resp.completion_tokens.unwrap_or(req.max_tokens)
+                        )
+                    } else {
+                        "Checklist still has open steps — continuing.".into()
+                    };
+                    emit(Some(sink), StreamEvent::Status(why));
+                    messages.push(ChatMessage::user(
+                        "[system] Your previous reply stopped without finishing. \
+                         Continue from exactly where you stopped. Call tools NOW to \
+                         complete the remaining checklist steps. Do not restart, do not \
+                         repeat finished work, and do not wait for the user."
                             .to_string(),
                     ));
                     iter += 1;
