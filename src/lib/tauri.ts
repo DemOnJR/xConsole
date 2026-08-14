@@ -84,6 +84,32 @@ export interface SystemCaps {
   gpu_name: string | null;
 }
 
+export interface ResourceSnapshot {
+  ts: string;
+  cpu_pct: number;
+  ram_mb: number;
+  ram_total_mb: number;
+  process_ram_mb: number;
+  gpu_pct: number | null;
+  gpu_mem_mb: number | null;
+  gpu_name: string | null;
+}
+
+export interface AgentAnalytics {
+  cache: { ts: string; session: string; prompt: number; hit: number; miss: number; pct: number }[];
+  cache_avg_pct: number;
+  conversations: {
+    id: string;
+    title: string;
+    updated_at: string;
+    user_turns: number;
+    tool_calls: number;
+    tools: { name: string; count: number }[];
+  }[];
+  tools_all: { name: string; count: number }[];
+  resource: ResourceSnapshot;
+}
+
 export interface ModelEntry {
   id: string;
   name: string;
@@ -1124,6 +1150,8 @@ export const api = {
 
   listAgentConversations: () =>
     invoke<AgentConversationMeta[]>("list_agent_conversations"),
+  agentAnalytics: () => invoke<AgentAnalytics>("agent_analytics"),
+  appResourceSnapshot: () => invoke<ResourceSnapshot>("app_resource_snapshot"),
   getAgentConversation: (id: string) =>
     invoke<AgentConversation | null>("get_agent_conversation", { id }),
   saveAgentConversation: (args: {

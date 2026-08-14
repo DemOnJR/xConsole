@@ -90,6 +90,8 @@ function DiffIcon({ size = 18 }: { size?: number }) {
  */
 export function NavRail() {
   const leftOpen = useUiStore((s) => s.leftOpen);
+  const leftMode = useUiStore((s) => s.leftMode);
+  const openAnalytics = useUiStore((s) => s.openAnalytics);
   const rightOpen = useUiStore((s) => s.rightOpen);
   const bottomOpen = useUiStore((s) => s.bottomOpen);
   const toggleLeft = useUiStore((s) => s.toggleLeft);
@@ -122,11 +124,19 @@ export function NavRail() {
   return (
     <nav className="xc-rail" aria-label="Main navigation">
       <RailBtn
-        active={leftOpen}
-        title={leftOpen ? "Hide workspaces" : "Workspaces"}
+        active={leftOpen && leftMode === "workspaces"}
+        title={leftOpen && leftMode === "workspaces" ? "Hide workspaces" : "Workspaces"}
         onClick={toggleLeft}
       >
         <FolderIcon size={18} />
+      </RailBtn>
+
+      <RailBtn
+        active={leftOpen && leftMode === "analytics"}
+        title={leftOpen && leftMode === "analytics" ? "Hide analytics" : "Analytics"}
+        onClick={openAnalytics}
+      >
+        <ChartIcon size={18} />
       </RailBtn>
 
       <RailBtn
@@ -201,6 +211,19 @@ export function NavRail() {
         </RailBtn>
       </div>
     </nav>
+  );
+}
+
+function ChartIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M4 19V5M4 19h16M8 16v-5M12 16V8M16 16v-8"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 

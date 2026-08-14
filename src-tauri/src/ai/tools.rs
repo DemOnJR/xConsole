@@ -90,11 +90,15 @@ combined output. Prefer this when the user asks about both/all/each server.".int
         },
         ToolDef {
             name: "read_file".into(),
-            description: "Read a text file from a server.".into(),
+            description: "Read a text file from a server. Lines are numbered. For large files \
+pass offset (1-based line) and limit instead of reading everything — find the line with \
+grep_search first.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
+                    "offset": {"type": "integer", "description": "1-based start line."},
+                    "limit": {"type": "integer", "description": "Max lines to return."},
                     "vps_id": {"type": "string"}
                 },
                 "required": ["path"]
@@ -103,7 +107,8 @@ combined output. Prefer this when the user asks about both/all/each server.".int
         ToolDef {
             name: "write_file".into(),
             description: "Write (overwrite) a text file on a server. Subject to the safety mode. \
-Use /root/ or /tmp/ on Linux (root login) — not /home/root/. Prefer hello.py over names with spaces."
+Use /root/ or /tmp/ on Linux (root login) — not /home/root/. Prefer hello.py over names with spaces. \
+For an existing file prefer edit_file (replace a unique snippet) — cheaper and safer."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -113,6 +118,67 @@ Use /root/ or /tmp/ on Linux (root login) — not /home/root/. Prefer hello.py o
                     "vps_id": {"type": "string"}
                 },
                 "required": ["path", "content"]
+            }),
+        },
+        ToolDef {
+            name: "edit_file".into(),
+            description: "Replace a unique snippet in an existing file on a server. Prefer this \
+over write_file for any file you have already read. old_string must match exactly once unless \
+replace_all is true.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"},
+                    "replace_all": {"type": "boolean"},
+                    "vps_id": {"type": "string"}
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+        },
+        ToolDef {
+            name: "grep_search".into(),
+            description: "Search file contents on a server with a regex. Returns path:line:text. \
+Use this FIRST on large trees instead of reading whole files; then read_file with offset/limit \
+around the matching line.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string", "description": "File or directory to search (default /)."},
+                    "glob": {"type": "string", "description": "Optional filename glob, e.g. *.conf"},
+                    "case_insensitive": {"type": "boolean"},
+                    "head_limit": {"type": "integer", "description": "Max matches (default 40)."},
+                    "vps_id": {"type": "string"}
+                },
+                "required": ["pattern"]
+            }),
+        },
+        ToolDef {
+            name: "todo_write".into(),
+            description: "Replace your live working checklist for THIS chat. Use for any task with \
+3+ steps AFTER the user is ready for you to execute (not instead of present_plan). Each item: \
+content, activeForm (gerund shown while in progress), status pending|in_progress|completed. \
+Keep exactly one in_progress. Mark done as you finish so you do not repeat work. The current \
+list is shown to you every turn under # Todos.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string"},
+                                "activeForm": {"type": "string"},
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
+                            },
+                            "required": ["content", "status"]
+                        }
+                    }
+                },
+                "required": ["todos"]
             }),
         },
         ToolDef {
@@ -367,11 +433,46 @@ in sh. For remote servers use run_command instead.".into(),
         },
         ToolDef {
             name: "local_read_file".into(),
-            description: "Read a text file from the user's local machine (this PC).".into(),
+            description: "Read a text file from this PC. Lines are numbered. Use offset/limit \
+on large files.".into(),
             parameters: json!({
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {"type": "string"},
+                    "offset": {"type": "integer"},
+                    "limit": {"type": "integer"}
+                },
                 "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "local_edit_file".into(),
+            description: "Replace a unique snippet in a file on this PC. Prefer this over \
+local_write_file for existing files.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"},
+                    "replace_all": {"type": "boolean"}
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+        },
+        ToolDef {
+            name: "local_grep_search".into(),
+            description: "Search file contents on this PC. Returns path:line:text.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string"},
+                    "glob": {"type": "string"},
+                    "case_insensitive": {"type": "boolean"},
+                    "head_limit": {"type": "integer"}
+                },
+                "required": ["pattern"]
             }),
         },
         ToolDef {
@@ -631,6 +732,9 @@ const OLLAMA_VPS_TOOLS: &[&str] = &[
     "list_vps_targets",
     "read_file",
     "write_file",
+    "edit_file",
+    "grep_search",
+    "todo_write",
     "upload_file",
     "download_file",
     "ssh_setup_key_auth",
@@ -639,6 +743,8 @@ const OLLAMA_VPS_TOOLS: &[&str] = &[
     "artifact_list",
     "local_run_command",
     "local_read_file",
+    "local_edit_file",
+    "local_grep_search",
     "local_write_file",
     "local_list_dir",
     "terminal_send",
@@ -667,8 +773,11 @@ const OLLAMA_VPS_TOOLS: &[&str] = &[
 const OLLAMA_LOCAL_TOOLS: &[&str] = &[
     "local_run_command",
     "local_read_file",
+    "local_edit_file",
+    "local_grep_search",
     "local_write_file",
     "local_list_dir",
+    "todo_write",
     "ask_user",
     "present_plan",
     "memory_save",
@@ -840,8 +949,13 @@ pub async fn dispatch_with_telemetry(
         "list_vps_targets" => list_vps_targets(ctx),
         "read_file" => read_file(ctx, args, sink, &call.id).await,
         "write_file" => write_file(ctx, args, sink, &call.id).await,
+        "edit_file" => edit_file(ctx, args, sink, &call.id).await,
+        "grep_search" => grep_search(ctx, args, sink, &call.id).await,
+        "todo_write" => todo_write(ctx, args),
         "local_run_command" => local_run_command(ctx, args).await,
         "local_read_file" => local_read_file(ctx, args).await,
+        "local_edit_file" => local_edit_file(ctx, args).await,
+        "local_grep_search" => local_grep_search(ctx, args).await,
         "local_write_file" => local_write_file(ctx, args).await,
         "local_list_dir" => local_list_dir(ctx, args).await,
         "upload_file" => upload_file(ctx, args, sink, &call.id).await,
@@ -993,7 +1107,7 @@ fn invalidate_cache_after_success(scope: &crate::ai::tool_cache::CacheScope, nam
                 });
             }
         }
-        "write_file" | "upload_file" => {
+        "write_file" | "edit_file" | "upload_file" => {
             let vps_id = args.get("vps_id").and_then(Value::as_str);
             let path = args
                 .get("path")
@@ -1037,6 +1151,15 @@ fn tool_activity_label(ctx: &ToolContext, call: &ToolCall) -> String {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("…");
             format!("Write {} on {}", path, vps_label(ctx, args))
         }
+        "edit_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("…");
+            format!("Edit {} on {}", path, vps_label(ctx, args))
+        }
+        "grep_search" => {
+            let pat = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("…");
+            format!("Search {pat} on {}", vps_label(ctx, args))
+        }
+        "todo_write" => "Update checklist".into(),
         "local_run_command" => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("…");
             format!("Run on this PC: {cmd}")
@@ -1048,6 +1171,14 @@ fn tool_activity_label(ctx: &ToolContext, call: &ToolCall) -> String {
         "local_write_file" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("…");
             format!("Write {path} on this PC")
+        }
+        "local_edit_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("…");
+            format!("Edit {path} on this PC")
+        }
+        "local_grep_search" => {
+            let pat = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("…");
+            format!("Search {pat} on this PC")
         }
         "local_list_dir" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("…");
@@ -1213,7 +1344,8 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
         "read_file" | "local_read_file" | "local_list_dir" | "list_vps_targets"
         | "artifact_list" | "ssh_key_status" | "memory_save" | "skills_list" | "skill_view"
         | "learn_skill" | "ask_user" | "present_plan" | "terminal_capture" | "canvas_open_terminal"
-        | "canvas_open_sftp" | "canvas_tile" | "canvas_close" | "canvas_refresh" | "vision" => false,
+        | "canvas_open_sftp" | "canvas_tile" | "canvas_close" | "canvas_refresh" | "vision"
+        | "grep_search" | "local_grep_search" | "todo_write" => false,
         // Typing into a live shell runs commands → mutating.
         "terminal_send" => true,
         // Shell tools: mutating only when the command isn't read-only.
@@ -1222,7 +1354,8 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
             !safety::is_read_only(cmd)
         }
         // Always change a server or the local PC.
-        "write_file" | "local_write_file" | "upload_file" | "download_file"
+        "write_file" | "edit_file" | "local_write_file" | "local_edit_file"
+        | "upload_file" | "download_file"
         | "ssh_setup_key_auth" | "vps_update_login" => true,
         // `web_fetch` reads nothing locally, but its URL is entirely model-chosen, so a
         // GET is an outbound channel: paired with a file read it can carry data off the
@@ -1345,6 +1478,9 @@ mod tests {
         assert!(!tool_is_mutating("local_run_command", &json!({"command": "cat /etc/hosts"})));
         // Always-mutating tools.
         assert!(tool_is_mutating("write_file", &json!({})));
+        assert!(tool_is_mutating("edit_file", &json!({})));
+        assert!(!tool_is_mutating("grep_search", &json!({})));
+        assert!(!tool_is_mutating("todo_write", &json!({})));
         assert!(tool_is_mutating("local_write_file", &json!({})));
         assert!(tool_is_mutating("upload_file", &json!({})));
         assert!(tool_is_mutating("ssh_setup_key_auth", &json!({})));
@@ -1432,23 +1568,82 @@ async fn exec_inner(ctx: &ToolContext, vps_id: &str, command: &str) -> String {
     }
 
     match ctx.sessions.run_command(vps_id, command).await {
-        Ok(out) => {
-            let mut s = format!("exit_code: {}\n", out.exit_code);
-            if out.exit_code == -1 && !out.stdout.trim().is_empty() {
-                s.push_str(
-                    "note: SSH channel closed without exit status; stdout below is still valid.\n",
-                );
+        Ok(out) => format_command_output(&out),
+        Err(e) => {
+            let err = e.to_string();
+            if is_connect_error(&err) {
+                if let Some(jumped) = try_jump_command(ctx, vps_id, command).await {
+                    return jumped;
+                }
             }
-            if !out.stdout.is_empty() {
-                s.push_str(&format!("stdout:\n{}\n", out.stdout.trim_end()));
-            }
-            if !out.stderr.is_empty() {
-                s.push_str(&format!("stderr:\n{}\n", out.stderr.trim_end()));
-            }
-            s
+            format!("error running command: {err}")
         }
-        Err(e) => format!("error running command: {e}"),
     }
+}
+
+fn format_command_output(out: &crate::ssh::manager::CommandOutput) -> String {
+    let mut s = format!("exit_code: {}\n", out.exit_code);
+    if out.exit_code == -1 && !out.stdout.trim().is_empty() {
+        s.push_str(
+            "note: SSH channel closed without exit status; stdout below is still valid.\n",
+        );
+    }
+    if !out.stdout.is_empty() {
+        s.push_str(&format!("stdout:\n{}\n", out.stdout.trim_end()));
+    }
+    if !out.stderr.is_empty() {
+        s.push_str(&format!("stderr:\n{}\n", out.stderr.trim_end()));
+    }
+    s
+}
+
+fn is_connect_error(err: &str) -> bool {
+    let l = err.to_lowercase();
+    l.contains("could not reach")
+        || l.contains("timed out")
+        || l.contains("connection refused")
+        || l.contains("no route")
+        || l.contains("network is unreachable")
+        || l.contains("forcibly closed")
+        || l.contains("os error 10061")
+        || l.contains("os error 10060")
+        || l.contains("os error 10054")
+}
+
+/// When this PC cannot reach a host (firewall/reboot/lockout), hop through
+/// another selected VPS that still answers. One hop only.
+async fn try_jump_command(ctx: &ToolContext, dest_id: &str, command: &str) -> Option<String> {
+    let dest = ctx.db.get_vps(dest_id).ok().flatten()?;
+    for hop_id in &ctx.targets {
+        if hop_id == dest_id {
+            continue;
+        }
+        let hop = match ctx.db.get_vps(hop_id).ok().flatten() {
+            Some(v) => v,
+            None => continue,
+        };
+        let remote = format!(
+            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 -p {} {}@{} -- {}",
+            dest.port,
+            dest.username,
+            dest.host,
+            command
+        );
+        match ctx.sessions.run_command(hop_id, &remote).await {
+            Ok(out) if out.exit_code == 0 || !out.stdout.trim().is_empty() => {
+                return Some(format!(
+                    "note: direct SSH to {} ({}) failed; jumped via {} ({}).\n{}",
+                    dest.name,
+                    dest.host,
+                    hop.name,
+                    hop.host,
+                    format_command_output(&out)
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 async fn exec(
@@ -1561,8 +1756,57 @@ async fn read_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str)
         Ok(id) => id,
         Err(e) => return format!("error: {e}"),
     };
-    let command = format!("cat -- {}", shell_quote(path));
-    exec(ctx, &vps_id, &command, Some(sink), true).await
+    let command = format!(
+        "stat -c %Y -- {p} 2>/dev/null; echo __XCONS_MTIME__; cat -- {p}",
+        p = shell_quote(path)
+    );
+    let raw = exec(ctx, &vps_id, &command, Some(sink), true).await;
+    if raw.starts_with("error") {
+        return raw;
+    }
+    let (mtime, body) = split_mtime_prefix(&raw);
+    let file = stdout_body(&body);
+    let offset = args.get("offset").and_then(|v| v.as_u64()).map(|n| n as u32);
+    let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
+    let numbered = crate::ai::file_ops::format_read(&file, offset, limit);
+    if let Some(m) = mtime {
+        crate::ai::file_state::note_read(&ctx.session_id, &vps_id, path, &m);
+        format!("[mtime: {m}]\n{numbered}")
+    } else {
+        numbered
+    }
+}
+
+fn stdout_body(wrapped: &str) -> String {
+    wrapped
+        .split_once("stdout:\n")
+        .map(|(_, rest)| {
+            rest.split("\nstderr:\n").next().unwrap_or(rest).to_string()
+        })
+        .unwrap_or_else(|| wrapped.to_string())
+}
+
+fn split_mtime_prefix(raw: &str) -> (Option<String>, String) {
+    // exec wraps stdout after "stdout:\n"
+    let stdout = raw
+        .split_once("stdout:\n")
+        .map(|(_, rest)| rest)
+        .unwrap_or(raw);
+    let Some((head, tail)) = stdout.split_once("__XCONS_MTIME__") else {
+        return (None, raw.to_string());
+    };
+    let mtime = head
+        .lines()
+        .rev()
+        .find(|l| l.chars().all(|c| c.is_ascii_digit()))
+        .map(|s| s.to_string());
+    let body = tail.trim_start_matches('\n');
+    // Rebuild keeping the exit_code header if present.
+    if let Some((hdr, _)) = raw.split_once("stdout:\n") {
+        (mtime, format!("{hdr}stdout:\n{body}"))
+    } else {
+        (mtime, body.to_string())
+    }
 }
 
 async fn write_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str) -> String {
@@ -1575,6 +1819,16 @@ async fn write_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str
         Ok(id) => id,
         Err(e) => return format!("error: {e}"),
     };
+    if let Ok(st) = ctx
+        .sessions
+        .run_command(&vps_id, &format!("stat -c %Y -- {} 2>/dev/null", shell_quote(&path)))
+        .await
+    {
+        let current = st.stdout.lines().find(|l| l.chars().all(|c| c.is_ascii_digit())).unwrap_or("");
+        if let Err(e) = crate::ai::file_state::check_write(&ctx.session_id, &vps_id, &path, current) {
+            return e;
+        }
+    }
     let parent = std::path::Path::new(&path)
         .parent()
         .and_then(|p| p.to_str())
@@ -1628,6 +1882,161 @@ fn normalize_vps_write_path(path: &str) -> String {
         p = "/root".into();
     }
     p
+}
+
+async fn write_remote_contents(
+    ctx: &ToolContext,
+    vps_id: &str,
+    path: &str,
+    content: &str,
+    sink: &EventSink,
+    before: &str,
+) -> String {
+    let parent = std::path::Path::new(path)
+        .parent()
+        .and_then(|p| p.to_str())
+        .filter(|p| !p.is_empty())
+        .unwrap_or("/tmp");
+    let b64 = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
+    let command = format!(
+        "mkdir -p {} && printf %s {} | base64 -d > {}",
+        shell_quote(parent),
+        shell_quote(&b64),
+        shell_quote(path)
+    );
+    let result = exec(ctx, vps_id, &command, Some(sink), true).await;
+    if result.starts_with("exit_code: 0") {
+        let label = ctx
+            .db
+            .get_vps(vps_id)
+            .ok()
+            .flatten()
+            .map(|v| format!("{} ({})", v.name, v.host))
+            .unwrap_or_else(|| vps_id.to_string());
+        ctx.edits.record(
+            &ctx.app,
+            &ctx.session_id,
+            ctx.workspace_id.clone(),
+            "vps",
+            Some(vps_id.to_string()),
+            &label,
+            path,
+            before,
+            content,
+        );
+    }
+    result
+}
+
+async fn edit_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str) -> String {
+    let path = match args.get("path").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => normalize_vps_write_path(p),
+        _ => return "error: missing 'path'".into(),
+    };
+    let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+    let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+    let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+    let vps_id = match resolve_target(ctx, args) {
+        Ok(id) => id,
+        Err(e) => return format!("error: {e}"),
+    };
+    if let Err(e) = authorize_vps(ctx, &vps_id, &format!("edit {path}")).await {
+        return format!("error: {e}");
+    }
+    let before_out = match ctx
+        .sessions
+        .run_command(&vps_id, &format!("cat -- {}", shell_quote(&path)))
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => return format!("error: {e}"),
+    };
+    if before_out.exit_code != 0 && before_out.stdout.is_empty() {
+        return format!(
+            "error: could not read {path} (exit {}). Use write_file to create it.",
+            before_out.exit_code
+        );
+    }
+    if let Ok(st) = ctx
+        .sessions
+        .run_command(&vps_id, &format!("stat -c %Y -- {} 2>/dev/null", shell_quote(&path)))
+        .await
+    {
+        let current = st
+            .stdout
+            .lines()
+            .find(|l| l.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or("");
+        if let Err(e) = crate::ai::file_state::check_write(&ctx.session_id, &vps_id, &path, current) {
+            return e;
+        }
+    }
+    let (next, n) = match crate::ai::file_ops::apply_edit(&before_out.stdout, old, new, replace_all)
+    {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let result = write_remote_contents(ctx, &vps_id, &path, &next, sink, &before_out.stdout).await;
+    if result.starts_with("exit_code: 0") {
+        format!("updated {path} ({n} replacement{}).\n{result}", if n == 1 { "" } else { "s" })
+    } else {
+        result
+    }
+}
+
+async fn grep_search(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str) -> String {
+    let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p,
+        _ => return "error: missing 'pattern'".into(),
+    };
+    let path = args.get("path").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("/");
+    let glob = args.get("glob").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let ci = args.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false);
+    let head = args
+        .get("head_limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(40)
+        .clamp(1, 200);
+    let vps_id = match resolve_target(ctx, args) {
+        Ok(id) => id,
+        Err(e) => return format!("error: {e}"),
+    };
+    let i = if ci { " -i" } else { "" };
+    let g = glob
+        .map(|g| format!(" -g {}", shell_quote(g)))
+        .unwrap_or_default();
+    let cmd = format!(
+        "if command -v rg >/dev/null 2>&1; then \
+           rg -n --no-heading -m {head}{i}{g} -e {pat} -- {path}; \
+         else \
+           grep -n -R -E{i} -m {head} {pat} {path} 2>/dev/null | head -n {head}; \
+         fi",
+        pat = shell_quote(pattern),
+        path = shell_quote(path),
+    );
+    let raw = exec(ctx, &vps_id, &cmd, Some(sink), true).await;
+    let body = stdout_body(&raw);
+    if body.trim().is_empty() {
+        format!("no matches for {pattern:?} under {path}")
+    } else {
+        format!("matches (path:line:text):\n{}", body.trim_end())
+    }
+}
+
+fn todo_write(ctx: &ToolContext, args: &Value) -> String {
+    let Some(arr) = args.get("todos").and_then(|v| v.as_array()) else {
+        return "error: missing 'todos' array".into();
+    };
+    let parsed: Vec<crate::ai::todos::TodoItem> = arr
+        .iter()
+        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+        .collect();
+    let items = crate::ai::todos::normalize_list(parsed);
+    if items.is_empty() {
+        return "error: no valid todo items".into();
+    }
+    ctx.session_state.set_todos(&ctx.session_id, items.clone());
+    crate::ai::todos::format_activity(&items)
 }
 
 fn memory_save(ctx: &ToolContext, args: &Value) -> String {
@@ -1866,8 +2275,8 @@ fn terminal_capture(ctx: &ToolContext, args: &Value) -> String {
         })
         .unwrap_or_default();
     // Return the tail (recent screen) to keep it compact.
-    let body = if trimmed.len() > 4000 {
-        let start = trimmed.len() - 4000;
+    let body = if trimmed.len() > 1800 {
+        let start = trimmed.len() - 1800;
         let cut = (start..trimmed.len())
             .find(|&i| trimmed.is_char_boundary(i))
             .unwrap_or(start);
@@ -1891,17 +2300,35 @@ fn canvas_command_tool(ctx: &ToolContext, args: &Value, action: &str) -> String 
         Ok(id) => id,
         Err(e) => return format!("error: {e}"),
     };
-    let _ = ctx.app.emit(
-        "canvas://command",
-        json!({ "action": action, "vps_id": vps_id }),
-    );
     let label = ctx
         .db
         .get_vps(&vps_id)
         .ok()
         .flatten()
         .map(|v| v.name)
-        .unwrap_or(vps_id);
+        .unwrap_or_else(|| vps_id.clone());
+    if action == "open_terminal" {
+        let already = ctx
+            .canvas
+            .iter()
+            .any(|n| n.kind == "terminal" && n.vps_id == vps_id);
+        let live = !ctx.sessions.live_sessions_for_vps(&vps_id).is_empty();
+        if already || live {
+            let _ = ctx.app.emit(
+                "canvas://command",
+                json!({ "action": "open_terminal", "vps_id": vps_id }),
+            );
+            return format!(
+                "a terminal for {label} is already on the canvas — focused it. \
+                 Do not call canvas_open_terminal again for this host; use terminal_send \
+                 or run_command."
+            );
+        }
+    }
+    let _ = ctx.app.emit(
+        "canvas://command",
+        json!({ "action": action, "vps_id": vps_id }),
+    );
     format!("requested canvas action '{action}' for {label}")
 }
 
@@ -2129,10 +2556,104 @@ I cannot read passwords or private keys. Use artifact_list for the backup path/h
 The user can open it from Settings → Artifacts or the saved path."
                     .into()
             } else {
-                s
+                let offset = args.get("offset").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
+                crate::ai::file_ops::format_read(&s, offset, limit)
             }
         }
         Err(e) => format!("error: {e}"),
+    }
+}
+
+async fn local_edit_file(ctx: &ToolContext, args: &Value) -> String {
+    let path = match args.get("path").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p,
+        _ => return "error: missing 'path'".into(),
+    };
+    let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+    let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+    let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+    if let Err(e) = authorize_local(ctx, &format!("edit local file {path}")).await {
+        return format!("error: {e}");
+    }
+    let before = match crate::local::read_local_file(path) {
+        Ok(s) => s,
+        Err(e) => return format!("error: {e}"),
+    };
+    let (next, n) = match crate::ai::file_ops::apply_edit(&before, old, new, replace_all) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match crate::artifacts::write_verified(std::path::Path::new(path), next.as_bytes()) {
+        Ok(written) => {
+            ctx.edits.record(
+                &ctx.app,
+                &ctx.session_id,
+                ctx.workspace_id.clone(),
+                "local",
+                None,
+                "This PC",
+                path,
+                &before,
+                &next,
+            );
+            format!(
+                "updated {path} ({n} replacement{}, {} bytes, sha256 {})",
+                if n == 1 { "" } else { "s" },
+                written.size,
+                written.sha256
+            )
+        }
+        Err(e) => format!("error: {e}"),
+    }
+}
+
+async fn local_grep_search(ctx: &ToolContext, args: &Value) -> String {
+    let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p,
+        _ => return "error: missing 'pattern'".into(),
+    };
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(".");
+    let glob = args.get("glob").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let ci = args.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false);
+    let head = args
+        .get("head_limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(40)
+        .clamp(1, 200);
+    let i = if ci { " -i" } else { "" };
+    let g = glob
+        .map(|g| format!(" -g {}", shell_quote(g)))
+        .unwrap_or_default();
+    let cmd = format!(
+        "rg -n --no-heading -m {head}{i}{g} -e {pat} -- {path}",
+        pat = shell_quote(pattern),
+        path = shell_quote(path),
+    );
+    if let Err(e) = authorize_local(ctx, &cmd).await {
+        return format!("error: {e}");
+    }
+    match crate::local::run_local_command(&cmd).await {
+        Ok(out) => {
+            let text = if out.stdout.trim().is_empty() {
+                out.stderr.clone()
+            } else {
+                out.stdout.clone()
+            };
+            if text.trim().is_empty() {
+                format!("no matches for {pattern:?} under {path}")
+            } else {
+                let clipped: String = text.lines().take(head as usize).collect::<Vec<_>>().join("\n");
+                format!("matches (path:line:text):\n{clipped}")
+            }
+        }
+        Err(e) => format!(
+            "error: {e}. Install ripgrep (rg) for fast local search, or pass a narrower path."
+        ),
     }
 }
 

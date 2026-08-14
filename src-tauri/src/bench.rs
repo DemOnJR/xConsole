@@ -295,6 +295,7 @@ impl BenchEnv {
             plan_mode: false,
             workspace_context: None,
             canvas_context: None,
+            todo_context: None,
             conversation,
         };
         (context::build_system_prompt(&ctx), tool_defs)
@@ -329,6 +330,7 @@ impl BenchEnv {
             plan_mode: false,
             workspace_context,
             canvas_context: None,
+            todo_context: None,
             conversation: false,
         };
         (context::build_system_prompt(&ctx), tool_defs)
@@ -3324,6 +3326,7 @@ fn selftest() -> i32 {
             plan_mode: false,
             workspace_context: None,
             canvas_context: Some("# Canvas\n$ uptime".into()),
+            todo_context: None,
             conversation: false,
         };
         let assembled = assemble_prompt(&ctx);

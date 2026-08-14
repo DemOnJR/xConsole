@@ -4,8 +4,12 @@
 use std::path::PathBuf;
 
 pub mod agent;
+pub mod analytics;
 pub mod autoresearch;
 pub mod canvas_context;
+pub mod file_ops;
+pub mod file_state;
+pub mod todos;
 pub mod consent;
 pub mod context;
 pub mod context_compact;

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { SettingsIcon, TerminalIcon } from "../icons";
 import type { AgentActivityItem } from "../../stores/agentStore";
 import { CodeHighlight, ConsoleOutput, langFromPath, ShellCommand } from "./SyntaxHighlight";
@@ -46,8 +46,47 @@ export function isCommandItem(item: AgentActivityItem): boolean {
   return false;
 }
 
+function isTodoItem(item: AgentActivityItem): boolean {
+  return (
+    item.tool === "todo_write" ||
+    /^update checklist$/i.test(item.label.trim()) ||
+    /^todo write$/i.test(item.label.trim())
+  );
+}
+
+function TodoCard({ item }: { item: AgentActivityItem }) {
+  const lines = (item.output || item.detail || "").split("\n").filter(Boolean);
+  return (
+    <div className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface)]/50 px-2.5 py-1.5">
+      <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--text-faint)]">
+        Checklist
+      </div>
+      <ul className="flex flex-col gap-0.5 font-mono text-[11px] text-[var(--text-dim)]">
+        {lines.map((line, i) => {
+          const done = line.startsWith("[x]");
+          const active = line.startsWith("[>]");
+          return (
+            <li
+              key={i}
+              className={
+                done
+                  ? "text-[var(--text-faint)] line-through"
+                  : active
+                    ? "text-[var(--accent)]"
+                    : ""
+              }
+            >
+              {line}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 function isMetaItem(item: AgentActivityItem): boolean {
-  if (item.kind === "file_edit" || isCommandItem(item)) return false;
+  if (item.kind === "file_edit" || isCommandItem(item) || isTodoItem(item)) return false;
   const raw = item.label.trim();
   return (
     raw.startsWith("Read file ·") ||
@@ -358,6 +397,9 @@ function ActivityBlock({ item, defaultCollapsed = false }: { item: AgentActivity
   if (item.kind === "file_edit") {
     return <FileEditCard item={item} />;
   }
+  if (isTodoItem(item)) {
+    return <TodoCard item={item} />;
+  }
   if (isCommandItem(item)) {
     return <CommandCard item={item} defaultCollapsed={defaultCollapsed} />;
   }
@@ -379,15 +421,86 @@ function ActivityBlock({ item, defaultCollapsed = false }: { item: AgentActivity
   );
 }
 
+/** Claude/claw-code style verbs. Text opacity only — no blur, canvas, or GPU filters. */
+const THINKING_VERBS = [
+  "Breathing",
+  "Pondering",
+  "Considering",
+  "Composing",
+  "Noodling",
+  "Mulling",
+  "Weaving",
+  "Sifting",
+  "Honing",
+  "Ruminating",
+  "Wondering",
+  "Cooking",
+];
+
+export function liveGerund(item: AgentActivityItem): string {
+  const tool = (item.tool || "").toLowerCase();
+  const label = item.label.trim();
+  const path = item.path || "";
+  if (item.kind === "file_edit" || tool === "write_file" || /^write /i.test(label)) {
+    return `Writing ${truncate(path || label.replace(/^Write( file)? ·\s*/i, ""), 56)}`;
+  }
+  if (tool === "read_file" || /^read /i.test(label) || label.startsWith("Read file")) {
+    return `Reading ${truncate(path || label.replace(/^Read( file)? ·\s*/i, ""), 56)}`;
+  }
+  if (tool === "terminal_send") {
+    return `Typing in terminal ${truncate(item.detail || label.replace(/^Type in live terminal:\s*/i, ""), 48)}`;
+  }
+  if (tool === "terminal_capture") return "Reading live terminal";
+  if (tool === "grep_search" || tool === "local_grep_search") {
+    return `Searching ${truncate(item.detail || item.label.replace(/^Search\s+/i, ""), 48)}`;
+  }
+  if (tool === "edit_file" || tool === "local_edit_file") {
+    return `Editing ${truncate(path || label.replace(/^Edit\s+/i, ""), 56)}`;
+  }
+  if (tool === "todo_write") return "Updating checklist";
+  if (tool === "canvas_open_terminal") return "Opening terminal";
+  if (tool === "canvas_refresh") return "Reconnecting terminal";
+  if (isCommandItem(item)) {
+    const host = hostFromCommandLabel(label);
+    const cmd = commandTitle(item);
+    return host ? `Executing ${cmd} on ${host}` : `Executing ${cmd}`;
+  }
+  if (label) return truncate(label, 72);
+  return "Working";
+}
+
+export function activitySummary(items: AgentActivityItem[]): string {
+  const visible = visibleActivityItems(items);
+  let commands = 0;
+  let reads = 0;
+  let writes = 0;
+  for (const item of visible) {
+    if (isCommandItem(item)) commands += 1;
+    else if (item.kind === "file_edit" || item.tool === "write_file") writes += 1;
+    else if (item.tool === "read_file" || /^read /i.test(item.label)) reads += 1;
+  }
+  const parts: string[] = [];
+  if (commands) parts.push(`executed ${commands} command${commands === 1 ? "" : "s"}`);
+  if (reads) parts.push(`read ${reads} file${reads === 1 ? "" : "s"}`);
+  if (writes) parts.push(`wrote ${writes} file${writes === 1 ? "" : "s"}`);
+  if (parts.length === 0) return `${visible.length} step${visible.length === 1 ? "" : "s"}`;
+  return parts.join(" · ");
+}
+
 export function AgentThinking() {
+  const [i, setI] = useState(() => Math.floor(Math.random() * THINKING_VERBS.length));
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      setI((n) => (n + 1) % THINKING_VERBS.length);
+    }, 2400);
+    return () => window.clearInterval(t);
+  }, []);
   return (
-    <div className="flex items-center gap-2.5 px-1 py-1">
-      <div className="flex gap-1">
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-500 [animation-delay:0ms]" />
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-500 [animation-delay:150ms]" />
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-500 [animation-delay:300ms]" />
-      </div>
-      <span className="text-[11px] text-gray-500">Thinking…</span>
+    <div className="flex items-center gap-2 px-1 py-1">
+      <span className="xc-think-dot" aria-hidden />
+      <span className="xc-think-verb text-[11px] text-[var(--text-faint)]">
+        {THINKING_VERBS[i]}…
+      </span>
     </div>
   );
 }
@@ -471,7 +584,8 @@ export function AgentActivityFeed({
   };
 
   const n = doneCommands.length;
-  const summary = `${n} command${n === 1 ? "" : "s"} used`;
+  const summary = activitySummary(blocks);
+  const running = rest.filter((item) => item.state === "running");
 
   return (
     <div className="flex w-full flex-col gap-2">
@@ -491,6 +605,13 @@ export function AgentActivityFeed({
         >
           Copy activity
         </button>
+      ) : null}
+      {live && running.length > 0 ? (
+        <div className="flex flex-col gap-0.5">
+          {running.slice(0, 3).map((item) => (
+            <MetaLine key={`live-${item.id}`} text={`${liveGerund(item)}…`} running />
+          ))}
+        </div>
       ) : null}
       {n > 0 && (
         <div className="overflow-hidden rounded-md border border-[var(--border)] bg-[var(--surface)]/40">
@@ -526,9 +647,7 @@ export function AgentActivityFeed({
       {rest.map((item) => (
         <ActivityBlock key={`${item.id}-${item.kind}`} item={item} defaultCollapsed={!live} />
       ))}
-      {live && blocks.length > 0 && !parallelMeta.show && (
-        <MetaLine text="Planning next moves" dimmed />
-      )}
+      {live && running.length === 0 && !parallelMeta.show && <AgentThinking />}
       {live && parallelMeta.show && !parallelMeta.done && parallelMeta.displayCount > 0 && (
         <MetaLine text="Tools running together…" dimmed />
       )}

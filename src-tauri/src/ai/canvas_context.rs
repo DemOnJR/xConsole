@@ -47,11 +47,11 @@ pub struct CanvasNode {
 }
 
 /// Max chars of recent terminal output shown per terminal.
-const TERM_TAIL_CHARS: usize = 1400;
+const TERM_TAIL_CHARS: usize = 700;
 /// Overall cap on the assembled canvas block. This rides in the uncached
-/// last-user tail, so a 6K dump permanently taxes hit rate. 2400 chars is
-/// still ~40–60 lines of screen — enough to see what the user is looking at.
-const BLOCK_MAX_CHARS: usize = 2400;
+/// last-user tail, so a fat dump permanently taxes hit rate. 1200 chars is
+/// still ~20–30 lines of screen — enough to see what the user is looking at.
+const BLOCK_MAX_CHARS: usize = 1200;
 /// Max parsed commands listed per terminal.
 const MAX_COMMANDS: usize = 25;
 /// Max length of a single listed command.

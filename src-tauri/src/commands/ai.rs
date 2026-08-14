@@ -363,6 +363,16 @@ pub fn list_agent_conversations(db: State<'_, Db>) -> Result<Vec<AgentConversati
 }
 
 #[tauri::command]
+pub fn agent_analytics(db: State<'_, Db>) -> Result<crate::ai::analytics::AgentAnalytics, String> {
+    Ok(crate::ai::analytics::collect(&db))
+}
+
+#[tauri::command]
+pub fn app_resource_snapshot() -> Result<crate::ai::analytics::ResourceSnapshot, String> {
+    Ok(crate::ai::analytics::resource_snapshot())
+}
+
+#[tauri::command]
 pub fn get_agent_conversation(
     db: State<'_, Db>,
     id: String,

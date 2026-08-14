@@ -340,6 +340,51 @@ pub fn redact_secrets(command: &str) -> String {
     out
 }
 
+/// Ban / firewall commands that would drop the agent's own SSH session.
+///
+/// The honeypot turn locked K8S because fail2ban banned the whole IP
+/// (`destination=any` / `ufw deny from $ip` with no dest port). Real SSH on
+/// 2222 died with it. These are never auto-run, and in every safety mode they
+/// are rejected until the dest port is pinned (the decoy, not the login port).
+pub fn ssh_lockout_risk(command: &str) -> Option<&'static str> {
+    let lc = command.to_lowercase();
+    // fail2ban `banip` is an all-ports ban unless a port-scoped action is used.
+    if lc.contains("fail2ban-client") && lc.contains("banip") {
+        return Some(
+            "fail2ban-client banip bans every port for that IP, including real SSH. \
+             Use a jail action that denies only the decoy port (e.g. `to any port 22`) \
+             and never destination=any.",
+        );
+    }
+    if lc.contains("destination=any") || lc.contains("destination = any") {
+        return Some(
+            "fail2ban/ufw destination=any would also block the real SSH port. \
+             Pin the dest to the decoy port only.",
+        );
+    }
+    // `ufw deny from 1.2.3.4` with no `port` = whole host.
+    if (lc.contains("ufw deny from") || lc.contains("ufw insert") && lc.contains(" deny from"))
+        && !lc.contains("port")
+    {
+        return Some(
+            "unscoped `ufw deny from <ip>` blocks every port, including the login SSH port. \
+             Add `to any port 22` (or the decoy port) so real SSH stays up.",
+        );
+    }
+    // iptables/nft drop by source with no dport.
+    if (lc.contains("iptables") || lc.contains("nft "))
+        && (lc.contains(" -j drop") || lc.contains(" drop "))
+        && lc.contains("-s ")
+        && !lc.contains("--dport")
+        && !lc.contains("dport")
+    {
+        return Some(
+            "source-only DROP would block real SSH. Add --dport for the decoy port only.",
+        );
+    }
+    None
+}
+
 /// Decide whether a command may run under the active safety mode. Blocks until
 /// the user approves/denies when approval is required.
 ///
@@ -354,6 +399,10 @@ pub async fn authorize(
     vps_id: Option<&str>,
     command: &str,
 ) -> Result<(), String> {
+    if let Some(why) = ssh_lockout_risk(command) {
+        return Err(format!("blocked (SSH lockout risk): {why}"));
+    }
+
     let needs_approval = match safety {
         "full" => false,
         "allowlist" => !is_allowlisted(command),
@@ -465,6 +514,20 @@ mod tests {
         // Double quotes and unquoted values.
         assert_eq!(redact_secrets("PASSWORD=\"hunter2\" mysql"), "PASSWORD=*** mysql");
         assert_eq!(redact_secrets("MY_PASSPHRASE=abc123 x"), "MY_PASSPHRASE=*** x");
+    }
+
+    #[test]
+    fn unscoped_ban_is_lockout() {
+        assert!(ssh_lockout_risk("fail2ban-client set cowrie banip 1.2.3.4").is_some());
+        assert!(ssh_lockout_risk("ufw deny from 1.2.3.4").is_some());
+        assert!(ssh_lockout_risk("ufw insert 1 deny from 1.2.3.4").is_some());
+        assert!(ssh_lockout_risk(
+            "ufw insert 1 deny from 1.2.3.4 to any port 22 proto tcp"
+        )
+        .is_none());
+        assert!(ssh_lockout_risk("ufw status verbose").is_none());
+        assert!(ssh_lockout_risk("iptables -A INPUT -s 1.2.3.4 -j DROP").is_some());
+        assert!(ssh_lockout_risk("iptables -A INPUT -s 1.2.3.4 --dport 22 -j DROP").is_none());
     }
 
     #[test]

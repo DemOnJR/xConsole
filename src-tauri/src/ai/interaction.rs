@@ -14,6 +14,7 @@ use tokio::sync::oneshot;
 
 use crate::ai::prefix_telemetry::RequestFingerprint;
 use crate::ai::provider::ChatMessage;
+use crate::ai::todos::TodoItem;
 
 /// Tracks in-flight `ask_user` / `present_plan` prompts so the UI can resolve
 /// them with the user's answer. Managed Tauri state.
@@ -162,6 +163,8 @@ struct SessionFlags {
     /// Fingerprint of that last request, so classification is not `first_request`
     /// on every new `run_turn`.
     last_prefix: Option<RequestFingerprint>,
+    /// Live working checklist for this chat (TodoWrite). Replaces as a whole.
+    todos: Vec<TodoItem>,
 }
 
 impl SessionState {
@@ -193,6 +196,17 @@ impl SessionState {
     /// Whether a plan has been approved for this session.
     pub fn plan_approved(&self, session_id: &str) -> bool {
         self.map.get(session_id).map(|f| f.plan_approved).unwrap_or(false)
+    }
+
+    pub fn set_todos(&self, session_id: &str, items: Vec<TodoItem>) {
+        self.map.entry(session_id.to_string()).or_default().todos = items;
+    }
+
+    pub fn todos(&self, session_id: &str) -> Vec<TodoItem> {
+        self.map
+            .get(session_id)
+            .map(|f| f.todos.clone())
+            .unwrap_or_default()
     }
 
     /// Clear plan approval at the beginning of a new agent turn.

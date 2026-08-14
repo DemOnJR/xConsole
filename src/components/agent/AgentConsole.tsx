@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { AgentChatMessage, TokenStats, TurnSegment } from "../../stores/agentStore";
 import { plainText } from "../../lib/plainText";
 import { AgentMarkdown } from "./AgentMarkdown";
-import { AgentActivityFeed } from "./AgentActivity";
+import { AgentActivityFeed, AgentThinking } from "./AgentActivity";
 import { AgentTokenStats } from "./AgentTokenStats";
 import { segmentsFromMessage } from "../../stores/turnSegments";
 import { previewSrc } from "../../lib/vision";
@@ -31,7 +31,7 @@ function AssistantTurn({
     return (
       <div className="flex gap-2 text-[var(--text)]">
         <span className="shrink-0 text-emerald-400">•</span>
-        <span className="text-gray-500">Thinking…</span>
+        <AgentThinking />
       </div>
     );
   }

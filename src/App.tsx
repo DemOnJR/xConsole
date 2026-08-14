@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { WorkspacePanel } from "./components/WorkspacePanel";
+import { AnalyticsPanel } from "./components/agent/AnalyticsPanel";
 import { ServerPanel } from "./components/ServerPanel";
 import { CanvasFlow } from "./components/CanvasFlow";
 import { BottomBar } from "./components/BottomBar";
@@ -119,6 +120,7 @@ function UnlockedApp() {
   useOsFileDrop();
 
   const leftOpen = useUiStore((s) => s.leftOpen);
+  const leftMode = useUiStore((s) => s.leftMode);
   const rightOpen = useUiStore((s) => s.rightOpen);
   const bottomOpen = useUiStore((s) => s.bottomOpen);
   const leftWidth = useUiStore((s) => s.leftWidth);
@@ -225,7 +227,11 @@ function UnlockedApp() {
 
           {leftOpen ? (
             <>
-              <WorkspacePanel width={leftWidth} />
+              {leftMode === "analytics" ? (
+                <AnalyticsPanel width={leftWidth} />
+              ) : (
+                <WorkspacePanel width={leftWidth} />
+              )}
               <DrawerSplitter
                 side="left"
                 width={leftWidth}

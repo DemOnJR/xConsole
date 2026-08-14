@@ -72,7 +72,16 @@ function CanvasCommandBridge() {
         : undefined;
       switch (cmd.action) {
         case "open_terminal":
-          if (vps) addVps(vps);
+          if (vps) {
+            const existing = useCanvasStore
+              .getState()
+              .nodes.find((n) => n.type === "terminal" && String(n.data.vpsId) === vps.id);
+            if (existing) {
+              useCanvasStore.getState().focus(existing.id);
+            } else {
+              addVps(vps);
+            }
+          }
           break;
         case "open_sftp":
           if (vps) addSftp(vps);

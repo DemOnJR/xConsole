@@ -65,7 +65,7 @@ pub(crate) fn diag_jsonl(filename: &str, json_line: &str) {
 }
 
 /// The app data dir, resolved without an AppHandle so the panic hook can use it.
-fn dirs_next_app_data() -> Option<std::path::PathBuf> {
+pub(crate) fn dirs_next_app_data() -> Option<std::path::PathBuf> {
     std::env::var_os("APPDATA").map(|p| std::path::PathBuf::from(p).join("com.xconsole.app"))
 }
 
@@ -436,6 +436,8 @@ pub fn run() {
             commands::ai::ai_list_models,
             commands::ai::ai_chat,
             commands::ai::list_agent_conversations,
+            commands::ai::agent_analytics,
+            commands::ai::app_resource_snapshot,
             commands::ai::get_agent_conversation,
             commands::ai::save_agent_conversation,
             commands::ai::delete_agent_conversation,

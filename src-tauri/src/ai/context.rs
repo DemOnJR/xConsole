@@ -33,10 +33,10 @@ pub const API_WORKING_SET_TOKENS: usize = 200_000;
 /// Caps on the *uncached* last-user tail. Long-session hit rate is
 /// `cached_prefix / (prefix + tail)`. A 20K prefix needs tail ≤ ~1.1K tokens
 /// (~4.4K chars) to stay at 95%. Skills/infra/workspace live in the prefix.
-const DYNAMIC_CANVAS_CHARS: usize = 2400;
-const DYNAMIC_HOST_CHARS: usize = 1200;
-const DYNAMIC_MEMORY_CHARS: usize = 1500;
-const DYNAMIC_SUMMARY_CHARS: usize = 1200;
+const DYNAMIC_CANVAS_CHARS: usize = 1200;
+const DYNAMIC_HOST_CHARS: usize = 600;
+const DYNAMIC_MEMORY_CHARS: usize = 800;
+const DYNAMIC_SUMMARY_CHARS: usize = 800;
 
 /// Trim an over-long message history to a recent token window.
 ///
@@ -135,6 +135,8 @@ pub struct PromptContext<'a> {
     /// Live canvas: the terminals / SFTP panels the user has open right now (with a
     /// tail of each terminal's scrollback). Injected into the context tier.
     pub canvas_context: Option<String>,
+    /// Live working checklist (todo_write). Injected into the uncached tail.
+    pub todo_context: Option<String>,
     /// Spoken voice conversation turn: assemble a tiny, fast prompt (no tool guidance,
     /// no skills index, no infra inventory) and instruct terse, markdown-free replies.
     /// Cuts prompt tokens ~3-10x so the model's first token (and the spoken reply)
@@ -163,7 +165,19 @@ For infrastructure, load skills meta/ponytail and the matching infra/terraform-*
 then use project_*, cloud_*, tfc_*, and terraform_* tools. \
 When a request is ambiguous or needs a decision only the user can make, call ask_user (offer options). \
 For a large, multi-step, or destructive task, first call present_plan with a numbered plan and wait for \
-approval before making changes. When a task is complete, stop.";
+approval before making changes. present_plan is a USER GATE at the start — it is not a live checklist. \
+While executing a 3+ step task, call todo_write and keep exactly one item in_progress; the # Todos \
+block is your memory so you do not repeat finished steps. \
+Find bugs the cheap way: grep_search first (get path:line), then read_file with offset/limit around \
+that line, then edit_file with a unique old_string. Do not cat whole large files or rewrite them. \
+Be cheap with tools: combine related checks into ONE command; do not re-read a file unless write_file \
+says it changed (mtime); do not call canvas_open_terminal if that host already has a canvas terminal — \
+drive it with terminal_send or use run_command for private one-offs. \
+SSH lockout: never ban an IP on all ports (no fail2ban banip, no `ufw deny from IP` without a dest \
+port, no destination=any). Pin decoy/honeypot bans to port 22 only and verify the real SSH login \
+port still answers from this PC before any honeypot test. If direct SSH fails, jump through another \
+selected host rather than opening more terminals. \
+When a task is complete, stop.";
 
 const VPS_TOOL_GUIDANCE: &str = "You can act on the user's VPS targets through your tools. \
 When the user asks about both/all/each server, use run_command_all (one call covers every selected target). \
@@ -176,6 +190,9 @@ For uptime/reboot: use the INTERPRETATION line (e.g. '20:59' = ~21 hours) — ne
 For write_file on Linux VPS as root: use /root/ or /tmp/ paths (e.g. /root/hello.py) — never /home/root/. \
 Use underscores in filenames (hello.py not hello world.py) unless the user asked for spaces. \
 Do not SSH or write files when the user only asked for example code in chat — answer in the message instead. \
+SSH lockout: never ban an IP on all ports; honeypot/fail2ban dest must be the decoy port only. \
+Do not reopen a canvas terminal that is already listed. Combine related checks into one command. \
+Use grep_search then read_file(offset,limit) then edit_file. For 3+ steps call todo_write. \
 For the user's OWN PC (they say 'my pc', 'locally', 'this machine', or ask about local software), use the \
 local_* tools instead of run_command. \
 When a request is ambiguous, call ask_user; for a large or destructive multi-step task, call present_plan \
@@ -184,8 +201,9 @@ When a task is complete, stop.";
 
 /// Injected when plan mode is on: investigate read-only, then present a plan.
 const PLAN_MODE_GUIDANCE: &str = "PLAN MODE IS ON. Do not change anything yet. Investigate using only \
-read-only tools (read_file, local_read_file, local_list_dir, list_vps_targets, read-only commands, \
-web_*). When you understand the task, you MUST call present_plan with the full markdown in the `plan` \
+read-only tools (read_file, grep_search, local_read_file, local_grep_search, local_list_dir, \
+list_vps_targets, todo_write, read-only commands, web_*). When you understand the task, you MUST call \
+present_plan with the full markdown in the `plan` \
 argument (never write the plan only as chat text — the review modal will not open). Then STOP and wait. \
 If the user already approved in chat (e.g. \"ok the plan looks good\", \"go ahead\", \"lgtm\", \
 \"continue\"), do NOT present again and do NOT stop — execute the plan immediately with tools. Only \
@@ -500,6 +518,9 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
     if let Some(canvas) = ctx.canvas_context.as_ref().filter(|s| !s.trim().is_empty()) {
         infra_parts.push(canvas.clone());
     }
+    if let Some(todos) = ctx.todo_context.as_ref().filter(|s| !s.trim().is_empty()) {
+        infra_parts.push(todos.clone());
+    }
     if !ctx.casual_turn && !ctx.target_ids.is_empty() {
         let catalog = crate::ai::tools::format_targets_catalog(ctx.db, ctx.target_ids);
         if !catalog.is_empty() {
@@ -671,6 +692,9 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
     if let Some(canvas) = ctx.canvas_context.as_ref().filter(|s| !s.trim().is_empty()) {
         context.push(truncate_chars(canvas, DYNAMIC_CANVAS_CHARS));
     }
+    if let Some(todos) = ctx.todo_context.as_ref().filter(|s| !s.trim().is_empty()) {
+        context.push(todos.clone());
+    }
     if !ctx.casual_turn && !ctx.target_ids.is_empty() {
         let hosts = crate::ai::host_memory::format_for_prompt(ctx.home, ctx.db, ctx.target_ids);
         if !hosts.is_empty() {
@@ -807,6 +831,7 @@ mod tests {
             plan_mode: false,
             workspace_context: None,
             canvas_context: None,
+            todo_context: None,
             conversation: false,
         }
     }

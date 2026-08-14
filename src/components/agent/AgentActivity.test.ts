@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isCommandItem, visibleActivityItems } from "./AgentActivity";
+import { activitySummary, isCommandItem, liveGerund, visibleActivityItems } from "./AgentActivity";
 import type { AgentActivityItem } from "../../stores/agentStore";
 
 const item = (partial: Partial<AgentActivityItem> & Pick<AgentActivityItem, "id" | "kind" | "label">): AgentActivityItem => ({
@@ -22,5 +22,52 @@ describe("visibleActivityItems", () => {
 describe("isCommandItem", () => {
   it("treats Run on HOST labels as commands", () => {
     expect(isCommandItem(item({ id: "1", kind: "tool", label: "Run on PORTAINER", tool: "run_command" }))).toBe(true);
+  });
+});
+
+describe("liveGerund", () => {
+  it("says executing for a host command", () => {
+    expect(
+      liveGerund(
+        item({
+          id: "1",
+          kind: "tool",
+          label: "Run on K8S",
+          tool: "run_command",
+          detail: "ufw status verbose",
+        }),
+      ),
+    ).toMatch(/^Executing ufw status/i);
+  });
+
+  it("says searching / editing for the cheap file path", () => {
+    expect(
+      liveGerund(item({ id: "g", kind: "tool", label: "Search cowrie on K8S", tool: "grep_search" })),
+    ).toMatch(/^Searching /);
+    expect(
+      liveGerund(item({ id: "e", kind: "tool", label: "Edit /etc/x.conf on K8S", tool: "edit_file" })),
+    ).toMatch(/^Editing /);
+  });
+
+  it("says reading / writing for file tools", () => {
+    expect(
+      liveGerund(item({ id: "r", kind: "tool", label: "Read file · /etc/hosts", tool: "read_file" })),
+    ).toMatch(/^Reading /);
+    expect(
+      liveGerund(item({ id: "w", kind: "file_edit", label: "cowrie.service", path: "/etc/systemd/system/cowrie.service" })),
+    ).toMatch(/^Writing /);
+  });
+});
+
+describe("activitySummary", () => {
+  it("names executed / read / wrote instead of a bare count", () => {
+    const text = activitySummary([
+      item({ id: "c1", kind: "command", label: "Run on K8S", detail: "uptime" }),
+      item({ id: "r", kind: "tool", label: "Read file · /etc/hosts", tool: "read_file" }),
+      item({ id: "w", kind: "file_edit", label: "x", path: "/tmp/x" }),
+    ]);
+    expect(text).toContain("executed 1 command");
+    expect(text).toContain("read 1 file");
+    expect(text).toContain("wrote 1 file");
   });
 });

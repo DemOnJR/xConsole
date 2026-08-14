@@ -17,7 +17,7 @@ source of truth. Persistent memory (MEMORY.md) in the system prompt stays author
 pub const SUMMARY_END: &str = "--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---";
 
 const PRUNED_TOOL: &str = "[Old tool output cleared to save context space]";
-const THRESHOLD_PERCENT: f32 = 0.50;
+const THRESHOLD_PERCENT: f32 = 0.80;
 const MIN_CTX_TRIGGER_RATIO: f32 = 0.85;
 const MINIMUM_CONTEXT_TOKENS: u32 = 32_768;
 const PROTECT_FIRST_N: usize = 3;

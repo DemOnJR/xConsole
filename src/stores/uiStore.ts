@@ -10,6 +10,8 @@ interface UiState {
   settingsOpen: boolean;
   settingsSection: string;
   leftOpen: boolean;
+  /** Which page the left drawer is showing. */
+  leftMode: "workspaces" | "analytics";
   rightOpen: boolean;
   bottomOpen: boolean;
   /** Persisted width of the expanded workspace drawer. */
@@ -25,6 +27,7 @@ interface UiState {
   closeSettings: () => void;
   setSettingsSection: (section: string) => void;
   toggleLeft: () => void;
+  openAnalytics: () => void;
   toggleRight: () => void;
   toggleBottom: () => void;
   setLeftWidth: (width: number) => void;
@@ -61,6 +64,7 @@ export const useUiStore = create<UiState>()(
   persist(
     (set) => ({
       settingsOpen: false,
+      leftMode: "workspaces",
       ...PERSIST_DEFAULTS,
 
       openSettings: (section) =>
@@ -70,7 +74,16 @@ export const useUiStore = create<UiState>()(
         })),
       closeSettings: () => set({ settingsOpen: false }),
       setSettingsSection: (section) => set({ settingsSection: section }),
-      toggleLeft: () => set((s) => ({ leftOpen: !s.leftOpen })),
+      toggleLeft: () =>
+        set((s) => ({
+          leftOpen: s.leftMode === "workspaces" ? !s.leftOpen : true,
+          leftMode: "workspaces",
+        })),
+      openAnalytics: () =>
+        set((s) => ({
+          leftOpen: s.leftMode === "analytics" ? !s.leftOpen : true,
+          leftMode: "analytics",
+        })),
       toggleRight: () => set((s) => ({ rightOpen: !s.rightOpen })),
       toggleBottom: () => set((s) => ({ bottomOpen: !s.bottomOpen })),
       setLeftWidth: (width) => set({ leftWidth: clampDrawerWidth(width) }),

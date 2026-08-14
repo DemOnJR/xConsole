@@ -449,3 +449,26 @@ body,
   border-color: var(--accent, #3b82f6);
   border-width: 1px;
 }
+
+/* Agent thinking: opacity pulse only (no blur / filter / canvas). */
+.xc-think-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  opacity: 0.45;
+  animation: xc-think-pulse 1.8s ease-in-out infinite;
+}
+.xc-think-verb {
+  animation: xc-think-pulse 1.8s ease-in-out infinite;
+}
+@keyframes xc-think-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
+  }
+}

@@ -72,7 +72,7 @@ pub async fn run_turn(
         .ok()
         .flatten()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(4000);
+        .unwrap_or(1800);
     // Compress by command type first (failures, not cargo progress;
     // git hints dropped; logs deduped), then apply the hard char cap.
     let cap_tool_result = |call: &crate::ai::provider::ToolCall, output: &str| -> String {
@@ -357,6 +357,7 @@ pub async fn run_turn(
             plan_mode: tc.plan_mode,
             workspace_context: workspace_block.clone(),
             canvas_context: canvas_block.clone(),
+            todo_context: crate::ai::todos::format_block(&tc.session_state.todos(&tc.session_id)),
             conversation,
         };
 
@@ -391,6 +392,10 @@ pub async fn run_turn(
             }
             if let Some(cv) = &canvas_block {
                 dynamic.push_str(cv);
+                dynamic.push_str("\n\n");
+            }
+            if let Some(todos) = crate::ai::todos::format_block(&tc.session_state.todos(&tc.session_id)) {
+                dynamic.push_str(&todos);
                 dynamic.push_str("\n\n");
             }
             if !casual_turn && !tc.targets.is_empty() {
@@ -548,6 +553,7 @@ pub async fn run_turn(
             plan_mode: tc.plan_mode,
             workspace_context: workspace_block.clone(),
             canvas_context: canvas_block.clone(),
+            todo_context: crate::ai::todos::format_block(&tc.session_state.todos(&tc.session_id)),
             conversation,
         },
         &tool_defs_for_turn,
@@ -587,6 +593,7 @@ pub async fn run_turn(
                 plan_mode: tc.plan_mode,
                 workspace_context: workspace_block.clone(),
                 canvas_context: canvas_block.clone(),
+                todo_context: crate::ai::todos::format_block(&tc.session_state.todos(&tc.session_id)),
                 conversation,
             },
             &tool_defs_for_turn,
