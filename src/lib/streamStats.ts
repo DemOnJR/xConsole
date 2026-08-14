@@ -112,6 +112,29 @@ export function formatSessionCache(acc: SessionCacheTotals): string {
   return `session ${formatTokenCount(acc.hit)} hit · ${formatTokenCount(acc.miss)} miss · ${Math.round(acc.rate * 100)}% avg · ${turns}`;
 }
 
+/** Multi-line hover copy for the compact cache meter. */
+export function formatCacheTooltip(
+  stats: TokenStats | null | undefined,
+  session?: SessionCacheTotals | null,
+  costUsd?: number,
+): string {
+  const lines: string[] = [];
+  if (stats && stats.tokensPerSec > 0) lines.push(formatTokensPerSec(stats.tokensPerSec));
+  if (stats && stats.completionTokens > 0) {
+    lines.push(`${stats.source === "estimate" ? "~" : ""}${stats.completionTokens} tok`);
+  }
+  const cache = stats ? cacheBreakdown(stats) : null;
+  if (cache) {
+    lines.push(
+      `${formatTokenCount(cache.hit)} hit · ${formatTokenCount(cache.miss)} miss · ${Math.round(cache.rate * 100)}%`,
+    );
+  }
+  const sessionLine = session ? formatSessionCache(session) : "";
+  if (sessionLine) lines.push(sessionLine);
+  if (costUsd && costUsd > 0) lines.push(`$${costUsd.toFixed(4)}`);
+  return lines.join("\n");
+}
+
 export function formatUsd(n: number | undefined): string {
   if (n === undefined || !Number.isFinite(n) || n <= 0) return "";
   if (n < 0.01) return `$${n.toFixed(4)}`;

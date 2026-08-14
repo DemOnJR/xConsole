@@ -7,7 +7,7 @@ import { useVpsStore } from "../stores/vpsStore";
 import { useWorkspaceStore } from "../stores/workspaceStore";
 import { useUiStore } from "../stores/uiStore";
 import { useUpdateStore } from "../stores/updateStore";
-import { cacheBreakdown, formatTokenCount } from "../lib/streamStats";
+
 
 /**
  * Compact bottom status strip — always visible, minimal.
@@ -17,7 +17,6 @@ export function StatusStrip() {
   const sessions = useSessionStore((s) => s.sessions);
   const nodes = useCanvasStore((s) => s.nodes);
   const streaming = useAgentStore((s) => s.streaming);
-  const streamStats = useAgentStore((s) => s.streamStats);
   const planMode = useAgentStore((s) => s.planMode);
   const pendingApprovals = useAgentStore((s) => s.pendingApprovals.length);
   const pendingQuestions = useAgentStore((s) => s.pendingQuestions.length);
@@ -95,24 +94,10 @@ export function StatusStrip() {
   const activity = useAgentStore((s) => s.activity);
   const runningTools = activity.filter((a) => a.state === "running").length;
 
-  const tokRate = (() => {
-    if (!streamStats) return "";
-    const bits: string[] = [];
-    if (streamStats.tokensPerSec > 0) {
-      bits.push(`${streamStats.tokensPerSec.toFixed(1)} t/s`);
-    }
-    const cache = cacheBreakdown(streamStats);
-    if (cache) {
-      bits.push(
-        `${formatTokenCount(cache.hit)} hit · ${formatTokenCount(cache.miss)} miss · ${Math.round(cache.rate * 100)}%`,
-      );
-    }
-    return bits.length ? ` · ${bits.join(" · ")}` : "";
-  })();
   const agentLabel = streaming
     ? runningTools > 1
-      ? `Agent · ${runningTools} tools…${tokRate}`
-      : `Agent working…${tokRate}`
+      ? `Agent · ${runningTools} tools…`
+      : `Agent working…`
     : hasPlan
       ? "Plan awaiting approval"
       : pendingApprovals > 0

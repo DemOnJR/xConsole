@@ -6,6 +6,7 @@ import {
   displayTurnStats,
   emptySessionCache,
   formatCacheLine,
+  formatCacheTooltip,
   formatSessionCache,
   formatUsd,
   formatTokenCount,
@@ -62,6 +63,27 @@ describe("cacheHitRate", () => {
         source: "provider",
       }),
     ).toBe("cache 1.7K hit · 68 miss · 96%");
+  });
+});
+
+describe("formatCacheTooltip", () => {
+  it("stacks tok/s, tokens, and cache on separate hover lines", () => {
+    const text = formatCacheTooltip(
+      {
+        completionTokens: 4096,
+        tokensPerSec: 96,
+        promptTokens: 2000,
+        cachedTokens: 18000,
+        source: "provider",
+      },
+      { hit: 18000, miss: 1300, turns: 2, rate: 18000 / 19300 },
+      0.0123,
+    );
+    expect(text).toContain("96.0 tok/s");
+    expect(text).toContain("4096 tok");
+    expect(text).toContain("93%");
+    expect(text).toContain("session");
+    expect(text).toContain("$0.0123");
   });
 });
 

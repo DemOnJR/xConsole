@@ -1,13 +1,8 @@
 import type { MouseEvent, PointerEvent } from "react";
 import type { AiProvider } from "../../lib/tauri";
 import type { ContextUsage, SessionCacheTotals, TokenStats } from "../../lib/streamStats";
-import {
-  cacheBreakdown,
-  formatSessionCache,
-  formatTokenCount,
-  formatTokensPerSec,
-} from "../../lib/streamStats";
 import { ContextGauge } from "./ContextGauge";
+import { CacheMeter } from "./AgentTokenStats";
 
 export type ReasoningLevel = "off" | "low" | "medium" | "high";
 
@@ -70,29 +65,7 @@ export function InputBar({
 }) {
   const model = activeModel || activeProvider?.model;
   const canReason = reasoningCapable(activeProvider?.kind, model ?? undefined);
-  const cache = streamStats ? cacheBreakdown(streamStats) : null;
-  const hitRate = cache != null ? Math.round(cache.rate * 100) : null;
-  const sessionLine = sessionCache ? formatSessionCache(sessionCache) : "";
-  const sessionRate =
-    sessionCache && sessionCache.turns > 0 ? Math.round(sessionCache.rate * 100) : null;
-  const tps =
-    streamStats && streamStats.tokensPerSec > 0
-      ? formatTokensPerSec(streamStats.tokensPerSec)
-      : null;
-  const toks =
-    streamStats && streamStats.completionTokens > 0
-      ? `${streamStats.source === "estimate" ? "~" : ""}${streamStats.completionTokens} tok`
-      : null;
   const stopNode = (e: PointerEvent | MouseEvent) => e.stopPropagation();
-  const shownRate = hitRate ?? sessionRate;
-  const cacheTone =
-    shownRate == null
-      ? "text-[var(--text-faint)]"
-      : shownRate >= 95
-        ? "text-emerald-300"
-        : shownRate >= 80
-          ? "text-amber-300"
-          : "text-red-300";
 
   const pill =
     "flex items-center gap-1 rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--border)]/40 transition";
@@ -180,37 +153,7 @@ export function InputBar({
           </span>
         )}
 
-        {/* Last reply + session cache — stays after the answer, does not reset */}
-        {(tps || toks || costUsd > 0 || cache || sessionLine) && (
-          <span
-            className={`max-w-[420px] text-right text-[10px] leading-tight tabular-nums ${cacheTone}`}
-            data-tooltip={
-              [
-                cache && hitRate != null
-                  ? `This reply: ${formatTokenCount(cache.hit)} hit · ${formatTokenCount(cache.miss)} miss · ${hitRate}%`
-                  : null,
-                sessionLine || null,
-                "Each reply is counted; session is the sum and average of every provider turn.",
-              ]
-                .filter(Boolean)
-                .join("\n")
-            }
-          >
-            {[
-              tps,
-              toks,
-              costUsd > 0 ? `$${costUsd.toFixed(4)}` : null,
-              cache && hitRate != null
-                ? `${formatTokenCount(cache.hit)} hit · ${formatTokenCount(cache.miss)} miss · ${hitRate}%`
-                : null,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-            {sessionLine ? (
-              <span className="mt-0.5 block text-[9px] text-[var(--text-faint)]">{sessionLine}</span>
-            ) : null}
-          </span>
-        )}
+        <CacheMeter stats={streamStats} sessionCache={sessionCache} costUsd={costUsd} />
 
         {/* Context gauge — opens the /ctx breakdown, not the model list */}
         <ContextGauge

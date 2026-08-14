@@ -1,59 +1,48 @@
-import type { TokenStats, TurnTelemetry } from "../../lib/streamStats";
-import { cacheBreakdown, formatTokenCount, formatTokensPerSec } from "../../lib/streamStats";
+import type { SessionCacheTotals, TokenStats } from "../../lib/streamStats";
+import { cacheBreakdown, formatCacheTooltip } from "../../lib/streamStats";
+import { CacheIcon } from "../icons";
 
-export function AgentTokenStats({
+/** Compact cache affordance for the composer. Full numbers live in the hover tooltip. */
+export function CacheMeter({
   stats,
-  telemetry,
-  live = false,
+  sessionCache,
+  costUsd,
 }: {
-  stats: TokenStats;
-  telemetry?: TurnTelemetry | null;
-  live?: boolean;
+  stats: TokenStats | null;
+  sessionCache?: SessionCacheTotals | null;
+  costUsd?: number;
 }) {
-  const approx = stats.source === "estimate";
-  const tps = formatTokensPerSec(stats.tokensPerSec);
-  const tokens =
-    stats.completionTokens > 0
-      ? approx
-        ? `~${stats.completionTokens} tok`
-        : `${stats.completionTokens} tok`
-      : null;
+  const turn = stats ? cacheBreakdown(stats) : null;
+  const sessionRate =
+    sessionCache && sessionCache.turns > 0 ? sessionCache.rate : null;
+  const rate = turn?.rate ?? sessionRate;
+  const pct = rate != null ? Math.round(rate * 100) : null;
+  const tooltip = formatCacheTooltip(stats, sessionCache, costUsd);
+  if (!tooltip) return null;
 
-  const cache = cacheBreakdown(stats);
-  const cachePct = cache != null ? Math.round(cache.rate * 100) : null;
-  const cacheTone =
-    cachePct == null
-      ? "text-gray-500"
-      : cachePct >= 95
-        ? "text-emerald-400"
-        : cachePct >= 80
+  const tone =
+    pct == null
+      ? "text-[var(--text-faint)]"
+      : pct >= 95
+        ? "text-emerald-300"
+        : pct >= 80
           ? "text-amber-300"
           : "text-red-300";
 
   return (
-    <div
-      className={`flex items-center gap-1.5 font-mono text-[10px] tabular-nums ${
-        live ? "opacity-90" : "opacity-80"
-      }`}
+    <span
+      className={`xc-cache-meter ${tone}`}
+      data-tooltip={tooltip}
+      data-tooltip-side="top"
+      role="img"
+      aria-label={tooltip.replace(/\n/g, ", ")}
     >
-      {live && (
-        <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500/80" />
-      )}
-      <span className="text-gray-500">
-        {approx ? "~" : ""}
-        {tps}
-        {tokens ? ` · ${tokens}` : ""}
-      </span>
-      {cache && cachePct != null ? (
-        <span className={cacheTone} title="Provider prompt-cache hit / miss for this request">
-          · {formatTokenCount(cache.hit)} hit · {formatTokenCount(cache.miss)} miss · {cachePct}%
-        </span>
-      ) : null}
-      {telemetry && telemetry.toolCacheLookups > 0 ? (
-        <span className="text-gray-500">
-          · tools cache {Math.round(telemetry.toolCacheHitRate * 100)}%
-        </span>
-      ) : null}
-    </div>
+      <span
+        className="xc-cache-rail"
+        style={pct != null ? { ["--xc-cache-pct" as string]: `${pct}%` } : undefined}
+        aria-hidden
+      />
+      <CacheIcon size={13} />
+    </span>
   );
 }

@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import type { AgentChatMessage, TokenStats, TurnSegment } from "../../stores/agentStore";
+import type { AgentChatMessage, TurnSegment } from "../../stores/agentStore";
 import { plainText } from "../../lib/plainText";
 import { AgentMarkdown } from "./AgentMarkdown";
 import { AgentActivityFeed, AgentThinking } from "./AgentActivity";
-import { AgentTokenStats } from "./AgentTokenStats";
 import { segmentsFromMessage } from "../../stores/turnSegments";
 import { previewSrc } from "../../lib/vision";
 
@@ -13,14 +12,12 @@ function AssistantTurn({
   expanded,
   executeTarget,
   onExecute,
-  tokenStats,
 }: {
   segments: TurnSegment[];
   live?: boolean;
   expanded: boolean;
   executeTarget?: { name: string; host: string } | null;
   onExecute?: (code: string) => void;
-  tokenStats?: TokenStats | null;
 }) {
   const lastActivity = live
     ? [...segments].reverse().findIndex((s) => s.type === "activity")
@@ -28,12 +25,7 @@ function AssistantTurn({
   const lastActivityIdx = lastActivity >= 0 ? segments.length - 1 - lastActivity : -1;
 
   if (live && segments.length === 0) {
-    return (
-      <div className="flex gap-2 text-[var(--text)]">
-        <span className="shrink-0 text-emerald-400">•</span>
-        <AgentThinking />
-      </div>
-    );
+    return <AgentThinking />;
   }
 
   return (
@@ -65,11 +57,6 @@ function AssistantTurn({
           </div>
         );
       })}
-      {tokenStats ? (
-        <div className="pl-4">
-          <AgentTokenStats stats={tokenStats} live={live} />
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -78,7 +65,6 @@ export function AgentConsole({
   messages,
   streamingSegments = [],
   streaming,
-  liveStats = null,
   expanded,
   executeTarget,
   onExecute,
@@ -88,7 +74,6 @@ export function AgentConsole({
   /** Live turn timeline (text / tools / more text), in order. */
   streamingSegments?: TurnSegment[];
   streaming: boolean;
-  liveStats?: TokenStats | null;
   expanded: boolean;
   executeTarget?: { name: string; host: string } | null;
   onExecute?: (code: string) => void;
@@ -189,7 +174,6 @@ export function AgentConsole({
                 expanded={expanded}
                 executeTarget={executeTarget}
                 onExecute={onExecute}
-                tokenStats={message.tokenStats}
               />
             );
           }
@@ -204,7 +188,6 @@ export function AgentConsole({
             expanded={expanded}
             executeTarget={executeTarget}
             onExecute={onExecute}
-            tokenStats={liveStats}
           />
         )}
       </div>

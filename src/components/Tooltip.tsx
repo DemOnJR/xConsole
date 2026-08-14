@@ -134,7 +134,7 @@ export function TooltipHost() {
         color: "var(--text)",
         border: "1px solid var(--border)",
         boxShadow: "0 6px 18px rgba(0,0,0,0.35)",
-        whiteSpace: "normal",
+        whiteSpace: "pre-line",
       }}
     >
       {anchor.text}

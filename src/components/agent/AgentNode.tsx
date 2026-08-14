@@ -1312,11 +1312,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
         </span>
         <span className="flex items-center gap-2 text-[var(--text-faint)]">
           {contextUsage ? <span>{contextUsage.percent}% ctx</span> : null}
-          {sessionCache.turns > 0 ? (
-            <span data-tooltip={formatSessionCache(sessionCache)}>
-              cache {Math.round(sessionCache.rate * 100)}% avg
-            </span>
-          ) : null}
           {conversationCostUsd > 0 ? (
             <span>${conversationCostUsd.toFixed(4)}</span>
           ) : null}
@@ -1352,7 +1347,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
           messages={messages}
           streamingSegments={streaming ? streamingSegments : []}
           streaming={streaming}
-          liveStats={streaming ? streamStats : null}
           expanded
           executeTarget={executeTarget}
           onExecute={executeCommand}

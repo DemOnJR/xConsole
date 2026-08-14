@@ -98,6 +98,17 @@ export function PlusIcon(props: IconProps) {
   );
 }
 
+/** Database / prompt-cache cylinder. */
+export function CacheIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <ellipse cx="12" cy="6" rx="7" ry="2.6" />
+      <path d="M5 6v12c0 1.6 3.1 2.8 7 2.8s7-1.2 7-2.8V6" />
+      <path d="M5 12c0 1.6 3.1 2.8 7 2.8s7-1.2 7-2.8" />
+    </svg>
+  );
+}
+
 export function EraserIcon(props: IconProps) {
   return (
     <svg {...base(props)}>

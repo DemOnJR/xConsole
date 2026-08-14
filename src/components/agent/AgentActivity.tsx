@@ -5,6 +5,7 @@ import { CodeHighlight, ConsoleOutput, langFromPath, ShellCommand } from "./Synt
 import { useVpsStore } from "../../stores/vpsStore";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { redactExportText } from "../../lib/agentExport";
+import { HashSpinner } from "./HashSpinner";
 
 function truncate(s: string, max: number): string {
   const flat = s.replace(/\s+/g, " ").trim();
@@ -140,10 +141,12 @@ function MetaLine({
   text,
   dimmed,
   running,
+  item,
 }: {
   text: string;
   dimmed?: boolean;
   running?: boolean;
+  item?: AgentActivityItem;
 }) {
   return (
     <div
@@ -151,12 +154,7 @@ function MetaLine({
         dimmed ? "text-gray-600" : "text-gray-500"
       }`}
     >
-      {running ? (
-        <span
-          className="inline-block h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-cyan-500/80"
-          aria-hidden
-        />
-      ) : null}
+      {running ? <HashSpinner item={item} /> : null}
       <span className="min-w-0 truncate">{text}</span>
     </div>
   );
@@ -497,7 +495,7 @@ export function AgentThinking() {
   }, []);
   return (
     <div className="flex items-center gap-2 px-1 py-1">
-      <span className="xc-think-dot" aria-hidden />
+      <HashSpinner kind="think" />
       <span className="xc-think-verb text-[11px] text-[var(--text-faint)]">
         {THINKING_VERBS[i]}…
       </span>
@@ -609,7 +607,7 @@ export function AgentActivityFeed({
       {live && running.length > 0 ? (
         <div className="flex flex-col gap-0.5">
           {running.slice(0, 3).map((item) => (
-            <MetaLine key={`live-${item.id}`} text={`${liveGerund(item)}…`} running />
+            <MetaLine key={`live-${item.id}`} text={`${liveGerund(item)}…`} running item={item} />
           ))}
         </div>
       ) : null}
