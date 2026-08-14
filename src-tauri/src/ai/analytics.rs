@@ -42,6 +42,7 @@ pub struct ResourceSnapshot {
     pub process_ram_mb: u64,
     pub gpu_pct: Option<f32>,
     pub gpu_mem_mb: Option<u64>,
+    pub gpu_mem_total_mb: Option<u64>,
     pub gpu_name: Option<String>,
 }
 
@@ -179,39 +180,16 @@ pub fn resource_snapshot() -> ResourceSnapshot {
         .map(|p| (p.memory() / (1024 * 1024), p.cpu_usage()))
         .unwrap_or((0, 0.0));
 
-    let (gpu_pct, gpu_mem_mb, gpu_name) = probe_gpu_load();
+    let gpu = crate::ai::gpu::snapshot();
     ResourceSnapshot {
         ts: chrono::Utc::now().to_rfc3339(),
         cpu_pct,
         ram_mb: sys.used_memory() / (1024 * 1024),
         ram_total_mb: sys.total_memory() / (1024 * 1024),
         process_ram_mb,
-        gpu_pct,
-        gpu_mem_mb,
-        gpu_name,
+        gpu_pct: gpu.util_pct,
+        gpu_mem_mb: gpu.mem_used_mb,
+        gpu_mem_total_mb: gpu.mem_total_mb,
+        gpu_name: gpu.name,
     }
-}
-
-fn probe_gpu_load() -> (Option<f32>, Option<u64>, Option<String>) {
-    let out = crate::proc::quiet_command("nvidia-smi")
-        .args([
-            "--query-gpu=utilization.gpu,memory.used,name",
-            "--format=csv,noheader,nounits",
-        ])
-        .output();
-    let Ok(out) = out else {
-        return (None, None, None);
-    };
-    if !out.status.success() {
-        return (None, None, None);
-    }
-    let line = String::from_utf8_lossy(&out.stdout);
-    let Some(line) = line.lines().next() else {
-        return (None, None, None);
-    };
-    let mut parts = line.split(',');
-    let pct = parts.next().and_then(|p| p.trim().parse::<f32>().ok());
-    let mem = parts.next().and_then(|p| p.trim().parse::<u64>().ok());
-    let name = parts.next().map(|p| p.trim().to_string()).filter(|s| !s.is_empty());
-    (pct, mem, name)
 }

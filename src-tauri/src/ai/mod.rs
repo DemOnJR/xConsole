@@ -18,6 +18,7 @@ pub mod conversations;
 pub mod cost;
 pub mod cron;
 pub mod edits;
+pub mod gpu;
 pub mod goal;
 pub mod hooks;
 pub mod host_memory;

@@ -90,8 +90,8 @@ function DiffIcon({ size = 18 }: { size?: number }) {
  */
 export function NavRail() {
   const leftOpen = useUiStore((s) => s.leftOpen);
-  const leftMode = useUiStore((s) => s.leftMode);
-  const openAnalytics = useUiStore((s) => s.openAnalytics);
+  const mainView = useUiStore((s) => s.mainView);
+  const toggleAnalytics = useUiStore((s) => s.toggleAnalytics);
   const rightOpen = useUiStore((s) => s.rightOpen);
   const bottomOpen = useUiStore((s) => s.bottomOpen);
   const toggleLeft = useUiStore((s) => s.toggleLeft);
@@ -124,17 +124,17 @@ export function NavRail() {
   return (
     <nav className="xc-rail" aria-label="Main navigation">
       <RailBtn
-        active={leftOpen && leftMode === "workspaces"}
-        title={leftOpen && leftMode === "workspaces" ? "Hide workspaces" : "Workspaces"}
+        active={leftOpen && mainView === "canvas"}
+        title={leftOpen ? "Hide workspaces" : "Workspaces"}
         onClick={toggleLeft}
       >
         <FolderIcon size={18} />
       </RailBtn>
 
       <RailBtn
-        active={leftOpen && leftMode === "analytics"}
-        title={leftOpen && leftMode === "analytics" ? "Hide analytics" : "Analytics"}
-        onClick={openAnalytics}
+        active={mainView === "analytics"}
+        title={mainView === "analytics" ? "Back to canvas" : "Analytics"}
+        onClick={toggleAnalytics}
       >
         <ChartIcon size={18} />
       </RailBtn>

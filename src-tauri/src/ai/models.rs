@@ -63,73 +63,20 @@ pub struct DownloadProgress {
     pub message: Option<String>,
 }
 
-/// Probe total RAM (sysinfo) and best-effort GPU VRAM (nvidia-smi).
+/// Probe total RAM (sysinfo) and best-effort GPU name / dedicated VRAM
+/// (NVIDIA, AMD, Intel — see `gpu::snapshot`).
 pub fn system_capabilities() -> SystemCaps {
     use sysinfo::System;
     let mut sys = System::new();
     sys.refresh_memory();
     let ram_mb = sys.total_memory() / 1024 / 1024; // sysinfo 0.32 reports bytes
 
-    let (vram_mb, gpu_name) = probe_gpu();
+    let gpu = crate::ai::gpu::snapshot();
     SystemCaps {
         ram_mb,
-        vram_mb,
-        gpu_name,
+        vram_mb: gpu.mem_total_mb,
+        gpu_name: gpu.name,
     }
-}
-
-fn probe_gpu() -> (Option<u64>, Option<String>) {
-    // NVIDIA: nvidia-smi gives exact total VRAM + name (fast path).
-    if let Ok(out) = crate::proc::quiet_command("nvidia-smi")
-        .args([
-            "--query-gpu=memory.total,name",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-    {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout);
-            if let Some(line) = s.lines().next() {
-                let mut parts = line.split(',');
-                let mb = parts.next().and_then(|p| p.trim().parse::<u64>().ok());
-                let name = parts.next().map(|p| p.trim().to_string());
-                if mb.is_some() {
-                    return (mb, name);
-                }
-            }
-        }
-    }
-    // Any vendor on Windows (AMD/Intel/NVIDIA): read the adapter's dedicated VRAM
-    // from the display-driver registry key (accurate for cards >4 GB, unlike WMI).
-    #[cfg(windows)]
-    {
-        if let Some(found) = probe_gpu_windows_registry() {
-            return found;
-        }
-    }
-    (None, None)
-}
-
-#[cfg(windows)]
-fn probe_gpu_windows_registry() -> Option<(Option<u64>, Option<String>)> {
-    // Pick the adapter with the largest dedicated VRAM (the discrete GPU).
-    let cmd = r#"$d='HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\*'; $a = Get-ItemProperty $d -ErrorAction SilentlyContinue | Where-Object { $_.'HardwareInformation.qwMemorySize' -gt 0 } | Sort-Object { [int64]$_.'HardwareInformation.qwMemorySize' } -Descending | Select-Object -First 1; if ($a) { Write-Output ("{0}|{1}" -f [int64]$a.'HardwareInformation.qwMemorySize', $a.DriverDesc) }"#;
-    let out = crate::proc::quiet_command("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", cmd])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout);
-    let line = s.lines().find(|l| l.contains('|'))?.trim();
-    let (bytes, name) = line.split_once('|')?;
-    let mb = bytes.trim().parse::<u64>().ok().map(|b| b / 1024 / 1024);
-    let name = name.trim().to_string();
-    if mb.unwrap_or(0) == 0 {
-        return None;
-    }
-    Some((mb, if name.is_empty() { None } else { Some(name) }))
 }
 
 /// A small curated list of popular Ollama models (the library has no public

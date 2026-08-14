@@ -92,6 +92,7 @@ export interface ResourceSnapshot {
   process_ram_mb: number;
   gpu_pct: number | null;
   gpu_mem_mb: number | null;
+  gpu_mem_total_mb: number | null;
   gpu_name: string | null;
 }
 
