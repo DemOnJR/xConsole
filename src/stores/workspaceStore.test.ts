@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { deserializeTiles, parseSavedNodes } from "./workspaceStore";
+import { deserializeTiles, parseSavedNodes, workspaceIdsAlreadyBound, workspaceNodeId } from "./workspaceStore";
+
+describe("workspaceIdsAlreadyBound", () => {
+  it("is true for an empty canvas and for already-rebinding ids", () => {
+    expect(workspaceIdsAlreadyBound("ws", [])).toBe(true);
+    expect(workspaceIdsAlreadyBound("ws", [workspaceNodeId("ws", 0), workspaceNodeId("ws", 1)])).toBe(true);
+    expect(workspaceIdsAlreadyBound("ws", ["random-uuid"])).toBe(false);
+  });
+});
 
 describe("workspace tile persistence (columns)", () => {
   it("round-trips a column layout through the saved nodes_json shape", () => {

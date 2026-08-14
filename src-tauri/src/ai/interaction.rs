@@ -336,6 +336,9 @@ fn write_prefix_cache(data_dir: &std::path::Path, session_id: &str, saved: &Pref
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(bytes) = serde_json::to_vec(saved) {
+        if std::fs::read(&path).ok().as_deref() == Some(bytes.as_slice()) {
+            return;
+        }
         let _ = std::fs::write(path, bytes);
     }
 }
@@ -413,5 +416,28 @@ mod tests {
         assert!(r.has_pending_for_session("s"));
         assert!(r.resolve("new", "APPROVE".into()));
         assert!(!r.has_pending_for_session("s"));
+    }
+
+    #[test]
+    fn prefix_cache_write_skips_identical_bytes() {
+        let dir = std::env::temp_dir().join(format!(
+            "xc-pcache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let s = SessionState::new();
+        s.store_request_messages("chat", vec![ChatMessage::user("hi")]);
+        s.persist_prefix_cache(&dir, "chat");
+        let path = prefix_cache_path(&dir, "chat");
+        let first = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        s.persist_prefix_cache(&dir, "chat");
+        let second = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(first, second, "unchanged prefix cache must not be rewritten");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

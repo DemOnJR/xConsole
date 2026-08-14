@@ -36,6 +36,17 @@ pub enum HostKeyVerdict {
     },
 }
 
+fn workspace_payload_eq(existing: &Workspace, input: &WorkspaceInput) -> bool {
+    existing.name == input.name
+        && existing.viewport_json == input.viewport_json
+        && existing.layout_mode == input.layout_mode
+        && existing.nodes_json == input.nodes_json
+        && existing.color == input.color
+        && existing.icon == input.icon
+        && existing.color_mode == input.color_mode
+        && existing.project_json == input.project_json
+}
+
 /// Thread-safe handle to the local SQLite database.
 #[derive(Clone)]
 pub struct Db {
@@ -138,6 +149,7 @@ impl Db {
             key: *key,
             dirty,
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_data_version: Mutex::new(None),
         });
         let db = Db {
             conn: conn.clone(),
@@ -205,6 +217,7 @@ impl Db {
             key: *key,
             dirty,
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_data_version: Mutex::new(None),
         });
         self.migrate()?; // run on the now-real connection
         if !enc.exists() {
@@ -260,6 +273,7 @@ impl Db {
             key: *key,
             dirty,
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_data_version: Mutex::new(None),
         });
         *self.persist.lock().unwrap() = Some(ctx.clone());
         encrypt::spawn_persister(self.conn.clone(), ctx);
@@ -826,6 +840,15 @@ impl Db {
 
     pub fn upsert_workspace(&self, input: &WorkspaceInput) -> Result<Workspace> {
         let id = input.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+        // An unchanged layout still used to bump `updated_at`, which marked the
+        // encrypted DB dirty and rewrote the whole ciphertext every autosave tick.
+        if input.id.is_some() {
+            if let Some(existing) = self.get_workspace(&id)? {
+                if workspace_payload_eq(&existing, input) {
+                    return Ok(existing);
+                }
+            }
+        }
         {
             let conn = self.conn.lock().unwrap();
             conn.execute(
@@ -2055,6 +2078,57 @@ mod known_host_tests {
             d.verify_host_key("h", 2222, "ssh-ed25519", "SHA256:ccc").unwrap(),
             HostKeyVerdict::PinnedOnFirstUse
         ));
+    }
+
+    /// A no-op autosave must not bump `updated_at` (that write used to keep the
+    /// encrypted snapshot rewriter hot at ~10 MB/s).
+    #[test]
+    fn identical_workspace_upsert_is_a_no_op() {
+        let d = db();
+        let first = d
+            .upsert_workspace(&WorkspaceInput {
+                id: Some("ws-1".into()),
+                name: "main".into(),
+                viewport_json: Some(r#"{"x":0,"y":0,"zoom":1}"#.into()),
+                layout_mode: Some("freeform".into()),
+                nodes_json: Some("[]".into()),
+                color: None,
+                icon: None,
+                color_mode: None,
+                project_json: None,
+            })
+            .unwrap();
+        let t1 = first.updated_at.clone();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let second = d
+            .upsert_workspace(&WorkspaceInput {
+                id: Some("ws-1".into()),
+                name: "main".into(),
+                viewport_json: Some(r#"{"x":0,"y":0,"zoom":1}"#.into()),
+                layout_mode: Some("freeform".into()),
+                nodes_json: Some("[]".into()),
+                color: None,
+                icon: None,
+                color_mode: None,
+                project_json: None,
+            })
+            .unwrap();
+        assert_eq!(second.updated_at, t1);
+        let renamed = d
+            .upsert_workspace(&WorkspaceInput {
+                id: Some("ws-1".into()),
+                name: "renamed".into(),
+                viewport_json: Some(r#"{"x":0,"y":0,"zoom":1}"#.into()),
+                layout_mode: Some("freeform".into()),
+                nodes_json: Some("[]".into()),
+                color: None,
+                icon: None,
+                color_mode: None,
+                project_json: None,
+            })
+            .unwrap();
+        assert_ne!(renamed.updated_at, t1);
+        assert_eq!(renamed.name, "renamed");
     }
 
     /// Forgetting is what makes a legitimate rebuild recoverable.

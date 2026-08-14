@@ -889,13 +889,13 @@ pub async fn run_turn(
         messages.push(assistant.clone());
         last = assistant;
 
-        // Persist the full provider-visible list (including this assistant /
-        // tool rows) so the next user turn can replay an append-only prefix.
+        // Keep the in-memory prefix current so the next model call can append.
+        // Disk is written once at turn end — rewriting the full transcript JSON
+        // after every tool made a long session a multi-MB/s writer.
         tc.session_state.store_request_messages(
             &tc.session_id,
             crate::ai::vision::strip_all_images(messages.clone()),
         );
-        tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
 
         // No tools to run, or an autonomous CLI that does its own tool use.
         if resp.tool_calls.is_empty() || cli_mode {
@@ -1071,7 +1071,6 @@ pub async fn run_turn(
             &tc.session_id,
             crate::ai::vision::strip_all_images(messages.clone()),
         );
-        tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
 
         iter += 1;
     }

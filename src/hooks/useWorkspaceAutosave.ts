@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { useReactFlow } from "@xyflow/react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../lib/tauri";
+import { workspacePersistKey } from "../lib/workspacePersist";
 import { useCanvasStore } from "../stores/canvasStore";
 import { useWorkspaceStore } from "../stores/workspaceStore";
 
@@ -31,6 +32,8 @@ export function useWorkspaceAutosave() {
   const { getViewport, setViewport } = useReactFlow();
   const restoredRef = useRef(false);
   const timer = useRef<number | null>(null);
+  const lastSavedRef = useRef<string | null>(null);
+  const savingRef = useRef(false);
 
   // ----- Restore, once, on launch -----
   useEffect(() => {
@@ -52,34 +55,57 @@ export function useWorkspaceAutosave() {
       // Tiles are laid out in flow coordinates anchored at the origin, so they only line
       // up at 1:1; everything else gets the viewport it was left at, verbatim.
       if (res.layout !== "tile") setViewport(res.viewport);
+      lastSavedRef.current = workspacePersistKey(
+        useCanvasStore.getState(),
+        res.layout === "tile" ? getViewport() : res.viewport,
+      );
     })();
   }, [setViewport]);
 
   // ----- Autosave on change -----
   useEffect(() => {
+    const persistKey = () =>
+      workspacePersistKey(useCanvasStore.getState(), getViewport());
+
     const flush = async () => {
       const { activeId, workspaces, save } = useWorkspaceStore.getState();
       if (!activeId) return;
       const ws = workspaces.find((w) => w.id === activeId);
       if (!ws) return;
-      await save(
-        ws.name,
-        getViewport(),
-        ws.id,
-        ws.color ?? undefined,
-        ws.icon ?? undefined,
-        ws.color_mode ?? undefined,
-      ).catch(() => {});
+      const key = persistKey();
+      if (key === lastSavedRef.current) return;
+      savingRef.current = true;
+      try {
+        await save(
+          ws.name,
+          getViewport(),
+          ws.id,
+          ws.color ?? undefined,
+          ws.icon ?? undefined,
+          ws.color_mode ?? undefined,
+        );
+        lastSavedRef.current = persistKey();
+      } catch {
+        // A failed save must not wedge the next one.
+      } finally {
+        savingRef.current = false;
+      }
     };
 
     const schedule = () => {
-      if (!restoredRef.current) return;
+      if (!restoredRef.current || savingRef.current) return;
       if (timer.current != null) clearTimeout(timer.current);
       timer.current = window.setTimeout(() => void flush(), DEBOUNCE_MS);
     };
 
-    // Any change to what is on the canvas or how it is arranged.
-    const unsubCanvas = useCanvasStore.subscribe(schedule);
+    // Layout only. Focus, WebGL LRU, pane-size ticks, and select/measure noise
+    // used to resave the workspace every 800 ms, which rewrote the encrypted DB
+    // at ~10 MB/s. Save() used to setNodes back into the store and retrigger this.
+    const unsubCanvas = useCanvasStore.subscribe(() => {
+      if (savingRef.current) return;
+      if (persistKey() === lastSavedRef.current) return;
+      schedule();
+    });
     // Switching workspaces changes which one should be remembered.
     const unsubWs = useWorkspaceStore.subscribe((s, prev) => {
       if (s.activeId === prev.activeId) return;

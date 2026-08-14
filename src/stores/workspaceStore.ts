@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { Viewport } from "@xyflow/react";
 import { api, type Workspace, type WorkspaceProject } from "../lib/tauri";
+import { stableViewport } from "../lib/workspacePersist";
 import {
   defaultViewport,
   useCanvasStore,
@@ -20,6 +21,11 @@ import {
 /** Deterministic node id for a workspace slot (stable across reopen). */
 export const workspaceNodeId = (workspaceId: string, index: number) =>
   `${workspaceId}::${index}`;
+
+/** True when every live node already uses the deterministic workspace id. */
+export function workspaceIdsAlreadyBound(workspaceId: string, nodeIds: string[]): boolean {
+  return nodeIds.every((id, i) => id === workspaceNodeId(workspaceId, i));
+}
 
 /** Serialized node persisted in a workspace (no live session state). */
 interface SavedNode {
@@ -283,7 +289,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const ws = await api.saveWorkspace({
       id,
       name,
-      viewport_json: JSON.stringify(viewport),
+      viewport_json: JSON.stringify(stableViewport(viewport)),
       layout_mode: layoutMode,
       nodes_json: JSON.stringify({
         nodes: saved,
@@ -298,42 +304,43 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       project_json: existing?.project_json ?? null,
     });
 
-    // Rebind the live canvas nodes to the deterministic ids this workspace will
-    // use on every future restore, and migrate their session-store entries so the
-    // running sessions keep matching (otherwise the first switch-back would miss).
-    const sess = useSessionStore.getState();
-    const rebound = nodes.map((n, i) => {
-      const newId = workspaceNodeId(ws.id, i);
-      if (n.id !== newId) {
-        const info = sess.sessions[n.id];
-        if (info) {
-          sess.setInfo(newId, info);
-          sess.remove(n.id);
+    // Rebind only when a node still has a random id. Doing this on every autosave
+    // rewrote the canvas store, which rescheduled another save, forever.
+    if (!workspaceIdsAlreadyBound(ws.id, nodes.map((n) => n.id))) {
+      const sess = useSessionStore.getState();
+      const rebound = nodes.map((n, i) => {
+        const newId = workspaceNodeId(ws.id, i);
+        if (n.id !== newId) {
+          const info = sess.sessions[n.id];
+          if (info) {
+            sess.setInfo(newId, info);
+            sess.remove(n.id);
+          }
         }
-      }
-      return { ...n, id: newId };
-    });
-    const reboundEdges: CanvasEdge[] = edges.map((e) => {
-      const srcIdx = nodes.findIndex((n) => n.id === e.source);
-      const tgtIdx = nodes.findIndex((n) => n.id === e.target);
-      const srcId = srcIdx >= 0 ? workspaceNodeId(ws.id, srcIdx) : e.source;
-      const tgtId = tgtIdx >= 0 ? workspaceNodeId(ws.id, tgtIdx) : e.target;
-      return {
-        ...e,
-        id: `link-${srcId}-${tgtId}`,
-        source: srcId,
-        target: tgtId,
-      };
-    });
-    useCanvasStore.getState().setNodes(rebound);
-    useCanvasStore.getState().setEdges(reboundEdges);
-    // The nodes just changed id, so the in-memory tile layout would point at ids that
-    // no longer exist and silently reset to the balanced default. Re-point it.
-    useCanvasStore
-      .getState()
-      .setTileLayout(
-        deserializeTiles(savedTiles.rows, savedTiles.columns, rebound.map((n) => n.id), savedTiles.tree),
-      );
+        return { ...n, id: newId };
+      });
+      const reboundEdges: CanvasEdge[] = edges.map((e) => {
+        const srcIdx = nodes.findIndex((n) => n.id === e.source);
+        const tgtIdx = nodes.findIndex((n) => n.id === e.target);
+        const srcId = srcIdx >= 0 ? workspaceNodeId(ws.id, srcIdx) : e.source;
+        const tgtId = tgtIdx >= 0 ? workspaceNodeId(ws.id, tgtIdx) : e.target;
+        return {
+          ...e,
+          id: `link-${srcId}-${tgtId}`,
+          source: srcId,
+          target: tgtId,
+        };
+      });
+      useCanvasStore.getState().setNodes(rebound);
+      useCanvasStore.getState().setEdges(reboundEdges);
+      // The nodes just changed id, so the in-memory tile layout would point at ids that
+      // no longer exist and silently reset to the balanced default. Re-point it.
+      useCanvasStore
+        .getState()
+        .setTileLayout(
+          deserializeTiles(savedTiles.rows, savedTiles.columns, rebound.map((n) => n.id), savedTiles.tree),
+        );
+    }
 
     await get().load();
     set({ activeId: ws.id });
