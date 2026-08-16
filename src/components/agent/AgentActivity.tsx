@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { SettingsIcon, TerminalIcon } from "../icons";
+import { SettingsIcon } from "../icons";
 import type { AgentActivityItem } from "../../stores/agentStore";
 import { CodeHighlight, ConsoleOutput, langFromPath, ShellCommand } from "./SyntaxHighlight";
 import { useVpsStore } from "../../stores/vpsStore";
@@ -269,7 +269,7 @@ function hostFromCommandLabel(label: string): string | null {
 
 function CommandCard({
   item,
-  defaultCollapsed = false,
+  defaultCollapsed = true,
   open,
   onOpenChange,
 }: {
@@ -280,7 +280,7 @@ function CommandCard({
 }) {
   const running = item.state === "running";
   const failed = item.state === "error";
-  const [internal, setInternal] = useState(!defaultCollapsed || running || failed);
+  const [internal, setInternal] = useState(!defaultCollapsed);
   const expanded = open ?? internal;
   const setExpanded = (next: boolean | ((v: boolean) => boolean)) => {
     const value = typeof next === "function" ? next(expanded) : next;
@@ -315,44 +315,31 @@ function CommandCard({
 
   return (
     <div
-      className={`overflow-hidden rounded-[var(--radius-md)] border bg-[var(--bg)] ${
+      className={`overflow-hidden rounded-md border bg-[var(--surface)]/30 ${
         failed
           ? "border-[color-mix(in_srgb,var(--danger)_45%,var(--border))]"
           : running
             ? "border-[color-mix(in_srgb,var(--accent)_35%,var(--border))]"
-            : "border-[var(--border)]"
+            : "border-[var(--border)]/60"
       }`}
     >
       <button
         type="button"
-        className="flex w-full items-center gap-2 border-b border-[var(--border)]/80 px-2.5 py-1.5 text-left hover:bg-[var(--surface-hover)]"
+        className="flex w-full items-center gap-2 px-2.5 py-1 text-left transition hover:bg-[var(--surface-hover)]"
         onClick={() => setExpanded((v) => !v)}
-        data-tooltip={expanded ? "Collapse" : "Expand command"}
+        data-tooltip={expanded ? "Collapse" : "Expand command details"}
       >
-        <TerminalIcon size={12} className="shrink-0 text-[var(--text-faint)]" />
+        <span className="select-none font-mono text-[9px] text-[var(--text-faint)]">
+          {expanded ? "▼" : "▶"}
+        </span>
+        <span className="shrink-0 font-mono text-[10px] text-[var(--success)]">$</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--text-dim)]">
-          {hostLabel ? (
-            <>
-              <span className="text-[var(--text-faint)]">{hostLabel}</span>
-              <span className="mx-1 text-[var(--border-strong)]">·</span>
-              {commandTitle(item)}
-            </>
-          ) : (
-            commandTitle(item)
-          )}
+          {cmd || commandTitle(item)}
         </span>
         {hostLabel ? (
-          <button
-            type="button"
-            className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-[var(--text-faint)] transition hover:bg-[var(--surface-hover)] hover:text-[var(--accent)]"
-            data-tooltip="Open this host on the canvas"
-            onClick={(e) => {
-              e.stopPropagation();
-              openOnCanvas();
-            }}
-          >
-            Canvas
-          </button>
+          <span className="shrink-0 rounded bg-[var(--border)]/60 px-1 py-0.5 font-mono text-[9px] text-[var(--text-faint)]">
+            {hostLabel}
+          </span>
         ) : null}
         {running ? (
           <span
@@ -366,7 +353,23 @@ function CommandCard({
         )}
       </button>
       {expanded && (
-        <div className="agent-activity-scroll max-h-[280px] overflow-y-auto px-2.5 py-2 font-[family-name:var(--font-mono)]">
+        <div className="agent-activity-scroll max-h-[280px] overflow-y-auto border-t border-[var(--border)]/60 bg-[var(--bg)] px-2.5 py-2 font-[family-name:var(--font-mono)]">
+          <div className="flex items-center justify-between gap-2 pb-1 text-[10px] text-[var(--text-faint)]">
+            <span className="truncate">{commandTitle(item)}</span>
+            {hostLabel ? (
+              <button
+                type="button"
+                className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-[var(--text-faint)] transition hover:bg-[var(--surface-hover)] hover:text-[var(--accent)]"
+                data-tooltip="Open this host on the canvas"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openOnCanvas();
+                }}
+              >
+                Open on Canvas
+              </button>
+            ) : null}
+          </div>
           <div className="flex gap-1.5">
             <span className="shrink-0 select-none font-mono text-[10px] text-[var(--success)]">
               $
@@ -387,7 +390,7 @@ function CommandCard({
   );
 }
 
-function ActivityBlock({ item, defaultCollapsed = false }: { item: AgentActivityItem; defaultCollapsed?: boolean }) {
+function ActivityBlock({ item, defaultCollapsed = true }: { item: AgentActivityItem; defaultCollapsed?: boolean }) {
   if (item.kind === "status" && (item.id === "parallel-batch" || /parallel/i.test(item.label))) {
     // Banner is rendered once by the feed when grouping; skip duplicate rows.
     return null;
@@ -742,25 +745,20 @@ export function AgentActivityFeed({
     [visible],
   );
 
-  // For archived (non-live) turns, collapse completed commands into the summary accordion.
-  // For live streaming turns, keep all blocks in-place so items do not jump around.
+  // Collapse completed commands into the summary accordion.
   const doneCommands = useMemo(
     () =>
-      !live
-        ? blocks.filter(
-            (item) => isCommandItem(item) && item.state !== "running" && item.state !== "error",
-          )
-        : [],
-    [blocks, live],
+      blocks.filter(
+        (item) => isCommandItem(item) && item.state !== "running" && item.state !== "error",
+      ),
+    [blocks],
   );
   const rest = useMemo(
     () =>
-      !live
-        ? blocks.filter(
-            (item) => !(isCommandItem(item) && item.state !== "running" && item.state !== "error"),
-          )
-        : blocks,
-    [blocks, live],
+      blocks.filter(
+        (item) => !(isCommandItem(item) && item.state !== "running" && item.state !== "error"),
+      ),
+    [blocks],
   );
 
   if (visible.length === 0 && !live) return null;

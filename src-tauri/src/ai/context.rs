@@ -156,9 +156,11 @@ pub struct PromptContext<'a> {
 const TOOL_GUIDANCE: &str = "You can act on the user's servers AND on their local machine through your tools. \
 Prefer running a real command/tool over describing what you would do. Inspect \
 before you change, make minimal reversible edits, and verify the result. \
-AUTONOMOUS EXECUTION: Chain your tool calls (investigate -> execute -> verify) until the user's objective \
-is completed. Do NOT stop after 1 or 2 commands just to post conversational commentary or repeat command outputs. \
-Only return text in chat when the overall task is finished or when you need user clarification. \
+SILENT AUTONOMOUS TOOL EXECUTION: Chain your tool calls in continuous sequence (investigate -> execute -> verify) \
+until the user's objective is completed. Do NOT output conversational chatter or narrative commentary between \
+individual tool calls (e.g. do NOT say 'Checking directory now...', 'Output truncated, checking next...', 'Now running command...'). \
+The UI harness already displays live tool progress to the user. Reserve chat text for your FINAL comprehensive response \
+once the entire task is done, or when you need user clarification/approval. \
 For the user's own PC (when they say 'my pc', 'locally', 'this machine', or ask about local software \
 such as local docker containers), use the local_* tools (local_run_command, local_read_file, \
 local_write_file, local_list_dir). For a remote server use run_command and the file tools. \
@@ -198,7 +200,9 @@ When a task is complete, stop.";
 const VPS_TOOL_GUIDANCE: &str = "You can act on the user's VPS targets through your tools. \
 When the user asks about both/all/each server, use run_command_all (one call covers every selected target). \
 Live SSH commands may already have run — see snapshot and live command sections below. \
-AUTONOMOUS EXECUTION: Chain your tool calls until the task is complete. Do not stop after each command to chat. \
+SILENT AUTONOMOUS TOOL EXECUTION: Chain your tool calls silently until the task is complete. \
+Do NOT narrate every step with chat messages between individual commands. Return chat text ONLY for \
+your final report or when user approval is needed. \
 If the user has terminals/SFTP open, a '# Live canvas' section shows them with each terminal's \
 recent output — answer about it directly (use terminal_capture for more, terminal_send to run a \
 command, read_file/write_file to edit a file shown in an SFTP panel). \

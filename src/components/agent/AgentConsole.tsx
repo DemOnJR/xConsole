@@ -19,17 +19,6 @@ function AssistantTurn({
   executeTarget?: { name: string; host: string } | null;
   onExecute?: (code: string) => void;
 }) {
-  const hasRunningActivity = live
-    ? segments.some(
-        (s) =>
-          s.type === "activity" &&
-          s.items.some((i) => i.state === "running" && i.kind !== "status"),
-      )
-    : false;
-
-  const isLastSegmentStreamingText =
-    live && segments.length > 0 && segments[segments.length - 1].type === "text";
-
   return (
     <div className="flex flex-col gap-2">
       {segments.map((seg, i) => {
@@ -59,12 +48,6 @@ function AssistantTurn({
           </div>
         );
       })}
-
-      {live && !hasRunningActivity && !isLastSegmentStreamingText && (
-        <div className="pl-4">
-          <AgentThinking />
-        </div>
-      )}
     </div>
   );
 }
@@ -200,11 +183,18 @@ export function AgentConsole({
         )}
       </div>
 
+      {streaming && (
+        <div className="flex shrink-0 items-center justify-between border-t border-[var(--border)]/70 bg-[var(--surface)]/90 px-3 py-1 text-[11px] backdrop-blur-sm">
+          <AgentThinking />
+          <span className="font-mono text-[10px] text-[var(--text-faint)]">active turn…</span>
+        </div>
+      )}
+
       {userScrolledUp && (
         <button
           type="button"
           onClick={scrollToBottom}
-          className="absolute bottom-3 right-4 flex items-center gap-1.5 rounded-full border border-[var(--border-strong)] bg-[var(--surface)] px-2.5 py-1 text-[11px] text-cyan-300 shadow-md transition hover:bg-[var(--border)]"
+          className={`absolute ${streaming ? "bottom-8" : "bottom-3"} right-4 flex items-center gap-1.5 rounded-full border border-[var(--border-strong)] bg-[var(--surface)] px-2.5 py-1 text-[11px] text-cyan-300 shadow-md transition hover:bg-[var(--border)]`}
         >
           <span>↓</span>
           <span>Jump to bottom</span>
