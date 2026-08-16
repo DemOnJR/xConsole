@@ -42,6 +42,13 @@ const MODELS: &[(&str, &str, ModelPrice)] = &[
     ("deepseek", "flash", ModelPrice { input: 0.14, output: 0.28, cache_read: 0.0028, cache_write: 0.14 }),
     ("deepseek", "v4-pro", ModelPrice { input: 0.435, output: 0.87, cache_read: 0.003625, cache_write: 0.435 }),
     ("deepseek", "deepseek", ModelPrice { input: 0.14, output: 0.28, cache_read: 0.0028, cache_write: 0.14 }),
+    // Google Gemini / Antigravity CLI pricing
+    ("gemini", "flash", ModelPrice { input: 0.15, output: 0.60, cache_read: 0.0375, cache_write: 0.15 }),
+    ("gemini", "pro", ModelPrice { input: 1.25, output: 5.0, cache_read: 0.3125, cache_write: 1.25 }),
+    ("gemini", "", ModelPrice { input: 0.15, output: 0.60, cache_read: 0.0375, cache_write: 0.15 }),
+    ("antigravity_cli", "flash", ModelPrice { input: 0.15, output: 0.60, cache_read: 0.0375, cache_write: 0.15 }),
+    ("antigravity_cli", "pro", ModelPrice { input: 1.25, output: 5.0, cache_read: 0.3125, cache_write: 1.25 }),
+    ("antigravity_cli", "", ModelPrice { input: 0.15, output: 0.60, cache_read: 0.0375, cache_write: 0.15 }),
     // Fallback for anything else: a conservative mid-range price.
     ("", "", ModelPrice { input: 2.0, output: 10.0, cache_read: 0.20, cache_write: 2.50 }),
 ];
@@ -55,6 +62,9 @@ pub fn kind_for_model(kind: &str, model: &str) -> String {
     }
     if m.contains("claude") {
         return "anthropic".into();
+    }
+    if m.contains("gemini") {
+        return "gemini".into();
     }
     kind.to_lowercase()
 }

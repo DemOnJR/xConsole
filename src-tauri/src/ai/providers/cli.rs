@@ -1,6 +1,6 @@
-//! Local CLI agent providers (Codex / OpenCode / Cursor Agent).
-
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -11,6 +11,34 @@ use crate::ai::provider::{
     XConsoleExec,
 };
 use crate::mcp::prepare_cursor_workspace;
+
+static AGY_SESSIONS: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn get_agy_conversation(session_id: &str) -> Option<String> {
+    if session_id.is_empty() {
+        return None;
+    }
+    AGY_SESSIONS.lock().ok()?.get(session_id).cloned()
+}
+
+fn store_agy_conversation(session_id: &str, conversation_id: &str) {
+    if session_id.is_empty() || conversation_id.is_empty() {
+        return;
+    }
+    if let Ok(mut map) = AGY_SESSIONS.lock() {
+        map.insert(session_id.to_string(), conversation_id.to_string());
+    }
+}
+
+fn remove_agy_conversation(session_id: &str) {
+    if session_id.is_empty() {
+        return;
+    }
+    if let Ok(mut map) = AGY_SESSIONS.lock() {
+        map.remove(session_id);
+    }
+}
 
 pub struct CliProvider {
     kind: String,
@@ -70,7 +98,13 @@ impl CliProvider {
     }
 
     /// CLI flags only — prompt is passed via stdin (avoids Windows cmd length limits).
-    fn run_flags(&self, xconsole: Option<&XConsoleExec>, workspace: Option<&Path>) -> Vec<String> {
+    fn run_flags(
+        &self,
+        xconsole: Option<&XConsoleExec>,
+        workspace: Option<&Path>,
+        agy_conv: Option<&str>,
+        reasoning: &str,
+    ) -> Vec<String> {
         match self.kind.as_str() {
             "opencode_cli" => {
                 let mut a = vec!["run".to_string()];
@@ -85,11 +119,19 @@ impl CliProvider {
                 let mut a = vec![
                     "--dangerously-skip-permissions".to_string(),
                     "--output-format".to_string(),
-                    "text".to_string(),
+                    "stream-json".to_string(),
                 ];
+                if let Some(conv_id) = agy_conv {
+                    a.push("--conversation".into());
+                    a.push(conv_id.to_string());
+                }
                 if let Some(m) = &self.model {
                     a.push("--model".into());
                     a.push(m.clone());
+                }
+                if !reasoning.is_empty() && matches!(reasoning, "low" | "medium" | "high") {
+                    a.push("--effort".into());
+                    a.push(reasoning.to_string());
                 }
                 a
             }
@@ -129,7 +171,12 @@ impl CliProvider {
         }
     }
 
-    fn build_prompt(req: &ChatRequest) -> String {
+    fn build_prompt(req: &ChatRequest, is_resumed_agy: bool) -> String {
+        if is_resumed_agy {
+            if let Some(last_user) = req.messages.iter().rev().find(|m| m.role == "user") {
+                return last_user.content.clone();
+            }
+        }
         let mut s = String::new();
         if !req.system.is_empty() {
             s.push_str(&req.system);
@@ -335,6 +382,7 @@ async fn read_child_output(
     mut child: tokio::process::Child,
     bin: &str,
     kind: &str,
+    session_id: &str,
     sink: Option<&EventSink>,
     stream_json: bool,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -347,6 +395,8 @@ async fn read_child_output(
     // more than a pipe buffer (~64KB) to stderr while we're blocked on stdout
     // (or vice versa) a sequential reader deadlocks.
     let cancel_out = cancel.clone();
+    let session_id_owned = session_id.to_string();
+    let kind_owned = kind.to_string();
     let stdout_fut = async move {
         let mut out = ChatResponse::default();
         if let Some(stdout) = stdout {
@@ -356,7 +406,11 @@ async fn read_child_output(
                     next = lines.next_line() => match next {
                         Ok(Some(line)) => {
                             if stream_json {
-                                parse_cursor_stream_line(&line, &mut out, sink);
+                                if kind_owned == "antigravity_cli" {
+                                    parse_antigravity_stream_line(&line, &session_id_owned, &mut out, sink);
+                                } else {
+                                    parse_cursor_stream_line(&line, &mut out, sink);
+                                }
                             } else {
                                 out.content.push_str(&line);
                                 out.content.push('\n');
@@ -411,6 +465,9 @@ async fn read_child_output(
 
     let status = child.wait().await.map_err(|e| e.to_string())?;
     if !status.success() {
+        if kind == "antigravity_cli" {
+            remove_agy_conversation(session_id);
+        }
         let hint = if kind == "cursor"
             && (err.contains("invalid") || err.contains("Not logged in") || err.contains("API key"))
         {
@@ -429,6 +486,213 @@ async fn read_child_output(
 
     out.stop_reason = "stop".into();
     Ok(out)
+}
+
+fn format_agy_tool_label(
+    name: &str,
+    params: Option<&serde_json::Value>,
+) -> (String, Option<String>) {
+    match name {
+        "run_command" | "bash" | "shell" => {
+            let cmd = params
+                .and_then(|p| {
+                    p.get("CommandLine")
+                        .or_else(|| p.get("command"))
+                        .or_else(|| p.get("cmd"))
+                })
+                .and_then(|c| c.as_str())
+                .unwrap_or("…");
+            (
+                format!("Shell › {}", truncate_str(cmd, 72)),
+                Some(cmd.to_string()),
+            )
+        }
+        "list_dir" => {
+            let path = params
+                .and_then(|p| {
+                    p.get("DirectoryPath")
+                        .or_else(|| p.get("path"))
+                        .or_else(|| p.get("dir"))
+                })
+                .and_then(|c| c.as_str())
+                .unwrap_or("…");
+            (format!("List directory · {path}"), None)
+        }
+        "view_file" | "read_file" | "read_resource" => {
+            let path = params
+                .and_then(|p| {
+                    p.get("AbsolutePath")
+                        .or_else(|| p.get("path"))
+                        .or_else(|| p.get("file"))
+                })
+                .and_then(|c| c.as_str())
+                .unwrap_or("…");
+            (format!("Read file · {path}"), None)
+        }
+        "write_to_file" | "replace_file_content" | "multi_replace_file_content" | "edit_file" => {
+            let path = params
+                .and_then(|p| {
+                    p.get("TargetFile")
+                        .or_else(|| p.get("path"))
+                        .or_else(|| p.get("file"))
+                })
+                .and_then(|c| c.as_str())
+                .unwrap_or("…");
+            (format!("Write file · {path}"), None)
+        }
+        "grep_search" | "grep" => {
+            let query = params
+                .and_then(|p| {
+                    p.get("Query")
+                        .or_else(|| p.get("query"))
+                        .or_else(|| p.get("pattern"))
+                })
+                .and_then(|c| c.as_str())
+                .unwrap_or("…");
+            (format!("Search · {query}"), None)
+        }
+        "search_web" | "web_search" => {
+            let query = params
+                .and_then(|p| p.get("query").or_else(|| p.get("Query")))
+                .and_then(|c| c.as_str())
+                .unwrap_or("…");
+            (format!("Web search · {query}"), None)
+        }
+        "read_url_content" | "web_fetch" => {
+            let url = params
+                .and_then(|p| p.get("Url").or_else(|| p.get("url")))
+                .and_then(|c| c.as_str())
+                .unwrap_or("…");
+            (format!("Web fetch · {url}"), None)
+        }
+        other => (other.replace('_', " "), None),
+    }
+}
+
+fn parse_antigravity_stream_line(
+    line: &str,
+    session_id: &str,
+    out: &mut ChatResponse,
+    sink: Option<&EventSink>,
+) {
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        out.content.push_str(line);
+        out.content.push('\n');
+        emit(sink, StreamEvent::Text(format!("{line}\n")));
+        return;
+    };
+
+    let event = v.get("event").and_then(|e| e.as_str()).unwrap_or("");
+    match event {
+        "init" => {
+            if let Some(conv_id) = v.get("conversation_id").and_then(|c| c.as_str()) {
+                if !conv_id.is_empty() && !session_id.is_empty() {
+                    store_agy_conversation(session_id, conv_id);
+                }
+            }
+        }
+        "step_update" => {
+            let Some(su) = v.get("step_update") else {
+                return;
+            };
+            if let Some(conv_id) = su.get("conversation_id").and_then(|c| c.as_str()) {
+                if !conv_id.is_empty() && !session_id.is_empty() {
+                    store_agy_conversation(session_id, conv_id);
+                }
+            }
+            let step_type = su.get("step_type").and_then(|s| s.as_str()).unwrap_or("");
+            let state = su.get("state").and_then(|s| s.as_str()).unwrap_or("");
+            let step_idx = su.get("step_index").and_then(|i| i.as_u64()).unwrap_or(0);
+            let call_id = format!("agy-step-{step_idx}");
+
+            if step_type == "agent_response" {
+                if let Some(delta) = su.get("text_delta").and_then(|d| d.as_str()) {
+                    if !delta.is_empty() {
+                        out.content.push_str(delta);
+                        emit(sink, StreamEvent::Text(delta.to_string()));
+                    }
+                }
+            } else if step_type == "tool" {
+                let tool_name = su
+                    .get("tool_name")
+                    .and_then(|t| t.as_str())
+                    .or_else(|| su.pointer("/tool_info/name").and_then(|t| t.as_str()))
+                    .unwrap_or("tool");
+                if state == "ACTIVE" {
+                    let params = su.pointer("/tool_info/parameters");
+                    let (label, detail) = format_agy_tool_label(tool_name, params);
+                    emit(
+                        sink,
+                        StreamEvent::Activity(ActivityEvent::ToolStart {
+                            id: call_id,
+                            tool: tool_name.to_string(),
+                            label,
+                            detail,
+                        }),
+                    );
+                } else if state == "DONE" {
+                    emit(
+                        sink,
+                        StreamEvent::Activity(ActivityEvent::ToolEnd {
+                            id: call_id,
+                            ok: true,
+                        }),
+                    );
+                } else if state == "ERROR" {
+                    emit(
+                        sink,
+                        StreamEvent::Activity(ActivityEvent::ToolEnd {
+                            id: call_id,
+                            ok: false,
+                        }),
+                    );
+                }
+            }
+
+            if let Some(u) = su.get("usage") {
+                if let Some(inp) = u.get("input_tokens").and_then(|v| v.as_u64()) {
+                    out.prompt_tokens = Some(inp as u32);
+                }
+                if let Some(outp) = u.get("output_tokens").and_then(|v| v.as_u64()) {
+                    out.completion_tokens = Some(outp as u32);
+                }
+                if let Some(cached) = u.get("cache_read_tokens").and_then(|v| v.as_u64()) {
+                    out.cached_tokens = Some(cached as u32);
+                }
+            }
+        }
+        "result" => {
+            let Some(res) = v.get("result") else {
+                return;
+            };
+            if let Some(conv_id) = res.get("conversation_id").and_then(|c| c.as_str()) {
+                if !conv_id.is_empty() && !session_id.is_empty() {
+                    store_agy_conversation(session_id, conv_id);
+                }
+            }
+            if let Some(resp_text) = res.get("response").and_then(|r| r.as_str()) {
+                if out.content.is_empty() && !resp_text.is_empty() {
+                    out.content = resp_text.to_string();
+                }
+            }
+            if let Some(u) = res.get("usage") {
+                if let Some(inp) = u.get("input_tokens").and_then(|v| v.as_u64()) {
+                    out.prompt_tokens = Some(inp as u32);
+                }
+                if let Some(outp) = u.get("output_tokens").and_then(|v| v.as_u64()) {
+                    out.completion_tokens = Some(outp as u32);
+                }
+                if let Some(cached) = u.get("cache_read_tokens").and_then(|v| v.as_u64()) {
+                    out.cached_tokens = Some(cached as u32);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn parse_cursor_stream_line(line: &str, out: &mut ChatResponse, sink: Option<&EventSink>) {
@@ -970,10 +1234,16 @@ impl Provider for CliProvider {
         req: &ChatRequest,
         sink: Option<&EventSink>,
     ) -> Result<ChatResponse, String> {
-        let prompt = Self::build_prompt(req);
-        // Count prompt tokens now (the prompt is moved into the child args below).
-        let prompt_tokens = crate::ai::text::count_tokens(&prompt) as u32;
-        let stream_json = self.kind == "cursor" && req.xconsole.is_some();
+        let existing_agy_conv = if self.kind == "antigravity_cli" && !req.session_id.is_empty() {
+            get_agy_conversation(&req.session_id)
+        } else {
+            None
+        };
+        let is_resumed_agy = existing_agy_conv.is_some();
+        let prompt = Self::build_prompt(req, is_resumed_agy);
+        let prompt_tokens_est = crate::ai::text::count_tokens(&prompt) as u32;
+        let stream_json = (self.kind == "cursor" && req.xconsole.is_some())
+            || self.kind == "antigravity_cli";
 
         let workspace = if let Some(xc) = &req.xconsole {
             emit(
@@ -996,20 +1266,34 @@ impl Provider for CliProvider {
             None
         };
 
-        let flags = self.run_flags(req.xconsole.as_ref(), workspace.as_deref());
+        let flags = self.run_flags(
+            req.xconsole.as_ref(),
+            workspace.as_deref(),
+            existing_agy_conv.as_deref(),
+            &req.reasoning,
+        );
         let key = self.api_key.as_deref();
         let bin = resolve_models_bin(&self.kind, &self.bin);
 
         let child = spawn_with_stdin(&self.kind, &bin, &flags, &prompt, key).await?;
 
         let started = std::time::Instant::now();
-        let resp =
-            read_child_output(child, &self.bin, &self.kind, sink, stream_json, req.cancel.clone())
-                .await?;
+        let resp = read_child_output(
+            child,
+            &self.bin,
+            &self.kind,
+            &req.session_id,
+            sink,
+            stream_json,
+            req.cancel.clone(),
+        )
+        .await?;
 
-        // CLI tools don't report token usage — tokenize locally so the calculator
-        // still works (labeled as an estimate in the UI).
-        let completion_tokens = crate::ai::text::count_tokens(&resp.content) as u32;
+        let completion_tokens = resp.completion_tokens.unwrap_or_else(|| {
+            crate::ai::text::count_tokens(&resp.content) as u32
+        });
+        let prompt_tokens = resp.prompt_tokens.unwrap_or(prompt_tokens_est);
+        let cached_tokens = resp.cached_tokens;
         let ms = started.elapsed().as_millis() as u64;
         let secs = (ms as f64 / 1000.0).max(0.05);
         emit(
@@ -1017,7 +1301,7 @@ impl Provider for CliProvider {
             StreamEvent::Stats(crate::ai::provider::StreamStats {
                 completion_tokens,
                 prompt_tokens: Some(prompt_tokens),
-                cached_tokens: None,
+                cached_tokens,
                 cache_creation_tokens: None,
                 duration_ms: ms,
                 tokens_per_sec: (completion_tokens as f64 / secs) as f32,
