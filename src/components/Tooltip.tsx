@@ -23,6 +23,8 @@ export function TooltipHost() {
   useEffect(() => {
     let timer: number | undefined;
     let current: HTMLElement | null = null;
+    let mouseX = -1;
+    let mouseY = -1;
 
     const clear = () => {
       if (timer) window.clearTimeout(timer);
@@ -43,47 +45,99 @@ export function TooltipHost() {
       });
     };
 
+    const onMove = (e: MouseEvent) => {
+      mouseX = e.clientX;
+      mouseY = e.clientY;
+    };
+
     const onOver = (e: MouseEvent) => {
+      mouseX = e.clientX;
+      mouseY = e.clientY;
       const el = (e.target as HTMLElement | null)?.closest?.("[data-tooltip]") as HTMLElement | null;
       if (!el) return;
+
+      const text = el.getAttribute("data-tooltip");
+      if (!text) return;
+
+      // While still hovering over the same element, update the text live if it changed (e.g. streaming tokens)
       if (el === current) {
-        // While still hovering over the same element, update the text live if it changed (e.g. streaming tokens)
-        const text = el.getAttribute("data-tooltip");
-        if (text) {
-          setAnchor((a) => (a && a.text !== text ? { ...a, text } : a));
-        }
+        setAnchor((a) => (a && a.text !== text ? { ...a, text } : a));
         return;
       }
+
       current = el;
       if (timer) window.clearTimeout(timer);
       timer = window.setTimeout(() => show(el), SHOW_DELAY);
     };
+
+    const isCursorStillOverCurrent = (): boolean => {
+      if (!current) return false;
+      if (mouseX < 0 || mouseY < 0) return false;
+      // 1. Check direct point-hit
+      const hit = document.elementFromPoint(mouseX, mouseY);
+      if (hit && (hit === current || current.contains(hit) || hit.closest("[data-tooltip]") === current)) {
+        return true;
+      }
+      // 2. If React replaced the DOM node during re-render, check if hit is a [data-tooltip] at the same spot
+      const nextTooltipEl = hit?.closest?.("[data-tooltip]") as HTMLElement | null;
+      if (nextTooltipEl) {
+        current = nextTooltipEl;
+        const text = nextTooltipEl.getAttribute("data-tooltip");
+        if (text) {
+          setAnchor((a) => (a ? { ...a, text, rect: nextTooltipEl.getBoundingClientRect() } : a));
+        }
+        return true;
+      }
+      // 3. Fallback: check bounding rect
+      const rect = current.getBoundingClientRect();
+      if (
+        mouseX >= rect.left &&
+        mouseX <= rect.right &&
+        mouseY >= rect.top &&
+        mouseY <= rect.bottom
+      ) {
+        return true;
+      }
+      return false;
+    };
+
     const onOut = (e: MouseEvent) => {
+      mouseX = e.clientX;
+      mouseY = e.clientY;
       const related = e.relatedTarget as HTMLElement | null;
       if (current && related && current.contains(related)) return;
+
       // React re-renders during text streaming can emit phantom mouseout events on child nodes
-      if (current && document.contains(current)) {
-        try {
-          if (current.matches(":hover") || current.querySelector(":hover")) return;
-        } catch {
-          // ignore selector errors
+      if (isCursorStillOverCurrent()) return;
+
+      clear();
+    };
+
+    const onScroll = () => {
+      // When chat or another container auto-scrolls while streaming, do not dismiss if cursor is still over the hovered element
+      if (isCursorStillOverCurrent()) {
+        if (current) {
+          setAnchor((a) => (a ? { ...a, rect: current!.getBoundingClientRect() } : a));
         }
+        return;
       }
       clear();
     };
 
+    document.addEventListener("mousemove", onMove, true);
     document.addEventListener("mouseover", onOver, true);
     document.addEventListener("mouseout", onOut, true);
     document.addEventListener("mousedown", clear, true);
-    window.addEventListener("scroll", clear, true);
+    window.addEventListener("scroll", onScroll, true);
     window.addEventListener("blur", clear);
 
     return () => {
       if (timer) window.clearTimeout(timer);
+      document.removeEventListener("mousemove", onMove, true);
       document.removeEventListener("mouseover", onOver, true);
       document.removeEventListener("mouseout", onOut, true);
       document.removeEventListener("mousedown", clear, true);
-      window.removeEventListener("scroll", clear, true);
+      window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("blur", clear);
     };
   }, []);
