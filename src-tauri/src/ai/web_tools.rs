@@ -229,17 +229,13 @@ async fn web_search(args: &Value) -> String {
     )
 }
 
+const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
 /// Real search results (title — snippet) scraped from DuckDuckGo's HTML endpoint.
 async fn ddg_html_results(client: &reqwest::Client, query: &str) -> Result<Vec<String>, String> {
     let resp = client
         .get("https://html.duckduckgo.com/html/")
         .query(&[("q", query)])
-        // DuckDuckGo serves the HTML results only to browser-like user agents.
-        .header(
-            reqwest::header::USER_AGENT,
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-        )
         .send()
         .await
         .map_err(|e| format!("error: search request failed: {e}"))?;
@@ -250,6 +246,10 @@ async fn ddg_html_results(client: &reqwest::Client, query: &str) -> Result<Vec<S
         .text()
         .await
         .map_err(|e| format!("error: read search body: {e}"))?;
+
+    if html.contains("anomaly-modal") || html.contains("challenge-form") {
+        return Err("error: search rate limited by anomaly challenge".into());
+    }
 
     let titles = anchor_inner_texts(&html, "result__a");
     let snippets = anchor_inner_texts(&html, "result__snippet");
@@ -339,47 +339,148 @@ async fn web_fetch(args: &Value) -> String {
     }
 }
 
+/// Check if an HTTP response represents a CAPTCHA challenge, Cloudflare block, or empty SPA shell.
+fn is_challenge_or_empty_shell(status_code: u16, content_type: &str, body: &str) -> bool {
+    if status_code == 403 || status_code == 503 || status_code == 429 {
+        return true;
+    }
+    let lower = body.to_lowercase();
+    if lower.contains("<title>just a moment...</title>")
+        || lower.contains("cf-chl-bypass")
+        || lower.contains("cf-challenge")
+        || lower.contains("challenge-running")
+        || lower.contains("please enable javascript")
+        || lower.contains("turn on javascript and cookies")
+        || lower.contains("security check to access")
+        || lower.contains("checking your browser")
+        || lower.contains("hcaptcha")
+        || lower.contains("g-recaptcha")
+        || lower.contains("datadome")
+        || lower.contains("anomaly-modal")
+    {
+        return true;
+    }
+    if content_type.contains("html") || body.trim_start().starts_with('<') {
+        let text = html_to_text(body);
+        let trimmed = text.trim();
+        if trimmed.len() < 50
+            && (lower.contains("<div id=\"root\"")
+                || lower.contains("<div id=\"app\"")
+                || lower.contains("<div id=\"__next\"")
+                || lower.contains("<main id=\"root\""))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Fallback to Jina Reader AI (https://r.jina.ai/{url}) which renders JS, bypasses anti-bot/CAPTCHA
+/// challenges, and extracts clean, rich Markdown for LLM ingestion.
+async fn fetch_via_ai_reader(url_str: &str) -> Result<String, String> {
+    let jina_url = format!("https://r.jina.ai/{url_str}");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(25))
+        .build()
+        .map_err(|e| format!("reader client error: {e}"))?;
+
+    let resp = client
+        .get(&jina_url)
+        .header(reqwest::header::ACCEPT, "text/plain")
+        .header("X-Return-Format", "markdown")
+        .header("X-No-Cache", "true")
+        .send()
+        .await
+        .map_err(|e| format!("reader fetch error: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("reader HTTP {}", resp.status()));
+    }
+
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("reader read body: {e}"))?;
+
+    let trimmed = text.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with("Error:")
+        || trimmed.starts_with("AuthenticationRequiredError")
+    {
+        return Err("reader returned empty or error".into());
+    }
+
+    Ok(truncate_text(trimmed, MAX_BODY))
+}
+
 /// Fetch a public URL and return its plain text (HTML stripped, SSRF-guarded, size-capped).
-/// Public so the autoresearch loop can read source pages through the same hardened path
-/// the `web_fetch` tool uses. Returns an `error: …` string on failure.
+/// If the direct fetch hits Cloudflare/CAPTCHA bot protection or an empty JS shell, automatically
+/// falls back to the Jina AI Reader service for clean markdown extraction.
 pub async fn fetch_text(url_str: &str) -> Result<String, String> {
     let url = validate_public_url(url_str)?;
     let client = http_client()?;
 
-    let resp = client
-        .get(url.clone())
-        .send()
-        .await
-        .map_err(|e| format!("error: fetch failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("error: HTTP {} for {url}", resp.status()));
-    }
+    let direct_res = client.get(url.clone()).send().await;
 
-    let content_type = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_lowercase();
+    let (needs_reader, direct_err_msg) = match direct_res {
+        Ok(resp) => {
+            let status = resp.status();
+            let status_u16 = status.as_u16();
 
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("error: read body: {e}"))?;
-    if bytes.len() > MAX_BODY {
-        return Err(format!(
-            "error: response too large ({} bytes, max {MAX_BODY})",
-            bytes.len()
-        ));
-    }
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_lowercase();
 
-    let raw = String::from_utf8_lossy(&bytes);
-    let text = if content_type.contains("html") || raw.trim_start().starts_with('<') {
-        html_to_text(&raw)
-    } else {
-        raw.into_owned()
+            if !status.is_success() {
+                if status_u16 == 403 || status_u16 == 503 || status_u16 == 429 {
+                    (true, String::new())
+                } else {
+                    return Err(format!("error: HTTP {} for {url}", status));
+                }
+            } else {
+                match resp.bytes().await {
+                    Ok(bytes) => {
+                        if bytes.len() > MAX_BODY * 4 {
+                            return Err(format!(
+                                "error: response too large ({} bytes, max {MAX_BODY})",
+                                bytes.len()
+                            ));
+                        }
+                        let raw = String::from_utf8_lossy(&bytes);
+                        if is_challenge_or_empty_shell(status_u16, &content_type, &raw) {
+                            (true, String::new())
+                        } else {
+                            let text = if content_type.contains("html") || raw.trim_start().starts_with('<') {
+                                html_to_text(&raw)
+                            } else {
+                                raw.into_owned()
+                            };
+                            return Ok(truncate_text(&text, MAX_BODY));
+                        }
+                    }
+                    Err(e) => (true, e.to_string()),
+                }
+            }
+        }
+        Err(e) => (true, e.to_string()),
     };
-    Ok(truncate_text(&text, MAX_BODY))
+
+    if needs_reader {
+        if let Ok(reader_text) = fetch_via_ai_reader(url_str).await {
+            if !reader_text.is_empty() {
+                return Ok(reader_text);
+            }
+        }
+    }
+
+    if !direct_err_msg.is_empty() {
+        return Err(format!("error: fetch failed: {direct_err_msg}"));
+    }
+
+    Err(format!("error: could not fetch {url} (blocked or empty content)"))
 }
 
 /// Public wrapper for the search tool — returns the same DuckDuckGo summary block the
@@ -419,11 +520,6 @@ async fn ddg_result_urls(client: &reqwest::Client, query: &str) -> Result<Vec<St
     let resp = client
         .get("https://html.duckduckgo.com/html/")
         .query(&[("q", query)])
-        .header(
-            reqwest::header::USER_AGENT,
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-        )
         .send()
         .await
         .map_err(|e| format!("error: search request failed: {e}"))?;
@@ -431,6 +527,9 @@ async fn ddg_result_urls(client: &reqwest::Client, query: &str) -> Result<Vec<St
         return Err(format!("error: search HTTP {}", resp.status()));
     }
     let html = resp.text().await.map_err(|e| e.to_string())?;
+    if html.contains("anomaly-modal") || html.contains("challenge-form") {
+        return Err("error: search challenge encountered".into());
+    }
     Ok(parse_ddg_result_urls(&html))
 }
 
@@ -518,9 +617,59 @@ fn percent_decode(s: &str) -> String {
 }
 
 pub fn http_client() -> Result<reqwest::Client, String> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::USER_AGENT,
+        reqwest::header::HeaderValue::from_static(BROWSER_UA),
+    );
+    headers.insert(
+        reqwest::header::ACCEPT,
+        reqwest::header::HeaderValue::from_static(
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        ),
+    );
+    headers.insert(
+        reqwest::header::ACCEPT_LANGUAGE,
+        reqwest::header::HeaderValue::from_static("en-US,en;q=0.9"),
+    );
+    headers.insert(
+        reqwest::header::HeaderName::from_static("sec-ch-ua"),
+        reqwest::header::HeaderValue::from_static(
+            "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
+        ),
+    );
+    headers.insert(
+        reqwest::header::HeaderName::from_static("sec-ch-ua-mobile"),
+        reqwest::header::HeaderValue::from_static("?0"),
+    );
+    headers.insert(
+        reqwest::header::HeaderName::from_static("sec-ch-ua-platform"),
+        reqwest::header::HeaderValue::from_static("\"Windows\""),
+    );
+    headers.insert(
+        reqwest::header::HeaderName::from_static("sec-fetch-dest"),
+        reqwest::header::HeaderValue::from_static("document"),
+    );
+    headers.insert(
+        reqwest::header::HeaderName::from_static("sec-fetch-mode"),
+        reqwest::header::HeaderValue::from_static("navigate"),
+    );
+    headers.insert(
+        reqwest::header::HeaderName::from_static("sec-fetch-site"),
+        reqwest::header::HeaderValue::from_static("none"),
+    );
+    headers.insert(
+        reqwest::header::HeaderName::from_static("sec-fetch-user"),
+        reqwest::header::HeaderValue::from_static("?1"),
+    );
+    headers.insert(
+        reqwest::header::HeaderName::from_static("upgrade-insecure-requests"),
+        reqwest::header::HeaderValue::from_static("1"),
+    );
+
     reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
-        .user_agent("xConsole-agent/1.0 (+https://github.com/xconsole)")
+        .default_headers(headers)
         // Re-validate EVERY redirect hop. reqwest follows 3xx responses without re-checking,
         // so without this a public URL could 30x-redirect to 127.0.0.1 / a metadata IP and
         // slip past validate_public_url (which only ever sees the first URL). We keep the same
