@@ -1,9 +1,15 @@
-import { memo, type MouseEvent, type PointerEvent } from "react";
+import { memo, useMemo, type MouseEvent, type PointerEvent } from "react";
 import type { AiProvider } from "../../lib/tauri";
 import type { ContextUsage, SessionCacheTotals, TokenStats } from "../../lib/streamStats";
-import { BrainIcon, EyeIcon, PlanIcon, ShieldIcon, SparkIcon } from "../icons";
+import { BrainIcon, EyeIcon, PlanIcon, ServerIcon, ShieldIcon, SparkIcon } from "../icons";
 import { ContextGauge } from "./ContextGauge";
 import { CacheMeter } from "./AgentTokenStats";
+
+export interface TargetServerInfo {
+  id: string;
+  name: string;
+  host: string;
+}
 
 export type ReasoningLevel = "off" | "low" | "medium" | "high";
 
@@ -19,9 +25,11 @@ export function reasoningCapable(kind: string | undefined, _model: string | unde
   return false;
 }
 
-/** Composer footer: provider·model · reasoning · plan · permissions ·
+/** Composer footer: targets · provider·model · reasoning · plan · permissions ·
  *  ctx gauge · cost · git branch · send/stop. */
 export const InputBar = memo(function InputBar({
+  activeTargets,
+  onPickTargets,
   activeProvider,
   activeModel,
   reasoning,
@@ -45,6 +53,8 @@ export const InputBar = memo(function InputBar({
   onPickVision,
   onPickReasoning,
 }: {
+  activeTargets?: TargetServerInfo[];
+  onPickTargets?: () => void;
   activeProvider?: AiProvider;
   activeModel?: string;
   reasoning: ReasoningLevel;
@@ -84,11 +94,33 @@ export const InputBar = memo(function InputBar({
     const i = order.indexOf(reasoning);
     onReasoning(order[(i + 1) % order.length] ?? "off");
   };
+  const targetsTip = useMemo(() => {
+    if (!activeTargets || activeTargets.length === 0) {
+      return "Targets: None active\nSelect target servers (/targets)";
+    }
+    const countStr = `Targets (${activeTargets.length} active):`;
+    const listStr = activeTargets.map((t) => `• ${t.name} (${t.host})`).join("\n");
+    return `${countStr}\n${listStr}\nManage targets (/targets)`;
+  }, [activeTargets]);
   const iconBtn =
     "flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--text-dim)] transition hover:bg-[var(--border)]/50 hover:text-[var(--text)]";
 
   return (
     <div className="xc-input-bar flex select-none flex-wrap items-center gap-0.5 border-t border-[var(--border)]/60 px-1.5 pb-1.5 pt-1">
+      {onPickTargets ? (
+        <button
+          type="button"
+          className={`${iconBtn} ${activeTargets && activeTargets.length > 0 ? "text-emerald-400" : ""}`}
+          onClick={onPickTargets}
+          onPointerDown={stopNode}
+          onMouseDown={stopNode}
+          aria-label="Target servers"
+          data-tooltip={targetsTip}
+        >
+          <ServerIcon size={14} />
+        </button>
+      ) : null}
+
       <button
         type="button"
         className={iconBtn}

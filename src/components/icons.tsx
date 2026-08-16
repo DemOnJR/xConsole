@@ -432,3 +432,17 @@ export function ColumnsIcon(props: IconProps) {
     </svg>
   );
 }
+
+/** A server chassis / targets icon. */
+export function ServerIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="2" y="3" width="20" height="7" rx="2" />
+      <rect x="2" y="14" width="20" height="7" rx="2" />
+      <line x1="6" y1="6.5" x2="6.01" y2="6.5" strokeWidth={2.5} />
+      <line x1="6" y1="17.5" x2="6.01" y2="17.5" strokeWidth={2.5} />
+      <line x1="10" y1="6.5" x2="18" y2="6.5" opacity="0.6" />
+      <line x1="10" y1="17.5" x2="18" y2="17.5" opacity="0.6" />
+    </svg>
+  );
+}

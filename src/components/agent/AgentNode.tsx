@@ -1335,6 +1335,18 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     setTargets(canvasVpsIds);
   }, [canvasVpsIds.join("|")]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const activeTargetsInfo = useMemo(
+    () =>
+      vpsList
+        .filter((v) => targets.includes(v.id))
+        .map((v) => ({ id: v.id, name: v.name, host: v.host })),
+    [vpsList, targets],
+  );
+
+  const handlePickTargets = () => {
+    setPicker((cur) => (cur?.kind === "targets" ? null : { kind: "targets" }));
+  };
+
 
 
   return (
@@ -1937,8 +1949,10 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
             </div>
           )}
 
-          {/* Composer input bar: provider·model · reasoning · plan · permissions · ctx · cost · git · send/stop */}
+          {/* Composer input bar: targets · provider·model · reasoning · plan · permissions · ctx · cost · git · send/stop */}
           <InputBar
+            activeTargets={activeTargetsInfo}
+            onPickTargets={handlePickTargets}
             activeProvider={activeProvider}
             activeModel={activeModel || undefined}
             reasoning={reasoning}
