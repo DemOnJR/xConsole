@@ -210,7 +210,7 @@ pub async fn sftp_edit_external(
 /// Settings key holding the external editor command (e.g. `code`).
 pub const EXTERNAL_EDITOR_SETTING: &str = "sftp.external_editor";
 
-/// List a local directory for the dual-pane SFTP browser (WinSCP-style).
+/// List a local directory for the dual-pane SFTP browser.
 #[tauri::command]
 pub fn local_fs_list(path: Option<String>) -> Result<crate::local::LocalFsList, String> {
     let p = path

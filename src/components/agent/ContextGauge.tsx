@@ -1,7 +1,7 @@
 import { useState, type PointerEvent } from "react";
 import type { ContextUsage } from "../../lib/streamStats";
 
-/** t3code-style circular context-window gauge: donut of % used, hover popover with
+/** Circular context-window gauge: donut of % used, hover popover with
  *  used/max + segment breakdown. Clicking opens the /ctx breakdown (handled by the
  *  parent via onClick). */
 export function ContextGauge({

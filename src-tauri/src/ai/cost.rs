@@ -2,7 +2,7 @@
 //!
 //! Providers report token usage (input, output, cache read, cache write) but not
 //! dollars. This module keeps a small price table for known providers/models so the
-//! UI can show a live cost estimate and cache economics (pi-style footer: `$0.0123 ·
+//! UI can show a live cost estimate and cache economics (cost footer: `$0.0123 ·
 //! R 42K · W 3K · 93% hit`). Prices are per 1M tokens, USD, and can be overridden
 //! by the user via settings (`agent.cost_input`, etc.).
 //!

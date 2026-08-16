@@ -708,7 +708,7 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
       } else {
         setSqlResult(await api.dbRunSql(sel.sessionId, sql));
       }
-      // Persist recent queries (phpMyAdmin-style history) per server.
+      // Persist recent queries per server.
       try {
         const key = `xconsole-sql-history:${data.vpsId}`;
         const next = [sql.trim(), ...sqlHistory.filter((q) => q !== sql.trim())].slice(
@@ -749,7 +749,7 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
     URL.revokeObjectURL(url);
   };
 
-  /** Page through the table and export up to a safety cap (phpMyAdmin-style dump). */
+  /** Page through the table and export up to a safety cap. */
   const exportAllCsv = async () => {
     if (!sel) return;
     const ok = await dialog.confirm({
@@ -803,7 +803,7 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
     }
   };
 
-  /** Export current page as INSERT statements (phpMyAdmin-style dump of visible rows). */
+  /** Export current page as INSERT statements (SQL dump of visible rows). */
   const exportSqlInserts = (set: DbResultSet | null, tableLabel: string) => {
     if (!set || set.columns.length === 0 || set.rows.length === 0) return;
     const cols = set.columns.join(", ");
@@ -907,7 +907,7 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
 
   /** Import a .sql file from disk and run it against the current connection.
    *  Supports larger dumps (up to 64 MB) and naive multi-statement splitting so
-   *  phpMyAdmin-style exports with many statements still land. */
+   *  SQL exports with many statements still land. */
   const importSqlFile = async () => {
     if (!sel?.sessionId) {
       setError("Connect to a database first.");

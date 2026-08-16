@@ -202,7 +202,7 @@ export interface SftpEntry {
   link_broken: boolean;
 }
 
-/** Local filesystem listing for dual-pane SFTP (WinSCP-style). */
+/** Local filesystem listing for dual-pane SFTP. */
 export interface LocalFsEntry {
   name: string;
   path: string;

@@ -314,7 +314,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
   const visionProviderId = useSettingsStore((s) => s.settings["agent.vision_provider"]) ?? "";
   const visionModel = useSettingsStore((s) => s.settings["agent.vision_model"]) ?? "";
 
-  // Reasoning effort (t3code-style capability control), persisted.
+  // Reasoning effort capability control, persisted.
   const [reasoning, setReasoning] = useState<ReasoningLevel>(() => {
     const v = useSettingsStore.getState().settings["agent.reasoning_level"];
     return v === "low" || v === "medium" || v === "high" || v === "off" ? v : "off";
@@ -1922,7 +1922,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
             </div>
           )}
 
-          {/* t3code-style input bar: provider·model · reasoning · plan · permissions · ctx · cost · git · send/stop */}
+          {/* Composer input bar: provider·model · reasoning · plan · permissions · ctx · cost · git · send/stop */}
           <InputBar
             activeProvider={activeProvider}
             activeModel={activeModel || undefined}

@@ -119,7 +119,7 @@ pub struct PromptContext<'a> {
     pub safety: &'a str,
     /// Number of VPS targets the agent may act on this turn.
     pub target_count: usize,
-    /// Compact summary of the current conversation thread (Hermes-style).
+    /// Compact summary of the current conversation thread.
     pub conversation_summary: Option<String>,
     /// Whether tool use is available this turn.
     pub has_tools: bool,

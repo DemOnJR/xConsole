@@ -1,5 +1,5 @@
 //! AI agent subsystem: providers, registry, agent loop, tools, and the
-//! Hermes-style soul / memory / context / skills / cron cores.
+//! soul / memory / context / skills / cron cores.
 
 use std::path::PathBuf;
 

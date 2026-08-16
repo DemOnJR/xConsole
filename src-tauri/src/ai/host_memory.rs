@@ -1,4 +1,4 @@
-//! Per-VPS institutional memory (Xirp-style dossiers).
+//! Per-VPS institutional memory dossiers.
 //!
 //! Layout:
 //! ```text

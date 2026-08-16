@@ -268,7 +268,7 @@ body,
   background: transparent;
 }
 
-/* Agent activity blocks — Cursor-style thin scroll inside cards */
+/* Agent activity blocks — thin scroll inside cards */
 .agent-activity-scroll {
   scrollbar-width: thin;
   scrollbar-color: #2a3344 transparent;

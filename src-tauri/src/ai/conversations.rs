@@ -1,4 +1,4 @@
-//! Persisted agent conversations with Hermes-style compact thread summaries.
+//! Persisted agent conversations with compact thread summaries.
 
 use crate::ai::provider::ChatMessage;
 
@@ -14,7 +14,7 @@ pub fn derive_title(messages: &[ChatMessage]) -> String {
         .unwrap_or_else(|| "New chat".into())
 }
 
-/// Build a terse bullet summary of recent turns (Hermes-style thread memory).
+/// Build a terse bullet summary of recent turns (thread memory).
 pub fn compact_summary(messages: &[ChatMessage]) -> String {
     if messages.is_empty() {
         return String::new();

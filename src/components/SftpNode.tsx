@@ -353,7 +353,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
       : "external editor"
     : null;
 
-  // Favorite paths for this host (WinSCP-style bookmarks).
+  // Favorite paths for this host (bookmarks).
   const bookmarkKey = `xconsole-sftp-bookmarks:${data.vpsId}`;
   const [bookmarks, setBookmarks] = useState<string[]>(() => {
     try {
@@ -374,7 +374,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
     }
   };
 
-  // Dual-pane: local filesystem (left) | remote (right) — WinSCP-style.
+  // Dual-pane: local filesystem (left) | remote (right).
   const [dualPane, setDualPane] = useState(
     () => localStorage.getItem("xconsole-sftp-dual-pane") === "1",
   );
@@ -1125,7 +1125,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
       void bulkDelete(null);
       return;
     }
-    // WinSCP-style dual-pane transfer keys (work when dual pane is open).
+    // Dual-pane transfer keys (work when dual pane is open).
     if (dualPane && e.key === "F5") {
       e.preventDefault();
       if (selection.size > 0) void downloadRemoteToLocal();
@@ -1739,7 +1739,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                 : "text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
             }`}
             data-tooltip={
-              dualPane ? "Hide local pane" : "Dual pane: local PC | remote (WinSCP-style)"
+              dualPane ? "Hide local pane" : "Dual pane: local PC | remote"
             }
             onClick={toggleDualPane}
           >

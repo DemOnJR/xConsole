@@ -1,4 +1,4 @@
-// xConsole setup — Hermes-style "clone + compile on the user's PC".
+// xConsole setup — source setup and build on the user's PC.
 //
 // The installer is a tiny Tauri app. On "Install" it:
 //   1. ensures the build toolchain (Git, Rust GNU, MinGW, Node+pnpm) — using the
@@ -1071,7 +1071,7 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
         // The previous updater, renamed aside so the new one could take its place. It is
         // no longer running by now, so it can finally go.
         let _ = std::fs::remove_file(base.join("uninstall.old.exe"));
-        rep.log("xConsole setup — building from source (Hermes-style).");
+        rep.log("xConsole setup — building from source.");
         rep.log(format!("Install location: {}", base.display()));
         rep.log("First run downloads the toolchain + compiles; this can take 10-20 minutes.");
         Ok(())

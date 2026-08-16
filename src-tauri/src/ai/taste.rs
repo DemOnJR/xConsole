@@ -1,4 +1,4 @@
-//! User working-style preferences (`TASTE.md`) — Command Code–inspired taste learning
+//! User working-style preferences (`TASTE.md`) — dynamic taste learning
 //! for DevOps. Changes rarely, so the content is injected into the *static* system
 //! prefix (cache-friendly). Reflection and explicit memory tools can append bullets.
 

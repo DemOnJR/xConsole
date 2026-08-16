@@ -16,7 +16,7 @@ function base({ size = 16, ...props }: IconProps) {
   };
 }
 
-/** Cursor-style "toggle left panel" icon: a panel with the left column highlighted. */
+/** "Toggle left panel" icon: a panel with the left column highlighted. */
 export function PanelLeftIcon(props: IconProps) {
   return (
     <svg {...base(props)}>
@@ -27,7 +27,7 @@ export function PanelLeftIcon(props: IconProps) {
   );
 }
 
-/** Cursor-style "toggle right panel" icon. */
+/** "Toggle right panel" icon. */
 export function PanelRightIcon(props: IconProps) {
   return (
     <svg {...base(props)}>

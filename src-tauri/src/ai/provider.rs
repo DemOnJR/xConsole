@@ -251,7 +251,7 @@ mod truncated_tests {
     }
 }
 
-/// One line in a compact file diff (Cursor-style).
+/// One line in a compact file diff.
 #[derive(Debug, Clone, Serialize)]
 pub struct DiffLine {
     pub kind: String,
@@ -373,7 +373,7 @@ pub enum StreamEvent {
     PrefixTelemetry(PrefixTelemetryEvent),
     /// Estimated prompt context breakdown for this turn.
     ContextUsage(ContextUsageEvent),
-    /// Conversation history replaced after auto-compaction (Hermes-style).
+    /// Conversation history replaced after auto-compaction.
     ConversationCompacted { messages: Vec<ChatMessage> },
     /// A status note (e.g. "running command...").
     Status(String),

@@ -814,7 +814,7 @@ pub async fn run_turn(
                 req.model = model.trim().to_string();
             }
         }
-        // Reasoning effort (t3code-style capability control): off|low|medium|high.
+        // Reasoning effort capability control: off|low|medium|high.
         req.reasoning = tc
             .db
             .get_setting("agent.reasoning_level")

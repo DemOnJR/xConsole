@@ -7,7 +7,7 @@ import { CacheMeter } from "./AgentTokenStats";
 
 export type ReasoningLevel = "off" | "low" | "medium" | "high";
 
-/** Does this provider+model support a reasoning-effort control? (t3code traits.) */
+/** Does this provider+model support a reasoning-effort control? */
 export function reasoningCapable(kind: string | undefined, _model: string | undefined): boolean {
   const k = (kind ?? "").toLowerCase();
   if (k === "anthropic") return true; // thinking budgets on Sonnet/Opus
@@ -19,7 +19,7 @@ export function reasoningCapable(kind: string | undefined, _model: string | unde
   return false;
 }
 
-/** t3code-style composer footer: provider·model · reasoning · plan · permissions ·
+/** Composer footer: provider·model · reasoning · plan · permissions ·
  *  ctx gauge · cost · git branch · send/stop. */
 export const InputBar = memo(function InputBar({
   activeProvider,

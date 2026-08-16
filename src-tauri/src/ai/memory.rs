@@ -1,10 +1,9 @@
 //! Built-in compact memory: `MEMORY.md` (durable facts) plus the user-profile
-//! view of the consolidated `TASTE.md` store, mirroring Hermes' always-on
-//! built-in memory. Injected into the volatile tier of the system prompt.
+//! view of the consolidated `TASTE.md` store. Injected into the volatile tier of the system prompt.
 
 use crate::ai::AgentHome;
 
-/// Keep the injected memory block compact (Hermes-style). Content beyond this is
+/// Keep the injected memory block compact. Content beyond this is
 /// truncated in the prompt (the file keeps everything; the agent compacts it).
 pub const MEMORY_MAX_CHARS: usize = 6000;
 

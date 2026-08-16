@@ -9,7 +9,7 @@ export interface CLIPickerOption {
 }
 
 /**
- * In-console arrow-key picker (opencode-style). Rendered above the prompt line.
+ * In-console arrow-key picker. Rendered above the prompt line.
  * Keyboard: type to filter, ↑/↓ to move, Enter to pick, Esc to cancel.
  * For multi-select (targets): Space toggles, Enter confirms.
  */
