@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useAgentStore } from "../../stores/agentStore";
 import { api, type AgentPlanFull } from "../../lib/tauri";
+import { computePlanDiff } from "../../lib/planDiff";
+import { StopIcon } from "../icons";
 
 const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
   presented: { label: "Awaiting review", cls: "text-amber-300 border-amber-500/40 bg-amber-500/10" },
@@ -25,14 +27,19 @@ function formatTimestamp(s: string): string {
  */
 export function PlanModal() {
   const pendingPlan = useAgentStore((s) => s.pendingPlan);
+  const previousPlanText = useAgentStore((s) => s.previousPlanText);
   const planDraft = useAgentStore((s) => s.planDraft);
   const planHistory = useAgentStore((s) => s.planHistory);
   const planHistoryOpen = useAgentStore((s) => s.planHistoryOpen);
+  const streaming = useAgentStore((s) => s.streaming);
+  const streamingText = useAgentStore((s) => s.streamingText);
+  const activity = useAgentStore((s) => s.activity);
   const setPlanDraft = useAgentStore((s) => s.setPlanDraft);
   const applyPlan = useAgentStore((s) => s.applyPlan);
   const archivePlanAction = useAgentStore((s) => s.archivePlanAction);
   const cancelPlanAction = useAgentStore((s) => s.cancelPlanAction);
   const revisePlan = useAgentStore((s) => s.revisePlan);
+  const stopPlanRevision = useAgentStore((s) => s.stopPlanRevision);
   const loadPlanHistory = useAgentStore((s) => s.loadPlanHistory);
   const setPlanHistoryOpen = useAgentStore((s) => s.setPlanHistoryOpen);
   const closePlanModal = useAgentStore((s) => s.closePlanModal);
@@ -40,8 +47,21 @@ export function PlanModal() {
   const [feedback, setFeedback] = useState("");
   const [viewing, setViewing] = useState<AgentPlanFull | null>(null);
   const [sending, setSending] = useState(false);
+  const [viewMode, setViewMode] = useState<"edit" | "preview" | "diff">("edit");
 
   const open = !!pendingPlan || planHistoryOpen;
+
+  const diff = useMemo(
+    () => computePlanDiff(previousPlanText || "", planDraft || ""),
+    [previousPlanText, planDraft],
+  );
+
+  // Automatically switch to diff view if a revision with diff changes arrives
+  useEffect(() => {
+    if (previousPlanText && diff.hasChanges) {
+      setViewMode("diff");
+    }
+  }, [previousPlanText, diff.hasChanges]);
 
   useEffect(() => {
     if (!open) return;
@@ -91,6 +111,12 @@ export function PlanModal() {
 
   const badge = (status: string) => STATUS_BADGE[status] ?? STATUS_BADGE.presented;
 
+  const runningActivity = activity.find((a) => a.state === "running");
+  const activeActivityLabel = runningActivity
+    ? runningActivity.detail || runningActivity.label
+    : null;
+  const streamingSnippet = streamingText ? streamingText.trim().slice(-240) : "";
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
       <div className="flex h-[min(85vh,820px)] w-[min(980px,94vw)] flex-col overflow-hidden rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-2)] shadow-[var(--shadow-panel)]">
@@ -138,7 +164,7 @@ export function PlanModal() {
 
         {/* Body */}
         <div className="flex min-h-0 flex-1">
-          {/* Main: editor or history */}
+          {/* Main: editor, diff or history */}
           <div className="flex min-w-0 flex-1 flex-col">
             {viewing ? (
               <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap px-4 py-3 font-mono text-[12px] leading-relaxed text-[var(--text)]">
@@ -172,12 +198,108 @@ export function PlanModal() {
                 )}
               </div>
             ) : pendingPlan ? (
-              <textarea
-                value={planDraft}
-                onChange={(e) => setPlanDraft(e.target.value)}
-                spellCheck={false}
-                className="min-h-0 flex-1 resize-none bg-transparent px-4 py-3 font-mono text-[12px] leading-relaxed text-[var(--text)] outline-none"
-              />
+              <>
+                {/* Main View Mode Selector */}
+                <div className="flex items-center justify-between border-b border-[var(--border)] bg-[var(--bg)]/50 px-3 py-1.5 text-[11px]">
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setViewMode("edit")}
+                      className={`rounded px-2.5 py-1 font-medium transition ${
+                        viewMode === "edit"
+                          ? "bg-[var(--surface-3)] text-white shadow-xs"
+                          : "text-[var(--text-faint)] hover:bg-[var(--surface)] hover:text-[var(--text)]"
+                      }`}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setViewMode("preview")}
+                      className={`rounded px-2.5 py-1 font-medium transition ${
+                        viewMode === "preview"
+                          ? "bg-[var(--surface-3)] text-white shadow-xs"
+                          : "text-[var(--text-faint)] hover:bg-[var(--surface)] hover:text-[var(--text)]"
+                      }`}
+                    >
+                      Preview
+                    </button>
+                    {previousPlanText && (
+                      <button
+                        type="button"
+                        onClick={() => setViewMode("diff")}
+                        className={`flex items-center gap-1.5 rounded px-2.5 py-1 font-medium transition ${
+                          viewMode === "diff"
+                            ? "bg-[var(--surface-3)] text-white shadow-xs"
+                            : "text-[var(--text-faint)] hover:bg-[var(--surface)] hover:text-[var(--text)]"
+                        }`}
+                      >
+                        Diff changes
+                        {diff.hasChanges && (
+                          <span className="flex items-center gap-1 font-mono text-[10px]">
+                            {diff.addedCount > 0 && <span className="text-emerald-400">+{diff.addedCount}</span>}
+                            {diff.removedCount > 0 && <span className="text-rose-400">-{diff.removedCount}</span>}
+                          </span>
+                        )}
+                      </button>
+                    )}
+                  </div>
+                  {viewMode === "diff" && diff.hasChanges && (
+                    <div className="text-[10px] text-[var(--text-faint)]">
+                      Diff against previous plan version
+                    </div>
+                  )}
+                </div>
+
+                {/* Content View */}
+                {viewMode === "diff" && previousPlanText ? (
+                  <div className="min-h-0 flex-1 overflow-auto bg-[#0a0e14] py-2 font-mono text-[12px] leading-relaxed">
+                    {diff.lines.map((line, idx) => (
+                      <div
+                        key={idx}
+                        className={`flex items-start px-2 py-0.5 ${
+                          line.kind === "add"
+                            ? "bg-emerald-950/40 text-emerald-200 border-l-2 border-emerald-500"
+                            : line.kind === "del"
+                              ? "bg-rose-950/40 text-rose-300 border-l-2 border-rose-500 opacity-85"
+                              : "text-gray-300 border-l-2 border-transparent"
+                        }`}
+                      >
+                        <span className="w-8 shrink-0 select-none text-right pr-2 text-[10px] text-gray-600">
+                          {line.oldLineNumber ?? ""}
+                        </span>
+                        <span className="w-8 shrink-0 select-none text-right pr-2 text-[10px] text-gray-600">
+                          {line.newLineNumber ?? ""}
+                        </span>
+                        <span
+                          className={`w-5 shrink-0 select-none text-center font-bold ${
+                            line.kind === "add"
+                              ? "text-emerald-400"
+                              : line.kind === "del"
+                                ? "text-rose-400"
+                                : "text-gray-600"
+                          }`}
+                        >
+                          {line.kind === "add" ? "+" : line.kind === "del" ? "-" : " "}
+                        </span>
+                        <span className="flex-1 whitespace-pre-wrap break-all">{line.text || "\u00A0"}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : viewMode === "preview" ? (
+                  <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap px-4 py-3 font-mono text-[12px] leading-relaxed text-[var(--text)]">
+                    {planDraft}
+                  </pre>
+                ) : (
+                  <textarea
+                    value={planDraft}
+                    onChange={(e) => setPlanDraft(e.target.value)}
+                    spellCheck={false}
+                    disabled={streaming}
+                    className="min-h-0 flex-1 resize-none bg-transparent px-4 py-3 font-mono text-[12px] leading-relaxed text-[var(--text)] outline-none disabled:opacity-60"
+                  />
+                )}
+              </>
             ) : (
               <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
                 <div className="px-2 py-6 text-center text-[11px] text-[var(--text-faint)]">
@@ -189,61 +311,118 @@ export function PlanModal() {
 
           {/* Side: revision chat + actions (only for the active pending plan) */}
           {pendingPlan && !viewing && !planHistoryOpen && (
-            <div className="flex w-64 shrink-0 flex-col border-l border-[var(--border)]">
-              <div className="border-b border-[var(--border)] px-3 py-2 text-[10px] font-medium uppercase tracking-wide text-[var(--text-faint)]">
-                Refine with the agent
+            <div className="flex w-72 shrink-0 flex-col border-l border-[var(--border)] bg-[var(--surface-1)]">
+              <div className="border-b border-[var(--border)] px-3 py-2 text-[10px] font-medium uppercase tracking-wide text-[var(--text-faint)] flex items-center justify-between">
+                <span>Refine with the agent</span>
+                {streaming && (
+                  <span className="flex items-center gap-1 text-amber-400 text-[10px] font-normal normal-case">
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+                    Running
+                  </span>
+                )}
               </div>
-              <div className="flex min-h-0 flex-1 flex-col gap-2 px-3 py-2">
+
+              <div className="flex min-h-0 flex-1 flex-col gap-2.5 px-3 py-2.5 overflow-y-auto">
+                {/* Live Progress Card when agent is revising */}
+                {streaming && (
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 flex flex-col gap-2">
+                    <div className="flex items-center gap-2 text-[11px] font-semibold text-amber-300">
+                      <span className="relative flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+                      </span>
+                      Agent is revising plan…
+                    </div>
+
+                    {activeActivityLabel && (
+                      <div className="text-[10px] text-amber-200/90 font-mono break-all leading-tight">
+                        ⚙️ {activeActivityLabel}
+                      </div>
+                    )}
+
+                    {streamingSnippet && (
+                      <div className="max-h-24 overflow-y-auto rounded bg-black/40 p-2 font-mono text-[10px] text-gray-300 leading-tight">
+                        {streamingSnippet}
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => void stopPlanRevision()}
+                      className="flex items-center justify-center gap-1.5 rounded bg-rose-600/90 hover:bg-rose-600 py-1.5 px-2.5 text-[11px] font-semibold text-white transition shadow-xs"
+                    >
+                      <StopIcon size={12} />
+                      Stop Agent
+                    </button>
+                  </div>
+                )}
+
                 <textarea
                   value={feedback}
                   onChange={(e) => setFeedback(e.target.value)}
                   placeholder="e.g. add a rollback step, split into phases, use less downtime…"
-                  rows={6}
-                  className="resize-none rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 font-mono text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-faint)]"
+                  rows={5}
+                  disabled={streaming}
+                  className="resize-none rounded border border-[var(--border)] bg-[var(--bg)] px-2.5 py-2 font-mono text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-faint)] focus:border-[var(--accent)] disabled:opacity-50"
                 />
+
                 <button
                   type="button"
-                  disabled={sending || !feedback.trim()}
+                  disabled={sending || streaming || !feedback.trim()}
                   onClick={() => void sendRevision("feedback")}
-                  className="rounded bg-[var(--accent-muted)] px-2 py-1.5 text-[11px] font-medium text-[var(--accent)] disabled:opacity-40"
+                  className="rounded bg-[var(--accent-muted)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--accent)] hover:bg-[var(--accent)] hover:text-black transition disabled:opacity-40"
                 >
-                  {sending ? "Sending…" : "Send changes"}
+                  {sending || streaming ? "Sending…" : "Send changes"}
                 </button>
+
                 <button
                   type="button"
-                  disabled={sending}
+                  disabled={sending || streaming}
                   onClick={() => void sendRevision("apply-draft")}
-                  className="rounded border border-[var(--border)] px-2 py-1.5 text-[11px] text-[var(--text-faint)] hover:bg-[var(--border)] disabled:opacity-40"
+                  className="rounded border border-[var(--border)] px-2.5 py-1.5 text-[11px] text-[var(--text-faint)] hover:bg-[var(--border)] hover:text-white transition disabled:opacity-40"
                 >
                   Submit my edited plan
                 </button>
-                <div className="mt-2 border-t border-[var(--border)] pt-2 text-[10px] leading-relaxed text-[var(--text-faint)]">
+
+                <div className="mt-auto border-t border-[var(--border)] pt-2 text-[10px] leading-relaxed text-[var(--text-faint)]">
                   The agent revises and re-presents the plan here. Nothing runs until you apply.
                 </div>
               </div>
-              <div className="flex flex-col gap-1.5 border-t border-[var(--border)] px-3 py-2">
+
+              {/* Action Buttons */}
+              <div className="flex flex-col gap-2 border-t border-[var(--border)] p-3 bg-[var(--surface-2)]">
                 <button
                   type="button"
-                  disabled={sending}
+                  disabled={sending || streaming}
                   onClick={() => void applyPlan(pendingPlan.id)}
-                  className="rounded bg-emerald-600/90 px-2 py-1.5 text-[12px] font-semibold text-white hover:bg-emerald-600 disabled:opacity-40"
+                  className="rounded bg-emerald-600/90 px-3 py-2 text-[12px] font-semibold text-white hover:bg-emerald-600 disabled:opacity-40 flex items-center justify-center gap-1.5 transition shadow-sm"
                 >
-                  {sending ? "Working…" : "Apply & run"}
+                  {streaming ? (
+                    <>
+                      <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-white" />
+                      Agent is revising…
+                    </>
+                  ) : sending ? (
+                    "Working…"
+                  ) : (
+                    "Apply & run"
+                  )}
                 </button>
-                <div className="flex gap-1.5">
+
+                <div className="flex gap-2">
                   <button
                     type="button"
-                    disabled={sending}
+                    disabled={sending || streaming}
                     onClick={() => void archivePlanAction(pendingPlan.id)}
-                    className="flex-1 rounded border border-[var(--border)] px-2 py-1.5 text-[11px] text-[var(--text-faint)] hover:bg-[var(--border)] disabled:opacity-40"
+                    className="flex-1 rounded border border-[var(--border)] px-2 py-1.5 text-[11px] text-[var(--text-faint)] hover:bg-[var(--border)] hover:text-white transition disabled:opacity-40"
                   >
                     Archive
                   </button>
                   <button
                     type="button"
-                    disabled={sending}
+                    disabled={sending || streaming}
                     onClick={() => void cancelPlanAction(pendingPlan.id)}
-                    className="flex-1 rounded border border-[var(--border)] px-2 py-1.5 text-[11px] text-[var(--text-faint)] hover:bg-[var(--border)] disabled:opacity-40"
+                    className="flex-1 rounded border border-[var(--border)] px-2 py-1.5 text-[11px] text-[var(--text-faint)] hover:bg-[var(--border)] hover:text-white transition disabled:opacity-40"
                   >
                     Cancel
                   </button>

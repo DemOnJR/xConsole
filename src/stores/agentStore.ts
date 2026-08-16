@@ -209,6 +209,8 @@ interface AgentState {
   pendingApprovals: AgentApproval[];
   pendingQuestions: AgentQuestion[];
   pendingPlan: AgentPlan | null;
+  /** Text of previous plan before revision, used for git-diff view in plan modal. */
+  previousPlanText: string | null;
   /** Editable copy of the pending plan shown in the modal. */
   planDraft: string;
   /** Persisted plan history (presented/applied/archived/cancelled). */
@@ -273,6 +275,7 @@ interface AgentState {
   loadPlanHistory: () => Promise<void>;
   setPlanHistoryOpen: (open: boolean) => void;
   closePlanModal: () => Promise<void>;
+  stopPlanRevision: () => Promise<void>;
 }
 
 const newSessionId = () =>
@@ -377,6 +380,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   pendingApprovals: [],
   pendingQuestions: [],
   pendingPlan: null,
+  previousPlanText: null,
   planDraft: "",
   planHistory: [],
   planHistoryOpen: false,
@@ -446,7 +450,12 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       maybeSpeak(first);
     });
     const unPlan = await onAgentPlan((plan) => {
-      set({ pendingPlan: plan, planDraft: plan.plan });
+      const current = get().pendingPlan?.plan;
+      set((s) => ({
+        pendingPlan: plan,
+        planDraft: plan.plan,
+        previousPlanText: current && current !== plan.plan ? current : s.previousPlanText,
+      }));
       void notify(
         "xConsole agent — plan ready for review",
         plan.title || "Review the proposed plan.",
@@ -492,7 +501,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   },
 
   resolvePlan: async (id, approve, feedback) => {
-    set({ pendingPlan: null, planDraft: "" });
+    set({ pendingPlan: null, previousPlanText: null, planDraft: "" });
     const answer = approve ? "APPROVE" : `REJECT: ${feedback ?? ""}`.trim();
     await api.agentAnswerPrompt(id, answer);
     // Taste learning: plan rejection feedback becomes a lasting preference.
@@ -522,7 +531,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       // user can retry, rather than silently closing and losing the plan.
       throw e;
     }
-    set({ pendingPlan: null, planDraft: "" });
+    set({ pendingPlan: null, previousPlanText: null, planDraft: "" });
     void get().loadPlanHistory();
   },
 
@@ -532,7 +541,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     } catch (e) {
       throw e;
     }
-    set({ pendingPlan: null, planDraft: "" });
+    set({ pendingPlan: null, previousPlanText: null, planDraft: "" });
     void get().loadPlanHistory();
   },
 
@@ -542,7 +551,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     } catch (e) {
       throw e;
     }
-    set({ pendingPlan: null, planDraft: "" });
+    set({ pendingPlan: null, previousPlanText: null, planDraft: "" });
     void get().loadPlanHistory();
   },
 
@@ -566,13 +575,27 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   closePlanModal: async () => {
     const pending = get().pendingPlan;
-    set({ pendingPlan: null, planDraft: "", planHistoryOpen: false });
+    set({ pendingPlan: null, previousPlanText: null, planDraft: "", planHistoryOpen: false });
     // Closing without a decision = cancel: unblock the waiting present_plan
     // tool and record the plan as cancelled in history.
     if (pending) {
       await api.cancelPlan(pending.id).catch(() => {});
       void get().loadPlanHistory();
     }
+  },
+
+  stopPlanRevision: async () => {
+    if (get().speaking) {
+      cancelSpeech();
+      set({ speaking: false });
+    }
+    if (get().streaming) {
+      void api.agentCancel(get().sessionId).catch(() => {});
+    }
+    set({
+      streaming: false,
+      holdQueue: true,
+    });
   },
 
   newConversation: async () => {
