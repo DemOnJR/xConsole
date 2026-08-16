@@ -433,6 +433,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
 
 
   const [input, setInput] = useState("");
+  const [copiedError, setCopiedError] = useState(false);
   const [intakeSpec, setIntakeSpec] = useState<GoalSpec | null>(null);
   const [intakeStatus, setIntakeStatus] = useState<string | null>(null);
   const [pendingImages, setPendingImages] = useState<ChatImage[]>([]);
@@ -1427,11 +1428,25 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
       )}
 
       {error && (
-        <div className="flex items-start gap-2 border-t border-red-900/30 px-3 py-2 text-xs text-red-400">
-          <span className="min-w-0 flex-1">{error}</span>
+        <div className="flex items-start gap-2 border-t border-red-900/40 bg-red-950/20 px-3 py-2 text-xs text-red-400">
+          <span className="nowheel min-w-0 flex-1 cursor-text select-text break-words font-mono text-[11px] leading-relaxed">
+            {error}
+          </span>
           <button
             type="button"
-            className="shrink-0 rounded border border-red-800/50 px-1.5 py-0.5 text-[10px] text-red-200 hover:bg-red-950/50"
+            className="shrink-0 rounded border border-red-800/50 bg-red-950/40 px-1.5 py-0.5 text-[10px] text-red-200 transition hover:bg-red-900/50"
+            onClick={() => {
+              void navigator.clipboard.writeText(error);
+              setCopiedError(true);
+              setTimeout(() => setCopiedError(false), 2000);
+            }}
+            data-tooltip="Copy error to clipboard"
+          >
+            {copiedError ? "Copied!" : "Copy"}
+          </button>
+          <button
+            type="button"
+            className="shrink-0 rounded border border-red-800/50 bg-red-950/40 px-1.5 py-0.5 text-[10px] text-red-200 transition hover:bg-red-900/50"
             onClick={() => void retryLast()}
             data-tooltip="Re-send the last message"
           >
