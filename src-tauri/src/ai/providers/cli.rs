@@ -81,9 +81,8 @@ impl CliProvider {
                 a
             }
             "antigravity_cli" => {
-                // `agy` CLI in headless mode: print mode, auto-approve permissions, text output.
+                // `agy` CLI flags placed BEFORE the prompt argument.
                 let mut a = vec![
-                    "-p".to_string(),
                     "--dangerously-skip-permissions".to_string(),
                     "--output-format".to_string(),
                     "text".to_string(),
@@ -249,9 +248,16 @@ async fn spawn_with_stdin(
         spawn_cli_program(bin)?
     };
 
-    cmd.args(flags)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
+    cmd.args(flags);
+
+    if kind == "antigravity_cli" {
+        cmd.arg("-p").arg(prompt);
+        cmd.stdin(std::process::Stdio::null());
+    } else {
+        cmd.stdin(std::process::Stdio::piped());
+    }
+
+    cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
     if kind == "cursor" {
@@ -271,12 +277,14 @@ async fn spawn_with_stdin(
         }
     })?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(prompt.as_bytes())
-            .await
-            .map_err(|e| format!("failed to write prompt to CLI stdin: {e}"))?;
-        drop(stdin);
+    if kind != "antigravity_cli" {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(prompt.as_bytes())
+                .await
+                .map_err(|e| format!("failed to write prompt to CLI stdin: {e}"))?;
+            drop(stdin);
+        }
     }
 
     Ok(child)
