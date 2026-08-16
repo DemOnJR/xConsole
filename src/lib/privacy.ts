@@ -37,7 +37,30 @@ export function maskIpString(ip: string): string {
 }
 
 /**
- * Replaces any occurrences of known machine hosts inside an arbitrary string with masked versions.
+ * Masks all IPv4 addresses in an arbitrary text string (e.g. MOTD banners, command outputs, interface IPs).
+ * Avoids common non-sensitive addresses like 127.0.0.1 and 0.0.0.0.
+ */
+export function maskAllIpsInText(text: string): string {
+  if (!text) return text;
+  return text.replace(
+    /\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(:\d+)?\b/g,
+    (match, p1, p2, p3, p4, port) => {
+      const n1 = parseInt(p1, 10);
+      const n2 = parseInt(p2, 10);
+      const n3 = parseInt(p3, 10);
+      const n4 = parseInt(p4, 10);
+      if (n1 <= 255 && n2 <= 255 && n3 <= 255 && n4 <= 255) {
+        if (match === "127.0.0.1" || match === "0.0.0.0") return match;
+        return `${p1}.***.***.${p4}${port ?? ""}`;
+      }
+      return match;
+    },
+  );
+}
+
+/**
+ * Replaces any occurrences of known machine hosts inside an arbitrary string with masked versions,
+ * and masks all detected IPv4 addresses when privacy mode is enabled.
  */
 export function maskMachineIpsInText(
   text: string,
@@ -53,7 +76,44 @@ export function maskMachineIpsInText(
       result = result.split(host).join(masked);
     }
   }
+  result = maskAllIpsInText(result);
   return result;
+}
+
+/**
+ * Directly returns all known VPS and Canvas node hosts.
+ */
+export function getKnownHosts(): string[] {
+  const vpsList = useVpsStore.getState().vpsList;
+  const nodes = useCanvasStore.getState().nodes;
+  const set = new Set<string>();
+  for (const v of vpsList) {
+    if (v.host && typeof v.host === "string" && v.host.trim()) {
+      set.add(v.host.trim());
+    }
+  }
+  for (const n of nodes) {
+    const h = (n.data as { host?: string } | undefined)?.host;
+    if (h && typeof h === "string" && h.trim()) {
+      set.add(h.trim());
+    }
+  }
+  return Array.from(set);
+}
+
+/**
+ * Masks raw terminal output (Uint8Array or string) for xterm / PTY streaming when privacy mode is on.
+ */
+export function maskTerminalData(
+  data: Uint8Array | string,
+  machineHosts?: string[],
+  maskEnabled?: boolean,
+): string {
+  const isEnabled = maskEnabled ?? usePrivacyStore.getState().maskIps;
+  const text = typeof data === "string" ? data : new TextDecoder().decode(data);
+  if (!isEnabled) return text;
+  const hosts = machineHosts ?? getKnownHosts();
+  return maskMachineIpsInText(text, hosts, true);
 }
 
 /**
@@ -100,3 +160,4 @@ export function useMaskHost(): (hostOrText: string) => string {
     };
   }, [maskIps, machineHosts]);
 }
+

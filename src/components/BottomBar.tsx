@@ -16,6 +16,8 @@ import { useUiStore } from "../stores/uiStore";
 import type { ConnState } from "../stores/sessionStore";
 import { useXtermScaleFix } from "../hooks/useXtermScaleFix";
 import { useThemeStore } from "../stores/themeStore";
+import { maskTerminalData } from "../lib/privacy";
+import { usePrivacyStore } from "../stores/privacyStore";
 import {
   ChevronDownIcon,
   ChevronUpIcon,
@@ -134,14 +136,14 @@ function ConsolePane({
       );
       unlisteners.push(
         await onSessionOutput(sid, (bytes) => {
-          term.write(bytes);
           const text = new TextDecoder().decode(bytes);
+          term.write(maskTerminalData(text));
           const next = extractCwdFromOutput(text);
           if (next) setCwd(next);
         }),
       );
       const replay = await api.sshReplay(sid);
-      if (replay) term.write(b64ToBytes(replay));
+      if (replay) term.write(maskTerminalData(b64ToBytes(replay)));
     };
 
     (async () => {
@@ -198,9 +200,20 @@ function ConsolePane({
     });
     if (containerRef.current) ro.observe(containerRef.current);
 
+    const unsubPrivacy = usePrivacyStore.subscribe(async (state, prevState) => {
+      if (state.maskIps !== prevState.maskIps && sessionIdRef.current && termRef.current) {
+        const replay = await api.sshReplay(sessionIdRef.current).catch(() => null);
+        if (replay && termRef.current) {
+          termRef.current.clear();
+          termRef.current.write(maskTerminalData(b64ToBytes(replay)));
+        }
+      }
+    });
+
     return () => {
       // Keep the backend session alive (registry) so reselecting reattaches.
       mounted = false;
+      unsubPrivacy();
       dataSub.dispose();
       ro.disconnect();
       unlisteners.forEach((u) => u());

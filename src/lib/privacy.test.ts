@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { maskIpString, maskMachineIpsInText } from "./privacy";
+import { maskIpString, maskMachineIpsInText, maskAllIpsInText, maskTerminalData } from "./privacy";
 
 describe("privacy masking", () => {
   it("masks IPv4 addresses keeping first and last octet", () => {
@@ -23,4 +23,25 @@ describe("privacy masking", () => {
     const unmasked = maskMachineIpsInText(text, machineHosts, false);
     expect(unmasked).toBe(text);
   });
+
+  it("masks SSH MOTD banners containing interface IPv4 and login IPs", () => {
+    const motd = `System load: 0.87 Processes: 251
+Usage of /: 60.3% of 231.44GB Users logged in: 1
+Memory usage: 46% IPv4 address for ens6: 212.227.52.118
+Last login: Sun Aug 16 21:46:46 2026 from 93.151.225.49`;
+
+    const masked = maskAllIpsInText(motd);
+    expect(masked).toContain("IPv4 address for ens6: 212.***.***.118");
+    expect(masked).toContain("from 93.***.***.49");
+    expect(masked).not.toContain("212.227.52.118");
+    expect(masked).not.toContain("93.151.225.49");
+  });
+
+  it("masks terminal data bytes seamlessly", () => {
+    const raw = "IPv4 address for ens6: 212.227.52.118";
+    const bytes = new TextEncoder().encode(raw);
+    const result = maskTerminalData(bytes, [], true);
+    expect(result).toBe("IPv4 address for ens6: 212.***.***.118");
+  });
 });
+
