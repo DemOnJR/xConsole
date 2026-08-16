@@ -528,14 +528,16 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   setPlanDraft: (draft) => set({ planDraft: draft }),
 
   applyPlan: async (id) => {
+    const draft = get().planDraft || get().pendingPlan?.plan;
+    set({ pendingPlan: null, previousPlanText: null, planDraft: "", planRevising: false });
     try {
       await api.agentAnswerPrompt(id, "APPROVE");
-    } catch (e) {
-      // Backend returned an error (e.g. no waiter): keep the modal open so the
-      // user can retry, rather than silently closing and losing the plan.
-      throw e;
+    } catch {
+      // If the backend prompt was cancelled/stopped or timed out, trigger execution as a new turn!
+      if (draft?.trim()) {
+        void get().send(`Proceed and execute this approved plan:\n\n${draft}`);
+      }
     }
-    set({ pendingPlan: null, previousPlanText: null, planDraft: "", planRevising: false });
     void get().loadPlanHistory();
   },
 
@@ -561,8 +563,13 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   revisePlan: async (id, feedback) => {
     set({ planRevising: true });
-    // Keep the modal open; the agent revises and re-presents (new ai://plan).
-    await api.agentAnswerPrompt(id, `REJECT: ${feedback}`.trim());
+    try {
+      // Keep the modal open; the agent revises and re-presents (new ai://plan).
+      await api.agentAnswerPrompt(id, `REJECT: ${feedback}`.trim());
+    } catch {
+      // If the prompt waiter is gone (e.g. user stopped agent), send feedback as a new turn to trigger revision.
+      void get().send(`Please revise the plan based on this feedback:\n\n${feedback}`);
+    }
   },
 
   loadPlanHistory: async () => {

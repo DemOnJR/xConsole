@@ -106,9 +106,6 @@ export function AgentConsole({
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col bg-[var(--bg)] font-mono">
-      {latestChecklist ? (
-        <StickyChecklist rawChecklist={latestChecklist} streaming={streaming} />
-      ) : null}
       <div
         ref={scrollRef}
         onScroll={handleScroll}
@@ -195,6 +192,10 @@ export function AgentConsole({
           />
         )}
       </div>
+
+      {latestChecklist ? (
+        <StickyChecklist rawChecklist={latestChecklist} streaming={streaming} position="bottom" />
+      ) : null}
 
       {streaming && (
         <div className="flex shrink-0 items-center justify-between border-t border-[var(--border)]/70 bg-[var(--surface)]/90 px-3 py-1 text-[11px] backdrop-blur-sm">

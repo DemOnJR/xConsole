@@ -98,9 +98,11 @@ export function findLatestChecklist(
 export function StickyChecklist({
   rawChecklist,
   streaming = false,
+  position = "bottom",
 }: {
   rawChecklist: string | null;
   streaming?: boolean;
+  position?: "top" | "bottom";
 }) {
   const [collapsed, setCollapsed] = useState(true);
 
@@ -116,9 +118,59 @@ export function StickyChecklist({
   const activeItem =
     items.find((i) => i.status === "active") || items.find((i) => i.status === "pending");
   const allDone = doneCount === totalCount;
+  const isBottom = position === "bottom";
+
+  const renderExpandedList = () => (
+    <div
+      className={`max-h-48 overflow-y-auto bg-black/50 px-3 py-2 ${
+        isBottom ? "border-b border-[var(--border)]/60" : "border-t border-[var(--border)]/60"
+      }`}
+    >
+      <ul className="flex flex-col gap-1 font-mono text-[11px]">
+        {items.map((item, idx) => {
+          const isDone = item.status === "done";
+          const isActive = item.status === "active";
+          return (
+            <li
+              key={idx}
+              className={`flex items-start gap-2 rounded px-1.5 py-0.5 ${
+                isActive
+                  ? "border-l-2 border-cyan-400 bg-cyan-950/40 font-medium text-cyan-200"
+                  : isDone
+                    ? "line-through opacity-70 text-gray-500"
+                    : "text-gray-300 hover:text-gray-100"
+              }`}
+            >
+              <span
+                className={`shrink-0 font-bold ${
+                  isActive
+                    ? "text-cyan-400"
+                    : isDone
+                      ? "text-emerald-500"
+                      : "text-gray-500"
+                }`}
+              >
+                {isDone ? "✓" : isActive ? "▶" : "○"}
+              </span>
+              <span className="flex-1 break-words">{item.text}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
 
   return (
-    <div className="sticky top-0 z-30 flex w-full flex-col border-b border-[var(--border)] bg-[#0c1017]/95 shadow-md backdrop-blur-md transition-all">
+    <div
+      className={`z-30 flex w-full flex-col bg-[#0c1017]/95 shadow-md backdrop-blur-md transition-all ${
+        isBottom
+          ? "sticky bottom-0 border-t border-[var(--border)]"
+          : "sticky top-0 border-b border-[var(--border)]"
+      }`}
+    >
+      {/* If positioned at bottom, expanded list renders ABOVE the summary header */}
+      {isBottom && !collapsed && renderExpandedList()}
+
       {/* Header bar (always visible) */}
       <div
         onClick={() => setCollapsed((v) => !v)}
@@ -177,53 +229,19 @@ export function StickyChecklist({
           {collapsed ? (
             <>
               <span>{totalCount - doneCount} left</span>
-              <span>▾</span>
+              <span>{isBottom ? "▴" : "▾"}</span>
             </>
           ) : (
             <>
               <span>Collapse</span>
-              <span>▴</span>
+              <span>{isBottom ? "▾" : "▴"}</span>
             </>
           )}
         </button>
       </div>
 
-      {/* Expanded full list */}
-      {!collapsed && (
-        <div className="max-h-48 overflow-y-auto border-t border-[var(--border)]/60 bg-black/40 px-3 py-2">
-          <ul className="flex flex-col gap-1 font-mono text-[11px]">
-            {items.map((item, idx) => {
-              const isDone = item.status === "done";
-              const isActive = item.status === "active";
-              return (
-                <li
-                  key={idx}
-                  className={`flex items-start gap-2 rounded px-1.5 py-0.5 ${
-                    isActive
-                      ? "border-l-2 border-cyan-400 bg-cyan-950/40 font-medium text-cyan-200"
-                      : isDone
-                        ? "line-through opacity-70 text-gray-500"
-                        : "text-gray-300 hover:text-gray-100"
-                  }`}
-                >
-                  <span
-                    className={`shrink-0 font-bold ${
-                      isActive
-                        ? "text-cyan-400"
-                        : isDone
-                          ? "text-emerald-500"
-                          : "text-gray-500"
-                    }`}
-                  >
-                    {isDone ? "✓" : isActive ? "▶" : "○"}
-                  </span>
-                  <span className="flex-1 break-words">{item.text}</span>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      )}
+      {/* If positioned at top, expanded list renders BELOW the summary header */}
+      {!isBottom && !collapsed && renderExpandedList()}
     </div>
   );
 }
