@@ -21,7 +21,8 @@ import { useWorkspaceStore } from "./workspaceStore";
 import { useCanvasStore } from "./canvasStore";
 import { useSessionStore } from "./sessionStore";
 import { useVoiceStore } from "./voiceStore";
-import type { PrefixTelemetry, TurnTelemetry } from "../lib/streamStats";
+import { useSettingsStore } from "./settingsStore";
+import { contextUsageFromMessages, type PrefixTelemetry, type TurnTelemetry } from "../lib/streamStats";
 import {
   appendTextDelta,
   applyActivityEvent,
@@ -615,6 +616,16 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         targets = [];
       }
     }
+    const settings = useSettingsStore.getState().settings;
+    const providers = useSettingsStore.getState().providers;
+    const activeProvider = providers.find((p) => p.id === settings["agent.active_provider"]);
+    const activeModel = settings["agent.active_model"] || activeProvider?.model;
+    const initialContextUsage = contextUsageFromMessages(
+      messages,
+      activeProvider?.kind ?? undefined,
+      activeModel ?? undefined,
+    );
+
     set({
       sessionId: id,
       messages,
@@ -626,7 +637,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       streamStats: [...messages].reverse().find((m) => m.tokenStats)?.tokenStats ?? null,
       turnTelemetry: null,
       prefixTelemetry: null,
-      contextUsage: null,
+      contextUsage: initialContextUsage,
       compactFlipCount: 0,
       error: null,
       conversationCostUsd: sessionCostFromMessages(messages),

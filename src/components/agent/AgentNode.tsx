@@ -339,6 +339,8 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
   const handlePickModel = useCallback(() => setPicker({ kind: "model" }), []);
   const handlePickContext = useCallback(() => setPicker({ kind: "ctx" }), []);
   const handlePickVision = useCallback(() => setPicker({ kind: "vision" }), []);
+  const handlePickSafety = useCallback(() => setPicker({ kind: "safety" }), []);
+  const handlePickReasoning = useCallback(() => setPicker({ kind: "reasoning" }), []);
 
   // Git pill: the repo the agent is working on (active workspace project).
   const activeWsId = useWorkspaceStore((s) => s.activeId);
@@ -606,6 +608,8 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     | "ctx"
     | "cost"
     | "help"
+    | "safety"
+    | "reasoning"
     | "vision"
     | "vision-provider"
     | "vision-models"
@@ -789,6 +793,57 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     [],
   );
 
+  const safetyOptions = useMemo<CLIPickerOption[]>(() => {
+    const cur = effectiveSafetyMode;
+    return [
+      {
+        id: "full",
+        label: "Full permissions",
+        detail: "Auto-run all commands without confirmation",
+        selected: cur === "full",
+      },
+      {
+        id: "allowlist",
+        label: "Allowlist only",
+        detail: "Auto-run safe read-only commands; ask for dangerous ones",
+        selected: cur === "allowlist",
+      },
+      {
+        id: "approve",
+        label: "Ask every time",
+        detail: "Prompt for confirmation on every command",
+        selected: cur === "approve",
+      },
+    ];
+  }, [effectiveSafetyMode]);
+
+  const reasoningOptions = useMemo<CLIPickerOption[]>(() => [
+    {
+      id: "off",
+      label: "Off",
+      detail: "Standard fast generation (no thinking budget)",
+      selected: reasoning === "off",
+    },
+    {
+      id: "low",
+      label: "Low",
+      detail: "Light reasoning effort (brief thinking)",
+      selected: reasoning === "low",
+    },
+    {
+      id: "medium",
+      label: "Medium",
+      detail: "Balanced reasoning effort (standard thinking)",
+      selected: reasoning === "medium",
+    },
+    {
+      id: "high",
+      label: "High",
+      detail: "Maximum reasoning effort (deep thinking)",
+      selected: reasoning === "high",
+    },
+  ], [reasoning]);
+
   const visionProvider = useMemo(
     () => providers.find((p) => p.id === visionProviderId) ?? providers.find(isGeminiProvider),
     [providers, visionProviderId],
@@ -951,6 +1006,20 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
         if (opt.id !== sessionId) void openConversation(opt.id);
         setPicker(null);
         break;
+      case "safety": {
+        if (opt.id === "full" || opt.id === "allowlist" || opt.id === "approve") {
+          void useSettingsStore.getState().set("agent.safety_mode", opt.id);
+        }
+        setPicker(null);
+        break;
+      }
+      case "reasoning": {
+        if (opt.id === "off" || opt.id === "low" || opt.id === "medium" || opt.id === "high") {
+          setReasoningPersisted(opt.id);
+        }
+        setPicker(null);
+        break;
+      }
       case "vision": {
         if (opt.id === "__model__") {
           setPicker({ kind: "vision-provider" });
@@ -1017,6 +1086,10 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
       setPicker({ kind: "model" });
     } else if (cmd.actionKey === "targets") {
       setPicker({ kind: "targets" });
+    } else if (cmd.actionKey === "safety") {
+      setPicker({ kind: "safety" });
+    } else if (cmd.actionKey === "reasoning") {
+      setPicker({ kind: "reasoning" });
     } else if (cmd.actionKey === "plan") {
       togglePlanMode();
     } else if (cmd.actionKey === "export") {
@@ -1520,6 +1593,24 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
               onCancel={() => setPicker(null)}
             />
           )}
+          {picker.kind === "safety" && (
+            <CLIPicker
+              title="Safety — Permissions"
+              options={safetyOptions}
+              onPick={onPickerPick}
+              onCancel={() => setPicker(null)}
+              placeholder="Filter safety mode…"
+            />
+          )}
+          {picker.kind === "reasoning" && (
+            <CLIPicker
+              title="Reasoning — Thinking Effort"
+              options={reasoningOptions}
+              onPick={onPickerPick}
+              onCancel={() => setPicker(null)}
+              placeholder="Filter reasoning level…"
+            />
+          )}
           {picker.kind === "vision" && (
             <CLIPicker
               title="Vision"
@@ -1837,10 +1928,12 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
             activeModel={activeModel || undefined}
             reasoning={reasoning}
             onReasoning={setReasoningPersisted}
+            onPickReasoning={handlePickReasoning}
             planMode={planMode}
             onTogglePlan={togglePlanMode}
             safetyMode={effectiveSafetyMode}
             onCycleSafety={handleCycleSafety}
+            onPickSafety={handlePickSafety}
             contextUsage={contextUsage}
             streamStats={displayStats}
             sessionCache={sessionCache}

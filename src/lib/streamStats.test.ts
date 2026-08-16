@@ -3,6 +3,7 @@ import {
   addTurnToSessionCache,
   cacheBreakdown,
   cacheHitRate,
+  contextUsageFromMessages,
   displayTurnStats,
   emptySessionCache,
   formatCacheLine,
@@ -169,5 +170,36 @@ describe("formatTokenCount", () => {
     expect(formatTokenCount(500)).toBe("500");
     expect(formatTokenCount(12_000)).toBe("12K");
     expect(formatTokenCount(1_500_000)).toBe("1.5M");
+  });
+});
+
+describe("contextUsageFromMessages", () => {
+  it("computes context usage from restored messages", () => {
+    const usage = contextUsageFromMessages(
+      [
+        { role: "user", content: "Hello world, what is the plan?" },
+        {
+          role: "assistant",
+          content: "Here is the response text.",
+          tokenStats: {
+            completionTokens: 25,
+            promptTokens: 4000,
+            tokensPerSec: 50,
+            source: "provider",
+          },
+        },
+      ],
+      "anthropic",
+      "claude-sonnet-4-5",
+    );
+    expect(usage).not.toBeNull();
+    expect(usage!.context_limit).toBe(200_000);
+    expect(usage!.total_tokens).toBeGreaterThanOrEqual(4000);
+    expect(usage!.percent).toBeGreaterThan(0);
+    expect(usage!.segments.length).toBeGreaterThan(0);
+  });
+
+  it("returns null for empty messages", () => {
+    expect(contextUsageFromMessages([])).toBeNull();
   });
 });

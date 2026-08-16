@@ -30,6 +30,7 @@ export const InputBar = memo(function InputBar({
   onTogglePlan,
   safetyMode,
   onCycleSafety,
+  onPickSafety,
   contextUsage,
   streamStats,
   sessionCache,
@@ -42,6 +43,7 @@ export const InputBar = memo(function InputBar({
   onPickContext,
   visionLabel,
   onPickVision,
+  onPickReasoning,
 }: {
   activeProvider?: AiProvider;
   activeModel?: string;
@@ -50,7 +52,8 @@ export const InputBar = memo(function InputBar({
   planMode: boolean;
   onTogglePlan: () => void;
   safetyMode: string;
-  onCycleSafety: () => void;
+  onCycleSafety?: () => void;
+  onPickSafety?: () => void;
   contextUsage: ContextUsage | null;
   streamStats: TokenStats | null;
   sessionCache?: SessionCacheTotals | null;
@@ -63,6 +66,7 @@ export const InputBar = memo(function InputBar({
   onPickContext: () => void;
   visionLabel?: string;
   onPickVision?: () => void;
+  onPickReasoning?: () => void;
 }) {
   const model = activeModel || activeProvider?.model;
   const canReason = reasoningCapable(activeProvider?.kind, model ?? undefined);
@@ -100,11 +104,11 @@ export const InputBar = memo(function InputBar({
       <button
         type="button"
         className={`${iconBtn} ${safetyTone}`}
-        onClick={onCycleSafety}
+        onClick={onPickSafety ?? onCycleSafety}
         onPointerDown={stopNode}
         onMouseDown={stopNode}
         aria-label={`Safety profile ${safety}`}
-        data-tooltip={`Safety: ${safety}\nClick to cycle (full / allowlist / approve)`}
+        data-tooltip={`Safety: ${safety}\nChoose permission level (/safety)`}
       >
         <ShieldIcon size={14} />
       </button>
@@ -139,11 +143,11 @@ export const InputBar = memo(function InputBar({
         <button
           type="button"
           className={`${iconBtn} ${reasoning !== "off" ? "text-violet-300" : ""}`}
-          onClick={cycleReasoning}
+          onClick={onPickReasoning ?? cycleReasoning}
           onPointerDown={stopNode}
           onMouseDown={stopNode}
           aria-label={`Reasoning ${reasoning}`}
-          data-tooltip={`Reasoning: ${reasoning}\nClick to cycle (off / low / medium / high)`}
+          data-tooltip={`Reasoning: ${reasoning}\nChoose reasoning effort (/reasoning)`}
         >
           <BrainIcon size={14} />
         </button>

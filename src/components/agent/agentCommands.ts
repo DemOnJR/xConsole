@@ -18,7 +18,9 @@ export interface SlashCommandDef {
     | "conversation"
     | "loop"
     | "goal"
-    | "vision";
+    | "vision"
+    | "safety"
+    | "reasoning";
   /** When set, picking the command inserts `/name ` so the user can type the rest. */
   needsArg?: boolean;
 }
@@ -35,6 +37,24 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     syntax: "/targets",
     description: "Select target VPS hosts (space toggles, enter done)",
     actionKey: "targets",
+  },
+  {
+    name: "safety",
+    syntax: "/safety",
+    description: "Set safety mode: full / allowlist / approve",
+    actionKey: "safety",
+  },
+  {
+    name: "reasoning",
+    syntax: "/reasoning",
+    description: "Set reasoning effort: off / low / medium / high",
+    actionKey: "reasoning",
+  },
+  {
+    name: "think",
+    syntax: "/think",
+    description: "Set reasoning effort (thinking budget): off / low / medium / high",
+    actionKey: "reasoning",
   },
   {
     name: "new",

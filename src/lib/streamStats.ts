@@ -208,3 +208,95 @@ export function liveGenerationStats(
     source: "estimate",
   };
 }
+
+export function defaultContextLimit(kind?: string, model?: string): number {
+  const m = (model ?? "").toLowerCase();
+  const k = (kind ?? "").toLowerCase();
+  if (m.includes("deepseek") || m.includes("gemini")) {
+    return 1_000_000;
+  }
+  if (k === "ollama") return 65_536;
+  if (
+    k === "anthropic" ||
+    k === "cursor" ||
+    k === "codex_cli" ||
+    k === "opencode_cli" ||
+    k === "antigravity_cli"
+  ) {
+    return 200_000;
+  }
+  return 128_000;
+}
+
+export function contextUsageFromMessages(
+  messages: Array<{
+    role: string;
+    content?: string;
+    toolCalls?: Array<{ name: string; arguments?: unknown }>;
+    images?: unknown[];
+    tokenStats?: TokenStats;
+  }>,
+  providerKind?: string,
+  model?: string,
+): ContextUsage | null {
+  if (!messages || messages.length === 0) return null;
+
+  let userTokens = 0;
+  let assistantTokens = 0;
+  let toolTokens = 0;
+
+  for (const m of messages) {
+    let t = estimateTokens(m.content || "");
+    if (m.toolCalls && Array.isArray(m.toolCalls)) {
+      for (const tc of m.toolCalls) {
+        const argStr =
+          typeof tc.arguments === "string"
+            ? tc.arguments
+            : JSON.stringify(tc.arguments || {});
+        t += estimateTokens(tc.name || "") + estimateTokens(argStr);
+      }
+    }
+    if (m.images && Array.isArray(m.images)) {
+      t += m.images.length * 1600;
+    }
+    t += 4;
+
+    if (m.role === "user") {
+      userTokens += t;
+    } else if (m.role === "assistant") {
+      assistantTokens += t;
+    } else {
+      toolTokens += t;
+    }
+  }
+
+  const estimatedConversationTokens = userTokens + assistantTokens + toolTokens;
+  if (estimatedConversationTokens === 0) return null;
+
+  const lastWithStats = [...messages].reverse().find((m) => m.tokenStats?.promptTokens);
+  const providerPromptTokens = lastWithStats?.tokenStats?.promptTokens;
+  const providerCompletionTokens = lastWithStats?.tokenStats?.completionTokens ?? 0;
+
+  const totalTokens = providerPromptTokens
+    ? Math.max(providerPromptTokens + providerCompletionTokens, estimatedConversationTokens)
+    : estimatedConversationTokens;
+
+  const limit = defaultContextLimit(providerKind, model);
+  const percent = Math.min(100, Math.round((totalTokens / limit) * 1000) / 10);
+
+  const convTotal = userTokens + assistantTokens;
+  const otherTokens = Math.max(0, totalTokens - (convTotal + toolTokens));
+
+  const segments: ContextUsageSegment[] = [
+    { key: "conversation", label: "Messages", tokens: convTotal },
+    ...(toolTokens > 0 ? [{ key: "tools", label: "Tool calls & outputs", tokens: toolTokens }] : []),
+    ...(otherTokens > 0 ? [{ key: "system", label: "System & context", tokens: otherTokens }] : []),
+  ];
+
+  return {
+    segments,
+    total_tokens: totalTokens,
+    context_limit: limit,
+    percent,
+  };
+}
