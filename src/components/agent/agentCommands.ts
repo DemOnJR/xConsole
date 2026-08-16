@@ -20,7 +20,8 @@ export interface SlashCommandDef {
     | "goal"
     | "vision"
     | "safety"
-    | "reasoning";
+    | "reasoning"
+    | "rename";
   /** When set, picking the command inserts `/name ` so the user can type the rest. */
   needsArg?: boolean;
 }
@@ -73,6 +74,13 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     syntax: "/history",
     description: "Browse past conversations (arrows + Enter)",
     actionKey: "history",
+  },
+  {
+    name: "rename",
+    syntax: "/rename <title>",
+    description: "Rename the current conversation session",
+    needsArg: true,
+    actionKey: "rename",
   },
   {
     name: "plan",

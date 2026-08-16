@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from "react";
-import type { AgentChatMessage, TurnSegment } from "../../stores/agentStore";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useAgentStore, type AgentChatMessage, type TurnSegment } from "../../stores/agentStore";
 import { plainText } from "../../lib/plainText";
 import { AgentMarkdown } from "./AgentMarkdown";
 import { AgentActivityFeed, AgentThinking } from "./AgentActivity";
 import { segmentsFromMessage } from "../../stores/turnSegments";
 import { previewSrc } from "../../lib/vision";
 import { useMaskHost } from "../../lib/privacy";
+import { StickyChecklist, findLatestChecklist } from "./StickyChecklist";
 
 function AssistantTurn({
   segments,
@@ -77,6 +78,12 @@ export function AgentConsole({
   const [userScrolledUp, setUserScrolledUp] = useState(false);
   const maskHost = useMaskHost();
 
+  const liveActivity = useAgentStore((s) => s.activity);
+  const latestChecklist = useMemo(
+    () => findLatestChecklist(messages, streamingSegments, liveActivity),
+    [messages, streamingSegments, liveActivity],
+  );
+
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
@@ -99,6 +106,9 @@ export function AgentConsole({
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col bg-[var(--bg)] font-mono">
+      {latestChecklist ? (
+        <StickyChecklist rawChecklist={latestChecklist} streaming={streaming} />
+      ) : null}
       <div
         ref={scrollRef}
         onScroll={handleScroll}

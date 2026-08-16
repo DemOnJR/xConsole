@@ -44,6 +44,7 @@ import { useVpsStore } from "../../stores/vpsStore";
 import { useCanvasStore, NODE_W, NODE_H, type AgentNode as AgentNodeType } from "../../stores/canvasStore";
 
 import { useSettingsStore } from "../../stores/settingsStore";
+import { dialog } from "../../stores/dialogStore";
 
 import { AgentConsole } from "./AgentConsole";
 import { GoalLockCard } from "./GoalLockCard";
@@ -67,6 +68,16 @@ import { useGoalStore } from "../../stores/goalStore";
 import { effectiveMode, shouldAutoRun } from "../../lib/safety";
 
 import type { AgentApproval, AgentQuestion } from "../../lib/tauri";
+
+function formatSessionDate(s?: string | null): string {
+  if (!s) return "";
+  const iso = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}/.test(s) ? `${s.replace(" ", "T")}Z` : s;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return s;
+  const dateStr = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const timeStr = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false });
+  return `${dateStr} · ${timeStr}`;
+}
 
 /** Maximize the agent node to the whole canvas pane, or restore its default size.
  *  Shared with the NavRail double-click, which has no React access to the node. */
@@ -290,6 +301,8 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     newConversation,
 
     openConversation,
+
+    renameConversation,
 
     exportConversationMarkdown,
 
@@ -772,12 +785,31 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
 
   const historyOptions = useMemo<CLIPickerOption[]>(
     () =>
-      conversations.map((c) => ({
-        id: c.id,
-        label: c.title || c.id.slice(0, 8),
-        detail: c.id === sessionId ? "current" : undefined,
-      })),
-    [conversations, sessionId],
+      conversations.map((c) => {
+        const timeStr = formatSessionDate(c.updated_at);
+        const isCurrent = c.id === sessionId;
+        const detailParts: string[] = [];
+        if (isCurrent) detailParts.push("current");
+        if (timeStr) detailParts.push(timeStr);
+        return {
+          id: c.id,
+          label: c.title || `Session ${c.id.slice(0, 8)}`,
+          detail: detailParts.join(" · ") || undefined,
+          actionLabel: "✎ Rename",
+          onAction: async (opt) => {
+            const newTitle = await dialog.prompt({
+              title: "Rename session",
+              label: "Enter a new title for this session:",
+              defaultValue: opt.label,
+              confirmText: "Rename",
+            });
+            if (newTitle && newTitle.trim()) {
+              await renameConversation(opt.id, newTitle.trim());
+            }
+          },
+        };
+      }),
+    [conversations, sessionId, renameConversation],
   );
 
   const helpOptions = useMemo<CLIPickerOption[]>(
@@ -1100,6 +1132,17 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
       history.reset("");
     } else if (cmd.actionKey === "history") {
       setPicker({ kind: "history" });
+    } else if (cmd.actionKey === "rename") {
+      const cur = conversations.find((c) => c.id === sessionId);
+      const newTitle = await dialog.prompt({
+        title: "Rename session",
+        label: "Enter a new title for this session:",
+        defaultValue: cur?.title || "",
+        confirmText: "Rename",
+      });
+      if (newTitle && newTitle.trim()) {
+        await renameConversation(sessionId, newTitle.trim());
+      }
     } else if (cmd.actionKey === "model") {
       setPicker({ kind: "model" });
     } else if (cmd.actionKey === "targets") {
@@ -1266,6 +1309,32 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
       return;
     }
     if (!trimmed && pendingImages.length === 0) return;
+    // /rename [title] — rename current session
+    const renameMatch = trimmed.match(/^\/rename(?:\s+(.+))?$/i);
+    if (renameMatch) {
+      const newTitle = renameMatch[1]?.trim();
+      setInput("");
+      history.reset("");
+      recallIdx.current = null;
+      if (newTitle) {
+        void renameConversation(sessionId, newTitle);
+      } else {
+        const cur = conversations.find((c) => c.id === sessionId);
+        void dialog
+          .prompt({
+            title: "Rename session",
+            label: "Enter a new title for this session:",
+            defaultValue: cur?.title || "",
+            confirmText: "Rename",
+          })
+          .then((title) => {
+            if (title && title.trim()) {
+              void renameConversation(sessionId, title.trim());
+            }
+          });
+      }
+      return;
+    }
     // /goal <objective> — start an autonomous goal session + open its kanban board.
     const goalMatch = trimmed.match(/^\/goal(?:\s+(.+))?$/i);
     if (goalMatch) {
@@ -1391,7 +1460,25 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
       {/* Slim terminal status line (no buttons — everything is a command). */}
       <div className="flex cursor-move select-none items-center gap-1 border-b border-[var(--border)] bg-[var(--surface)] px-2 py-1 font-mono text-[11px]">
         <span className="shrink-0 text-cyan-400">{streaming ? "●" : "❯"}</span>
-        <span className="xc-agent-title shrink-0 text-[var(--text-dim)]">agent</span>
+        <span
+          className="xc-agent-title max-w-[280px] truncate font-medium text-[var(--text)] hover:text-cyan-300"
+          data-tooltip={`Session: ${conversations.find((c) => c.id === sessionId)?.title || "agent"} (double-click to rename)`}
+          onDoubleClick={async (e) => {
+            e.stopPropagation();
+            const cur = conversations.find((c) => c.id === sessionId);
+            const newTitle = await dialog.prompt({
+              title: "Rename session",
+              label: "Enter a new title for this session:",
+              defaultValue: cur?.title || "",
+              confirmText: "Rename",
+            });
+            if (newTitle && newTitle.trim()) {
+              await renameConversation(sessionId, newTitle.trim());
+            }
+          }}
+        >
+          {conversations.find((c) => c.id === sessionId)?.title || "agent"}
+        </span>
         {planMode ? (
           <span className="rounded bg-indigo-500/20 px-1 text-[9px] text-indigo-300">plan</span>
         ) : null}
@@ -1577,8 +1664,18 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
           )}
           {picker.kind === "ctx" && (
             <div className="rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-3 py-2 font-mono text-[11px]">
-              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-dim)]">
-                Context
+              <div className="mb-1 flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-dim)]">
+                  Context
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPicker(null)}
+                  className="flex h-4 w-4 items-center justify-center rounded text-gray-500 hover:bg-[var(--border)] hover:text-white"
+                  title="Close (Esc)"
+                >
+                  ✕
+                </button>
               </div>
               {contextUsage ? (
                 <>
@@ -1606,8 +1703,18 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
           )}
           {picker.kind === "cost" && (
             <div className="rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-3 py-2 font-mono text-[11px]">
-              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-dim)]">
-                Cost
+              <div className="mb-1 flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-dim)]">
+                  Cost
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPicker(null)}
+                  className="flex h-4 w-4 items-center justify-center rounded text-gray-500 hover:bg-[var(--border)] hover:text-white"
+                  title="Close (Esc)"
+                >
+                  ✕
+                </button>
               </div>
               <div className="text-[var(--text)]">
                 This conversation: ${conversationCostUsd.toFixed(4)}

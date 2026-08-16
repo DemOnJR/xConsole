@@ -48,7 +48,7 @@ export function isCommandItem(item: AgentActivityItem): boolean {
   return false;
 }
 
-function isTodoItem(item: AgentActivityItem): boolean {
+export function isTodoItem(item: AgentActivityItem): boolean {
   return (
     item.tool === "todo_write" ||
     /^update checklist$/i.test(item.label.trim()) ||

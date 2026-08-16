@@ -192,6 +192,20 @@ workspace/project is active this saves to that workspace's memory; otherwise to 
                 "required": ["entry"]
             }),
         },
+        ToolDef {
+            name: "rename_session".into(),
+            description: "Rename this agent conversation session to a clear, descriptive title summarizing the topic or work (e.g. when the user asks to rename the session or when establishing the main task).".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "The new short, descriptive title for this session."
+                    }
+                },
+                "required": ["title"]
+            }),
+        },
         // ---- Goal-driven autonomous mode (/goal) ----
         ToolDef {
             name: "goal_propose_spec".into(),
@@ -756,6 +770,7 @@ const OLLAMA_VPS_TOOLS: &[&str] = &[
     "canvas_refresh",
     "ask_user",
     "present_plan",
+    "rename_session",
     "memory_save",
     "host_memory_get",
     "host_memory_update",
@@ -780,6 +795,7 @@ const OLLAMA_LOCAL_TOOLS: &[&str] = &[
     "todo_write",
     "ask_user",
     "present_plan",
+    "rename_session",
     "memory_save",
     "taste_save",
     "set_project_brief",
@@ -977,6 +993,7 @@ pub async fn dispatch_with_telemetry(
         "canvas_close" => canvas_node_command(ctx, args, "close"),
         "canvas_refresh" => canvas_node_command(ctx, args, "reconnect"),
         "memory_save" => memory_save(ctx, args),
+        "rename_session" => rename_session(ctx, args),
         "goal_propose_spec" => goal_propose_spec(ctx, args).await,
         "goal_add_task" => goal_add_task(ctx, args).await,
         "goal_update_task" => goal_update_task(ctx, args).await,
@@ -1160,6 +1177,7 @@ fn tool_activity_label(ctx: &ToolContext, call: &ToolCall) -> String {
             format!("Search {pat} on {}", vps_label(ctx, args))
         }
         "todo_write" => "Update checklist".into(),
+        "rename_session" => "Rename session".into(),
         "local_run_command" => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("…");
             format!("Run on this PC: {cmd}")
@@ -1345,7 +1363,7 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
         | "artifact_list" | "ssh_key_status" | "memory_save" | "skills_list" | "skill_view"
         | "learn_skill" | "ask_user" | "present_plan" | "terminal_capture" | "canvas_open_terminal"
         | "canvas_open_sftp" | "canvas_tile" | "canvas_close" | "canvas_refresh" | "vision"
-        | "grep_search" | "local_grep_search" | "todo_write" => false,
+        | "grep_search" | "local_grep_search" | "todo_write" | "rename_session" => false,
         // Typing into a live shell runs commands → mutating.
         "terminal_send" => true,
         // Shell tools: mutating only when the command isn't read-only.
@@ -2055,6 +2073,28 @@ fn memory_save(ctx: &ToolContext, args: &Value) -> String {
         Ok(_) => "saved to memory".into(),
         Err(e) => format!("error: {e}"),
     }
+}
+
+fn rename_session(ctx: &ToolContext, args: &Value) -> String {
+    let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if title.is_empty() {
+        return "error: missing or empty 'title'".into();
+    }
+    if let Ok(Some(conv)) = ctx.db.get_agent_conversation(&ctx.session_id) {
+        let targets: Vec<String> = conv
+            .targets_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default();
+        let input = crate::storage::models::AgentConversationInput {
+            id: conv.id,
+            title: Some(title.to_string()),
+            targets,
+            messages_json: conv.messages_json,
+        };
+        let _ = ctx.db.upsert_agent_conversation(&input);
+    }
+    format!("Session renamed to: {title}")
 }
 
 fn host_memory_get(ctx: &ToolContext, args: &Value) -> String {
