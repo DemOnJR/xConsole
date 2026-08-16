@@ -92,14 +92,14 @@ pub fn build(db: &Db, provider_id: &str) -> Result<ResolvedProvider, String> {
             p.model.clone(),
             secret,
         )),
-        "codex_cli" | "opencode_cli" => Box::new(CliProvider::new(
+        "codex_cli" | "opencode_cli" | "antigravity_cli" => Box::new(CliProvider::new(
             p.kind.clone(),
             p.bin_path
                 .clone()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| CliProvider::default_bin(&p.kind)),
             p.model.clone(),
-            None,
+            secret,
         )),
         other => return Err(format!("unknown provider kind: {other}")),
     };
@@ -114,6 +114,7 @@ pub fn build(db: &Db, provider_id: &str) -> Result<ResolvedProvider, String> {
 }
 
 /// First enabled provider that can run the agent tool loop.
+#[allow(dead_code)]
 pub fn find_tool_provider_id(db: &Db) -> Option<String> {
     db.list_providers()
         .ok()?
@@ -122,37 +123,11 @@ pub fn find_tool_provider_id(db: &Db) -> Option<String> {
         .map(|p| p.id)
 }
 
-/// Resolve which provider should run this turn. Cursor uses xConsole MCP for
-/// VPS SSH. OpenCode/Codex fall back to an API provider when one is configured.
+/// Resolve which provider should run this turn.
 pub fn resolve_for_turn(
     db: &Db,
     preferred_id: &str,
 ) -> Result<(ResolvedProvider, Option<String>), String> {
     let preferred = build(db, preferred_id)?;
-    if !preferred.provider.is_autonomous_cli() {
-        return Ok((preferred, None));
-    }
-
-    // CLI providers (Cursor, OpenCode, Codex) run their own tool loop.
-    // Cursor uses xConsole MCP for SSH. OpenCode/Codex can't SSH — the agent
-    // loop shows an error when VPS targets are selected (agent.rs:142-148).
-    // Either way, never silently swap a CLI for a different provider.
-    if preferred.kind == "cursor" || preferred.provider.is_autonomous_cli() {
-        return Ok((preferred, None));
-    }
-
-    let Some(fallback_id) = find_tool_provider_id(db) else {
-        return Ok((preferred, None));
-    };
-
-    if fallback_id == preferred_id {
-        return Ok((preferred, None));
-    }
-
-    let fallback = build(db, &fallback_id)?;
-    let note = format!(
-        "Active provider \"{}\" is chat-only; using \"{}\" to run tools on your servers.",
-        preferred.name, fallback.name
-    );
-    Ok((fallback, Some(note)))
+    Ok((preferred, None))
 }

@@ -3,7 +3,7 @@
 
 use base64::Engine;
 use serde_json::{json, Value};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::ai::infra_tools;
 use crate::ai::web_tools;
@@ -45,8 +45,14 @@ pub struct ToolContext {
     pub canvas: Vec<crate::ai::canvas_context::CanvasNode>,
     /// Journal of files the agent edits this session (for the diff/changes panel).
     pub edits: crate::ai::edits::EditJournal,
-    /// Claude Code–style lifecycle hooks (snapshotted at startup). Empty = disabled.
+    /// Lifecycle hooks (snapshotted at startup). Empty = disabled.
     pub hooks: crate::ai::hooks::HooksConfig,
+    /// Images from the latest user turn (for the `vision` side-call). Empty when
+    /// the session model already received native image blocks.
+    pub turn_images: Vec<crate::ai::provider::ChatImage>,
+    /// Intake goal id for a normal chat turn (`/goal`). Loop cycles use `goal:<id>`
+    /// as the session id instead.
+    pub goal_id: Option<String>,
 }
 
 /// Tool schemas advertised to the model.
@@ -84,11 +90,15 @@ combined output. Prefer this when the user asks about both/all/each server.".int
         },
         ToolDef {
             name: "read_file".into(),
-            description: "Read a text file from a server.".into(),
+            description: "Read a text file from a server. Lines are numbered. For large files \
+pass offset (1-based line) and limit instead of reading everything — find the line with \
+grep_search first.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
+                    "offset": {"type": "integer", "description": "1-based start line."},
+                    "limit": {"type": "integer", "description": "Max lines to return."},
                     "vps_id": {"type": "string"}
                 },
                 "required": ["path"]
@@ -97,7 +107,8 @@ combined output. Prefer this when the user asks about both/all/each server.".int
         ToolDef {
             name: "write_file".into(),
             description: "Write (overwrite) a text file on a server. Subject to the safety mode. \
-Use /root/ or /tmp/ on Linux (root login) — not /home/root/. Prefer hello.py over names with spaces."
+Use /root/ or /tmp/ on Linux (root login) — not /home/root/. Prefer hello.py over names with spaces. \
+For an existing file prefer edit_file (replace a unique snippet) — cheaper and safer."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -110,6 +121,67 @@ Use /root/ or /tmp/ on Linux (root login) — not /home/root/. Prefer hello.py o
             }),
         },
         ToolDef {
+            name: "edit_file".into(),
+            description: "Replace a unique snippet in an existing file on a server. Prefer this \
+over write_file for any file you have already read. old_string must match exactly once unless \
+replace_all is true.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"},
+                    "replace_all": {"type": "boolean"},
+                    "vps_id": {"type": "string"}
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+        },
+        ToolDef {
+            name: "grep_search".into(),
+            description: "Search file contents on a server with a regex. Returns path:line:text. \
+Use this FIRST on large trees instead of reading whole files; then read_file with offset/limit \
+around the matching line.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string", "description": "File or directory to search (default /)."},
+                    "glob": {"type": "string", "description": "Optional filename glob, e.g. *.conf"},
+                    "case_insensitive": {"type": "boolean"},
+                    "head_limit": {"type": "integer", "description": "Max matches (default 40)."},
+                    "vps_id": {"type": "string"}
+                },
+                "required": ["pattern"]
+            }),
+        },
+        ToolDef {
+            name: "todo_write".into(),
+            description: "Replace your live working checklist for THIS chat. Use for any task with \
+3+ steps AFTER the user is ready for you to execute (not instead of present_plan). Each item: \
+content, activeForm (gerund shown while in progress), status pending|in_progress|completed. \
+Keep exactly one in_progress. Mark done as you finish so you do not repeat work. The current \
+list is shown to you every turn under # Todos.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string"},
+                                "activeForm": {"type": "string"},
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
+                            },
+                            "required": ["content", "status"]
+                        }
+                    }
+                },
+                "required": ["todos"]
+            }),
+        },
+        ToolDef {
             name: "memory_save".into(),
             description: "Save a durable, reusable fact to persistent memory. Keep it terse. When a \
 workspace/project is active this saves to that workspace's memory; otherwise to global memory."
@@ -118,6 +190,108 @@ workspace/project is active this saves to that workspace's memory; otherwise to 
                 "type": "object",
                 "properties": {"entry": {"type": "string"}},
                 "required": ["entry"]
+            }),
+        },
+        // ---- Goal-driven autonomous mode (/goal) ----
+        ToolDef {
+            name: "goal_propose_spec".into(),
+            description: "Intake phase for a goal session: submit the drafted GoalSpec (objective, \
+success criteria, check method/tooling, hard constraints, max cycles) for the user to review and \
+lock. Only callable while the goal is in 'intake' status.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "objective": {"type": "string"},
+                    "success_criteria": {"type": "array", "items": {"type": "string"}},
+                    "check_method": {"type": "string"},
+                    "check_tooling": {"type": "array", "items": {"type": "string"}},
+                    "hard_constraints": {"type": "array", "items": {"type": "string"}},
+                    "max_cycles": {"type": "integer"}
+                },
+                "required": ["objective", "success_criteria", "check_method"]
+            }),
+        },
+        ToolDef {
+            name: "goal_add_task".into(),
+            description: "Add a kanban card to the goal board. Columns: backlog, in_progress, \
+waiting, testing, blocked, done. kind: edit, test, bug, research, check. Pass parent_id to \
+create a sub-task under an existing card — break work into sub-tasks whenever a step has \
+more than one action.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "column": {"type": "string"},
+                    "title": {"type": "string"},
+                    "kind": {"type": "string"},
+                    "detail": {"type": "string"},
+                    "files": {"type": "array", "items": {"type": "string"}},
+                    "parent_id": {"type": "string", "description": "Existing task id to nest this under"}
+                },
+                "required": ["column", "title"]
+            }),
+        },
+        ToolDef {
+            name: "goal_update_task".into(),
+            description: "Move or annotate an existing kanban card (column, result, error, files, \
+detail, note). Always write a note of what you just did so the task history stays complete. \
+The task id is returned by goal_add_task.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "column": {"type": "string"},
+                    "title": {"type": "string"},
+                    "detail": {"type": "string"},
+                    "kind": {"type": "string"},
+                    "result": {"type": "string"},
+                    "error": {"type": "string"},
+                    "note": {"type": "string", "description": "What happened — appended to task history"},
+                    "files": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["task_id"]
+            }),
+        },
+        ToolDef {
+            name: "goal_record_constraint".into(),
+            description: "Write a learned fact to the goal's constraint memory (e.g. how long \
+Google takes to reindex). Provide the key, value, and the evidence you observed.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                    "value": {"type": "string"},
+                    "evidence": {"type": "string"},
+                    "confidence": {"type": "string"}
+                },
+                "required": ["key", "value", "evidence"]
+            }),
+        },
+        ToolDef {
+            name: "goal_check_criteria".into(),
+            description: "THE verification gate. Verdicts: 'met' (done, with evidence), \
+'not_yet' (keep working), 'too_early_to_tell' (keep working unless delay_secs is set). \
+Do not wait unless the user asked for a timeout.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "verdict": {"type": "string", "enum": ["met", "not_yet", "too_early_to_tell"]},
+                    "evidence": {"type": "string"},
+                    "delay_secs": {"type": "integer", "description": "Optional wait before the next cycle. Omit to keep going."}
+                },
+                "required": ["verdict", "evidence"]
+            }),
+        },
+        ToolDef {
+            name: "goal_schedule_wait".into(),
+            description: "Explicitly pause the goal until a time (RFC3339) with a reason — e.g. \
+waiting for Google to reindex. Writes next_check_at; the loop resumes then.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "until": {"type": "string"},
+                    "reason": {"type": "string"}
+                },
+                "required": ["until", "reason"]
             }),
         },
         ToolDef {
@@ -151,8 +325,9 @@ Never store secrets/passwords."
         },
         ToolDef {
             name: "taste_save".into(),
-            description: "Save a user working-style preference (how they like ops done) to TASTE.md. \
-Examples: prefer systemd restarts, never apt upgrade without approval, terse replies. Keep terse."
+            description: "Save a user preference (how they like ops done, or their profile) to the \
+merged TASTE.md store. Examples: prefer systemd restarts, never apt upgrade without approval, \
+terse replies. Keep terse."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -258,11 +433,46 @@ in sh. For remote servers use run_command instead.".into(),
         },
         ToolDef {
             name: "local_read_file".into(),
-            description: "Read a text file from the user's local machine (this PC).".into(),
+            description: "Read a text file from this PC. Lines are numbered. Use offset/limit \
+on large files.".into(),
             parameters: json!({
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {"type": "string"},
+                    "offset": {"type": "integer"},
+                    "limit": {"type": "integer"}
+                },
                 "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "local_edit_file".into(),
+            description: "Replace a unique snippet in a file on this PC. Prefer this over \
+local_write_file for existing files.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"},
+                    "replace_all": {"type": "boolean"}
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+        },
+        ToolDef {
+            name: "local_grep_search".into(),
+            description: "Search file contents on this PC. Returns path:line:text.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string"},
+                    "glob": {"type": "string"},
+                    "case_insensitive": {"type": "boolean"},
+                    "head_limit": {"type": "integer"}
+                },
+                "required": ["pattern"]
             }),
         },
         ToolDef {
@@ -320,11 +530,53 @@ Parent directories are created automatically. Subject to the safety mode.".into(
             name: "ssh_setup_key_auth".into(),
             description: "Switch a server from password login to a secure app-managed SSH key: \
 generate an Ed25519 keypair, install the public key in the server's authorized_keys, store the \
-private key in the OS keychain, and verify key login works. Password login on the server is left \
-enabled (no lockout). Use this when the user wants key-based auth instead of passwords.".into(),
+private key in the OS keychain AND a verified backup file on this PC, point the xConsole VPS \
+record at that key, and verify key login works. Password login on the server is left enabled \
+(no lockout). The private key is NEVER returned to you — only the path, fingerprint, and SHA-256. \
+Use this before disabling password SSH.".into(),
             parameters: json!({
                 "type": "object",
-                "properties": {"vps_id": {"type": "string"}},
+                "properties": {
+                    "vps_id": {"type": "string"},
+                    "backup_dir": {
+                        "type": "string",
+                        "description": "Optional folder on this PC for the key backup. Default: xConsole artifacts/ssh/<server>/"
+                    },
+                    "save_backup": {
+                        "type": "boolean",
+                        "description": "Write a verified local backup (default true). Set false only if the user refuses a file backup."
+                    }
+                },
+                "required": []
+            }),
+        },
+        ToolDef {
+            name: "vps_update_login".into(),
+            description: "Update how xConsole connects to a saved server: host, port, username, \
+auth_type (key/password), or key_path. Use this after changing sshd port or switching to a key \
+file. You CANNOT read or set the password, and you NEVER receive key material. After changing \
+the remote sshd port, call this so xConsole uses the new port.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "vps_id": {"type": "string"},
+                    "host": {"type": "string"},
+                    "port": {"type": "integer"},
+                    "username": {"type": "string"},
+                    "auth_type": {"type": "string", "description": "key or password"},
+                    "key_path": {"type": "string"},
+                    "name": {"type": "string"}
+                },
+                "required": []
+            }),
+        },
+        ToolDef {
+            name: "artifact_list".into(),
+            description: "List files this agent created on the user's PC (SSH key backups, \
+downloads, writes). Returns name, path, kind, size, sha256 — never private-key contents.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
                 "required": []
             }),
         },
@@ -374,8 +626,10 @@ Blocks until the user answers."
             name: "present_plan".into(),
             description: "Present a step-by-step plan to the user and wait for approval BEFORE making \
 any changes. Use this for large, multi-step, or destructive tasks (and always when plan mode is on): \
-first investigate with read-only tools, then call present_plan. The user can approve the plan (you \
-then execute it) or request changes (you revise and present again). Blocks until the user responds."
+first investigate with read-only tools, then call present_plan with the FULL plan in the required \
+`plan` argument (title is optional). Never write the plan only as chat text — without this call the \
+review modal does not open and the user cannot approve. The user can approve in the modal or in chat \
+(you then execute) or request changes (you revise and present again). Blocks until the user responds."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -478,12 +732,19 @@ const OLLAMA_VPS_TOOLS: &[&str] = &[
     "list_vps_targets",
     "read_file",
     "write_file",
+    "edit_file",
+    "grep_search",
+    "todo_write",
     "upload_file",
     "download_file",
     "ssh_setup_key_auth",
     "ssh_key_status",
+    "vps_update_login",
+    "artifact_list",
     "local_run_command",
     "local_read_file",
+    "local_edit_file",
+    "local_grep_search",
     "local_write_file",
     "local_list_dir",
     "terminal_send",
@@ -512,8 +773,11 @@ const OLLAMA_VPS_TOOLS: &[&str] = &[
 const OLLAMA_LOCAL_TOOLS: &[&str] = &[
     "local_run_command",
     "local_read_file",
+    "local_edit_file",
+    "local_grep_search",
     "local_write_file",
     "local_list_dir",
+    "todo_write",
     "ask_user",
     "present_plan",
     "memory_save",
@@ -572,8 +836,15 @@ pub fn format_targets_catalog(db: &Db, target_ids: &[String]) -> String {
     lines.join("\n")
 }
 
-/// Run a single tool call, returning a text result for the model.
-pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> String {
+pub async fn dispatch_with_telemetry(
+    ctx: &ToolContext,
+    call: &ToolCall,
+    sink: &EventSink,
+    telemetry: Option<&crate::ai::tool_cache::TurnTelemetryHandle>,
+) -> String {
+    if let Some(telemetry) = telemetry {
+        crate::ai::tool_cache::record_tool_call(telemetry);
+    }
     let label = tool_activity_label(ctx, call);
     emit(
         Some(sink),
@@ -587,9 +858,19 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
     emit_skill_activity(ctx, call, sink);
 
     let args = &call.arguments;
+    let scope = crate::ai::tool_cache::CacheScope::new(
+        &ctx.session_id,
+        ctx.workspace_id.as_deref(),
+        &ctx.targets,
+        &ctx.home.0,
+    );
 
-    // Short-TTL cache for read-only tools / web lookups (same args → skip re-exec).
-    if let Some(hit) = crate::ai::tool_cache::get(&call.name, args) {
+    // Short-TTL cache for read-only tools / web lookups (same scoped args → skip re-exec).
+    let cacheable = crate::ai::tool_cache::is_cacheable(&call.name);
+    if let Some(hit) = crate::ai::tool_cache::get_scoped(&scope, &call.name, args) {
+        if let Some(telemetry) = telemetry {
+            crate::ai::tool_cache::record_cache_lookup(telemetry, true);
+        }
         emit(
             Some(sink),
             StreamEvent::Status(format!("Cache hit · {}", call.name)),
@@ -602,6 +883,11 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
             }),
         );
         return hit;
+    }
+    if cacheable {
+        if let Some(telemetry) = telemetry {
+            crate::ai::tool_cache::record_cache_lookup(telemetry, false);
+        }
     }
 
     // PreToolUse hooks: a user-configured command can block this tool before it runs
@@ -663,14 +949,21 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
         "list_vps_targets" => list_vps_targets(ctx),
         "read_file" => read_file(ctx, args, sink, &call.id).await,
         "write_file" => write_file(ctx, args, sink, &call.id).await,
+        "edit_file" => edit_file(ctx, args, sink, &call.id).await,
+        "grep_search" => grep_search(ctx, args, sink, &call.id).await,
+        "todo_write" => todo_write(ctx, args),
         "local_run_command" => local_run_command(ctx, args).await,
         "local_read_file" => local_read_file(ctx, args).await,
+        "local_edit_file" => local_edit_file(ctx, args).await,
+        "local_grep_search" => local_grep_search(ctx, args).await,
         "local_write_file" => local_write_file(ctx, args).await,
         "local_list_dir" => local_list_dir(ctx, args).await,
         "upload_file" => upload_file(ctx, args, sink, &call.id).await,
         "download_file" => download_file(ctx, args, sink, &call.id).await,
         "ssh_setup_key_auth" => ssh_setup_key_auth(ctx, args).await,
         "ssh_key_status" => ssh_key_status(ctx, args),
+        "vps_update_login" => vps_update_login(ctx, args),
+        "artifact_list" => artifact_list(ctx, args),
         "ask_user" => ask_user(ctx, args).await,
         "present_plan" => present_plan(ctx, args).await,
         "set_project_brief" => set_project_brief(ctx, args),
@@ -684,12 +977,18 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
         "canvas_close" => canvas_node_command(ctx, args, "close"),
         "canvas_refresh" => canvas_node_command(ctx, args, "reconnect"),
         "memory_save" => memory_save(ctx, args),
+        "goal_propose_spec" => goal_propose_spec(ctx, args).await,
+        "goal_add_task" => goal_add_task(ctx, args).await,
+        "goal_update_task" => goal_update_task(ctx, args).await,
+        "goal_record_constraint" => goal_record_constraint(ctx, args).await,
+        "goal_check_criteria" => goal_check_criteria(ctx, args).await,
+        "goal_schedule_wait" => goal_schedule_wait(ctx, args).await,
         "host_memory_get" => host_memory_get(ctx, args),
         "host_memory_update" => host_memory_update(ctx, args),
         "taste_save" => taste_save(ctx, args),
         "skills_list" => skills_list(ctx),
         "skill_view" => skill_view(ctx, args),
-        "skill_save" => skill_save(ctx, args),
+        "skill_save" => skill_save(ctx, args).await,
         "learn_skill" => learn_skill(ctx, args, sink).await,
         name if web_tools::is_web_tool(name) => {
             // Gate `web_fetch` like a command. Its URL is model-controlled, so with a
@@ -717,6 +1016,7 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
         {
             infra_tools::dispatch(ctx, call.name.as_str(), args, sink).await
         }
+        "vision" => vision_tool(ctx, args).await,
         other => format!("error: unknown tool '{other}'"),
         }
     };
@@ -763,7 +1063,13 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
 
     let ok = !result.starts_with("error:");
     if ok {
-        crate::ai::tool_cache::put(&call.name, args, &result);
+        invalidate_cache_after_success(&scope, &call.name, args);
+        crate::ai::tool_cache::put_scoped(&scope, &call.name, args, &result);
+        if cacheable {
+            if let Some(telemetry) = telemetry {
+                crate::ai::tool_cache::record_cache_write(telemetry);
+            }
+        }
     }
     emit(
         Some(sink),
@@ -773,6 +1079,49 @@ pub async fn dispatch(ctx: &ToolContext, call: &ToolCall, sink: &EventSink) -> S
         }),
     );
     result
+}
+
+fn invalidate_cache_after_success(scope: &crate::ai::tool_cache::CacheScope, name: &str, args: &Value) {
+    let cache = |invalidation: &crate::ai::tool_cache::Invalidation| {
+        crate::ai::tool_cache::invalidate_scoped(scope, invalidation);
+    };
+    match name {
+        "host_memory_update" => {
+            if let Some(vps_id) = args.get("vps_id").and_then(Value::as_str) {
+                cache(&crate::ai::tool_cache::Invalidation::HostMemory {
+                    vps_id: vps_id.to_string(),
+                });
+            }
+        }
+        "skill_save" | "skill_install" | "learn_skill" => {
+            cache(&crate::ai::tool_cache::Invalidation::Skills);
+        }
+        "local_write_file" | "download_file" => {
+            if let Some(path) = args
+                .get("path")
+                .or_else(|| args.get("local_path"))
+                .and_then(Value::as_str)
+            {
+                cache(&crate::ai::tool_cache::Invalidation::LocalFile {
+                    path: path.to_string(),
+                });
+            }
+        }
+        "write_file" | "edit_file" | "upload_file" => {
+            let vps_id = args.get("vps_id").and_then(Value::as_str);
+            let path = args
+                .get("path")
+                .or_else(|| args.get("remote_path"))
+                .and_then(Value::as_str);
+            if let (Some(vps_id), Some(path)) = (vps_id, path) {
+                cache(&crate::ai::tool_cache::Invalidation::RemoteFile {
+                    vps_id: vps_id.to_string(),
+                    path: path.to_string(),
+                });
+            }
+        }
+        _ => {}
+    }
 }
 
 fn tool_activity_label(ctx: &ToolContext, call: &ToolCall) -> String {
@@ -802,6 +1151,15 @@ fn tool_activity_label(ctx: &ToolContext, call: &ToolCall) -> String {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("…");
             format!("Write {} on {}", path, vps_label(ctx, args))
         }
+        "edit_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("…");
+            format!("Edit {} on {}", path, vps_label(ctx, args))
+        }
+        "grep_search" => {
+            let pat = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("…");
+            format!("Search {pat} on {}", vps_label(ctx, args))
+        }
+        "todo_write" => "Update checklist".into(),
         "local_run_command" => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("…");
             format!("Run on this PC: {cmd}")
@@ -813,6 +1171,14 @@ fn tool_activity_label(ctx: &ToolContext, call: &ToolCall) -> String {
         "local_write_file" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("…");
             format!("Write {path} on this PC")
+        }
+        "local_edit_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("…");
+            format!("Edit {path} on this PC")
+        }
+        "local_grep_search" => {
+            let pat = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("…");
+            format!("Search {pat} on this PC")
         }
         "local_list_dir" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("…");
@@ -829,6 +1195,8 @@ fn tool_activity_label(ctx: &ToolContext, call: &ToolCall) -> String {
             format!("Download {rp} from {} → {lp}", vps_label(ctx, args))
         }
         "ssh_setup_key_auth" => format!("Set up SSH key auth on {}", vps_label(ctx, args)),
+        "vps_update_login" => format!("Update xConsole login for {}", vps_label(ctx, args)),
+        "artifact_list" => "List local artifacts".into(),
         "ssh_key_status" => format!("SSH key status for {}", vps_label(ctx, args)),
         "ask_user" => "Ask the user".into(),
         "present_plan" => {
@@ -876,6 +1244,10 @@ fn tool_activity_label(ctx: &ToolContext, call: &ToolCall) -> String {
             format!("Web fetch · {url}")
         }
         "geo_locate" => "Locate (by IP)".into(),
+        "vision" => {
+            let n = args.get("image").and_then(|v| v.as_i64()).unwrap_or(1);
+            format!("Look at image #{n}")
+        }
         other => other.replace('_', " "),
     }
 }
@@ -970,9 +1342,10 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
         // Read-only inspection, agent-local notes/skills, interactive prompts, and
         // non-destructive canvas/UI actions.
         "read_file" | "local_read_file" | "local_list_dir" | "list_vps_targets"
-        | "ssh_key_status" | "memory_save" | "skills_list" | "skill_view" | "skill_save"
+        | "artifact_list" | "ssh_key_status" | "memory_save" | "skills_list" | "skill_view"
         | "learn_skill" | "ask_user" | "present_plan" | "terminal_capture" | "canvas_open_terminal"
-        | "canvas_open_sftp" | "canvas_tile" | "canvas_close" | "canvas_refresh" => false,
+        | "canvas_open_sftp" | "canvas_tile" | "canvas_close" | "canvas_refresh" | "vision"
+        | "grep_search" | "local_grep_search" | "todo_write" => false,
         // Typing into a live shell runs commands → mutating.
         "terminal_send" => true,
         // Shell tools: mutating only when the command isn't read-only.
@@ -981,8 +1354,9 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
             !safety::is_read_only(cmd)
         }
         // Always change a server or the local PC.
-        "write_file" | "local_write_file" | "upload_file" | "download_file"
-        | "ssh_setup_key_auth" => true,
+        "write_file" | "edit_file" | "local_write_file" | "local_edit_file"
+        | "upload_file" | "download_file"
+        | "ssh_setup_key_auth" | "vps_update_login" => true,
         // `web_fetch` reads nothing locally, but its URL is entirely model-chosen, so a
         // GET is an outbound channel: paired with a file read it can carry data off the
         // machine. Treating it as mutating is what makes plan mode — where the user has
@@ -1052,6 +1426,31 @@ pub fn resolve_target(ctx: &ToolContext, args: &Value) -> Result<String, String>
     }
 }
 
+async fn vision_tool(ctx: &ToolContext, args: &Value) -> String {
+    let index = args
+        .get("image")
+        .and_then(|v| v.as_i64())
+        .or_else(|| {
+            args.get("image")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok())
+        })
+        .unwrap_or(1);
+    let question = args
+        .get("question")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let image = match crate::ai::vision::lookup_turn_image(&ctx.turn_images, index) {
+        Ok(img) => img,
+        Err(e) => return format!("error: {e}"),
+    };
+    match crate::ai::vision::describe_one(&ctx.db, image, &question).await {
+        Ok(text) => text,
+        Err(e) => format!("error: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,15 +1471,21 @@ mod tests {
         assert!(!tool_is_mutating("ssh_key_status", &json!({})));
         assert!(!tool_is_mutating("ask_user", &json!({})));
         assert!(!tool_is_mutating("present_plan", &json!({})));
+        assert!(!tool_is_mutating("vision", &json!({"image": 1, "question": "what"})));
         // Shell tools depend on whether the command is read-only.
         assert!(!tool_is_mutating("run_command", &json!({"command": "ls -la"})));
         assert!(tool_is_mutating("run_command", &json!({"command": "rm -rf /tmp/x"})));
         assert!(!tool_is_mutating("local_run_command", &json!({"command": "cat /etc/hosts"})));
         // Always-mutating tools.
         assert!(tool_is_mutating("write_file", &json!({})));
+        assert!(tool_is_mutating("edit_file", &json!({})));
+        assert!(!tool_is_mutating("grep_search", &json!({})));
+        assert!(!tool_is_mutating("todo_write", &json!({})));
         assert!(tool_is_mutating("local_write_file", &json!({})));
         assert!(tool_is_mutating("upload_file", &json!({})));
         assert!(tool_is_mutating("ssh_setup_key_auth", &json!({})));
+        assert!(tool_is_mutating("vps_update_login", &json!({})));
+        assert!(!tool_is_mutating("artifact_list", &json!({})));
         // Infra: plan is read-only, apply mutates.
         assert!(!tool_is_mutating("terraform_plan", &json!({})));
         assert!(tool_is_mutating("terraform_apply", &json!({})));
@@ -1163,23 +1568,82 @@ async fn exec_inner(ctx: &ToolContext, vps_id: &str, command: &str) -> String {
     }
 
     match ctx.sessions.run_command(vps_id, command).await {
-        Ok(out) => {
-            let mut s = format!("exit_code: {}\n", out.exit_code);
-            if out.exit_code == -1 && !out.stdout.trim().is_empty() {
-                s.push_str(
-                    "note: SSH channel closed without exit status; stdout below is still valid.\n",
-                );
+        Ok(out) => format_command_output(&out),
+        Err(e) => {
+            let err = e.to_string();
+            if is_connect_error(&err) {
+                if let Some(jumped) = try_jump_command(ctx, vps_id, command).await {
+                    return jumped;
+                }
             }
-            if !out.stdout.is_empty() {
-                s.push_str(&format!("stdout:\n{}\n", out.stdout.trim_end()));
-            }
-            if !out.stderr.is_empty() {
-                s.push_str(&format!("stderr:\n{}\n", out.stderr.trim_end()));
-            }
-            s
+            format!("error running command: {err}")
         }
-        Err(e) => format!("error running command: {e}"),
     }
+}
+
+fn format_command_output(out: &crate::ssh::manager::CommandOutput) -> String {
+    let mut s = format!("exit_code: {}\n", out.exit_code);
+    if out.exit_code == -1 && !out.stdout.trim().is_empty() {
+        s.push_str(
+            "note: SSH channel closed without exit status; stdout below is still valid.\n",
+        );
+    }
+    if !out.stdout.is_empty() {
+        s.push_str(&format!("stdout:\n{}\n", out.stdout.trim_end()));
+    }
+    if !out.stderr.is_empty() {
+        s.push_str(&format!("stderr:\n{}\n", out.stderr.trim_end()));
+    }
+    s
+}
+
+fn is_connect_error(err: &str) -> bool {
+    let l = err.to_lowercase();
+    l.contains("could not reach")
+        || l.contains("timed out")
+        || l.contains("connection refused")
+        || l.contains("no route")
+        || l.contains("network is unreachable")
+        || l.contains("forcibly closed")
+        || l.contains("os error 10061")
+        || l.contains("os error 10060")
+        || l.contains("os error 10054")
+}
+
+/// When this PC cannot reach a host (firewall/reboot/lockout), hop through
+/// another selected VPS that still answers. One hop only.
+async fn try_jump_command(ctx: &ToolContext, dest_id: &str, command: &str) -> Option<String> {
+    let dest = ctx.db.get_vps(dest_id).ok().flatten()?;
+    for hop_id in &ctx.targets {
+        if hop_id == dest_id {
+            continue;
+        }
+        let hop = match ctx.db.get_vps(hop_id).ok().flatten() {
+            Some(v) => v,
+            None => continue,
+        };
+        let remote = format!(
+            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 -p {} {}@{} -- {}",
+            dest.port,
+            dest.username,
+            dest.host,
+            command
+        );
+        match ctx.sessions.run_command(hop_id, &remote).await {
+            Ok(out) if out.exit_code == 0 || !out.stdout.trim().is_empty() => {
+                return Some(format!(
+                    "note: direct SSH to {} ({}) failed; jumped via {} ({}).\n{}",
+                    dest.name,
+                    dest.host,
+                    hop.name,
+                    hop.host,
+                    format_command_output(&out)
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 async fn exec(
@@ -1292,8 +1756,57 @@ async fn read_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str)
         Ok(id) => id,
         Err(e) => return format!("error: {e}"),
     };
-    let command = format!("cat -- {}", shell_quote(path));
-    exec(ctx, &vps_id, &command, Some(sink), true).await
+    let command = format!(
+        "stat -c %Y -- {p} 2>/dev/null; echo __XCONS_MTIME__; cat -- {p}",
+        p = shell_quote(path)
+    );
+    let raw = exec(ctx, &vps_id, &command, Some(sink), true).await;
+    if raw.starts_with("error") {
+        return raw;
+    }
+    let (mtime, body) = split_mtime_prefix(&raw);
+    let file = stdout_body(&body);
+    let offset = args.get("offset").and_then(|v| v.as_u64()).map(|n| n as u32);
+    let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
+    let numbered = crate::ai::file_ops::format_read(&file, offset, limit);
+    if let Some(m) = mtime {
+        crate::ai::file_state::note_read(&ctx.session_id, &vps_id, path, &m);
+        format!("[mtime: {m}]\n{numbered}")
+    } else {
+        numbered
+    }
+}
+
+fn stdout_body(wrapped: &str) -> String {
+    wrapped
+        .split_once("stdout:\n")
+        .map(|(_, rest)| {
+            rest.split("\nstderr:\n").next().unwrap_or(rest).to_string()
+        })
+        .unwrap_or_else(|| wrapped.to_string())
+}
+
+fn split_mtime_prefix(raw: &str) -> (Option<String>, String) {
+    // exec wraps stdout after "stdout:\n"
+    let stdout = raw
+        .split_once("stdout:\n")
+        .map(|(_, rest)| rest)
+        .unwrap_or(raw);
+    let Some((head, tail)) = stdout.split_once("__XCONS_MTIME__") else {
+        return (None, raw.to_string());
+    };
+    let mtime = head
+        .lines()
+        .rev()
+        .find(|l| l.chars().all(|c| c.is_ascii_digit()))
+        .map(|s| s.to_string());
+    let body = tail.trim_start_matches('\n');
+    // Rebuild keeping the exit_code header if present.
+    if let Some((hdr, _)) = raw.split_once("stdout:\n") {
+        (mtime, format!("{hdr}stdout:\n{body}"))
+    } else {
+        (mtime, body.to_string())
+    }
 }
 
 async fn write_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str) -> String {
@@ -1306,6 +1819,16 @@ async fn write_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str
         Ok(id) => id,
         Err(e) => return format!("error: {e}"),
     };
+    if let Ok(st) = ctx
+        .sessions
+        .run_command(&vps_id, &format!("stat -c %Y -- {} 2>/dev/null", shell_quote(&path)))
+        .await
+    {
+        let current = st.stdout.lines().find(|l| l.chars().all(|c| c.is_ascii_digit())).unwrap_or("");
+        if let Err(e) = crate::ai::file_state::check_write(&ctx.session_id, &vps_id, &path, current) {
+            return e;
+        }
+    }
     let parent = std::path::Path::new(&path)
         .parent()
         .and_then(|p| p.to_str())
@@ -1338,6 +1861,7 @@ async fn write_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str
         ctx.edits.record(
             &ctx.app,
             &ctx.session_id,
+            ctx.workspace_id.clone(),
             "vps",
             Some(vps_id.clone()),
             &label,
@@ -1358,6 +1882,161 @@ fn normalize_vps_write_path(path: &str) -> String {
         p = "/root".into();
     }
     p
+}
+
+async fn write_remote_contents(
+    ctx: &ToolContext,
+    vps_id: &str,
+    path: &str,
+    content: &str,
+    sink: &EventSink,
+    before: &str,
+) -> String {
+    let parent = std::path::Path::new(path)
+        .parent()
+        .and_then(|p| p.to_str())
+        .filter(|p| !p.is_empty())
+        .unwrap_or("/tmp");
+    let b64 = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
+    let command = format!(
+        "mkdir -p {} && printf %s {} | base64 -d > {}",
+        shell_quote(parent),
+        shell_quote(&b64),
+        shell_quote(path)
+    );
+    let result = exec(ctx, vps_id, &command, Some(sink), true).await;
+    if result.starts_with("exit_code: 0") {
+        let label = ctx
+            .db
+            .get_vps(vps_id)
+            .ok()
+            .flatten()
+            .map(|v| format!("{} ({})", v.name, v.host))
+            .unwrap_or_else(|| vps_id.to_string());
+        ctx.edits.record(
+            &ctx.app,
+            &ctx.session_id,
+            ctx.workspace_id.clone(),
+            "vps",
+            Some(vps_id.to_string()),
+            &label,
+            path,
+            before,
+            content,
+        );
+    }
+    result
+}
+
+async fn edit_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str) -> String {
+    let path = match args.get("path").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => normalize_vps_write_path(p),
+        _ => return "error: missing 'path'".into(),
+    };
+    let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+    let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+    let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+    let vps_id = match resolve_target(ctx, args) {
+        Ok(id) => id,
+        Err(e) => return format!("error: {e}"),
+    };
+    if let Err(e) = authorize_vps(ctx, &vps_id, &format!("edit {path}")).await {
+        return format!("error: {e}");
+    }
+    let before_out = match ctx
+        .sessions
+        .run_command(&vps_id, &format!("cat -- {}", shell_quote(&path)))
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => return format!("error: {e}"),
+    };
+    if before_out.exit_code != 0 && before_out.stdout.is_empty() {
+        return format!(
+            "error: could not read {path} (exit {}). Use write_file to create it.",
+            before_out.exit_code
+        );
+    }
+    if let Ok(st) = ctx
+        .sessions
+        .run_command(&vps_id, &format!("stat -c %Y -- {} 2>/dev/null", shell_quote(&path)))
+        .await
+    {
+        let current = st
+            .stdout
+            .lines()
+            .find(|l| l.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or("");
+        if let Err(e) = crate::ai::file_state::check_write(&ctx.session_id, &vps_id, &path, current) {
+            return e;
+        }
+    }
+    let (next, n) = match crate::ai::file_ops::apply_edit(&before_out.stdout, old, new, replace_all)
+    {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let result = write_remote_contents(ctx, &vps_id, &path, &next, sink, &before_out.stdout).await;
+    if result.starts_with("exit_code: 0") {
+        format!("updated {path} ({n} replacement{}).\n{result}", if n == 1 { "" } else { "s" })
+    } else {
+        result
+    }
+}
+
+async fn grep_search(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str) -> String {
+    let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p,
+        _ => return "error: missing 'pattern'".into(),
+    };
+    let path = args.get("path").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("/");
+    let glob = args.get("glob").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let ci = args.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false);
+    let head = args
+        .get("head_limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(40)
+        .clamp(1, 200);
+    let vps_id = match resolve_target(ctx, args) {
+        Ok(id) => id,
+        Err(e) => return format!("error: {e}"),
+    };
+    let i = if ci { " -i" } else { "" };
+    let g = glob
+        .map(|g| format!(" -g {}", shell_quote(g)))
+        .unwrap_or_default();
+    let cmd = format!(
+        "if command -v rg >/dev/null 2>&1; then \
+           rg -n --no-heading -m {head}{i}{g} -e {pat} -- {path}; \
+         else \
+           grep -n -R -E{i} -m {head} {pat} {path} 2>/dev/null | head -n {head}; \
+         fi",
+        pat = shell_quote(pattern),
+        path = shell_quote(path),
+    );
+    let raw = exec(ctx, &vps_id, &cmd, Some(sink), true).await;
+    let body = stdout_body(&raw);
+    if body.trim().is_empty() {
+        format!("no matches for {pattern:?} under {path}")
+    } else {
+        format!("matches (path:line:text):\n{}", body.trim_end())
+    }
+}
+
+fn todo_write(ctx: &ToolContext, args: &Value) -> String {
+    let Some(arr) = args.get("todos").and_then(|v| v.as_array()) else {
+        return "error: missing 'todos' array".into();
+    };
+    let parsed: Vec<crate::ai::todos::TodoItem> = arr
+        .iter()
+        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+        .collect();
+    let items = crate::ai::todos::normalize_list(parsed);
+    if items.is_empty() {
+        return "error: no valid todo items".into();
+    }
+    ctx.session_state.set_todos(&ctx.session_id, items.clone());
+    crate::ai::todos::format_activity(&items)
 }
 
 fn memory_save(ctx: &ToolContext, args: &Value) -> String {
@@ -1383,8 +2062,11 @@ fn host_memory_get(ctx: &ToolContext, args: &Value) -> String {
     if vps_id.is_empty() {
         return "error: missing 'vps_id'".into();
     }
-    if !ctx.targets.is_empty() && !ctx.targets.iter().any(|t| t == vps_id) {
+    if !ctx.targets.iter().any(|t| t == vps_id) {
         return "error: vps_id is not in the selected targets for this turn".into();
+    }
+    if !ctx.db.get_vps(vps_id).ok().flatten().is_some() {
+        return "error: VPS target was not found".into();
     }
     let profile = crate::ai::host_memory::load_profile(&ctx.home, vps_id);
     let mem = crate::ai::host_memory::load_memory(&ctx.home, vps_id);
@@ -1414,8 +2096,11 @@ fn host_memory_update(ctx: &ToolContext, args: &Value) -> String {
     if content.trim().is_empty() {
         return "error: missing 'content'".into();
     }
-    if !ctx.targets.is_empty() && !ctx.targets.iter().any(|t| t == vps_id) {
+    if !ctx.targets.iter().any(|t| t == vps_id) {
         return "error: vps_id is not in the selected targets for this turn".into();
+    }
+    if !ctx.db.get_vps(vps_id).ok().flatten().is_some() {
+        return "error: VPS target was not found".into();
     }
     match kind {
         "profile" => match crate::ai::host_memory::save_profile(&ctx.home, vps_id, content) {
@@ -1470,17 +2155,15 @@ async fn skill_install_tool(ctx: &ToolContext, args: &Value) -> String {
         Err(e) => return e,
     };
 
-    // Stage to a temp dir so the scanner sees the file on disk.
-    let tmp = std::env::temp_dir().join(format!("xconsole_skill_{}", Uuid::new_v4()));
-    if let Err(e) = std::fs::create_dir_all(&tmp) {
-        return format!("error: staging skill: {e}");
-    }
-    if let Err(e) = std::fs::write(tmp.join("SKILL.md"), &skill_md) {
-        let _ = std::fs::remove_dir_all(&tmp);
-        return format!("error: staging skill: {e}");
-    }
-    let report = skill_scan::scan_skill_with(&tmp, &skill_scan::scan_options_from_db(&ctx.db)).await;
-    let _ = std::fs::remove_dir_all(&tmp);
+    let report = match skill_scan::scan_skill_content(
+        &skill_md,
+        &skill_scan::scan_options_from_db(&ctx.db),
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(e) => return format!("error: scanning skill: {e}"),
+    };
 
     if report.is_blocking() {
         return format!(
@@ -1592,8 +2275,8 @@ fn terminal_capture(ctx: &ToolContext, args: &Value) -> String {
         })
         .unwrap_or_default();
     // Return the tail (recent screen) to keep it compact.
-    let body = if trimmed.len() > 4000 {
-        let start = trimmed.len() - 4000;
+    let body = if trimmed.len() > 1800 {
+        let start = trimmed.len() - 1800;
         let cut = (start..trimmed.len())
             .find(|&i| trimmed.is_char_boundary(i))
             .unwrap_or(start);
@@ -1617,17 +2300,35 @@ fn canvas_command_tool(ctx: &ToolContext, args: &Value, action: &str) -> String 
         Ok(id) => id,
         Err(e) => return format!("error: {e}"),
     };
-    let _ = ctx.app.emit(
-        "canvas://command",
-        json!({ "action": action, "vps_id": vps_id }),
-    );
     let label = ctx
         .db
         .get_vps(&vps_id)
         .ok()
         .flatten()
         .map(|v| v.name)
-        .unwrap_or(vps_id);
+        .unwrap_or_else(|| vps_id.clone());
+    if action == "open_terminal" {
+        let already = ctx
+            .canvas
+            .iter()
+            .any(|n| n.kind == "terminal" && n.vps_id == vps_id);
+        let live = !ctx.sessions.live_sessions_for_vps(&vps_id).is_empty();
+        if already || live {
+            let _ = ctx.app.emit(
+                "canvas://command",
+                json!({ "action": "open_terminal", "vps_id": vps_id }),
+            );
+            return format!(
+                "a terminal for {label} is already on the canvas — focused it. \
+                 Do not call canvas_open_terminal again for this host; use terminal_send \
+                 or run_command."
+            );
+        }
+    }
+    let _ = ctx.app.emit(
+        "canvas://command",
+        json!({ "action": action, "vps_id": vps_id }),
+    );
     format!("requested canvas action '{action}' for {label}")
 }
 
@@ -1686,12 +2387,34 @@ fn skill_view(ctx: &ToolContext, args: &Value) -> String {
     }
 }
 
-fn skill_save(ctx: &ToolContext, args: &Value) -> String {
+async fn skill_save(ctx: &ToolContext, args: &Value) -> String {
     let category = args.get("category").and_then(|v| v.as_str()).unwrap_or("");
     let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-    match skills::save_skill(&ctx.home, category, name, content) {
-        Ok(()) => format!("saved skill {category}/{name}"),
+    if category.trim().is_empty() || name.trim().is_empty() || content.trim().is_empty() {
+        return "error: category, name, and non-empty content are required".into();
+    }
+    let report = match skill_scan::scan_skill_content(
+        content,
+        &skill_scan::scan_options_from_db(&ctx.db),
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(e) => return format!("error: scanning skill: {e}"),
+    };
+    if report.is_blocking() {
+        return format!("BLOCKED: skill was not saved.\n{}", report.summary());
+    }
+    let gate = format!(
+        "save unverified skill '{category}/{name}' (scan: {} risk {}/100, scanner {})",
+        report.severity, report.risk_score, report.scanner
+    );
+    if let Err(e) = authorize_local(ctx, &gate).await {
+        return format!("error: {e}");
+    }
+    match skills::save_unverified(&ctx.home, name, content) {
+        Ok(saved) => format!("saved unverified skill unverified/{saved}; promote it after review.\n{}", report.summary()),
         Err(e) => format!("error: {e}"),
     }
 }
@@ -1821,9 +2544,116 @@ async fn local_read_file(ctx: &ToolContext, args: &Value) -> String {
     if let Err(e) = authorize_local(ctx, &format!("cat -- {}", shell_quote(path))).await {
         return format!("error: {e}");
     }
+    if crate::artifacts::looks_like_secret_path(path) {
+        return "error: refused — that path looks like a private key or app secret. \
+I cannot read passwords or private keys. Use artifact_list for the backup path/hash."
+            .into();
+    }
     match crate::local::read_local_file(path) {
-        Ok(s) => s,
+        Ok(s) => {
+            if crate::artifacts::looks_like_private_key_content(s.as_bytes()) {
+                "error: refused — file is a private key. I cannot read key material. \
+The user can open it from Settings → Artifacts or the saved path."
+                    .into()
+            } else {
+                let offset = args.get("offset").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
+                crate::ai::file_ops::format_read(&s, offset, limit)
+            }
+        }
         Err(e) => format!("error: {e}"),
+    }
+}
+
+async fn local_edit_file(ctx: &ToolContext, args: &Value) -> String {
+    let path = match args.get("path").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p,
+        _ => return "error: missing 'path'".into(),
+    };
+    let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+    let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+    let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+    if let Err(e) = authorize_local(ctx, &format!("edit local file {path}")).await {
+        return format!("error: {e}");
+    }
+    let before = match crate::local::read_local_file(path) {
+        Ok(s) => s,
+        Err(e) => return format!("error: {e}"),
+    };
+    let (next, n) = match crate::ai::file_ops::apply_edit(&before, old, new, replace_all) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match crate::artifacts::write_verified(std::path::Path::new(path), next.as_bytes()) {
+        Ok(written) => {
+            ctx.edits.record(
+                &ctx.app,
+                &ctx.session_id,
+                ctx.workspace_id.clone(),
+                "local",
+                None,
+                "This PC",
+                path,
+                &before,
+                &next,
+            );
+            format!(
+                "updated {path} ({n} replacement{}, {} bytes, sha256 {})",
+                if n == 1 { "" } else { "s" },
+                written.size,
+                written.sha256
+            )
+        }
+        Err(e) => format!("error: {e}"),
+    }
+}
+
+async fn local_grep_search(ctx: &ToolContext, args: &Value) -> String {
+    let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p,
+        _ => return "error: missing 'pattern'".into(),
+    };
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(".");
+    let glob = args.get("glob").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let ci = args.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false);
+    let head = args
+        .get("head_limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(40)
+        .clamp(1, 200);
+    let i = if ci { " -i" } else { "" };
+    let g = glob
+        .map(|g| format!(" -g {}", shell_quote(g)))
+        .unwrap_or_default();
+    let cmd = format!(
+        "rg -n --no-heading -m {head}{i}{g} -e {pat} -- {path}",
+        pat = shell_quote(pattern),
+        path = shell_quote(path),
+    );
+    if let Err(e) = authorize_local(ctx, &cmd).await {
+        return format!("error: {e}");
+    }
+    match crate::local::run_local_command(&cmd).await {
+        Ok(out) => {
+            let text = if out.stdout.trim().is_empty() {
+                out.stderr.clone()
+            } else {
+                out.stdout.clone()
+            };
+            if text.trim().is_empty() {
+                format!("no matches for {pattern:?} under {path}")
+            } else {
+                let clipped: String = text.lines().take(head as usize).collect::<Vec<_>>().join("\n");
+                format!("matches (path:line:text):\n{clipped}")
+            }
+        }
+        Err(e) => format!(
+            "error: {e}. Install ripgrep (rg) for fast local search, or pass a narrower path."
+        ),
     }
 }
 
@@ -1837,11 +2667,12 @@ async fn local_write_file(ctx: &ToolContext, args: &Value) -> String {
         return format!("error: {e}");
     }
     let before = crate::local::read_local_file(path).ok();
-    match crate::local::write_local_file(path, content) {
-        Ok(()) => {
+    match crate::artifacts::write_verified(std::path::Path::new(path), content.as_bytes()) {
+        Ok(written) => {
             ctx.edits.record(
                 &ctx.app,
                 &ctx.session_id,
+                ctx.workspace_id.clone(),
                 "local",
                 None,
                 "This PC",
@@ -1849,7 +2680,23 @@ async fn local_write_file(ctx: &ToolContext, args: &Value) -> String {
                 before.as_deref().unwrap_or(""),
                 content,
             );
-            format!("wrote {} bytes to {path}", content.len())
+            record_artifact(
+                ctx,
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path),
+                &written.path.to_string_lossy(),
+                "file",
+                &written.sha256,
+                written.size,
+                crate::artifacts::looks_like_private_key_content(content.as_bytes()),
+                None,
+            );
+            format!(
+                "wrote {} bytes to {path} (sha256 {} — verified)",
+                written.size, written.sha256
+            )
         }
         Err(e) => format!("error: {e}"),
     }
@@ -1987,8 +2834,26 @@ async fn download_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &
             }
         }
     }
-    let result = match std::fs::write(local_path, &bytes) {
-        Ok(()) => format!("downloaded {} bytes to {local_path}", bytes.len()),
+    let result = match crate::artifacts::write_verified(std::path::Path::new(local_path), &bytes) {
+        Ok(written) => {
+            record_artifact(
+                ctx,
+                std::path::Path::new(local_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(local_path),
+                &written.path.to_string_lossy(),
+                "download",
+                &written.sha256,
+                written.size,
+                crate::artifacts::looks_like_private_key_content(&bytes),
+                Some(vps_id.clone()),
+            );
+            format!(
+                "downloaded {} bytes to {local_path} (sha256 {} — verified)",
+                written.size, written.sha256
+            )
+        }
         Err(e) => format!("error: writing local file: {e}"),
     };
     emit_command_result(sink, &activity_id, &result);
@@ -2008,14 +2873,140 @@ async fn ssh_setup_key_auth(ctx: &ToolContext, args: &Value) -> String {
     if let Err(e) = authorize_vps(ctx, &vps_id, gate).await {
         return format!("error: {e}");
     }
-    match keygen::setup_key_auth(&ctx.db, &ctx.sessions, &vps_id).await {
-        Ok(r) => format!(
-            "Key authentication is set up.\nFingerprint: {}\nInstalled public key: {}\n\
-             The private key is stored only in your OS keychain (never on disk or in the database). \
-             Password login on the server was left enabled as a fallback.",
-            r.fingerprint, r.public_openssh
-        ),
+    let save_backup = args
+        .get("save_backup")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let backup_dir = if !save_backup {
+        None
+    } else if let Some(custom) = args.get("backup_dir").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        Some(std::path::PathBuf::from(custom))
+    } else {
+        ctx.app.path().app_data_dir().ok().and_then(|d| {
+            let vps = ctx.db.get_vps(&vps_id).ok().flatten()?;
+            Some(crate::artifacts::ssh_backup_dir(&d, &vps_id, &vps.name))
+        })
+    };
+    match keygen::setup_key_auth(&ctx.db, &ctx.sessions, &vps_id, backup_dir.as_deref()).await {
+        Ok(r) => {
+            let _ = ctx.app.emit("vps://updated", &vps_id);
+            let _ = ctx.app.emit("artifacts://changed", ());
+            let mut out = format!(
+                "Key authentication is set up.\nFingerprint: {}\nInstalled public key: {}\n\
+                 Password login on the server was left enabled as a fallback.\n\
+                 The private key is in the OS keychain (never returned here).",
+                r.fingerprint, r.public_openssh
+            );
+            if r.backup_verified {
+                out.push_str(&format!(
+                    "\nVerified local backup: {}\nPublic key file: {}\nSHA-256: {}\n\
+                     xConsole now uses this key file for this server. Open Settings → Artifacts to find it.",
+                    r.backup_private_path.unwrap_or_default(),
+                    r.backup_public_path.unwrap_or_default(),
+                    r.backup_sha256.unwrap_or_default()
+                ));
+            } else if let Some(msg) = r.backup_private_path {
+                out.push_str(&format!("\nLocal backup: {msg}"));
+            }
+            out
+        }
         Err(e) => format!("error: {e}"),
+    }
+}
+
+fn vps_update_login(ctx: &ToolContext, args: &Value) -> String {
+    let vps_id = match resolve_target(ctx, args) {
+        Ok(id) => id,
+        Err(e) => return format!("error: {e}"),
+    };
+    if args.get("password").is_some() || args.get("secret").is_some() || args.get("private_key").is_some()
+    {
+        return "error: refused — I cannot set or read passwords or private keys. \
+Use ssh_setup_key_auth to create a key, then vps_update_login for host/port/username/key_path."
+            .into();
+    }
+    let auth_type = args.get("auth_type").and_then(|v| v.as_str()).map(|s| {
+        crate::storage::models::AuthType::from_str(s)
+    });
+    let port = args.get("port").and_then(|v| {
+        v.as_u64()
+            .or_else(|| v.as_i64().map(|n| n as u64))
+            .and_then(|n| u16::try_from(n).ok())
+    });
+    let patch = crate::storage::models::VpsLoginPatch {
+        name: args.get("name").and_then(|v| v.as_str()).map(String::from),
+        host: args.get("host").and_then(|v| v.as_str()).map(String::from),
+        port,
+        username: args.get("username").and_then(|v| v.as_str()).map(String::from),
+        auth_type,
+        key_path: args.get("key_path").and_then(|v| v.as_str()).map(String::from),
+    };
+    match ctx.db.patch_vps_login(&vps_id, &patch) {
+        Ok(v) => {
+            let _ = ctx.app.emit("vps://updated", &v.id);
+            format!(
+                "Updated xConsole login (no secrets exposed).\n\
+                 vps_id: {}\nname: {}\nhost: {}\nport: {}\nusername: {}\nauth_type: {}\nkey_path: {}",
+                v.id,
+                v.name,
+                v.host,
+                v.port,
+                v.username,
+                v.auth_type.as_str(),
+                v.key_path.unwrap_or_else(|| "(managed key / none)".into())
+            )
+        }
+        Err(e) => format!("error: {e}"),
+    }
+}
+
+fn artifact_list(ctx: &ToolContext, args: &Value) -> String {
+    let query = args.get("query").and_then(|v| v.as_str());
+    match ctx.db.list_artifacts(query) {
+        Ok(list) if list.is_empty() => "(no artifacts yet)".into(),
+        Ok(list) => list
+            .into_iter()
+            .map(|a| {
+                format!(
+                    "- [{}] {}  {} bytes  sha256={}  path={}{}",
+                    a.kind,
+                    a.name,
+                    a.size,
+                    a.sha256,
+                    a.path,
+                    if a.secret { "  (secret — contents hidden)" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(e) => format!("error: {e}"),
+    }
+}
+
+fn record_artifact(
+    ctx: &ToolContext,
+    name: &str,
+    path: &str,
+    kind: &str,
+    sha256: &str,
+    size: u64,
+    secret: bool,
+    vps_id: Option<String>,
+) {
+    let art = crate::artifacts::Artifact {
+        id: Uuid::new_v4().to_string(),
+        name: name.to_string(),
+        path: path.to_string(),
+        kind: kind.to_string(),
+        sha256: sha256.to_string(),
+        size,
+        secret,
+        session_id: Some(ctx.session_id.clone()),
+        vps_id,
+        created_at: None,
+    };
+    if ctx.db.insert_artifact(&art).is_ok() {
+        let _ = ctx.app.emit("artifacts://changed", ());
     }
 }
 
@@ -2041,7 +3032,17 @@ fn ssh_key_status(ctx: &ToolContext, args: &Value) -> String {
 
 // ---- Interactive prompts: clarifying questions and plan review --------------
 
+/// Cron and goal runs are unattended — there is nobody to answer interactive
+/// prompts, and their private registries can't be resolved from the UI (which
+/// would deadlock the turn for the full PROMPT_TIMEOUT).
+fn is_unattended_session(session_id: &str) -> bool {
+    session_id.starts_with("cron:") || session_id.starts_with("goal:")
+}
+
 async fn ask_user(ctx: &ToolContext, args: &Value) -> String {
+    if is_unattended_session(&ctx.session_id) {
+        return "error: ask_user is not available in unattended runs (cron/goal)".into();
+    }
     let questions = args.get("questions").filter(|q| {
         q.as_array().map(|a| !a.is_empty()).unwrap_or(false)
     });
@@ -2056,7 +3057,7 @@ async fn ask_user(ctx: &ToolContext, args: &Value) -> String {
         "questions": questions,
     });
     let _ = ctx.app.emit("ai://question", payload);
-    let rx = ctx.prompts.register(id.clone());
+    let rx = ctx.prompts.register_for_session(id.clone(), &ctx.session_id);
     match tokio::time::timeout(PROMPT_TIMEOUT, rx).await {
         Ok(Ok(answer)) if !answer.trim().is_empty() => format!("User's answer:\n{}", answer.trim()),
         Ok(Ok(_)) => "The user submitted an empty answer.".into(),
@@ -2069,27 +3070,62 @@ async fn ask_user(ctx: &ToolContext, args: &Value) -> String {
 }
 
 async fn present_plan(ctx: &ToolContext, args: &Value) -> String {
-    let plan = match args.get("plan").and_then(|v| v.as_str()) {
-        Some(p) if !p.trim().is_empty() => p,
-        _ => return "error: missing 'plan'".into(),
+    if is_unattended_session(&ctx.session_id) {
+        return "error: plan mode is not available in unattended runs (cron/goal). Present the \
+                plan as normal text instead, and do not attempt to execute anything."
+            .into();
+    }
+    let plan = match crate::ai::consent::plan_body_from_args(args) {
+        Some(p) => p,
+        None => {
+            return "error: missing 'plan' — pass the full markdown plan in the `plan` argument \
+                    (aliases: content, text, steps)."
+                .into()
+        }
     };
-    let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("Plan");
+    let title = args
+        .get("title")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Plan");
     let id = Uuid::new_v4().to_string();
+    let stored = crate::storage::models::AgentPlan {
+        id: id.clone(),
+        session_id: ctx.session_id.clone(),
+        workspace_id: ctx.workspace_id.clone(),
+        title: Some(title.to_string()),
+        plan: plan.to_string(),
+        status: "presented".into(),
+        created_at: None,
+        updated_at: None,
+    };
+    let _ = ctx.db.insert_agent_plan(&stored);
     let payload = json!({
         "id": id,
         "session_id": ctx.session_id,
+        "workspace_id": ctx.workspace_id,
         "title": title,
         "plan": plan,
     });
     let _ = ctx.app.emit("ai://plan", payload);
-    let rx = ctx.prompts.register(id.clone());
+    // A new presentation supersedes any still-pending one for this session.
+    ctx.prompts.cancel_superseded(&ctx.session_id, &id);
+    let rx = ctx.prompts.register_for_session(id.clone(), &ctx.session_id);
     match tokio::time::timeout(PROMPT_TIMEOUT, rx).await {
         Ok(Ok(decision)) => {
-            // The frontend sends "APPROVE" or "REJECT: <feedback>".
+            // The frontend sends "APPROVE", "REJECT: <feedback>", or "CANCEL".
             let d = decision.trim();
             if d.eq_ignore_ascii_case("approve") || d.to_ascii_uppercase().starts_with("APPROVE") {
+                let _ = ctx.db.update_agent_plan_status(&id, "applied");
                 ctx.session_state.mark_plan_approved(&ctx.session_id);
                 "The user APPROVED the plan. Proceed to execute it now.".into()
+            } else if d.to_ascii_uppercase().starts_with("CANCEL: SUPERSEDED") {
+                let _ = ctx.db.update_agent_plan_status(&id, "cancelled");
+                "This plan was superseded by a newer presentation. Continue with the latest plan."
+                    .into()
+            } else if d.eq_ignore_ascii_case("cancel") || d.to_ascii_uppercase().starts_with("CANCEL") {
+                let _ = ctx.db.update_agent_plan_status(&id, "cancelled");
+                "The user cancelled the plan. Stop and ask what they want instead.".into()
             } else {
                 let feedback = d
                     .strip_prefix("REJECT:")
@@ -2111,7 +3147,325 @@ async fn present_plan(ctx: &ToolContext, args: &Value) -> String {
         Ok(Err(_)) => "error: plan channel closed".into(),
         Err(_) => {
             ctx.prompts.cancel(&id);
+            // Only a still-presented plan becomes "cancelled" on timeout; an
+            // already-archived/applied plan keeps its status.
+            let _ = ctx.db.update_agent_plan_status_if(&id, "cancelled", "presented");
             "error: the user did not respond to the plan in time".into()
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Goal-driven autonomous mode (/goal) tool handlers. The goal id is embedded in
+// the session id ("goal:<id>"), mirroring how cron jobs use "cron:<id>".
+// ---------------------------------------------------------------------------
+
+fn latest_intake_goal_id(ctx: &ToolContext) -> Option<String> {
+    ctx.db
+        .list_goals()
+        .ok()?
+        .into_iter()
+        .rev()
+        .find(|g| g.status == "intake")
+        .map(|g| g.id)
+}
+
+fn goal_session_mut(
+    ctx: &ToolContext,
+) -> Result<(String, crate::storage::models::GoalSession), String> {
+    let goal_id = crate::ai::goal::goal_id_from_session(&ctx.session_id)
+        .or_else(|| ctx.goal_id.clone().filter(|s| !s.is_empty()))
+        .or_else(|| latest_intake_goal_id(ctx))
+        .ok_or_else(|| "no active goal — start one with /goal <objective>".to_string())?;
+    let goal = ctx
+        .db
+        .get_goal(&goal_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "goal session not found".to_string())?;
+    Ok((goal_id, goal))
+}
+
+fn emit_goal_event(app: &tauri::AppHandle, goal_id: &str, event: StreamEvent) {
+    let _ = app.emit(&crate::ai::goal::goal_event(goal_id), event);
+}
+
+async fn goal_propose_spec(ctx: &ToolContext, args: &Value) -> String {
+    let (goal_id, mut goal) = match goal_session_mut(ctx) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {e}"),
+    };
+    if goal.status != "intake" {
+        return format!("error: goal is in '{}' status, not intake", goal.status);
+    }
+    let spec = crate::storage::models::GoalSpec {
+        objective: args.get("objective").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        success_criteria: args
+            .get("success_criteria")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        check_method: args.get("check_method").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        check_tooling: args
+            .get("check_tooling")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        hard_constraints: args
+            .get("hard_constraints")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        max_cycles: args.get("max_cycles").and_then(|v| v.as_i64()),
+        vps_targets: crate::ai::goal::parse_spec(&goal)
+            .map(|s| s.vps_targets)
+            .unwrap_or_default(),
+    };
+    goal.spec_json = serde_json::to_string(&spec).unwrap_or_default();
+    if let Err(e) = ctx.db.update_goal(&goal) {
+        return format!("error: {e}");
+    }
+    emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("spec_proposed".into()));
+    "Goal spec proposed. The user must review and click 'Lock goal & start' to activate it.".into()
+}
+
+fn goal_now() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn push_task_history(
+    task: &mut crate::storage::models::GoalTask,
+    action: &str,
+    note: Option<String>,
+) {
+    let at = goal_now();
+    task.history.push(crate::storage::models::GoalTaskEvent {
+        at: at.clone(),
+        action: action.to_string(),
+        column: Some(task.column.clone()),
+        note,
+    });
+    task.updated_at = Some(at);
+}
+
+async fn goal_add_task(ctx: &ToolContext, args: &Value) -> String {
+    let (goal_id, mut goal) = match goal_session_mut(ctx) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {e}"),
+    };
+    let mut tasks = crate::ai::goal::parse_kanban(&goal);
+    let parent_id = args
+        .get("parent_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if let Some(ref pid) = parent_id {
+        if !tasks.iter().any(|t| t.id == *pid) {
+            return format!("error: parent task '{pid}' not found");
+        }
+    }
+    let now = goal_now();
+    let column = args
+        .get("column")
+        .and_then(|v| v.as_str())
+        .unwrap_or("backlog")
+        .to_string();
+    let detail = args.get("detail").and_then(|v| v.as_str()).map(String::from);
+    let mut task = crate::storage::models::GoalTask {
+        id: Uuid::new_v4().to_string(),
+        column: column.clone(),
+        title: args.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        detail: detail.clone(),
+        kind: args.get("kind").and_then(|v| v.as_str()).unwrap_or("task").to_string(),
+        files: args
+            .get("files")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        result: None,
+        error: None,
+        parent_id,
+        history: Vec::new(),
+        created_at: Some(now.clone()),
+        updated_at: Some(now),
+    };
+    push_task_history(&mut task, "created", detail);
+    let id = task.id.clone();
+    tasks.push(task);
+    crate::ai::goal::set_kanban(&mut goal, tasks);
+    if let Err(e) = ctx.db.update_goal(&goal) {
+        return format!("error: {e}");
+    }
+    emit_goal_event(
+        &ctx.app,
+        &goal_id,
+        StreamEvent::ToolResult { id: id.clone(), output: "task added".into() },
+    );
+    id
+}
+
+async fn goal_update_task(ctx: &ToolContext, args: &Value) -> String {
+    let (goal_id, mut goal) = match goal_session_mut(ctx) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {e}"),
+    };
+    let task_id = args.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+    if task_id.is_empty() {
+        return "error: task_id required".into();
+    }
+    let mut tasks = crate::ai::goal::parse_kanban(&goal);
+    let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) else {
+        return format!("error: task '{task_id}' not found");
+    };
+    let mut action = "updated";
+    if let Some(col) = args.get("column").and_then(|v| v.as_str()) {
+        if col != task.column {
+            action = "moved";
+        }
+        task.column = col.to_string();
+    }
+    if let Some(title) = args.get("title").and_then(|v| v.as_str()) {
+        task.title = title.to_string();
+    }
+    if let Some(d) = args.get("detail").and_then(|v| v.as_str()) {
+        task.detail = Some(d.to_string());
+        if action == "updated" {
+            action = "detail";
+        }
+    }
+    if let Some(k) = args.get("kind").and_then(|v| v.as_str()) {
+        task.kind = k.to_string();
+    }
+    if let Some(r) = args.get("result").and_then(|v| v.as_str()) {
+        task.result = Some(r.to_string());
+        action = "result";
+    }
+    if let Some(e) = args.get("error").and_then(|v| v.as_str()) {
+        task.error = Some(e.to_string());
+        action = "error";
+    }
+    if let Some(f) = args.get("files").and_then(|v| v.as_array()) {
+        task.files = f.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+        if action == "updated" {
+            action = "files";
+        }
+    }
+    let note = args
+        .get("note")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| {
+            if action == "result" {
+                task.result.clone()
+            } else if action == "error" {
+                task.error.clone()
+            } else {
+                None
+            }
+        });
+    if args.get("note").and_then(|v| v.as_str()).is_some() && action == "updated" {
+        action = "note";
+    }
+    push_task_history(task, action, note);
+    crate::ai::goal::set_kanban(&mut goal, tasks);
+    if let Err(e) = ctx.db.update_goal(&goal) {
+        return format!("error: {e}");
+    }
+    emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("task_updated".into()));
+    "ok".into()
+}
+
+async fn goal_record_constraint(ctx: &ToolContext, args: &Value) -> String {
+    let (goal_id, mut goal) = match goal_session_mut(ctx) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {e}"),
+    };
+    let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let value = args.get("value").and_then(|v| v.as_str()).unwrap_or("");
+    let evidence = args.get("evidence").and_then(|v| v.as_str()).unwrap_or("");
+    let confidence = args.get("confidence").and_then(|v| v.as_str()).unwrap_or("observed");
+    if key.is_empty() || value.is_empty() {
+        return "error: key and value required".into();
+    }
+    // Constraint memory: {"learned":[{key,value,evidence,confidence}], "history":[]}.
+    let mut mem: serde_json::Value =
+        serde_json::from_str(&goal.memory_json).unwrap_or_else(|_| serde_json::json!({}));
+    if mem.get("learned").and_then(|l| l.as_array()).is_none() {
+        mem["learned"] = serde_json::json!([]);
+    }
+    let learned = mem["learned"].as_array_mut().unwrap();
+    // Replace an existing entry with the same key.
+    learned.retain(|e| e.get("key").and_then(|k| k.as_str()) != Some(key));
+    learned.push(serde_json::json!({
+        "key": key,
+        "value": value,
+        "evidence": evidence,
+        "confidence": confidence,
+    }));
+    goal.memory_json = serde_json::to_string(&mem).unwrap_or_default();
+    if let Err(e) = ctx.db.update_goal(&goal) {
+        return format!("error: {e}");
+    }
+    emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("memory_updated".into()));
+    "ok".into()
+}
+
+async fn goal_check_criteria(ctx: &ToolContext, args: &Value) -> String {
+    let (goal_id, mut goal) = match goal_session_mut(ctx) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {e}"),
+    };
+    let verdict = args.get("verdict").and_then(|v| v.as_str()).unwrap_or("");
+    let evidence = args.get("evidence").and_then(|v| v.as_str()).unwrap_or("");
+    match verdict {
+        "met" => {
+            goal.status = "done".to_string();
+            goal.finished_at = Some(chrono::Utc::now().to_rfc3339());
+            if let Err(e) = ctx.db.update_goal(&goal) {
+                return format!("error: {e}");
+            }
+            emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("done".into()));
+            format!("Goal marked done. Evidence: {evidence}")
+        }
+        "not_yet" => {
+            emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("active".into()));
+            "Not yet met — continue working.".into()
+        }
+        "too_early_to_tell" => {
+            let delay = args.get("delay_secs").and_then(|v| v.as_i64()).unwrap_or(0);
+            if delay > 0 {
+                goal.status = "waiting".to_string();
+                goal.next_check_at = Some(
+                    (chrono::Utc::now() + chrono::Duration::seconds(delay)).to_rfc3339(),
+                );
+                if let Err(e) = ctx.db.update_goal(&goal) {
+                    return format!("error: {e}");
+                }
+                emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("waiting".into()));
+                format!("Too early to tell — re-check in {delay}s. Evidence: {evidence}")
+            } else {
+                emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("active".into()));
+                format!("Too early to tell — keep scanning (no delay set). Evidence: {evidence}")
+            }
+        }
+        other => format!("error: unknown verdict '{other}' (use met|not_yet|too_early_to_tell)"),
+    }
+}
+
+async fn goal_schedule_wait(ctx: &ToolContext, args: &Value) -> String {
+    let (goal_id, mut goal) = match goal_session_mut(ctx) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {e}"),
+    };
+    let until = args.get("until").and_then(|v| v.as_str()).unwrap_or("");
+    if chrono::DateTime::parse_from_rfc3339(until).is_err() {
+        return format!("error: 'until' must be RFC3339, got '{until}'");
+    }
+    let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+    goal.status = "waiting".to_string();
+    goal.next_check_at = Some(until.to_string());
+    if let Err(e) = ctx.db.update_goal(&goal) {
+        return format!("error: {e}");
+    }
+    emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("waiting".into()));
+    format!("Goal paused until {until}. Reason: {reason}")
 }

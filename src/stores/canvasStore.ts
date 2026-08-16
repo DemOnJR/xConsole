@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { persist, createJSONStorage } from "zustand/middleware";
 import {
   applyEdgeChanges,
   applyNodeChanges,
@@ -16,6 +16,7 @@ import {
   autoLayout,
   computeBoxes,
   isSolo,
+  layoutFromColumnCounts,
   moveToRow,
   moveWithinRow,
   reconcile,
@@ -26,6 +27,7 @@ import {
   toggleFullWidth,
   type TileLayout,
 } from "../lib/tileLayout";
+import { moveInTree, resizeTree, treeOf } from "../lib/tileTree";
 
 // "snap" was removed: it snapped node positions to a grid while dragging, which was
 // neither freeform nor a real tiling, and nobody used it.
@@ -61,12 +63,29 @@ export interface DbData {
   [key: string]: unknown;
 }
 
+/** The AI agent window node. Binds to the global agent session (Phase 1); a
+ *  per-node `sessionId` becomes the binding once multi-agent lands. */
+export interface AgentData {
+  name: string;
+  sessionId?: string;
+  [key: string]: unknown;
+}
+
+/** A kanban board node for a /goal session (one node per active goal). */
+export interface GoalData {
+  goalId: string;
+  name: string;
+  [key: string]: unknown;
+}
+
 export type CanvasEdge = Edge<{ kind: "sftp-terminal" }>;
 
 export type TermNode = Node<TermData, "terminal">;
 export type SftpNode = Node<SftpData, "sftp">;
 export type DbNode = Node<DbData, "db">;
-export type CanvasNode = TermNode | SftpNode | DbNode;
+export type AgentNode = Node<AgentData, "agent">;
+export type GoalNode = Node<GoalData, "goal">;
+export type CanvasNode = TermNode | SftpNode | DbNode | AgentNode | GoalNode;
 
 export const NODE_W = 460;
 export const NODE_H = 320;
@@ -91,6 +110,8 @@ interface CanvasState {
   tileLayout: TileLayout | null;
   /** Last known canvas pane size, so layout edits can re-tile without the caller. */
   paneSize: { width: number; height: number } | null;
+  /** Pending terminal commands from the agent chat Execute button (FIFO per node). */
+  pendingTerminalCommands: Record<string, { command: string; send: boolean }[]>;
 
   setNodes: (nodes: CanvasNode[]) => void;
   setEdges: (edges: CanvasEdge[]) => void;
@@ -102,6 +123,10 @@ interface CanvasState {
   addSftp: (vps: Vps, position?: { x: number; y: number }) => string;
   /** Drop a database browser for this server onto the canvas. */
   addDb: (vps: Vps, position?: { x: number; y: number }) => string;
+  /** Open the agent window (single instance — focuses it if one is open). */
+  addAgent: (position?: { x: number; y: number }) => string;
+  /** Open a kanban board node for a goal session (multiple allowed). */
+  addGoal: (goalId: string, position?: { x: number; y: number }) => string;
   removeNode: (id: string) => void;
   setLayout: (mode: LayoutMode) => void;
   focus: (id: string | null) => void;
@@ -121,6 +146,8 @@ interface CanvasState {
   setTileLayout: (layout: TileLayout | null) => void;
   /** Re-flow into rows of the given sizes, e.g. `[3, 2]` for 3 on top, 2 below. */
   setTileRows: (counts: number[]) => void;
+  /** Re-flow into side-by-side columns, e.g. `[2, 1]` for 2 stacked left, 1 right. */
+  setTileColumns: (counts: number[]) => void;
   /** Discard any hand-tuned arrangement and go back to the balanced default. */
   resetTileLayout: () => void;
   /** Move a tile within its row (`horizontal`) or between rows (`vertical`). */
@@ -130,6 +157,14 @@ interface CanvasState {
   /** Give a tile its own full-width row — or merge it back. */
   toggleTileFullWidth: (id: string) => void;
   clear: () => void;
+  /**
+   * Queue a command to be typed into a terminal node once its SSH session is ready.
+   * `send=true` runs it (appends newline); `send=false` types it and waits (the user
+   * presses Enter). Used by the agent chat's Execute button.
+   */
+  queueTerminalCommand: (nodeId: string, command: string, send: boolean) => void;
+  /** Take (and clear) the queued command for a node — called by TerminalNode. */
+  takeTerminalCommand: (nodeId: string) => { command: string; send: boolean } | null;
 }
 
 /** The slice of state `applyTiles` reads — keeps the helper testable and cheap. */
@@ -201,12 +236,24 @@ export const useCanvasStore = create<CanvasState>()(
       webglIds: [],
       tileLayout: null,
       paneSize: null,
+      // Pending terminal commands (Execute button): nodeId → FIFO array.
+      pendingTerminalCommands: {} as Record<string, { command: string; send: boolean }[]>,
 
       setNodes: (nodes) => set({ nodes }),
       setEdges: (edges) => set({ edges }),
 
       onNodesChange: (changes) =>
         set((s) => {
+          // React Flow emits measurement ticks that don't change size. Applying
+          // them still clones the node list and re-renders every window.
+          const meaningful = changes.filter((c) => {
+            if (c.type !== "dimensions" || !c.dimensions || c.resizing) return true;
+            const n = s.nodes.find((node) => node.id === c.id);
+            if (!n) return true;
+            return n.width !== c.dimensions.width || n.height !== c.dimensions.height;
+          });
+          if (meaningful.length === 0) return s;
+
           // In tile mode a node's size is derived from the layout, so writing pixel
           // dimensions straight onto the node does nothing lasting — the next reflow
           // overwrites them. Dragging an edge has to become a change to the *layout*.
@@ -215,7 +262,7 @@ export const useCanvasStore = create<CanvasState>()(
             // measurements as dimension changes too, and those must not be read as user
             // intent: on the first one a node has no width yet, so the "delta" would be
             // the node's entire width and the layout would be thrown across the pane.
-            const resizes = changes.filter(
+            const resizes = meaningful.filter(
               (c): c is Extract<NodeChange<CanvasNode>, { type: "dimensions" }> =>
                 c.type === "dimensions" && !!c.dimensions && c.resizing === true,
             );
@@ -240,6 +287,15 @@ export const useCanvasStore = create<CanvasState>()(
                   );
                   continue;
                 }
+                if (layout.tree) {
+                  layout = resizeTree(
+                    layout,
+                    c.id,
+                    Math.abs(dw) >= 1 ? (dw / s.paneSize.width) * 2 : 0,
+                    Math.abs(dh) >= 1 ? (dh / s.paneSize.height) * 2 : 0,
+                  );
+                  continue;
+                }
                 if (Math.abs(dw) >= 1) {
                   const total = row.items.reduce((a, i) => a + i.weight, 0);
                   layout = resizeTile(layout, c.id, (dw / s.paneSize.width) * total);
@@ -255,7 +311,7 @@ export const useCanvasStore = create<CanvasState>()(
               return applyTiles({ ...s, tileLayout: layout }, s.paneSize);
             }
           }
-          return { ...s, nodes: applyNodeChanges(changes, s.nodes) };
+          return { ...s, nodes: applyNodeChanges(meaningful, s.nodes) };
         }),
 
       onEdgesChange: (changes) => {
@@ -337,7 +393,7 @@ export const useCanvasStore = create<CanvasState>()(
                   },
                 }
               : n,
-          ),
+          ) as CanvasNode[],
         }));
       },
 
@@ -345,7 +401,7 @@ export const useCanvasStore = create<CanvasState>()(
         set((s) => ({
           nodes: s.nodes.map((n) =>
             n.id === id ? { ...n, data: { ...n.data, ...partial } } : n,
-          ),
+          ) as CanvasNode[],
         })),
 
       addVps: (vps, position) => {
@@ -418,21 +474,106 @@ export const useCanvasStore = create<CanvasState>()(
         return id;
       },
 
+      addAgent: (position) => {
+        // One agent window at a time (Phase 1): the store is a single session, so
+        // a second node would just be a mirror. Focus the existing one instead.
+        const existing = get().nodes.find((n) => n.type === "agent");
+        if (existing) {
+          get().focus(existing.id);
+          return existing.id;
+        }
+        const id = crypto.randomUUID();
+        const count = get().nodes.length;
+        const pos =
+          position ?? {
+            x: 80 + (count % 4) * (NODE_W + GAP),
+            y: 80 + Math.floor(count / 4) * (NODE_H + GAP),
+          };
+        const node: AgentNode = {
+          id,
+          type: "agent",
+          position: pos,
+          width: NODE_W,
+          height: NODE_H,
+          data: { name: "Agent" },
+        };
+        set((s) => ({ nodes: [...s.nodes, node] }));
+        if (get().layoutMode === "tile") get().arrangeTiles();
+        get().focus(id);
+        return id;
+      },
+
+      addGoal: (goalId, position) => {
+        // Don't spawn the board under a maximized agent — un-fill first.
+        const pane = get().paneSize;
+        const agent = get().nodes.find((n) => n.type === "agent");
+        if (agent && pane) {
+          const w = Number(agent.width) || 0;
+          const h = Number(agent.height) || 0;
+          if (w >= pane.width - 4 && h >= pane.height - 4) {
+            if (get().layoutMode === "tile") {
+              get().toggleTileFullWidth(agent.id);
+            } else {
+              set((s) => ({
+                nodes: s.nodes.map((n) =>
+                  n.id === agent.id
+                    ? { ...n, position: { x: 80, y: 80 }, width: NODE_W, height: NODE_H }
+                    : n,
+                ),
+              }));
+            }
+          }
+        }
+        // One board per goal session; focus it if already open.
+        const existing = get().nodes.find(
+          (n) => n.type === "goal" && String(n.data.goalId) === goalId,
+        );
+        if (existing) {
+          get().focus(existing.id);
+          return existing.id;
+        }
+        const id = crypto.randomUUID();
+        const count = get().nodes.length;
+        const pos =
+          position ?? {
+            x: 80 + (count % 4) * (NODE_W + GAP),
+            y: 80 + Math.floor(count / 4) * (NODE_H + GAP),
+          };
+        const node: GoalNode = {
+          id,
+          type: "goal",
+          position: pos,
+          // Kanban board: wider than the default node.
+          width: Math.round(NODE_W * 1.6),
+          height: NODE_H + 60,
+          data: { goalId, name: "Goal" },
+        };
+        set((s) => ({ nodes: [...s.nodes, node] }));
+        if (get().layoutMode === "tile") get().arrangeTiles();
+        get().focus(id);
+        return id;
+      },
+
       removeNode: (id) => {
-        set((s) => ({
-          // Drop the node, and unlink any SFTP node that followed it so it isn't
-          // left with a dangling linkedTerminalId / followTerminal=true.
-          nodes: s.nodes
-            .filter((n) => n.id !== id)
-            .map((n) =>
-              n.type === "sftp" && n.data.linkedTerminalId === id
-                ? { ...n, data: { ...n.data, linkedTerminalId: undefined, followTerminal: false } }
-                : n,
-            ),
-          edges: s.edges.filter((e) => e.source !== id && e.target !== id),
-          webglIds: s.webglIds.filter((w) => w !== id),
-          focusedId: s.focusedId === id ? null : s.focusedId,
-        }));
+        set((s) => {
+          const next = { ...s.pendingTerminalCommands };
+          delete next[id];
+          return {
+            // Drop the node, and unlink any SFTP node that followed it so it isn't
+            // left with a dangling linkedTerminalId / followTerminal=true.
+            nodes: s.nodes
+              .filter((n) => n.id !== id)
+              .map((n) =>
+                n.type === "sftp" && n.data.linkedTerminalId === id
+                  ? { ...n, data: { ...n.data, linkedTerminalId: undefined, followTerminal: false } }
+                  : n,
+              ),
+            edges: s.edges.filter((e) => e.source !== id && e.target !== id),
+            webglIds: s.webglIds.filter((w) => w !== id),
+            focusedId: s.focusedId === id ? null : s.focusedId,
+            pendingTerminalCommands: next,
+          };
+        });
         // Close the hole the removed tile left behind.
         if (get().layoutMode === "tile") get().arrangeTiles();
       },
@@ -499,37 +640,100 @@ export const useCanvasStore = create<CanvasState>()(
           return applyTiles({ ...s, tileLayout: applyRowCounts(base, counts) }, s.paneSize ?? undefined);
         }),
 
+      setTileColumns: (counts) =>
+        set((s) => {
+          const ids = s.nodes.map((n) => n.id);
+          return applyTiles(
+            { ...s, tileLayout: layoutFromColumnCounts(ids, counts) },
+            s.paneSize ?? undefined,
+          );
+        }),
+
       resetTileLayout: () =>
         set((s) => applyTiles({ ...s, tileLayout: autoLayout(s.nodes.map((n) => n.id)) }, s.paneSize ?? undefined)),
 
       moveTile: (id, dir, axis) =>
         set((s) => {
           const base = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
-          const next =
-            axis === "horizontal" ? moveWithinRow(base, id, dir) : moveToRow(base, id, dir);
+          const next = base.tree
+            ? moveInTree(base, id, dir, axis)
+            : axis === "horizontal"
+              ? moveWithinRow(base, id, dir)
+              : moveToRow(base, id, dir);
           return applyTiles({ ...s, tileLayout: next }, s.paneSize ?? undefined);
         }),
 
       growTile: (id, delta, axis) =>
         set((s) => {
           const base = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
-          const next =
-            axis === "horizontal" ? resizeTile(base, id, delta) : resizeRow(base, id, delta);
+          const next = base.tree
+            ? resizeTree(
+                base,
+                id,
+                axis === "horizontal" ? delta : 0,
+                axis === "vertical" ? delta : 0,
+              )
+            : axis === "horizontal"
+              ? resizeTile(base, id, delta)
+              : resizeRow(base, id, delta);
           return applyTiles({ ...s, tileLayout: next }, s.paneSize ?? undefined);
         }),
 
       toggleTileFullWidth: (id) =>
         set((s) => {
           const base = reconcile(s.tileLayout, s.nodes.map((n) => n.id));
-          return applyTiles({ ...s, tileLayout: toggleFullWidth(base, id) }, s.paneSize ?? undefined);
+          const next = toggleFullWidth(base, id);
+          return applyTiles(
+            { ...s, tileLayout: { ...next, tree: treeOf(next) } },
+            s.paneSize ?? undefined,
+          );
         }),
 
       clear: () =>
         set({ nodes: [], edges: [], webglIds: [], focusedId: null, tileLayout: null }),
+
+      queueTerminalCommand: (nodeId, command, send) =>
+        set((s) => ({
+          pendingTerminalCommands: {
+            ...s.pendingTerminalCommands,
+            [nodeId]: [...(s.pendingTerminalCommands[nodeId] ?? []), { command, send }],
+          },
+        })),
+
+      takeTerminalCommand: (nodeId) => {
+        const pending = get().pendingTerminalCommands[nodeId];
+        if (!pending || pending.length === 0) return null;
+        const [first, ...rest] = pending;
+        set((s) => ({
+          pendingTerminalCommands: {
+            ...s.pendingTerminalCommands,
+            [nodeId]: rest,
+          },
+        }));
+        return first;
+      },
     }),
     {
       name: "xconsole-canvas",
       version: 1,
+      // Tile resize rewrites tileLayout every pointer move. Writing localStorage
+      // on each frame is what made dragging feel like the disk was wedged.
+      storage: createJSONStorage(() => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let pending: string | null = null;
+        return {
+          getItem: (name) => localStorage.getItem(name),
+          setItem: (name, value) => {
+            pending = value;
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(() => {
+              if (pending != null) localStorage.setItem(name, pending);
+              pending = null;
+            }, 400);
+          },
+          removeItem: (name) => localStorage.removeItem(name),
+        };
+      }),
       // The arrangement rides along with the mode so a hand-tuned grid survives a
       // restart. It references node ids that may be gone by then; `reconcile` drops
       // stale ids and places new ones on the next tile.

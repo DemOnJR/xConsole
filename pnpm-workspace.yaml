@@ -3,7 +3,11 @@
 # Applies to transitive dependencies too. See the project security policy.
 minimumReleaseAge: 10080 # 7 days, in minutes
 minimumReleaseAgeStrict: true # FAIL install if no version is old enough (no silent fallback)
-minimumReleaseAgeExclude: [] # only add a package here with a written, reviewed reason
+# nanoid 3.3.18 (GHSA-2v37-7h3g-55p8) is the only patched 3.x line postcss uses.
+# It is a few days inside the 7-day cooldown; taking the security fix is better
+# than failing every PR on a transitive build-time advisory.
+minimumReleaseAgeExclude:
+  - nanoid
 
 # Pin exact versions on `pnpm add` so dependency updates are always deliberate.
 savePrefix: ''
@@ -26,7 +30,7 @@ savePrefix: ''
 overrides:
   postcss: '>=8.5.18'
   # Stay on the 3.x line postcss already depends on; `>=3.3.17` alone would float to 6.x.
-  nanoid: '>=3.3.17 <4'
+  nanoid: '>=3.3.18 <4'
 
 # Allow-list of dependencies permitted to run install/build scripts (pnpm blocks
 # all by default as a supply-chain measure). Only well-known build tooling here.

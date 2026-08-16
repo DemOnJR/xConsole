@@ -6,11 +6,13 @@ use uuid::Uuid;
 
 use super::models::{
     AgentApproval, AgentConversation, AgentConversationInput, AgentConversationMeta,
-    AiProvider, AiProviderInput, AuthType, CloudAccount, CloudAccountInput,
-    CronJob, CronJobInput, InfraProject, InfraProjectInput, KnownHost, Vps, VpsInput, Workspace,
-    WorkspaceInput,
+    AgentPlan, AgentPlanMeta, AiProvider, AiProviderInput, AuthType, CloudAccount,
+    CloudAccountInput, CronJob, CronJobInput, GoalSession, InfraProject, InfraProjectInput,
+    KnownHost, Vps, VpsInput, VpsLoginPatch, Workspace, WorkspaceInput,
 };
+use crate::artifacts::Artifact;
 use crate::ai::conversations;
+use crate::ai::edits::EditRecord;
 use crate::ai::provider::ChatMessage;
 use crate::secrets;
 
@@ -32,6 +34,17 @@ pub enum HostKeyVerdict {
         offered: String,
         key_type: String,
     },
+}
+
+fn workspace_payload_eq(existing: &Workspace, input: &WorkspaceInput) -> bool {
+    existing.name == input.name
+        && existing.viewport_json == input.viewport_json
+        && existing.layout_mode == input.layout_mode
+        && existing.nodes_json == input.nodes_json
+        && existing.color == input.color
+        && existing.icon == input.icon
+        && existing.color_mode == input.color_mode
+        && existing.project_json == input.project_json
 }
 
 /// Thread-safe handle to the local SQLite database.
@@ -136,6 +149,7 @@ impl Db {
             key: *key,
             dirty,
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_data_version: Mutex::new(None),
         });
         let db = Db {
             conn: conn.clone(),
@@ -203,6 +217,7 @@ impl Db {
             key: *key,
             dirty,
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_data_version: Mutex::new(None),
         });
         self.migrate()?; // run on the now-real connection
         if !enc.exists() {
@@ -258,6 +273,7 @@ impl Db {
             key: *key,
             dirty,
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_data_version: Mutex::new(None),
         });
         *self.persist.lock().unwrap() = Some(ctx.clone());
         encrypt::spawn_persister(self.conn.clone(), ctx);
@@ -423,6 +439,22 @@ impl Db {
                 created_at   TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            -- Persistent autonomous goal sessions (/goal).
+            CREATE TABLE IF NOT EXISTS goal_sessions (
+                id            TEXT PRIMARY KEY,
+                title         TEXT NOT NULL,
+                raw_request   TEXT NOT NULL,
+                spec_json     TEXT NOT NULL,
+                status        TEXT NOT NULL DEFAULT 'intake',
+                kanban_json   TEXT NOT NULL DEFAULT '[]',
+                memory_json   TEXT NOT NULL DEFAULT '{}',
+                next_check_at TEXT,
+                cycles        INTEGER NOT NULL DEFAULT 0,
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                finished_at   TEXT
+            );
+
             -- Pending/!resolved approvals for agent commands (approve safety mode).
             CREATE TABLE IF NOT EXISTS agent_approval (
                 id          TEXT PRIMARY KEY,
@@ -484,6 +516,51 @@ impl Db {
                 messages_json TEXT NOT NULL DEFAULT '[]',
                 created_at    TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Plans the agent presents via present_plan, for review history.
+            -- status: presented | applied | archived | cancelled
+            CREATE TABLE IF NOT EXISTS agent_plan (
+                id           TEXT PRIMARY KEY,
+                session_id   TEXT NOT NULL,
+                workspace_id TEXT,
+                title        TEXT,
+                plan         TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'presented',
+                created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Files the agent changed (before/after), for per-session and
+            -- per-workspace diff history.
+            CREATE TABLE IF NOT EXISTS agent_file_change (
+                id           TEXT PRIMARY KEY,
+                session_id   TEXT NOT NULL,
+                workspace_id TEXT,
+                scope        TEXT NOT NULL,
+                vps_id       TEXT,
+                label        TEXT,
+                path         TEXT NOT NULL,
+                before       TEXT,
+                after        TEXT,
+                is_new       INTEGER NOT NULL DEFAULT 0,
+                reverted     INTEGER NOT NULL DEFAULT 0,
+                ts           INTEGER NOT NULL
+            );
+
+            -- Local files the agent created (SSH key backups, downloads, writes).
+            -- Secret rows are listed by path/hash only; contents are never served to tools.
+            CREATE TABLE IF NOT EXISTS artifact (
+                id          TEXT PRIMARY KEY,
+                name        TEXT NOT NULL,
+                path        TEXT NOT NULL,
+                kind        TEXT NOT NULL,
+                sha256      TEXT NOT NULL,
+                size        INTEGER NOT NULL DEFAULT 0,
+                secret      INTEGER NOT NULL DEFAULT 0,
+                session_id  TEXT,
+                vps_id      TEXT,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
             );
             "#,
         )?;
@@ -618,6 +695,98 @@ impl Db {
         Ok(self.get_vps(&id)?.expect("vps just upserted"))
     }
 
+    /// Update only the public login fields. Passwords / private keys are never read or written.
+    pub fn patch_vps_login(&self, id: &str, patch: &VpsLoginPatch) -> Result<Vps> {
+        let current = self
+            .get_vps(id)?
+            .ok_or_else(|| anyhow::anyhow!("VPS not found"))?;
+        let input = VpsInput {
+            id: Some(current.id),
+            name: patch.name.clone().unwrap_or(current.name),
+            host: patch.host.clone().unwrap_or(current.host),
+            port: patch.port.unwrap_or(current.port),
+            username: patch.username.clone().unwrap_or(current.username),
+            auth_type: patch.auth_type.clone().unwrap_or(current.auth_type),
+            key_path: match &patch.key_path {
+                Some(p) if p.is_empty() => None,
+                Some(p) => Some(p.clone()),
+                None => current.key_path,
+            },
+            tags: current.tags,
+            secret: None,
+        };
+        self.upsert_vps(&input)
+    }
+
+    pub fn insert_artifact(&self, art: &Artifact) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO artifact (id, name, path, kind, sha256, size, secret, session_id, vps_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                art.id,
+                art.name,
+                art.path,
+                art.kind,
+                art.sha256,
+                art.size as i64,
+                if art.secret { 1 } else { 0 },
+                art.session_id,
+                art.vps_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_artifacts(&self, query: Option<&str>) -> Result<Vec<Artifact>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, path, kind, sha256, size, secret, session_id, vps_id, created_at
+             FROM artifact ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Artifact {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                path: r.get(2)?,
+                kind: r.get(3)?,
+                sha256: r.get(4)?,
+                size: r.get::<_, i64>(5)? as u64,
+                secret: r.get::<_, i64>(6)? != 0,
+                session_id: r.get(7)?,
+                vps_id: r.get(8)?,
+                created_at: r.get(9)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        let q = query.unwrap_or("").trim().to_ascii_lowercase();
+        for row in rows {
+            let a = row?;
+            if q.is_empty()
+                || a.name.to_ascii_lowercase().contains(&q)
+                || a.path.to_ascii_lowercase().contains(&q)
+                || a.kind.to_ascii_lowercase().contains(&q)
+                || a.sha256.to_ascii_lowercase().contains(&q)
+            {
+                out.push(a);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn get_artifact(&self, id: &str) -> Result<Option<Artifact>> {
+        Ok(self.list_artifacts(None)?.into_iter().find(|a| a.id == id))
+    }
+
+    pub fn delete_artifact(&self, id: &str) -> Result<Option<Artifact>> {
+        let existing = self.get_artifact(id)?;
+        if existing.is_some() {
+            let conn = self.conn.lock().unwrap();
+            conn.execute("DELETE FROM artifact WHERE id = ?1", [id])?;
+        }
+        Ok(existing)
+    }
+
     pub fn delete_vps(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM vps WHERE id = ?1", [id])?;
@@ -671,6 +840,15 @@ impl Db {
 
     pub fn upsert_workspace(&self, input: &WorkspaceInput) -> Result<Workspace> {
         let id = input.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+        // An unchanged layout still used to bump `updated_at`, which marked the
+        // encrypted DB dirty and rewrote the whole ciphertext every autosave tick.
+        if input.id.is_some() {
+            if let Some(existing) = self.get_workspace(&id)? {
+                if workspace_payload_eq(&existing, input) {
+                    return Ok(existing);
+                }
+            }
+        }
         {
             let conn = self.conn.lock().unwrap();
             conn.execute(
@@ -919,6 +1097,117 @@ impl Db {
             "UPDATE cron_job SET last_run = datetime('now'), last_status = ?2 WHERE id = ?1",
             params![id, status],
         )?;
+        Ok(())
+    }
+
+    // ----- Goal sessions (/goal) -----
+
+    fn row_to_goal(r: &rusqlite::Row) -> rusqlite::Result<GoalSession> {
+        Ok(GoalSession {
+            id: r.get(0)?,
+            title: r.get(1)?,
+            raw_request: r.get(2)?,
+            spec_json: r.get(3)?,
+            status: r.get(4)?,
+            kanban_json: r.get(5)?,
+            memory_json: r.get(6)?,
+            next_check_at: r.get(7)?,
+            cycles: r.get(8)?,
+            created_at: r.get(9)?,
+            updated_at: r.get(10)?,
+            finished_at: r.get(11)?,
+        })
+    }
+
+    pub fn list_goals(&self) -> Result<Vec<GoalSession>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
+                    next_check_at, cycles, created_at, updated_at, finished_at
+             FROM goal_sessions ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_goal)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_goal(&self, id: &str) -> Result<Option<GoalSession>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
+                    next_check_at, cycles, created_at, updated_at, finished_at
+             FROM goal_sessions WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query([id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::row_to_goal(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Insert a new goal session in "intake" status.
+    pub fn insert_goal(&self, goal: &GoalSession) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO goal_sessions
+               (id, title, raw_request, spec_json, status, kanban_json, memory_json, next_check_at, cycles)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                goal.id,
+                goal.title,
+                goal.raw_request,
+                goal.spec_json,
+                goal.status,
+                goal.kanban_json,
+                goal.memory_json,
+                goal.next_check_at,
+                goal.cycles,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_goal(&self, goal: &GoalSession) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE goal_sessions SET
+                title = ?2, raw_request = ?3, spec_json = ?4, status = ?5,
+                kanban_json = ?6, memory_json = ?7, next_check_at = ?8, cycles = ?9,
+                updated_at = datetime('now'), finished_at = ?10
+             WHERE id = ?1",
+            params![
+                goal.id,
+                goal.title,
+                goal.raw_request,
+                goal.spec_json,
+                goal.status,
+                goal.kanban_json,
+                goal.memory_json,
+                goal.next_check_at,
+                goal.cycles,
+                goal.finished_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Goals that are due to resume (status "waiting" with next_check_at <= now).
+    pub fn list_due_goals(&self) -> Result<Vec<GoalSession>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
+                    next_check_at, cycles, created_at, updated_at, finished_at
+             FROM goal_sessions
+             WHERE status = 'waiting' AND next_check_at IS NOT NULL
+               AND next_check_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now')
+             ORDER BY next_check_at",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_goal)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn delete_goal(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM goal_sessions WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -1423,6 +1712,248 @@ impl Db {
         conn.execute("DELETE FROM agent_conversation WHERE id = ?1", params![id])?;
         Ok(())
     }
+
+    // ----- Agent plans (present_plan history) -----
+
+    pub fn insert_agent_plan(&self, plan: &AgentPlan) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agent_plan (id, session_id, workspace_id, title, plan, status, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))
+             ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                plan = excluded.plan,
+                status = excluded.status,
+                updated_at = datetime('now')",
+            params![
+                plan.id,
+                plan.session_id,
+                plan.workspace_id,
+                plan.title,
+                plan.plan,
+                plan.status,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_agent_plan(&self, id: &str) -> Result<Option<AgentPlan>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, workspace_id, title, plan, status, created_at, updated_at
+             FROM agent_plan WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map([id], |r| {
+            Ok(AgentPlan {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                workspace_id: r.get(2)?,
+                title: r.get(3)?,
+                plan: r.get(4)?,
+                status: r.get(5)?,
+                created_at: r.get(6)?,
+                updated_at: r.get(7)?,
+            })
+        })?;
+        match rows.next() {
+            Some(v) => Ok(Some(v?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_agent_plans(
+        &self,
+        session_id: Option<&str>,
+        workspace_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<AgentPlanMeta>> {
+        let conn = self.conn.lock().unwrap();
+        let (sql, params_vec): (String, Vec<String>) = match (session_id, workspace_id) {
+            (Some(s), Some(w)) => (
+                "SELECT id, session_id, workspace_id, title, status, created_at, updated_at
+                 FROM agent_plan WHERE session_id = ?1 AND workspace_id = ?2
+                 ORDER BY updated_at DESC LIMIT ?3"
+                    .into(),
+                vec![s.to_string(), w.to_string(), limit.to_string()],
+            ),
+            (Some(s), None) => (
+                "SELECT id, session_id, workspace_id, title, status, created_at, updated_at
+                 FROM agent_plan WHERE session_id = ?1
+                 ORDER BY updated_at DESC LIMIT ?2"
+                    .into(),
+                vec![s.to_string(), limit.to_string()],
+            ),
+            (None, Some(w)) => (
+                "SELECT id, session_id, workspace_id, title, status, created_at, updated_at
+                 FROM agent_plan WHERE workspace_id = ?1
+                 ORDER BY updated_at DESC LIMIT ?2"
+                    .into(),
+                vec![w.to_string(), limit.to_string()],
+            ),
+            (None, None) => (
+                "SELECT id, session_id, workspace_id, title, status, created_at, updated_at
+                 FROM agent_plan ORDER BY updated_at DESC LIMIT ?1"
+                    .into(),
+                vec![limit.to_string()],
+            ),
+        };
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec
+            .iter()
+            .map(|p| p as &dyn rusqlite::ToSql)
+            .collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_refs.as_slice(), |r| {
+            Ok(AgentPlanMeta {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                workspace_id: r.get(2)?,
+                title: r.get(3)?,
+                status: r.get(4)?,
+                created_at: r.get(5)?,
+                updated_at: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn update_agent_plan_status(&self, id: &str, status: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE agent_plan SET status = ?2, updated_at = datetime('now') WHERE id = ?1",
+            params![id, status],
+        )?;
+        Ok(())
+    }
+
+    /// Transition a plan's status only when it is still in `only_if_current`
+    /// (e.g. timeout must not overwrite an already-archived/applied plan).
+    pub fn update_agent_plan_status_if(
+        &self,
+        id: &str,
+        status: &str,
+        only_if_current: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE agent_plan SET status = ?2, updated_at = datetime('now')
+             WHERE id = ?1 AND status = ?3",
+            params![id, status, only_if_current],
+        )?;
+        Ok(())
+    }
+
+    // ----- Agent file changes (diff history) -----
+
+    /// Insert or replace a file-change record (same id = replace, for revert updates).
+    pub fn insert_file_change(&self, rec: &EditRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agent_file_change
+                (id, session_id, workspace_id, scope, vps_id, label, path, before, after, is_new, reverted, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(id) DO UPDATE SET
+                before = excluded.before,
+                after = excluded.after,
+                reverted = excluded.reverted",
+            params![
+                rec.id,
+                rec.session_id,
+                rec.workspace_id,
+                rec.scope,
+                rec.vps_id,
+                rec.label,
+                rec.path,
+                rec.before,
+                rec.after,
+                rec.is_new as i64,
+                rec.reverted as i64,
+                rec.ts,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_file_changes(
+        &self,
+        session_id: Option<&str>,
+        workspace_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<EditRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let (sql, params_vec): (String, Vec<String>) = match (session_id, workspace_id) {
+            (Some(s), Some(w)) => (
+                "SELECT id, session_id, workspace_id, scope, vps_id, label, path, before, after, is_new, reverted, ts
+                 FROM agent_file_change WHERE session_id = ?1 AND workspace_id = ?2
+                 ORDER BY ts DESC LIMIT ?3"
+                    .into(),
+                vec![s.to_string(), w.to_string(), limit.to_string()],
+            ),
+            (Some(s), None) => (
+                "SELECT id, session_id, workspace_id, scope, vps_id, label, path, before, after, is_new, reverted, ts
+                 FROM agent_file_change WHERE session_id = ?1
+                 ORDER BY ts DESC LIMIT ?2"
+                    .into(),
+                vec![s.to_string(), limit.to_string()],
+            ),
+            (None, Some(w)) => (
+                "SELECT id, session_id, workspace_id, scope, vps_id, label, path, before, after, is_new, reverted, ts
+                 FROM agent_file_change WHERE workspace_id = ?1
+                 ORDER BY ts DESC LIMIT ?2"
+                    .into(),
+                vec![w.to_string(), limit.to_string()],
+            ),
+            (None, None) => (
+                "SELECT id, session_id, workspace_id, scope, vps_id, label, path, before, after, is_new, reverted, ts
+                 FROM agent_file_change ORDER BY ts DESC LIMIT ?1"
+                    .into(),
+                vec![limit.to_string()],
+            ),
+        };
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec
+            .iter()
+            .map(|p| p as &dyn rusqlite::ToSql)
+            .collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_refs.as_slice(), |r| {
+            Ok(EditRecord {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                workspace_id: r.get(2)?,
+                scope: r.get(3)?,
+                vps_id: r.get(4)?,
+                label: r.get(5)?,
+                path: r.get(6)?,
+                before: r.get(7)?,
+                after: r.get(8)?,
+                is_new: r.get::<_, i64>(9)? != 0,
+                reverted: r.get::<_, i64>(10)? != 0,
+                ts: r.get(11)?,
+            })
+        })?;
+        let mut out: Vec<EditRecord> =
+            rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        // DESC gives the most recent `limit` rows; reverse to chronological order.
+        out.reverse();
+        Ok(out)
+    }
+
+    pub fn mark_file_change_reverted(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE agent_file_change SET reverted = 1 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_file_changes(&self, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM agent_file_change WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1547,6 +2078,57 @@ mod known_host_tests {
             d.verify_host_key("h", 2222, "ssh-ed25519", "SHA256:ccc").unwrap(),
             HostKeyVerdict::PinnedOnFirstUse
         ));
+    }
+
+    /// A no-op autosave must not bump `updated_at` (that write used to keep the
+    /// encrypted snapshot rewriter hot at ~10 MB/s).
+    #[test]
+    fn identical_workspace_upsert_is_a_no_op() {
+        let d = db();
+        let first = d
+            .upsert_workspace(&WorkspaceInput {
+                id: Some("ws-1".into()),
+                name: "main".into(),
+                viewport_json: Some(r#"{"x":0,"y":0,"zoom":1}"#.into()),
+                layout_mode: Some("freeform".into()),
+                nodes_json: Some("[]".into()),
+                color: None,
+                icon: None,
+                color_mode: None,
+                project_json: None,
+            })
+            .unwrap();
+        let t1 = first.updated_at.clone();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let second = d
+            .upsert_workspace(&WorkspaceInput {
+                id: Some("ws-1".into()),
+                name: "main".into(),
+                viewport_json: Some(r#"{"x":0,"y":0,"zoom":1}"#.into()),
+                layout_mode: Some("freeform".into()),
+                nodes_json: Some("[]".into()),
+                color: None,
+                icon: None,
+                color_mode: None,
+                project_json: None,
+            })
+            .unwrap();
+        assert_eq!(second.updated_at, t1);
+        let renamed = d
+            .upsert_workspace(&WorkspaceInput {
+                id: Some("ws-1".into()),
+                name: "renamed".into(),
+                viewport_json: Some(r#"{"x":0,"y":0,"zoom":1}"#.into()),
+                layout_mode: Some("freeform".into()),
+                nodes_json: Some("[]".into()),
+                color: None,
+                icon: None,
+                color_mode: None,
+                project_json: None,
+            })
+            .unwrap();
+        assert_ne!(renamed.updated_at, t1);
+        assert_eq!(renamed.name, "renamed");
     }
 
     /// Forgetting is what makes a legitimate rebuild recoverable.

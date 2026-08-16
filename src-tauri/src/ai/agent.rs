@@ -12,9 +12,45 @@ use crate::ai::registry;
 use serde_json::json;
 use tauri::{Emitter, Manager};
 
-/// Maximum tool-execution iterations before we stop.
-/// Raised for multi-host infra tasks; UI/status still surfaces when the cap is hit.
-const MAX_ITERS: usize = 20;
+// No tool-round cap. Claude / Grok / OpenAI do not limit how many tools a
+// turn may run — they stop when the model returns text (or the user hits Stop).
+// A 20-iter ceiling left unfinished `tool_calls` in history and the next
+// request 400'd ("assistant message with tool_calls must be followed by tool messages").
+
+/// Write cache hit/miss to `xconsole.log` + `cache.jsonl`.
+///
+/// Release builds set `windows_subsystem = "windows"`, so `eprintln!` is discarded.
+/// The installed app's "hi / how are you" session left no cache lines in the log
+/// for that reason — the numbers only survived on the assistant `tokenStats`.
+fn log_prompt_cache(
+    session_id: &str,
+    iter: u32,
+    prompt: u32,
+    cached: u32,
+    classification: &str,
+    reason: Option<&str>,
+) {
+    let report = crate::ai::cost::cache_report(prompt, cached);
+    let line = crate::ai::cost::format_cache_line(prompt, cached);
+    crate::diag(&format!(
+        "cache session={session_id} iter={iter} {line} · prefix={classification}"
+    ));
+    if let Some(why) = reason {
+        crate::diag(why);
+    }
+    let payload = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "session": session_id,
+        "iter": iter,
+        "prompt": prompt,
+        "hit": report.hit,
+        "miss": report.miss,
+        "pct": (report.rate * 100.0).round() as i32,
+        "prefix": classification,
+        "reason": reason,
+    });
+    crate::diag_jsonl("cache.jsonl", &payload.to_string());
+}
 
 /// Run one full agent turn, streaming events to `sink`. Returns the final
 /// assistant message (with any tool calls it issued).
@@ -25,7 +61,24 @@ pub async fn run_turn(
     conversation: bool,
     sink: &EventSink,
 ) -> Result<ChatMessage, String> {
-    let mut messages = context::compress_window(messages);
+    let telemetry = crate::ai::tool_cache::new_turn_telemetry();
+    let mut previous_prefix = tc.session_state.last_prefix(&tc.session_id);
+
+    // Tool-result budget: cap what rides back into context so long command outputs
+    // don't blow up every subsequent request. 0 = unlimited (opt out).
+    let tool_result_max_chars: usize = tc
+        .db
+        .get_setting("agent.tool_result_max_chars")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1800);
+    // Compress by command type first (failures, not cargo progress;
+    // git hints dropped; logs deduped), then apply the hard char cap.
+    let cap_tool_result = |call: &crate::ai::provider::ToolCall, output: &str| -> String {
+        let cmd = crate::ai::output_compress::command_from_call(&call.name, &call.arguments);
+        crate::ai::output_compress::compress_and_cap(&cmd, output, tool_result_max_chars)
+    };
 
     // Per-workspace agent status (working / planning / testing / idle) shown on the
     // workspace row. No-op when the turn isn't tied to a workspace.
@@ -50,6 +103,20 @@ pub async fn run_turn(
     // Read num_ctx from the resolved provider (not preferred_id) so a CLI→Ollama
     // fallback budgets context against the Ollama provider that actually runs.
     let ollama_num_ctx = resolved.ollama_num_ctx;
+    // Local models have a small KV window so we must drop old turns. API
+    // providers prompt-cache the growing prefix — a 20K sliding window rewrites
+    // that prefix every turn and converts cheap cache reads into full misses.
+    let mut messages = if ollama_mode {
+        match ollama_num_ctx {
+            Some(n) => context::compress_window_to(
+                messages,
+                (n as usize).saturating_sub(4_096).max(context::WORKING_SET_TOKENS),
+            ),
+            None => context::compress_window(messages),
+        }
+    } else {
+        context::compress_window_to(messages, context::API_WORKING_SET_TOKENS)
+    };
     let last_user_msg = messages
         .iter()
         .rev()
@@ -135,17 +202,73 @@ pub async fn run_turn(
     // web_fetch / geo_locate are ALWAYS included (so "what's the weather?" works), plus
     // local_* tools, plus VPS tools when targets are selected. The voice prompt stays
     // fast by trimming PROSE (see voice_tiers), not by removing the agent's hands.
-    let tool_defs_for_turn = if ollama_mode {
+    let mut tool_defs_for_turn = if ollama_mode {
         tools::definitions_for_ollama(&tc.home, tc.targets.len(), casual_turn)
     } else {
         tool_defs.clone()
     };
+
+    let session_url = tc
+        .db
+        .get_provider(&preferred_id)
+        .ok()
+        .flatten()
+        .and_then(|p| p.base_url)
+        .unwrap_or_default();
+    let vision_provider_setting = tc
+        .db
+        .get_setting(crate::ai::vision::SETTING_PROVIDER)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let vision_model_setting = tc
+        .db
+        .get_setting(crate::ai::vision::SETTING_MODEL)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let vision_native = crate::ai::vision::use_native(
+        &resolved.kind,
+        &resolved.model,
+        &session_url,
+        &preferred_id,
+        &vision_provider_setting,
+        &vision_model_setting,
+        !tc.turn_images.is_empty(),
+    );
+    let vision_via_tool = !tc.turn_images.is_empty() && !vision_native && !cli_mode;
+    if vision_via_tool {
+        tool_defs_for_turn.push(crate::ai::vision::tool_def());
+        emit(
+            Some(sink),
+            StreamEvent::Status(format!(
+                "Images attached — session model cannot see pixels; use the vision tool ({}).",
+                if vision_model_setting.is_empty() {
+                    "Gemini if configured"
+                } else {
+                    vision_model_setting.as_str()
+                }
+            )),
+        );
+    } else if vision_native {
+        emit(
+            Some(sink),
+            StreamEvent::Status(format!(
+                "Sending {} image(s) to the session model.",
+                tc.turn_images.len()
+            )),
+        );
+    }
 
     let data_dir = tc
         .app
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir().join("xconsole"));
+    tc.session_state.load_prefix_cache(&data_dir, &tc.session_id);
+    if previous_prefix.is_none() {
+        previous_prefix = tc.session_state.last_prefix(&tc.session_id);
+    }
 
     let xconsole_exec = if resolved.kind == "cursor" && !tc.targets.is_empty() {
         Some(crate::ai::provider::XConsoleExec {
@@ -234,6 +357,7 @@ pub async fn run_turn(
             plan_mode: tc.plan_mode,
             workspace_context: workspace_block.clone(),
             canvas_context: canvas_block.clone(),
+            todo_context: crate::ai::todos::format_block(&tc.session_state.todos(&tc.session_id)),
             conversation,
         };
 
@@ -249,7 +373,7 @@ pub async fn run_turn(
                 base.push_str(
                     "\n\nYou have xConsole MCP tools for the user's VPS: run_command, read_file, \
                      write_file, list_vps_targets, skills_list, skill_view, skill_save, memory_save, \
-                     set_project_brief. \
+                     host_memory_get, host_memory_update, set_project_brief. \
                      You ALSO control the user's canvas: canvas_open_terminal and canvas_open_sftp open \
                      a live panel for a server, canvas_close removes a panel (node_id or vps_id), \
                      canvas_refresh reconnects a terminal, and canvas_tile arranges them. So when the \
@@ -268,6 +392,17 @@ pub async fn run_turn(
             }
             if let Some(cv) = &canvas_block {
                 dynamic.push_str(cv);
+                dynamic.push_str("\n\n");
+            }
+            if let Some(todos) = crate::ai::todos::format_block(&tc.session_state.todos(&tc.session_id)) {
+                dynamic.push_str(&todos);
+                dynamic.push_str("\n\n");
+            }
+            if !casual_turn && !tc.targets.is_empty() {
+                let host_dossiers = crate::ai::host_memory::format_for_prompt(&tc.home, &tc.db, &tc.targets);
+                if !host_dossiers.is_empty() {
+                    dynamic.push_str(&host_dossiers);
+                }
             }
             if !dynamic.is_empty() {
                 base.push_str("\n\n");
@@ -293,11 +428,18 @@ pub async fn run_turn(
         let assembled = context::assemble_prompt(&ctx);
         let mut dynamic = assembled.dynamic_block;
         let mut snap_txt = String::new();
-        if !snapshot.is_empty() {
-            let ctx_budget = if force_minimal {
-                ollama_num_ctx.unwrap_or(65_536).min(32_768)
+        // Live canvas already shows what's on screen. A 50K-char snapshot in
+        // the last user message is a permanent cache-miss tail — skip it when
+        // canvas is present, and keep a small cap for API providers otherwise.
+        if !snapshot.is_empty() && canvas_block.is_none() {
+            let ctx_budget = if ollama_mode {
+                if force_minimal {
+                    ollama_num_ctx.unwrap_or(65_536).min(32_768)
+                } else {
+                    ollama_num_ctx.unwrap_or(65_536)
+                }
             } else {
-                ollama_num_ctx.unwrap_or(65_536)
+                8_192 // → ~3K chars in truncate_for_context
             };
             snap_txt = vps_snapshot::truncate_for_context(&snapshot, ctx_budget);
             if !dynamic.is_empty() {
@@ -317,8 +459,51 @@ pub async fn run_turn(
     let (mut system, mut dynamic_block, mut snapshot_text) =
         build_system(false, &thread_summary);
 
+    if vision_via_tool {
+        if !dynamic_block.is_empty() {
+            dynamic_block.push_str("\n\n");
+        }
+        dynamic_block.push_str(&crate::ai::vision::tool_hint(tc.turn_images.len()));
+    }
+    if cli_mode && !tc.turn_images.is_empty() {
+        emit(
+            Some(sink),
+            StreamEvent::Status(format!(
+                "Looking at {} image(s) with the vision model…",
+                tc.turn_images.len()
+            )),
+        );
+        match crate::ai::vision::describe_all(
+            &tc.db,
+            &tc.turn_images,
+            "Describe this image for a coding agent. Transcribe visible text. Note UI, errors, code, and layout.",
+        )
+        .await
+        {
+            Ok(text) if !text.is_empty() => {
+                if let Some(user) = messages
+                    .iter_mut()
+                    .rev()
+                    .find(|m| m.role == "user" && !context::is_runtime_message(m))
+                {
+                    user.content.push_str("\n\n");
+                    user.content.push_str(&text);
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                emit(
+                    Some(sink),
+                    StreamEvent::Status(format!(
+                        "Vision unavailable ({e}) — continuing without pixels."
+                    )),
+                );
+            }
+        }
+    }
+
     let context_limit =
-        context_usage::default_context_limit(&resolved.kind, ollama_num_ctx);
+        context_usage::default_context_limit(&resolved.kind, &resolved.model, ollama_num_ctx);
 
     if registry::is_tool_capable_kind(&resolved.kind) && !cli_mode {
         if let Ok(Some(compact)) = context_compact::auto_compact_if_needed(
@@ -326,7 +511,6 @@ pub async fn run_turn(
             &system,
             &tool_defs_for_turn,
             context_limit,
-            thread_summary.as_deref(),
             resolved.provider.as_ref(),
             &resolved.model,
             Some(sink),
@@ -369,6 +553,7 @@ pub async fn run_turn(
             plan_mode: tc.plan_mode,
             workspace_context: workspace_block.clone(),
             canvas_context: canvas_block.clone(),
+            todo_context: crate::ai::todos::format_block(&tc.session_state.todos(&tc.session_id)),
             conversation,
         },
         &tool_defs_for_turn,
@@ -408,6 +593,7 @@ pub async fn run_turn(
                 plan_mode: tc.plan_mode,
                 workspace_context: workspace_block.clone(),
                 canvas_context: canvas_block.clone(),
+                todo_context: crate::ai::todos::format_block(&tc.session_state.todos(&tc.session_id)),
                 conversation,
             },
             &tool_defs_for_turn,
@@ -562,24 +748,104 @@ pub async fn run_turn(
     let mut last = ChatMessage::assistant("");
     let mut iters_used = 0usize;
 
-    for iter in 0..MAX_ITERS {
+    // Replay the last provider-visible prefix (frozen runtime blocks included)
+    // so this turn is a true append. Dropping last turn's `# Runtime context`
+    // and putting the new assistant in that slot was the installed-app miss:
+    // turn 2 hit only 1536/8277 (system+tools+first user).
+    if let Some(prev) = tc.session_state.last_request_messages(&tc.session_id) {
+        if let Some(continued) = context::continue_cached_prefix(&prev, &messages) {
+            messages = continued;
+        }
+    }
+    // Freeze runtime once per user turn. Tool-loop iters must not move or
+    // replace it — that would bust the prefix we just paid to write.
+    if vision_native {
+        crate::ai::vision::attach_images_to_latest_user(&mut messages, tc.turn_images.clone());
+    }
+    if !messages.last().is_some_and(context::is_runtime_message) {
+        context::inject_dynamic_into_last_user(&mut messages, &dynamic_block);
+    }
+    // Repair history from a previous stop/cap so DeepSeek/OpenAI accept this turn.
+    crate::ai::provider::close_unanswered_tool_calls(&mut messages);
+
+    let mut iter: usize = 0;
+    let mut execution_nudge = false;
+    let mut truncate_continues: u8 = 0;
+    loop {
         // User pressed Stop — halt before the next model call.
         if tc.session_state.is_cancelled(&tc.session_id) {
             emit(Some(sink), StreamEvent::Status("Stopped.".into()));
+            crate::ai::provider::close_unanswered_tool_calls(&mut messages);
+            tc.session_state.store_request_messages(
+                &tc.session_id,
+                crate::ai::vision::strip_all_images(messages.clone()),
+            );
+            tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
             break;
         }
         iters_used = iter + 1;
         let mut req = ChatRequest::new(&resolved.model);
         req.system = system.clone();
-        // Request-only copy: inject runtime context into last user message so the
-        // system prefix stays cache-stable across multi-turn / multi-iter calls.
-        let mut req_messages = messages.clone();
-        context::inject_dynamic_into_last_user(&mut req_messages, &dynamic_block);
-        req.messages = req_messages;
+        req.messages = messages.clone();
         req.tools = tool_defs_for_turn.clone();
+        req.max_tokens = tc
+            .db
+            .get_setting("agent.max_tokens")
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .filter(|n: &u32| *n >= 256)
+            .unwrap_or(16_384);
         req.xconsole = xconsole_exec.clone();
+        // Opt-in extended cache TTL (1h) when the user enables it — 2× write price
+        // but the prefix survives idle gaps that would evict the 5-min cache.
+        req.cache_retention = tc
+            .db
+            .get_setting("agent.cache_retention")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        // Stable per-session id for provider cache routing (OpenAI prompt_cache_key).
+        req.session_id = tc.session_id.clone();
+        // Per-chat model override (set via /model): empty falls back to the
+        // provider's configured model.
+        if let Ok(Some(model)) = tc.db.get_setting("agent.active_model") {
+            if !model.trim().is_empty() {
+                req.model = model.trim().to_string();
+            }
+        }
+        // Reasoning effort capability control: off|low|medium|high.
+        req.reasoning = tc
+            .db
+            .get_setting("agent.reasoning_level")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         // Let the provider's stream loop abort the moment the user presses Stop.
         req.cancel = Some(tc.session_state.cancel_flag(&tc.session_id));
+
+        let current_prefix = crate::ai::prefix_telemetry::fingerprint_request(&req);
+        let classification = crate::ai::prefix_telemetry::classify(
+            previous_prefix.as_ref(),
+            &current_prefix,
+        );
+        emit(
+            Some(sink),
+            StreamEvent::PrefixTelemetry(crate::ai::provider::PrefixTelemetryEvent {
+                request_index: iter as u32,
+                system_hash: current_prefix.system.hash.clone(),
+                schema_hash: current_prefix.schema.hash.clone(),
+                message_prefix_hash: current_prefix.messages.hash.clone(),
+                system_bytes: current_prefix.system.bytes as u64,
+                schema_bytes: current_prefix.schema.bytes as u64,
+                message_bytes: current_prefix.messages.bytes as u64,
+                classification: classification.as_str().into(),
+                source: resolved.kind.clone(),
+            }),
+        );
+        previous_prefix = Some(current_prefix.clone());
+        tc.session_state
+            .store_prefix(&tc.session_id, current_prefix);
 
         let resp = match resolved.provider.chat(&req, Some(sink)).await {
             Ok(r) => r,
@@ -590,17 +856,142 @@ pub async fn run_turn(
             }
         };
 
+        if let Some(prompt) = resp.prompt_tokens {
+            let cached = resp.cached_tokens.unwrap_or(0);
+            let line = crate::ai::cost::format_cache_line(prompt, cached);
+            emit(Some(sink), StreamEvent::Status(line.clone()));
+            let why = crate::ai::cost::cache_miss_reason(
+                prompt,
+                cached,
+                classification.as_str(),
+                iter as u32,
+            );
+            if let Some(reason) = &why {
+                emit(Some(sink), StreamEvent::Status(reason.clone()));
+            }
+            log_prompt_cache(
+                &tc.session_id,
+                iter as u32,
+                prompt,
+                cached,
+                classification.as_str(),
+                why.as_deref(),
+            );
+        }
+
         let assistant = ChatMessage {
             role: "assistant".into(),
             content: resp.content.clone(),
             tool_calls: resp.tool_calls.clone(),
             tool_call_id: None,
+            images: vec![],
         };
         messages.push(assistant.clone());
         last = assistant;
 
+        // Keep the in-memory prefix current so the next model call can append.
+        // Disk is written once at turn end — rewriting the full transcript JSON
+        // after every tool made a long session a multi-MB/s writer.
+        tc.session_state.store_request_messages(
+            &tc.session_id,
+            crate::ai::vision::strip_all_images(messages.clone()),
+        );
+
         // No tools to run, or an autonomous CLI that does its own tool use.
         if resp.tool_calls.is_empty() || cli_mode {
+            if !cli_mode {
+                // Model wrote a plan as chat text and skipped present_plan —
+                // open the review modal ourselves so the user can approve.
+                if let Some(call) = crate::ai::consent::synthetic_present_plan(
+                    tc.plan_mode,
+                    tc.session_state.plan_approved(&tc.session_id),
+                    &resp.content,
+                ) {
+                    emit(
+                        Some(sink),
+                        StreamEvent::Status(
+                            "Opening the plan review modal — the plan was written in chat.".into(),
+                        ),
+                    );
+                    if let Some(asst) = messages.last_mut() {
+                        if asst.role == "assistant" {
+                            asst.tool_calls = vec![call.clone()];
+                        }
+                    }
+                    last.tool_calls = vec![call.clone()];
+                    emit(Some(sink), StreamEvent::ToolCall(call.clone()));
+                    let output =
+                        tools::dispatch_with_telemetry(tc, &call, sink, Some(&telemetry)).await;
+                    let capped = cap_tool_result(&call, &output);
+                    emit(
+                        Some(sink),
+                        StreamEvent::ToolResult {
+                            id: call.id.clone(),
+                            output: capped.clone(),
+                        },
+                    );
+                    messages.push(ChatMessage::tool_result(call.id, capped));
+                    iter += 1;
+                    continue;
+                }
+                // User approved (modal or chat) but the model returned empty /
+                // "waiting for you" instead of executing. Nudge once.
+                if crate::ai::consent::should_nudge_execute(
+                    tc.plan_mode,
+                    tc.session_state.plan_approved(&tc.session_id),
+                    &resp.content,
+                    execution_nudge,
+                ) {
+                    execution_nudge = true;
+                    emit(
+                        Some(sink),
+                        StreamEvent::Status(
+                            "Plan approved — continuing execution.".into(),
+                        ),
+                    );
+                    messages.push(ChatMessage::user(
+                        "[system] The user approved the plan. Execute it now with tools. \
+                         Do not wait and do not re-present the plan."
+                            .to_string(),
+                    ));
+                    iter += 1;
+                    continue;
+                }
+                // Hit max_tokens mid-reply (often mid-checklist, no tool_calls
+                // parsed). Stopping here looks like a hang. Continue a few times.
+                let truncated = crate::ai::provider::is_output_truncated(
+                    &resp.stop_reason,
+                    resp.completion_tokens,
+                    req.max_tokens,
+                );
+                let todos_open = tc
+                    .session_state
+                    .todos(&tc.session_id)
+                    .iter()
+                    .any(|t| t.status != "completed")
+                    || crate::ai::provider::reply_has_open_checklist(&resp.content);
+                if (truncated || todos_open) && truncate_continues < 4 {
+                    truncate_continues += 1;
+                    let why = if truncated {
+                        format!(
+                            "Output hit the token cap ({}) — continuing from where it stopped…",
+                            resp.completion_tokens.unwrap_or(req.max_tokens)
+                        )
+                    } else {
+                        "Checklist still has open steps — continuing.".into()
+                    };
+                    emit(Some(sink), StreamEvent::Status(why));
+                    messages.push(ChatMessage::user(
+                        "[system] Your previous reply stopped without finishing. \
+                         Continue from exactly where you stopped. Call tools NOW to \
+                         complete the remaining checklist steps. Do not restart, do not \
+                         repeat finished work, and do not wait for the user."
+                            .to_string(),
+                    ));
+                    iter += 1;
+                    continue;
+                }
+            }
             break;
         }
         // Surface a "testing" status when the agent runs a test/verify command.
@@ -640,48 +1031,55 @@ pub async fn run_turn(
                 .iter()
                 .map(|call| {
                     let call = call.clone();
+                    let telemetry = telemetry.clone();
                     async move {
-                        let output = tools::dispatch(tc, &call, sink).await;
-                        (call.id, output)
+                        let output = tools::dispatch_with_telemetry(tc, &call, sink, Some(&telemetry)).await;
+                        (call, output)
                     }
                 })
                 .collect();
             let results = futures_util::future::join_all(futs).await;
-            for (id, output) in results {
+            for (call, output) in results {
+                let capped = cap_tool_result(&call, &output);
                 emit(
                     Some(sink),
                     StreamEvent::ToolResult {
-                        id: id.clone(),
-                        output: output.clone(),
+                        id: call.id.clone(),
+                        output: capped.clone(),
                     },
                 );
-                messages.push(ChatMessage::tool_result(id, output));
+                messages.push(ChatMessage::tool_result(call.id, capped));
             }
         } else {
             for call in &resp.tool_calls {
                 // The provider already streamed StreamEvent::ToolCall for each call;
                 // the single ToolResult is emitted by this loop below. No re-emit here.
-                let output = tools::dispatch(tc, call, sink).await;
+                let output = tools::dispatch_with_telemetry(tc, call, sink, Some(&telemetry)).await;
+                let capped = cap_tool_result(call, &output);
                 emit(
                     Some(sink),
                     StreamEvent::ToolResult {
                         id: call.id.clone(),
-                        output: output.clone(),
+                        output: capped.clone(),
                     },
                 );
-                messages.push(ChatMessage::tool_result(call.id.clone(), output));
+                messages.push(ChatMessage::tool_result(call.id.clone(), capped));
             }
         }
 
-        if iter == MAX_ITERS - 1 && !resp.tool_calls.is_empty() {
-            emit(
-                Some(sink),
-                StreamEvent::Error(format!(
-                    "Agent stopped after {MAX_ITERS} tool iterations; task may be incomplete."
-                )),
-            );
-        }
+        tc.session_state.store_request_messages(
+            &tc.session_id,
+            crate::ai::vision::strip_all_images(messages.clone()),
+        );
+
+        iter += 1;
     }
+    crate::ai::provider::close_unanswered_tool_calls(&mut messages);
+    tc.session_state.store_request_messages(
+        &tc.session_id,
+        crate::ai::vision::strip_all_images(messages.clone()),
+    );
+    tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
 
     // Self-improvement loop (ETAPA 29): before finishing, look at what went wrong this
     // turn (failed/retried tool calls, hitting the iteration cap), distill a short
@@ -697,8 +1095,13 @@ pub async fn run_turn(
         .map(|v| v != "false")
         .unwrap_or(true);
     if self_improve && registry::is_tool_capable_kind(&resolved.kind) && !cli_mode {
-        let lessons =
-            crate::ai::reflection::reflect_and_save(&tc.home, &messages, iters_used, MAX_ITERS);
+        let lessons = crate::ai::reflection::reflect_and_save_with_targets(
+            &tc.home,
+            &messages,
+            &tc.targets,
+            iters_used,
+            0,
+        );
         if !lessons.is_empty() {
             emit(
                 Some(sink),
@@ -720,7 +1123,7 @@ pub async fn run_turn(
             .iter()
             .any(|m| m.role == "assistant" && !m.tool_calls.is_empty());
         if acted {
-            let outcome = crate::ai::reflection::analyze_turn(&messages, iters_used, MAX_ITERS);
+            let outcome = crate::ai::reflection::analyze_turn(&messages, iters_used, 0);
             let new_status =
                 crate::ai::autoresearch::record_outcome(&tc.home, &skill, !outcome.had_trouble());
             emit(
@@ -759,6 +1162,18 @@ pub async fn run_turn(
         }
     }
 
+    let telemetry = telemetry.snapshot();
+    emit(
+        Some(sink),
+        StreamEvent::TurnTelemetry(crate::ai::provider::TurnTelemetryEvent {
+            tool_calls: telemetry.tool_calls,
+            tool_cache_lookups: telemetry.tool_cache_lookups,
+            tool_cache_hits: telemetry.tool_cache_hits,
+            tool_cache_misses: telemetry.tool_cache_misses,
+            tool_cache_writes: telemetry.tool_cache_writes,
+            tool_cache_hit_rate: telemetry.tool_cache_hit_rate,
+        }),
+    );
     emit(Some(sink), StreamEvent::Done);
     emit_ws("idle");
 

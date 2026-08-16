@@ -25,12 +25,12 @@ function isTypingTarget(target: EventTarget | null): boolean {
  * (selection box), Control/Meta (multi-select + zoom), Space (pan) and the bare arrow
  * keys (nudge a node by 1px), and the app claims Ctrl+Tab.
  *
- *   Alt + ← / →          move the tile within its row
- *   Alt + ↑ / ↓          move the tile to the row above / below (past the edge = its own row)
+ *   Alt + ← / →          swap with the neighbour on that side
+ *   Alt + ↑ / ↓          swap with the neighbour above / below
  *   Alt + Shift + ← / →  make the tile narrower / wider
- *   Alt + Shift + ↑ / ↓  make its row shorter / taller
- *   Alt + F              give the tile a full-width row of its own — press again to merge back
- *   Alt + R              reset to the balanced default arrangement
+ *   Alt + Shift + ↑ / ↓  make it shorter / taller
+ *   Alt + F              give the tile a band of its own
+ *   Alt + R              reset to a balanced default
  *
  * The listener is registered in the **capture** phase: xterm attaches its own keydown
  * handler to the terminal element, and a bubble-phase listener would only see the key

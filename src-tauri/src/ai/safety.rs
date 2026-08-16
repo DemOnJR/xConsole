@@ -21,7 +21,12 @@ const APPROVAL_TIMEOUT: Duration = Duration::from_secs(600);
 /// Tracks in-flight approval requests so the UI can resolve them. Managed state.
 #[derive(Clone, Default)]
 pub struct ApprovalRegistry {
-    pending: Arc<DashMap<String, oneshot::Sender<bool>>>,
+    pending: Arc<DashMap<String, PendingApproval>>,
+}
+
+struct PendingApproval {
+    session_id: String,
+    tx: oneshot::Sender<bool>,
 }
 
 impl ApprovalRegistry {
@@ -29,16 +34,22 @@ impl ApprovalRegistry {
         Self::default()
     }
 
-    fn register(&self, id: String) -> oneshot::Receiver<bool> {
+    fn register(&self, id: String, session_id: &str) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
-        self.pending.insert(id, tx);
+        self.pending.insert(
+            id,
+            PendingApproval {
+                session_id: session_id.to_string(),
+                tx,
+            },
+        );
         rx
     }
 
     /// Resolve a pending approval. Returns true if it was awaiting.
     pub fn resolve(&self, id: &str, approved: bool) -> bool {
-        if let Some((_, tx)) = self.pending.remove(id) {
-            let _ = tx.send(approved);
+        if let Some((_, pending)) = self.pending.remove(id) {
+            let _ = pending.tx.send(approved);
             true
         } else {
             false
@@ -48,6 +59,29 @@ impl ApprovalRegistry {
     /// Drop a pending approval without sending a decision (e.g. on timeout).
     pub fn cancel(&self, id: &str) -> bool {
         self.pending.remove(id).is_some()
+    }
+
+    /// Deny every waiting command approval for a session (Stop). Unblocks
+    /// `authorize` so the turn does not hang until the 10-minute timeout.
+    pub fn deny_all_for_session(&self, session_id: &str) -> usize {
+        let ids: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|e| e.value().session_id == session_id)
+            .map(|e| e.key().clone())
+            .collect();
+        let mut n = 0;
+        for id in ids {
+            if self.resolve(&id, false) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    #[allow(dead_code)]
+    pub fn has_pending_for_session(&self, session_id: &str) -> bool {
+        self.pending.iter().any(|e| e.value().session_id == session_id)
     }
 }
 
@@ -83,14 +117,18 @@ fn has_write_or_substitution(command: &str) -> bool {
         || command.contains("$(")
 }
 
-/// Whether a whole command line is read-only. Splits on shell separators and
-/// requires every segment's leading token to be in the read-only set. Output
-/// redirection, input redirection, and command substitution are treated as writes.
+/// Whether a whole command line is read-only. Splits on shell separators
+/// (including newlines — a prompt-injected `ls\nrm -rf /` must NOT be treated
+/// as one read-only segment) and requires every segment's leading token to be
+/// in the read-only set. Output redirection, input redirection, and command
+/// substitution are treated as writes.
 pub fn is_read_only(command: &str) -> bool {
     if has_write_or_substitution(command) {
         return false;
     }
-    let segments = command.split(['|', ';', '&']).filter(|s| !s.trim().is_empty());
+    let segments = command
+        .split(['|', ';', '&', '\n', '\r'])
+        .filter(|s| !s.trim().is_empty());
     let mut any = false;
     for seg in segments {
         any = true;
@@ -302,6 +340,51 @@ pub fn redact_secrets(command: &str) -> String {
     out
 }
 
+/// Ban / firewall commands that would drop the agent's own SSH session.
+///
+/// The honeypot turn locked K8S because fail2ban banned the whole IP
+/// (`destination=any` / `ufw deny from $ip` with no dest port). Real SSH on
+/// 2222 died with it. These are never auto-run, and in every safety mode they
+/// are rejected until the dest port is pinned (the decoy, not the login port).
+pub fn ssh_lockout_risk(command: &str) -> Option<&'static str> {
+    let lc = command.to_lowercase();
+    // fail2ban `banip` is an all-ports ban unless a port-scoped action is used.
+    if lc.contains("fail2ban-client") && lc.contains("banip") {
+        return Some(
+            "fail2ban-client banip bans every port for that IP, including real SSH. \
+             Use a jail action that denies only the decoy port (e.g. `to any port 22`) \
+             and never destination=any.",
+        );
+    }
+    if lc.contains("destination=any") || lc.contains("destination = any") {
+        return Some(
+            "fail2ban/ufw destination=any would also block the real SSH port. \
+             Pin the dest to the decoy port only.",
+        );
+    }
+    // `ufw deny from 1.2.3.4` with no `port` = whole host.
+    if (lc.contains("ufw deny from") || lc.contains("ufw insert") && lc.contains(" deny from"))
+        && !lc.contains("port")
+    {
+        return Some(
+            "unscoped `ufw deny from <ip>` blocks every port, including the login SSH port. \
+             Add `to any port 22` (or the decoy port) so real SSH stays up.",
+        );
+    }
+    // iptables/nft drop by source with no dport.
+    if (lc.contains("iptables") || lc.contains("nft "))
+        && (lc.contains(" -j drop") || lc.contains(" drop "))
+        && lc.contains("-s ")
+        && !lc.contains("--dport")
+        && !lc.contains("dport")
+    {
+        return Some(
+            "source-only DROP would block real SSH. Add --dport for the decoy port only.",
+        );
+    }
+    None
+}
+
 /// Decide whether a command may run under the active safety mode. Blocks until
 /// the user approves/denies when approval is required.
 ///
@@ -316,6 +399,10 @@ pub async fn authorize(
     vps_id: Option<&str>,
     command: &str,
 ) -> Result<(), String> {
+    if let Some(why) = ssh_lockout_risk(command) {
+        return Err(format!("blocked (SSH lockout risk): {why}"));
+    }
+
     let needs_approval = match safety {
         "full" => false,
         "allowlist" => !is_allowlisted(command),
@@ -334,7 +421,7 @@ pub async fn authorize(
     let approval = db
         .create_approval(session_id, vps_id, &shown)
         .map_err(|e| e.to_string())?;
-    let rx = approvals.register(approval.id.clone());
+    let rx = approvals.register(approval.id.clone(), session_id);
     let _ = app.emit("ai://approval", &approval);
 
     match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
@@ -427,6 +514,20 @@ mod tests {
         // Double quotes and unquoted values.
         assert_eq!(redact_secrets("PASSWORD=\"hunter2\" mysql"), "PASSWORD=*** mysql");
         assert_eq!(redact_secrets("MY_PASSPHRASE=abc123 x"), "MY_PASSPHRASE=*** x");
+    }
+
+    #[test]
+    fn unscoped_ban_is_lockout() {
+        assert!(ssh_lockout_risk("fail2ban-client set cowrie banip 1.2.3.4").is_some());
+        assert!(ssh_lockout_risk("ufw deny from 1.2.3.4").is_some());
+        assert!(ssh_lockout_risk("ufw insert 1 deny from 1.2.3.4").is_some());
+        assert!(ssh_lockout_risk(
+            "ufw insert 1 deny from 1.2.3.4 to any port 22 proto tcp"
+        )
+        .is_none());
+        assert!(ssh_lockout_risk("ufw status verbose").is_none());
+        assert!(ssh_lockout_risk("iptables -A INPUT -s 1.2.3.4 -j DROP").is_some());
+        assert!(ssh_lockout_risk("iptables -A INPUT -s 1.2.3.4 --dport 22 -j DROP").is_none());
     }
 
     #[test]
@@ -544,5 +645,20 @@ mod tests {
         assert!(is_terraform_readonly("local terraform plan (project: my-app)"));
         assert!(is_terraform_readonly("TFC remote plan for project my-app"));
         assert!(!is_terraform_readonly("TFC remote apply for project my-app"));
+    }
+
+    #[test]
+    fn stop_denies_waiting_approvals_for_that_session() {
+        let r = ApprovalRegistry::new();
+        let mut a = r.register("a1".into(), "s1");
+        let mut b = r.register("b1".into(), "s2");
+        assert!(r.has_pending_for_session("s1"));
+        assert_eq!(r.deny_all_for_session("s1"), 1);
+        assert_eq!(a.try_recv().unwrap(), false);
+        assert!(b.try_recv().is_err());
+        assert!(!r.has_pending_for_session("s1"));
+        assert!(r.has_pending_for_session("s2"));
+        assert!(r.resolve("b1", true));
+        assert_eq!(b.try_recv().unwrap(), true);
     }
 }

@@ -78,9 +78,14 @@ const assistantComponents: Components = {
 export function AgentMarkdown({
   content,
   variant = "assistant",
+  executeTarget,
+  onExecute,
 }: {
   content: string;
   variant?: "assistant" | "user";
+  /** VPS context for code-block Execute buttons (shell blocks only). */
+  executeTarget?: { name: string; host: string } | null;
+  onExecute?: (code: string) => void;
 }) {
   const body = normalizeAgentMarkdown(content);
 
@@ -88,8 +93,31 @@ export function AgentMarkdown({
     return <span className="whitespace-pre-wrap">{body}</span>;
   }
 
+  const components: Components = {
+    ...assistantComponents,
+    code: ({ className, children }) => {
+      const text = String(children).replace(/\n$/, "");
+      const isBlock = className?.includes("language-") || text.includes("\n");
+      if (isBlock) {
+        return (
+          <MarkdownCodeBlock
+            code={text}
+            className={className}
+            executeTarget={executeTarget}
+            onExecute={onExecute}
+          />
+        );
+      }
+      return (
+        <code className="rounded bg-[#1a2230] px-1 py-0.5 font-mono text-[12px] text-emerald-200/90">
+          {children}
+        </code>
+      );
+    },
+  };
+
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={assistantComponents}>
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
       {body}
     </ReactMarkdown>
   );

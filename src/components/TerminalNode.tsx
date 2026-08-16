@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Handle, NodeResizer, Position, useReactFlow, useStore, type NodeProps } from "@xyflow/react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -46,7 +46,7 @@ const STATUS_COLOR: Record<ConnState, string> = {
   error: "#f7768e",
 };
 
-export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNode>) {
+export const TerminalNode = memo(function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNode>) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -76,6 +76,25 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
       gitDirty: gitInfo?.dirty ?? false,
     });
   }, [gitInfo, id, setInfo]);
+
+  // ----- Execute-button delivery (agent code blocks, canvas Execute) -----
+  // Consume the queue whenever this node is connected and something is queued.
+  // Works for BOTH freshly-connected and already-open terminals, and sends via
+  // sshWrite so the command actually reaches the remote shell — not just the
+  // local screen.
+  const queue = useCanvasStore((s) => s.pendingTerminalCommands[id]);
+  useEffect(() => {
+    if (!queue) return;
+    if (status !== "connected" || !sessionIdRef.current) return;
+    const item = useCanvasStore.getState().takeTerminalCommand(id);
+    if (!item) return;
+    // Multi-line blocks: join with && so each line doesn't execute immediately.
+    const cmd = item.command.replace(/\r?\n/g, " && ");
+    const sid = sessionIdRef.current;
+    api.sshWrite(sid, strToB64(cmd)).catch(() => {});
+    if (item.send) api.sshWrite(sid, strToB64("\r")).catch(() => {});
+    termRef.current?.focus();
+  }, [queue, status, id]);
   const themeId = useThemeStore((s) => s.themeId);
   const customVars = useThemeStore((s) => s.customVars);
   const layoutMode = useCanvasStore((s) => s.layoutMode);
@@ -229,6 +248,8 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
         if (replay) term.write(b64ToBytes(replay));
         if (isReconnect) term.writeln("\r\n\x1b[32m✓ reconnected\x1b[0m");
         reconnectAttemptsRef.current = 0;
+        // Execute-button commands are delivered via the queue-consumption effect
+        // once status flips to "connected" (works for reused terminals too).
       } catch (e) {
         if (!mounted || disposed) return;
         const msg = String(e);
@@ -661,4 +682,4 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
       />
     </div>
   );
-}
+});

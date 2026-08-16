@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useSettingsStore } from "../../../stores/settingsStore";
 import { useVpsStore } from "../../../stores/vpsStore";
+import { defaultVisionModel, isGeminiProvider, parseVisionMode } from "../../../lib/vision";
 import { Card, Field, SectionHeader, Select } from "../ui";
 import { SK } from "./GeneralSection";
 
@@ -25,6 +26,7 @@ const SAFETY_OPTIONS: { value: string; label: string; hint: string }[] = [
 export function AgentSection() {
   const settings = useSettingsStore((s) => s.settings);
   const set = useSettingsStore((s) => s.set);
+  const providers = useSettingsStore((s) => s.providers);
   const vpsList = useVpsStore((s) => s.vpsList);
   const loadVps = useVpsStore((s) => s.load);
 
@@ -54,6 +56,85 @@ export function AgentSection() {
               </option>
             ))}
           </Select>
+        </Field>
+      </Card>
+
+      <Card className="mb-3">
+        <Field
+          label="Tool output limit (chars)"
+          hint="Applied once when the tool result is stored (append-only, cache-friendly). Default 4000. 0 = unlimited."
+        >
+          <input
+            type="number"
+            min={0}
+            step={500}
+            value={settings[SK.toolResultMaxChars] ?? "4000"}
+            onChange={(e) => set(SK.toolResultMaxChars, e.target.value)}
+            className="w-40 rounded border border-[var(--border-strong)] bg-[var(--bg)] px-2 py-1 text-sm text-gray-200 outline-none focus:border-[var(--accent)]"
+          />
+        </Field>
+        <Field
+          label="Cache retention"
+          hint="Anthropic only. Long = 1h TTL at 2× cache-write price. Leave at 5 minutes unless sessions sit idle. DeepSeek / Command Code ignore this — they auto-cache the prefix."
+        >
+          <Select
+            value={settings[SK.cacheRetention] ?? ""}
+            onChange={(e) => set(SK.cacheRetention, e.target.value)}
+          >
+            <option value="">5 minutes (default)</option>
+            <option value="long">1 hour (2× write price)</option>
+          </Select>
+        </Field>
+      </Card>
+
+      <Card className="mb-3">
+        <Field
+          label="Image vision"
+          hint="Ask = confirm before sending pixels. Enabled = always send. Disabled = keep [Image #n] text only. The session model never switches."
+        >
+          <Select
+            value={parseVisionMode(settings[SK.visionMode])}
+            onChange={(e) => set(SK.visionMode, e.target.value)}
+          >
+            <option value="ask">Ask before sending images</option>
+            <option value="enabled">Always send images</option>
+            <option value="disabled">Don't send images</option>
+          </Select>
+        </Field>
+        <Field
+          label="Vision provider"
+          hint="Used when the session model cannot see, or when you pick a different vision model. Gemini is recommended."
+        >
+          <Select
+            value={settings[SK.visionProvider] ?? ""}
+            onChange={(e) => {
+              const id = e.target.value;
+              void set(SK.visionProvider, id);
+              const p = providers.find((x) => x.id === id);
+              if (p) void set(SK.visionModel, defaultVisionModel(p));
+            }}
+          >
+            <option value="">Auto (Gemini if configured)</option>
+            {providers
+              .filter((p) => p.enabled)
+              .map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                  {isGeminiProvider(p) ? " — recommended" : ""}
+                </option>
+              ))}
+          </Select>
+        </Field>
+        <Field
+          label="Vision model"
+          hint="Override the model on the vision provider. Empty uses Gemini Flash when the provider is Gemini."
+        >
+          <input
+            value={settings[SK.visionModel] ?? ""}
+            onChange={(e) => set(SK.visionModel, e.target.value)}
+            placeholder="gemini-2.5-flash"
+            className="w-full max-w-md rounded border border-[var(--border-strong)] bg-[var(--bg)] px-2 py-1 text-sm text-gray-200 outline-none focus:border-[var(--accent)]"
+          />
         </Field>
       </Card>
 

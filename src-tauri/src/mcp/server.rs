@@ -195,6 +195,28 @@ impl McpSession {
                     }
                 },
                 {
+                    "name": "host_memory_get",
+                    "description": "Read the institutional PROFILE.md and MEMORY.md dossier for one selected VPS.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "vps_id": { "type": "string", "description": "Exact selected VPS id." } },
+                        "required": ["vps_id"]
+                    }
+                },
+                {
+                    "name": "host_memory_update",
+                    "description": "Update one selected VPS dossier: kind=profile replaces PROFILE.md; kind=memory appends a durable host fact. Never store secrets.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "vps_id": { "type": "string" },
+                            "kind": { "type": "string", "enum": ["profile", "memory"] },
+                            "content": { "type": "string" }
+                        },
+                        "required": ["vps_id", "kind", "content"]
+                    }
+                },
+                {
                     "name": "canvas_open_terminal",
                     "description": "Open a live terminal for a server on the xConsole canvas so the user can watch it.",
                     "inputSchema": {
@@ -417,11 +439,28 @@ impl McpSession {
                 }
             }
             "skill_save" => {
-                let cat = args.get("category").and_then(|v| v.as_str()).unwrap_or("");
                 let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                match skills::save_skill(&self.home, cat, name, content) {
-                    Ok(()) => (format!("saved skill {cat}/{name}"), false),
+                if name.trim().is_empty() || content.trim().is_empty() {
+                    return ("error: name and non-empty content are required".into(), true);
+                }
+                let report = match crate::ai::skill_scan::scan_skill_content(
+                    content,
+                    &crate::ai::skill_scan::scan_options_from_db(&self.db),
+                )
+                .await
+                {
+                    Ok(report) => report,
+                    Err(e) => return (format!("error: scanning skill: {e}"), true),
+                };
+                if report.is_blocking() {
+                    return (format!("BLOCKED: skill was not saved.\n{}", report.summary()), true);
+                }
+                if self.effective_safety(None) != "full" {
+                    return ("error: skill_save requires Full autonomy in xConsole MCP; review and save skills from Settings or the in-app agent".into(), true);
+                }
+                match skills::save_unverified(&self.home, name, content) {
+                    Ok(saved) => (format!("saved unverified skill unverified/{saved}; promote it after review.\n{}", report.summary()), false),
                     Err(e) => (format!("error: {e}"), true),
                 }
             }
@@ -454,6 +493,49 @@ impl McpSession {
                 match workspace_context::save_brief(&self.home, &self.workspace_id, content) {
                     Ok(()) => ("saved the project brief for this workspace".into(), false),
                     Err(e) => (format!("error: {e}"), true),
+                }
+            }
+            "host_memory_get" => {
+                let vps_id = match self.resolve_vps(args) {
+                    Ok(id) => id,
+                    Err(e) => return (format!("error: {e}"), true),
+                };
+                let profile = crate::ai::host_memory::load_profile(&self.home, &vps_id);
+                let memory = crate::ai::host_memory::load_memory(&self.home, &vps_id);
+                if profile.trim().is_empty() && memory.trim().is_empty() {
+                    return (format!("(no dossier yet for {vps_id} — update with host_memory_update)"), false);
+                }
+                let mut out = String::new();
+                if !profile.trim().is_empty() {
+                    out.push_str("# PROFILE\n");
+                    out.push_str(profile.trim());
+                    out.push('\n');
+                }
+                if !memory.trim().is_empty() {
+                    out.push_str("\n# MEMORY\n");
+                    out.push_str(memory.trim());
+                }
+                (out, false)
+            }
+            "host_memory_update" => {
+                let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                if content.trim().is_empty() {
+                    return ("error: missing content".into(), true);
+                }
+                let vps_id = match self.resolve_vps(args) {
+                    Ok(id) => id,
+                    Err(e) => return (format!("error: {e}"), true),
+                };
+                match args.get("kind").and_then(|v| v.as_str()).unwrap_or("") {
+                    "profile" => match crate::ai::host_memory::save_profile(&self.home, &vps_id, content) {
+                        Ok(()) => ("saved host PROFILE".into(), false),
+                        Err(e) => (format!("error: {e}"), true),
+                    },
+                    "memory" => match crate::ai::host_memory::append_memory(&self.home, &vps_id, content) {
+                        Ok(_) => ("appended to host MEMORY".into(), false),
+                        Err(e) => (format!("error: {e}"), true),
+                    },
+                    _ => ("error: kind must be 'profile' or 'memory'".into(), true),
                 }
             }
             "canvas_open_terminal" | "canvas_open_sftp" => {

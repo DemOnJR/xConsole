@@ -1,6 +1,8 @@
+pub mod artifacts;
 pub mod ai;
 pub mod cloud;
 pub mod db;
+pub mod goal;
 pub mod infra;
 pub mod lock;
 pub mod remote_file;

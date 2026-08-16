@@ -16,7 +16,7 @@ function base({ size = 16, ...props }: IconProps) {
   };
 }
 
-/** Cursor-style "toggle left panel" icon: a panel with the left column highlighted. */
+/** "Toggle left panel" icon: a panel with the left column highlighted. */
 export function PanelLeftIcon(props: IconProps) {
   return (
     <svg {...base(props)}>
@@ -27,7 +27,7 @@ export function PanelLeftIcon(props: IconProps) {
   );
 }
 
-/** Cursor-style "toggle right panel" icon. */
+/** "Toggle right panel" icon. */
 export function PanelRightIcon(props: IconProps) {
   return (
     <svg {...base(props)}>
@@ -94,6 +94,17 @@ export function PlusIcon(props: IconProps) {
     <svg {...base(props)}>
       <line x1="12" y1="5" x2="12" y2="19" />
       <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+
+/** Database / prompt-cache cylinder. */
+export function CacheIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <ellipse cx="12" cy="6" rx="7" ry="2.6" />
+      <path d="M5 6v12c0 1.6 3.1 2.8 7 2.8s7-1.2 7-2.8V6" />
+      <path d="M5 12c0 1.6 3.1 2.8 7 2.8s7-1.2 7-2.8" />
     </svg>
   );
 }
@@ -291,6 +302,25 @@ export function VolumeOffIcon(props: IconProps) {
   );
 }
 
+export function EyeIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+export function ImageIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <circle cx="8.5" cy="10" r="1.5" />
+      <path d="m21 16-4.5-4.5L9 19" />
+    </svg>
+  );
+}
+
 export function PlanIcon(props: IconProps) {
   return (
     <svg {...base(props)}>
@@ -386,6 +416,19 @@ export function RowsIcon(props: IconProps) {
       <line x1="9" y1="4" x2="9" y2="12" />
       <line x1="15" y1="4" x2="15" y2="12" />
       <line x1="12" y1="12" x2="12" y2="20" />
+    </svg>
+  );
+}
+
+/** Side-by-side columns: two stacked on the left, one tall on the right. */
+export function ColumnsIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <line x1="3" y1="4" x2="3" y2="20" />
+      <line x1="12" y1="4" x2="12" y2="20" />
+      <line x1="3" y1="12" x2="12" y2="12" />
+      <line x1="21" y1="4" x2="21" y2="20" />
     </svg>
   );
 }

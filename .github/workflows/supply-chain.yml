@@ -1,0 +1,55 @@
+name: Supply chain
+
+# Slow cargo-install + advisory / license / 7-day cooldown checks.
+# Not on every push — those were the 12-minute CI jobs.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [main, dev]
+    paths:
+      - "src-tauri/Cargo.lock"
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/deny.toml"
+      - "cooldown.toml"
+      - ".github/workflows/supply-chain.yml"
+
+concurrency:
+  group: supply-chain-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: supply-chain
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+      - name: Security audit (RustSec)
+        working-directory: src-tauri
+        run: |
+          cargo audit \
+            --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195
+      - name: Policy check (advisories, licenses, sources)
+        working-directory: src-tauri
+        run: cargo deny check
+      - name: Cooldown (optional prebuilt)
+        working-directory: src-tauri
+        continue-on-error: true
+        run: |
+          if command -v cargo-cooldown >/dev/null; then
+            cargo cooldown check --locked
+          else
+            echo "cargo-cooldown not preinstalled; skip (install locally to enforce 7-day crate age)."
+          fi

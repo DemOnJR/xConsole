@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use super::{join_url, SseBuffer};
 use crate::ai::provider::{
-    emit, ChatRequest, ChatResponse, EventSink, Provider, StreamEvent, ToolCall,
+    emit, ChatRequest, ChatResponse, EventSink, Provider, StreamEvent, StreamStats, ToolCall,
 };
 
 const DEFAULT_BASE: &str = "https://api.openai.com/v1";
@@ -45,7 +45,10 @@ impl OpenAiProvider {
         }
         for m in &req.messages {
             match m.role.as_str() {
-                "user" => out.push(json!({"role": "user", "content": m.content})),
+                "user" => out.push(json!({
+                    "role": "user",
+                    "content": crate::ai::vision::openai_user_content(&m.content, &m.images),
+                })),
                 "assistant" => {
                     let mut msg = json!({"role": "assistant", "content": m.content});
                     if !m.tool_calls.is_empty() {
@@ -92,6 +95,47 @@ impl OpenAiProvider {
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct UsageCounts {
+    prompt_tokens: Option<u32>,
+    completion_tokens: Option<u32>,
+    cached_tokens: Option<u32>,
+    cache_write_tokens: Option<u32>,
+}
+
+fn visible_response_content(content: String, _opaque_reasoning: String) -> String {
+    content
+}
+
+fn usage_counts(event: &Value) -> UsageCounts {
+    let Some(usage) = event.get("usage") else {
+        return UsageCounts::default();
+    };
+    let count = |value: Option<&Value>| value.and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
+    let details = usage.get("prompt_tokens_details");
+    UsageCounts {
+        prompt_tokens: count(usage.get("prompt_tokens")),
+        completion_tokens: count(usage.get("completion_tokens")),
+        // OpenAI: prompt_tokens_details.cached_tokens
+        // DeepSeek / Command Code: usage.prompt_cache_hit_tokens (and the same
+        // value mirrored under details.cached_tokens).
+        cached_tokens: count(details.and_then(|v| v.get("cached_tokens")))
+            .or_else(|| count(details.and_then(|v| v.get("cache_read_input_tokens"))))
+            .or_else(|| count(usage.get("prompt_cache_hit_tokens")))
+            .or_else(|| count(usage.get("cached_tokens"))),
+        cache_write_tokens: count(usage.get("cache_write_tokens"))
+            .or_else(|| count(details.and_then(|v| v.get("cache_write_tokens")))),
+    }
+}
+
+/// GPT-5.x / native OpenAI accept `prompt_cache_options`. DeepSeek, Command Code,
+/// and most gateways ignore or 400 on the field — only send it where it is proven.
+fn wants_openai_cache_options(model: &str, base_url: &str) -> bool {
+    let m = model.to_lowercase();
+    let url = base_url.to_lowercase();
+    m.contains("gpt-5") || url.contains("api.openai.com")
+}
+
 /// Accumulator for one streamed tool call (arguments arrive as string fragments).
 #[derive(Default)]
 struct ToolAcc {
@@ -120,8 +164,23 @@ impl Provider for OpenAiProvider {
                 "max_tokens": req.max_tokens,
                 "temperature": req.temperature,
                 "stream": true,
+                "stream_options": { "include_usage": true },
                 "messages": Self::build_messages(req),
             });
+            // Reasoning effort → OpenAI reasoning_effort (low/medium/high), off/empty = default.
+            if !req.reasoning.is_empty() && req.reasoning != "off" {
+                body["reasoning_effort"] = json!(req.reasoning);
+            }
+            // Stable cache key routes every request of a session to the same cache
+            // node (OpenAI, OpenCode Go, most OpenAI-compat proxies). DeepSeek's
+            // automatic prefix cache ignores the field; unknown-field 400s are
+            // rare and cheaper than a full miss on a routed-away prefix.
+            if !req.session_id.is_empty() {
+                body["prompt_cache_key"] = json!(format!("xc-{}", req.session_id));
+                if wants_openai_cache_options(&req.model, &self.base_url) {
+                    body["prompt_cache_options"] = json!({ "mode": "implicit" });
+                }
+            }
             if send_tools {
                 body["tools"] = json!(tools);
             }
@@ -198,6 +257,8 @@ impl Provider for OpenAiProvider {
         // Reasoning models (gpt-oss, qwen3, … on Groq) stream their text in a
         // separate `reasoning` field and may leave `content` empty.
         let mut reasoning = String::new();
+        let started = std::time::Instant::now();
+        let mut usage = UsageCounts::default();
 
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
@@ -216,6 +277,12 @@ impl Provider for OpenAiProvider {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
+                let counts = usage_counts(&ev);
+                usage.prompt_tokens = counts.prompt_tokens.or(usage.prompt_tokens);
+                usage.completion_tokens = counts.completion_tokens.or(usage.completion_tokens);
+                usage.cached_tokens = counts.cached_tokens.or(usage.cached_tokens);
+                usage.cache_write_tokens = counts.cache_write_tokens.or(usage.cache_write_tokens);
+
                 let choice = match ev["choices"].get(0) {
                     Some(c) => c,
                     None => continue,
@@ -274,13 +341,158 @@ impl Provider for OpenAiProvider {
             out.tool_calls.push(tc);
         }
 
-        // Reasoning model emitted only `reasoning` (no content, no tools) — surface
-        // it so the reply isn't blank.
-        if out.content.trim().is_empty() && out.tool_calls.is_empty() && !reasoning.trim().is_empty() {
-            emit(sink, StreamEvent::Text(reasoning.clone()));
-            out.content = reasoning;
+        // Provider reasoning is opaque continuation state, not user-visible content.
+        // Never promote it into ChatResponse.content, persistence, compaction, or export.
+        out.content = visible_response_content(out.content, reasoning);
+
+        out.prompt_tokens = usage.prompt_tokens;
+        out.cached_tokens = usage.cached_tokens;
+        out.completion_tokens = usage.completion_tokens;
+
+        if let Some(completion_tokens) = usage.completion_tokens {
+            let duration_ms = started.elapsed().as_millis() as u64;
+            let seconds = (duration_ms as f64 / 1000.0).max(0.05);
+            emit(
+                sink,
+                StreamEvent::Stats(StreamStats {
+                    completion_tokens,
+                    prompt_tokens: usage.prompt_tokens,
+                    cached_tokens: usage.cached_tokens,
+                    cache_creation_tokens: usage.cache_write_tokens,
+                    duration_ms: duration_ms.max(1),
+                    tokens_per_sec: (completion_tokens as f64 / seconds) as f32,
+                }),
+            );
+            emit(
+                sink,
+                StreamEvent::Cost(crate::ai::cost::turn_cost(
+                    &crate::ai::cost::kind_for_model("openai", &req.model),
+                    &req.model,
+                    usage.prompt_tokens,
+                    completion_tokens,
+                    usage.cached_tokens,
+                    usage.cache_write_tokens,
+                )),
+            );
         }
 
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opaque_reasoning_is_never_promoted_to_visible_content() {
+        assert_eq!(visible_response_content(String::new(), "private reasoning".into()), "");
+        assert_eq!(visible_response_content("visible answer".into(), "private reasoning".into()), "visible answer");
+    }
+
+    #[test]
+    fn extracts_standard_and_compatibility_cache_fields() {
+        let standard: Value = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 42,
+                "completion_tokens": 7,
+                "prompt_tokens_details": { "cached_tokens": 19 }
+            }
+        });
+        assert_eq!(
+            usage_counts(&standard),
+            UsageCounts {
+                prompt_tokens: Some(42),
+                completion_tokens: Some(7),
+                cached_tokens: Some(19),
+                cache_write_tokens: None,
+            }
+        );
+
+        let alias: Value = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 42,
+                "completion_tokens": 7,
+                "prompt_tokens_details": { "cache_read_input_tokens": 19 }
+            }
+        });
+        assert_eq!(usage_counts(&alias).cached_tokens, Some(19));
+
+        let top_level: Value = serde_json::json!({
+            "usage": { "prompt_tokens": 42, "completion_tokens": 7, "cached_tokens": 19 }
+        });
+        assert_eq!(usage_counts(&top_level).cached_tokens, Some(19));
+
+        // DeepSeek V4 / Command Code official field.
+        let deepseek: Value = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 1387,
+                "completion_tokens": 423,
+                "prompt_tokens_details": { "cached_tokens": 128, "miss_tokens": 1259 },
+                "prompt_cache_hit_tokens": 128,
+                "prompt_cache_miss_tokens": 1259
+            }
+        });
+        assert_eq!(usage_counts(&deepseek).cached_tokens, Some(128));
+        assert_eq!(usage_counts(&deepseek).prompt_tokens, Some(1387));
+
+        let hit_only: Value = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 2000,
+                "completion_tokens": 10,
+                "prompt_cache_hit_tokens": 1856
+            }
+        });
+        assert_eq!(usage_counts(&hit_only).cached_tokens, Some(1856));
+    }
+
+    #[test]
+    fn openai_cache_options_only_for_native_openai() {
+        assert!(wants_openai_cache_options("gpt-5.6-luna", "https://api.openai.com/v1"));
+        assert!(wants_openai_cache_options("gpt-5", "https://example.com/v1"));
+        assert!(!wants_openai_cache_options(
+            "deepseek/deepseek-v4-flash",
+            "https://api.commandcode.ai/provider/v1"
+        ));
+        assert!(!wants_openai_cache_options(
+            "deepseek-v4-flash",
+            "https://api.deepseek.com/v1"
+        ));
+    }
+
+    #[test]
+    fn usage_only_event_is_parsed_without_choices() {
+        let event: Value = serde_json::json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 5,
+                "prompt_tokens_details": { "cached_tokens": 80 }
+            }
+        });
+        let counts = usage_counts(&event);
+        assert_eq!(counts.prompt_tokens, Some(100));
+        assert_eq!(counts.completion_tokens, Some(5));
+        assert_eq!(counts.cached_tokens, Some(80));
+    }
+
+    #[test]
+    fn malformed_or_missing_cache_is_optional() {
+        let event: Value = serde_json::json!({
+            "usage": { "prompt_tokens": 4, "completion_tokens": 1, "cached_tokens": "unknown" }
+        });
+        assert_eq!(usage_counts(&event).cached_tokens, None);
+        assert_eq!(usage_counts(&serde_json::json!({})), UsageCounts::default());
+    }
+
+    #[test]
+    fn sse_buffer_handles_split_usage_event_and_done() {
+        let mut sse = SseBuffer::new();
+        assert!(sse.push("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":").is_empty());
+        let payloads = sse.push("4,\"completion_tokens\":1}}\r\n\r\ndata: [DONE]\r\n\r\n");
+        assert_eq!(payloads.len(), 2);
+        let event: Value = serde_json::from_str(&payloads[0]).unwrap();
+        assert_eq!(usage_counts(&event).completion_tokens, Some(1));
+        assert_eq!(payloads[1], "[DONE]");
     }
 }

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { Viewport } from "@xyflow/react";
 import { api, type Workspace, type WorkspaceProject } from "../lib/tauri";
+import { stableViewport } from "../lib/workspacePersist";
 import {
   defaultViewport,
   useCanvasStore,
@@ -10,10 +11,21 @@ import {
 } from "./canvasStore";
 import { useSessionStore } from "./sessionStore";
 import { reconcile, type TileLayout } from "../lib/tileLayout";
+import {
+  deserializeSplit,
+  serializeSplit,
+  treeOf,
+  type SavedSplit,
+} from "../lib/tileTree";
 
 /** Deterministic node id for a workspace slot (stable across reopen). */
 export const workspaceNodeId = (workspaceId: string, index: number) =>
   `${workspaceId}::${index}`;
+
+/** True when every live node already uses the deterministic workspace id. */
+export function workspaceIdsAlreadyBound(workspaceId: string, nodeIds: string[]): boolean {
+  return nodeIds.every((id, i) => id === workspaceNodeId(workspaceId, i));
+}
 
 /** Serialized node persisted in a workspace (no live session state). */
 interface SavedNode {
@@ -26,9 +38,11 @@ interface SavedNode {
   y: number;
   width: number;
   height: number;
-  nodeType?: "terminal" | "sftp" | "db";
+  nodeType?: "terminal" | "sftp" | "db" | "agent" | "goal";
   linkedTerminalIndex?: number;
   followTerminal?: boolean;
+  /** Persisted /goal session id (kanban boards). */
+  goalId?: string;
 }
 
 interface SavedEdge {
@@ -48,6 +62,12 @@ interface SavedTileRow {
   items: { index: number; weight: number }[];
 }
 
+/** A persisted column pane (side-by-side layout). */
+interface SavedTileColumn {
+  weight: number;
+  items: { index: number; weight: number }[];
+}
+
 /**
  * Parse a workspace's persisted `nodes_json`. It is stored as an object
  * `{ nodes, edges }`, but a legacy format stored a bare array — and a corrupt
@@ -56,50 +76,113 @@ interface SavedTileRow {
  */
 export function parseSavedNodes(
   nodesJson: string | null | undefined,
-): { nodes: SavedNode[]; edges: SavedEdge[]; tiles: SavedTileRow[] } {
+): {
+  nodes: SavedNode[];
+  edges: SavedEdge[];
+  tiles: SavedTileRow[];
+  columns?: SavedTileColumn[];
+  tree?: SavedSplit;
+} {
   if (!nodesJson) return { nodes: [], edges: [], tiles: [] };
   try {
     const raw = JSON.parse(nodesJson);
     if (Array.isArray(raw)) return { nodes: raw, edges: [], tiles: [] };
-    return { nodes: raw.nodes ?? [], edges: raw.edges ?? [], tiles: raw.tiles ?? [] };
+    return {
+      nodes: raw.nodes ?? [],
+      edges: raw.edges ?? [],
+      tiles: raw.tiles ?? [],
+      columns: raw.columns,
+      tree: raw.tree,
+    };
   } catch {
     return { nodes: [], edges: [], tiles: [] };
   }
 }
 
-/** Tile layout → index form, for persistence. */
+/** Tile layout → index form, for persistence. Persists BOTH rows and columns so a
+ *  side-by-side arrangement survives a save/restore (monitor move → autosave →
+ *  reload would otherwise flatten columns into one long row). */
 function serializeTiles(
   layout: TileLayout | null,
   indexOf: (nodeId: string) => number,
-): SavedTileRow[] {
-  if (!layout) return [];
-  return layout.rows
-    .map((row) => ({
-      weight: row.weight,
-      items: row.items
-        .map((it) => ({ index: indexOf(it.id), weight: it.weight }))
-        .filter((it) => it.index >= 0),
-    }))
-    .filter((row) => row.items.length > 0);
+): { rows: SavedTileRow[]; columns?: SavedTileColumn[]; tree?: SavedSplit } {
+  if (!layout) return { rows: [] };
+  const toSaved = (items: { id: string; weight: number }[]) =>
+    items
+      .map((it) => ({ index: indexOf(it.id), weight: it.weight }))
+      .filter((it) => it.index >= 0);
+  const tree = serializeSplit(layout.tree ?? treeOf(layout), indexOf);
+  return {
+    rows: layout.rows
+      .map((row) => ({ weight: row.weight, items: toSaved(row.items) }))
+      .filter((row) => row.items.length > 0),
+    columns: layout.columns
+      ?.map((col) => ({ weight: col.weight, items: toSaved(col.items) }))
+      .filter((col) => col.items.length > 0),
+    tree: tree ?? undefined,
+  };
 }
 
 /** Index form → tile layout, against the node ids a restore just produced. */
-function deserializeTiles(rows: SavedTileRow[], ids: string[]): TileLayout | null {
-  if (!Array.isArray(rows) || rows.length === 0) return null;
+export function deserializeTiles(
+  rows: SavedTileRow[],
+  columns: SavedTileColumn[] | undefined,
+  ids: string[],
+  tree?: SavedSplit,
+): TileLayout | null {
+  const toItems = (items: { index: number; weight: number }[]) =>
+    items
+      .filter((it) => it && it.index >= 0 && it.index < ids.length)
+      .map((it) => ({
+        id: ids[it.index],
+        weight: typeof it.weight === "number" ? it.weight : 1,
+      }))
+      .filter((it) => ids.includes(it.id));
+
+  // Column layout persisted → rebuild columns and mirror rows from them (same as
+  // layoutFromColumnCounts) so every op stays consistent.
+  if (columns && columns.length > 0) {
+    const cols = columns
+      .map((col) => ({ weight: col.weight ?? 1, items: toItems(col.items) }))
+      .filter((col) => col.items.length > 0);
+    if (cols.length > 0) {
+      const flat = cols.flatMap((c) => c.items);
+      const layout: TileLayout = {
+        rows: flat.length > 0 ? [{ weight: 1, items: flat }] : [],
+        columns: cols,
+      };
+      // Columns are a flat fallback (one stack per x-band). A nested left
+      // pane — 1 over 2 beside a full-height right — lives only on `tree`.
+      // Dropping it here made refresh collapse that layout to 3 stacked left.
+      if (tree) {
+        const parsed = deserializeSplit(tree, ids);
+        if (parsed) layout.tree = parsed;
+      }
+      return layout;
+    }
+  }
+
+  if (!Array.isArray(rows) || rows.length === 0) {
+    if (tree) {
+      const parsed = deserializeSplit(tree, ids);
+      if (parsed) return { rows: [{ weight: 1, items: [] }], tree: parsed };
+    }
+    return null;
+  }
   const layout: TileLayout = {
     rows: rows
       .map((row) => ({
         weight: typeof row.weight === "number" ? row.weight : 1,
-        items: (row.items ?? [])
-          .filter((it) => it && it.index >= 0 && it.index < ids.length)
-          .map((it) => ({
-            id: ids[it.index],
-            weight: typeof it.weight === "number" ? it.weight : 1,
-          })),
+        items: toItems(row.items),
       }))
       .filter((row) => row.items.length > 0),
   };
-  return layout.rows.length > 0 ? layout : null;
+  if (layout.rows.length === 0) return null;
+  if (tree) {
+    const parsed = deserializeSplit(tree, ids);
+    if (parsed) layout.tree = parsed;
+  }
+  return layout;
 }
 
 export const WORKSPACE_COLORS = [
@@ -165,9 +248,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const saved: SavedNode[] = nodes.map((n) => {
       const base: SavedNode = {
         id: n.id,
-        vpsId: n.data.vpsId,
-        name: n.data.name,
-        host: n.data.host,
+        vpsId: String(n.data.vpsId ?? ""),
+        name: String(n.data.name ?? ""),
+        host: String(n.data.host ?? ""),
         x: n.position.x,
         y: n.position.y,
         width: (n.width as number) ?? 460,
@@ -175,7 +258,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         // Explicit per type, not a two-way ternary: the old
         // `n.type === "sftp" ? "sftp" : "terminal"` silently turned any third node type
         // into a terminal on save, losing it on the next restore.
-        nodeType: n.type === "sftp" ? "sftp" : n.type === "db" ? "db" : "terminal",
+        nodeType:
+          n.type === "sftp" ? "sftp" : n.type === "db" ? "db" : n.type === "agent" ? "agent" : n.type === "goal" ? "goal" : "terminal",
       };
       if (n.type === "sftp" && n.data.linkedTerminalId) {
         const idx = nodes.findIndex((x) => x.id === n.data.linkedTerminalId);
@@ -183,6 +267,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           base.linkedTerminalIndex = idx;
           base.followTerminal = n.data.followTerminal ?? true;
         }
+      }
+      if (n.type === "goal" && n.data.goalId) {
+        base.goalId = String(n.data.goalId);
       }
       return base;
     });
@@ -202,49 +289,58 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const ws = await api.saveWorkspace({
       id,
       name,
-      viewport_json: JSON.stringify(viewport),
+      viewport_json: JSON.stringify(stableViewport(viewport)),
       layout_mode: layoutMode,
-      nodes_json: JSON.stringify({ nodes: saved, edges: savedEdges, tiles: savedTiles }),
+      nodes_json: JSON.stringify({
+        nodes: saved,
+        edges: savedEdges,
+        tiles: savedTiles.rows,
+        columns: savedTiles.columns,
+        tree: savedTiles.tree,
+      }),
       color: color ?? existing?.color ?? null,
       icon: icon ?? existing?.icon ?? null,
       color_mode: colorMode ?? existing?.color_mode ?? null,
       project_json: existing?.project_json ?? null,
     });
 
-    // Rebind the live canvas nodes to the deterministic ids this workspace will
-    // use on every future restore, and migrate their session-store entries so the
-    // running sessions keep matching (otherwise the first switch-back would miss).
-    const sess = useSessionStore.getState();
-    const rebound = nodes.map((n, i) => {
-      const newId = workspaceNodeId(ws.id, i);
-      if (n.id !== newId) {
-        const info = sess.sessions[n.id];
-        if (info) {
-          sess.setInfo(newId, info);
-          sess.remove(n.id);
+    // Rebind only when a node still has a random id. Doing this on every autosave
+    // rewrote the canvas store, which rescheduled another save, forever.
+    if (!workspaceIdsAlreadyBound(ws.id, nodes.map((n) => n.id))) {
+      const sess = useSessionStore.getState();
+      const rebound = nodes.map((n, i) => {
+        const newId = workspaceNodeId(ws.id, i);
+        if (n.id !== newId) {
+          const info = sess.sessions[n.id];
+          if (info) {
+            sess.setInfo(newId, info);
+            sess.remove(n.id);
+          }
         }
-      }
-      return { ...n, id: newId };
-    });
-    const reboundEdges: CanvasEdge[] = edges.map((e) => {
-      const srcIdx = nodes.findIndex((n) => n.id === e.source);
-      const tgtIdx = nodes.findIndex((n) => n.id === e.target);
-      const srcId = srcIdx >= 0 ? workspaceNodeId(ws.id, srcIdx) : e.source;
-      const tgtId = tgtIdx >= 0 ? workspaceNodeId(ws.id, tgtIdx) : e.target;
-      return {
-        ...e,
-        id: `link-${srcId}-${tgtId}`,
-        source: srcId,
-        target: tgtId,
-      };
-    });
-    useCanvasStore.getState().setNodes(rebound);
-    useCanvasStore.getState().setEdges(reboundEdges);
-    // The nodes just changed id, so the in-memory tile layout would point at ids that
-    // no longer exist and silently reset to the balanced default. Re-point it.
-    useCanvasStore
-      .getState()
-      .setTileLayout(deserializeTiles(savedTiles, rebound.map((n) => n.id)));
+        return { ...n, id: newId };
+      });
+      const reboundEdges: CanvasEdge[] = edges.map((e) => {
+        const srcIdx = nodes.findIndex((n) => n.id === e.source);
+        const tgtIdx = nodes.findIndex((n) => n.id === e.target);
+        const srcId = srcIdx >= 0 ? workspaceNodeId(ws.id, srcIdx) : e.source;
+        const tgtId = tgtIdx >= 0 ? workspaceNodeId(ws.id, tgtIdx) : e.target;
+        return {
+          ...e,
+          id: `link-${srcId}-${tgtId}`,
+          source: srcId,
+          target: tgtId,
+        };
+      });
+      useCanvasStore.getState().setNodes(rebound);
+      useCanvasStore.getState().setEdges(reboundEdges);
+      // The nodes just changed id, so the in-memory tile layout would point at ids that
+      // no longer exist and silently reset to the balanced default. Re-point it.
+      useCanvasStore
+        .getState()
+        .setTileLayout(
+          deserializeTiles(savedTiles.rows, savedTiles.columns, rebound.map((n) => n.id), savedTiles.tree),
+        );
+    }
 
     await get().load();
     set({ activeId: ws.id });
@@ -310,9 +406,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   restore: async (id) => {
     const ws = get().workspaces.find((w) => w.id === id);
     if (!ws) return null;
-    const { nodes: saved, edges: savedEdges, tiles: savedTiles } = parseSavedNodes(
-      ws.nodes_json,
-    );
+    const {
+      nodes: saved,
+      edges: savedEdges,
+      tiles: savedTiles,
+      columns: savedColumns,
+      tree: savedTree,
+    } = parseSavedNodes(ws.nodes_json);
     let viewport: Viewport = { x: 0, y: 0, zoom: 1 };
     if (ws.viewport_json) {
       try {
@@ -334,10 +434,20 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
               followTerminal: s.followTerminal ?? true,
             }
           : {}),
+        ...(s.nodeType === "goal" && s.goalId ? { goalId: s.goalId } : {}),
       };
       return {
         id: nodeId,
-        type: s.nodeType === "sftp" ? "sftp" : s.nodeType === "db" ? "db" : "terminal",
+        type:
+          s.nodeType === "sftp"
+            ? "sftp"
+            : s.nodeType === "db"
+              ? "db"
+              : s.nodeType === "agent"
+                ? "agent"
+                : s.nodeType === "goal"
+                  ? "goal"
+                  : "terminal",
         position: { x: s.x, y: s.y },
         width: s.width,
         height: s.height,
@@ -357,7 +467,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         data: { kind: "sftp-terminal" },
       };
     });
-    const tiles = deserializeTiles(savedTiles, nodes.map((n) => n.id));
+    const tiles = deserializeTiles(savedTiles, savedColumns, nodes.map((n) => n.id), savedTree);
     set({ activeId: id });
     return { nodes, edges, viewport, layout, tiles };
   },

@@ -8,16 +8,39 @@ import {
   type AgentApproval,
   type AgentConversationMeta,
   type AgentPlan,
+  type AgentPlanMeta,
   type AgentQuestion,
   type CanvasSnapshotNode,
   type ChatMessage,
-  type StreamEvent,
 } from "../lib/tauri";
+import { appendImageMarkers } from "../lib/vision";
 import { notify } from "../lib/notify";
+import { exportConversationMarkdown as renderConversationMarkdown } from "../lib/agentExport";
+import { classifyChat } from "../lib/consent";
 import { useWorkspaceStore } from "./workspaceStore";
 import { useCanvasStore } from "./canvasStore";
 import { useSessionStore } from "./sessionStore";
 import { useVoiceStore } from "./voiceStore";
+import { useSettingsStore } from "./settingsStore";
+import { contextUsageFromMessages, type PrefixTelemetry, type TurnTelemetry } from "../lib/streamStats";
+import {
+  appendTextDelta,
+  applyActivityEvent,
+  flattenActivity,
+  textFromSegments,
+  type TurnSegment,
+} from "./turnSegments";
+import {
+  enqueueMessage,
+  removeQueuedMessage,
+  takeNextQueued,
+  updateQueuedMessage,
+  type QueuedMessage,
+} from "./messageQueue";
+
+export type { QueuedMessage } from "./messageQueue";
+
+export type { TurnSegment } from "./turnSegments";
 import {
   cancelSpeech,
   currentSpeechEpoch,
@@ -124,7 +147,10 @@ async function speakSentenceQueued(raw: string) {
   }
 }
 import {
+  estimateTokens,
+  liveGenerationStats,
   liveTokenStats,
+  sessionCostFromMessages,
   type ContextUsage,
   type TokenStats,
 } from "../lib/streamStats";
@@ -147,11 +173,18 @@ export interface AgentActivityItem {
 }
 
 /** Token throughput for a completed or streaming assistant message. */
-export type { TokenStats, ContextUsage } from "../lib/streamStats";
+export type { TokenStats, ContextUsage, TurnTelemetry } from "../lib/streamStats";
 
 export interface AgentChatMessage extends ChatMessage {
   activity?: AgentActivityItem[];
+  /** Chronological text / tool bursts for this turn. Prefer this when rendering. */
+  segments?: TurnSegment[];
   tokenStats?: TokenStats;
+  isCompaction?: boolean;
+  compactionTokensBefore?: number;
+  compactionTokensAfter?: number;
+  compactionPrunedTools?: number;
+  compactionSummary?: string;
 }
 
 interface AgentState {
@@ -160,10 +193,14 @@ interface AgentState {
   conversations: AgentConversationMeta[];
   streamingText: string;
   activity: AgentActivityItem[];
+  /** Live turn timeline (text then tools then more text). */
+  streamingSegments: TurnSegment[];
   streaming: boolean;
   /** TTS is currently reading a reply aloud (so the user can press Stop to hush it). */
   speaking: boolean;
   streamStats: TokenStats | null;
+  turnTelemetry: TurnTelemetry | null;
+  prefixTelemetry: PrefixTelemetry | null;
   contextUsage: ContextUsage | null;
   /** Increments when conversation is auto-compacted — drives hourglass flip. */
   compactFlipCount: number;
@@ -172,14 +209,46 @@ interface AgentState {
   pendingApprovals: AgentApproval[];
   pendingQuestions: AgentQuestion[];
   pendingPlan: AgentPlan | null;
+  /** Editable copy of the pending plan shown in the modal. */
+  planDraft: string;
+  /** Persisted plan history (presented/applied/archived/cancelled). */
+  planHistory: AgentPlanMeta[];
+  planHistoryOpen: boolean;
   planMode: boolean;
   hydrated: boolean;
+  /** Running estimated cost (USD) of the current conversation. */
+  conversationCostUsd: number;
+  /** Follow-ups typed while a turn is running. Editable until they send. */
+  queued: QueuedMessage[];
+  /** After Stop, do not auto-send the queue until the user sends again. */
+  holdQueue: boolean;
+  /** Intake `/goal` session the chat tools should bind to. */
+  activeIntakeGoalId: string | null;
 
   init: () => Promise<void>;
   setTargets: (ids: string[]) => void;
   setSpeaking: (v: boolean) => void;
   togglePlanMode: () => void;
-  send: (text: string, opts?: { providerId?: string; conversation?: boolean }) => Promise<void>;
+  setActiveIntakeGoal: (id: string | null) => void;
+  send: (
+    text: string,
+    opts?: {
+      providerId?: string;
+      conversation?: boolean;
+      images?: import("../lib/tauri").ChatImage[];
+      goalId?: string;
+    },
+  ) => Promise<void>;
+  /** Queue a follow-up if a turn is running; otherwise send now. */
+  enqueueOrSend: (text: string, images?: import("../lib/tauri").ChatImage[]) => void;
+  /**
+   * If a plan / question / command-approval is waiting, resolve it from
+   * this chat line and return true. Used by send + enqueueOrSend.
+   */
+  tryRouteChatToPending: (text: string) => boolean;
+  enqueue: (text: string, images?: import("../lib/tauri").ChatImage[]) => void;
+  updateQueued: (id: string, text: string) => void;
+  removeQueued: (id: string) => void;
   /** Re-send the last user message (after an error or aborted turn). */
   retryLast: () => Promise<void>;
   clearError: () => void;
@@ -194,6 +263,16 @@ interface AgentState {
   resolveApproval: (id: string, approved: boolean, remember?: boolean) => Promise<void>;
   answerQuestion: (id: string, answer: string) => Promise<void>;
   resolvePlan: (id: string, approve: boolean, feedback?: string) => Promise<void>;
+  /** Modal actions: keep the plan open while the agent revises it. */
+  setPlanDraft: (draft: string) => void;
+  applyPlan: (id: string) => Promise<void>;
+  archivePlanAction: (id: string) => Promise<void>;
+  cancelPlanAction: (id: string) => Promise<void>;
+  /** Send revision feedback to the agent (plan modal chat). */
+  revisePlan: (id: string, feedback: string) => Promise<void>;
+  loadPlanHistory: () => Promise<void>;
+  setPlanHistoryOpen: (open: boolean) => void;
+  closePlanModal: () => Promise<void>;
 }
 
 const newSessionId = () =>
@@ -239,200 +318,19 @@ function canvasSnapshot(): CanvasSnapshotNode[] {
   });
 }
 
-function applyStreamEvent(
-  activity: AgentActivityItem[],
-  ev: StreamEvent,
-): AgentActivityItem[] {
-  switch (ev.kind) {
-    case "Status": {
-      // Most status lines are internal noise. Parallel tool batches are user-visible:
-      // the agent is genuinely doing multiple read-only tools at once.
-      if (/parallel/i.test(ev.data)) {
-        return [
-          ...activity.filter((a) => a.id !== "parallel-batch"),
-          {
-            id: "parallel-batch",
-            kind: "status" as const,
-            label: ev.data,
-            state: "running" as const,
-          },
-        ];
-      }
-      return activity;
+function persistableMessages(messages: AgentChatMessage[]): AgentChatMessage[] {
+  let lastUser = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      lastUser = i;
+      break;
     }
-    case "ToolCall":
-      if (activity.some((a) => a.id === ev.data.id)) return activity;
-      if (/mcp/i.test(ev.data.name)) return activity;
-      return [
-        ...activity,
-        {
-          id: ev.data.id,
-          kind: "tool",
-          label: ev.data.name.replace(/_/g, " "),
-          state: "running",
-        },
-      ];
-    case "ToolResult": {
-      if (ev.data.id.startsWith("snapshot-")) return activity;
-      const idx = activity.findIndex((a) => a.id === ev.data.id);
-      let next = activity;
-      if (idx >= 0) {
-        next = [...activity];
-        next[idx] = {
-          ...next[idx],
-          output: ev.data.output,
-          state: (ev.data.output.startsWith("error") ? "error" : "done") as
-            | "error"
-            | "done",
-        };
-      }
-      // When every tool in a parallel batch has finished, mark the banner done.
-      const stillRunning = next.some(
-        (a) => a.state === "running" && a.id !== "parallel-batch" && a.kind !== "status",
-      );
-      if (!stillRunning) {
-        next = next.map((a) =>
-          a.id === "parallel-batch" && a.state === "running"
-            ? ({
-                ...a,
-                state: "done" as const,
-                label: a.label.replace(/…$/, " — done"),
-              } satisfies AgentActivityItem)
-            : a,
-        );
-      }
-      return next;
-    }
-    case "Activity": {
-      const d = ev.data;
-      switch (d.type) {
-        case "ToolStart":
-          return [
-            ...activity.filter((a) => !(a.id === d.data.id && a.kind === "tool")),
-            {
-              id: d.data.id,
-              kind: "tool",
-              tool: d.data.tool,
-              label: d.data.label,
-              detail: d.data.detail,
-              state: "running",
-            },
-          ];
-        case "FileEdit":
-          return [
-            ...activity.filter((a) => a.id !== d.data.id),
-            {
-              id: d.data.id,
-              kind: "file_edit",
-              label: d.data.path,
-              path: d.data.path,
-              linesAdded: d.data.lines_added,
-              linesRemoved: d.data.lines_removed,
-              hunks: d.data.hunks,
-              state: "done",
-            },
-          ];
-        case "ToolEnd": {
-          const endState: "done" | "error" = d.data.ok ? "done" : "error";
-          const afterEnd: AgentActivityItem[] = activity.map((a) => {
-            if (a.id !== d.data.id && !a.id.startsWith(`${d.data.id}-`)) return a;
-            if (a.kind === "file_edit") {
-              return { ...a, state: endState };
-            }
-            if (
-              a.kind === "tool" &&
-              a.label.startsWith("Write file ·") &&
-              a.detail &&
-              !activity.some((x) => x.id === a.id && x.kind === "file_edit")
-            ) {
-              const fullPath = a.label.slice("Write file ·".length).trim();
-              const fileName = fullPath.split(/[/\\]/).pop() || fullPath;
-              const hunks = a.detail.split("\n").slice(0, 28).map((text) => ({
-                kind: "add" as const,
-                text,
-              }));
-              return {
-                id: a.id,
-                kind: "file_edit" as const,
-                label: fileName,
-                path: fileName,
-                linesAdded: a.detail.split("\n").length,
-                linesRemoved: 0,
-                hunks,
-                state: endState,
-              };
-            }
-            if (a.kind === "tool" || a.kind === "skill_read" || a.kind === "command") {
-              return { ...a, state: endState };
-            }
-            return a;
-          });
-          const stillRunning = afterEnd.some(
-            (a) => a.state === "running" && a.id !== "parallel-batch" && a.kind !== "status",
-          );
-          if (!stillRunning) {
-            return afterEnd.map((a) =>
-              a.id === "parallel-batch" && a.state === "running"
-                ? { ...a, state: "done" as const, label: a.label.replace(/…$/, " — done") }
-                : a,
-            );
-          }
-          return afterEnd;
-        }
-        case "SkillRead":
-          return [
-            ...activity,
-            {
-              id: `${d.data.id}-skill-read`,
-              kind: "skill_read",
-              label: `Read skill ${d.data.category}/${d.data.name}`,
-              category: d.data.category,
-              name: d.data.name,
-              state: "running",
-            },
-          ];
-        case "SkillSaved":
-          return [
-            ...activity,
-            {
-              id: `${d.data.id}-skill-save`,
-              kind: "skill_save",
-              label: `Saved skill ${d.data.category}/${d.data.name}`,
-              category: d.data.category,
-              name: d.data.name,
-              state: "done",
-            },
-          ];
-        case "Command": {
-          const idx = activity.findIndex((a) => a.id === d.data.id);
-          if (idx >= 0) {
-            const next = [...activity];
-            next[idx] = {
-              ...next[idx],
-              kind: "command",
-              label: `Run on ${d.data.vps}`,
-              detail: d.data.command,
-            };
-            return next;
-          }
-          return [
-            ...activity,
-            {
-              id: d.data.id,
-              kind: "command",
-              label: `Run on ${d.data.vps}`,
-              detail: d.data.command,
-              state: "running",
-            },
-          ];
-        }
-        default:
-          return activity;
-      }
-    }
-    default:
-      return activity;
   }
+  return messages.map((m, i) => {
+    if (i === lastUser || !m.images?.length) return m;
+    const { images: _drop, ...rest } = m;
+    return rest;
+  });
 }
 
 async function persistConversation(state: {
@@ -444,7 +342,7 @@ async function persistConversation(state: {
   await api.saveAgentConversation({
     id: state.sessionId,
     targets: state.targets,
-    messagesJson: JSON.stringify(state.messages),
+    messagesJson: JSON.stringify(persistableMessages(state.messages)),
   });
 }
 
@@ -454,12 +352,18 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   conversations: [],
   streamingText: "",
   activity: [],
+  streamingSegments: [],
   streaming: false,
   speaking: false,
   streamStats: null,
+  turnTelemetry: null,
+  prefixTelemetry: null,
   contextUsage: null,
   compactFlipCount: 0,
   error: null,
+  queued: [],
+  holdQueue: false,
+  activeIntakeGoalId: null,
   targets: (() => {
     try {
       const raw = localStorage.getItem("xconsole-agent-targets");
@@ -473,10 +377,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   pendingApprovals: [],
   pendingQuestions: [],
   pendingPlan: null,
+  planDraft: "",
+  planHistory: [],
+  planHistoryOpen: false,
   planMode:
     typeof localStorage !== "undefined" &&
     localStorage.getItem("xconsole-agent-plan-mode") === "1",
   hydrated: false,
+  conversationCostUsd: 0,
 
   init: async () => {
     if (get().hydrated) return;
@@ -538,7 +446,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       maybeSpeak(first);
     });
     const unPlan = await onAgentPlan((plan) => {
-      set({ pendingPlan: plan });
+      set({ pendingPlan: plan, planDraft: plan.plan });
       void notify(
         "xConsole agent — plan ready for review",
         plan.title || "Review the proposed plan.",
@@ -584,7 +492,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   },
 
   resolvePlan: async (id, approve, feedback) => {
-    set({ pendingPlan: null });
+    set({ pendingPlan: null, planDraft: "" });
     const answer = approve ? "APPROVE" : `REJECT: ${feedback ?? ""}`.trim();
     await api.agentAnswerPrompt(id, answer);
     // Taste learning: plan rejection feedback becomes a lasting preference.
@@ -604,6 +512,69 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
+  setPlanDraft: (draft) => set({ planDraft: draft }),
+
+  applyPlan: async (id) => {
+    try {
+      await api.agentAnswerPrompt(id, "APPROVE");
+    } catch (e) {
+      // Backend returned an error (e.g. no waiter): keep the modal open so the
+      // user can retry, rather than silently closing and losing the plan.
+      throw e;
+    }
+    set({ pendingPlan: null, planDraft: "" });
+    void get().loadPlanHistory();
+  },
+
+  archivePlanAction: async (id) => {
+    try {
+      await api.archivePlan(id);
+    } catch (e) {
+      throw e;
+    }
+    set({ pendingPlan: null, planDraft: "" });
+    void get().loadPlanHistory();
+  },
+
+  cancelPlanAction: async (id) => {
+    try {
+      await api.cancelPlan(id);
+    } catch (e) {
+      throw e;
+    }
+    set({ pendingPlan: null, planDraft: "" });
+    void get().loadPlanHistory();
+  },
+
+  revisePlan: async (id, feedback) => {
+    // Keep the modal open; the agent revises and re-presents (new ai://plan).
+    await api.agentAnswerPrompt(id, `REJECT: ${feedback}`.trim());
+  },
+
+  loadPlanHistory: async () => {
+    try {
+      const sid = get().sessionId;
+      const wid = useWorkspaceStore.getState().activeId;
+      const history = await api.listPlans(sid ?? null, wid ?? null);
+      set({ planHistory: history });
+    } catch {
+      /* non-fatal */
+    }
+  },
+
+  setPlanHistoryOpen: (open) => set({ planHistoryOpen: open }),
+
+  closePlanModal: async () => {
+    const pending = get().pendingPlan;
+    set({ pendingPlan: null, planDraft: "", planHistoryOpen: false });
+    // Closing without a decision = cancel: unblock the waiting present_plan
+    // tool and record the plan as cancelled in history.
+    if (pending) {
+      await api.cancelPlan(pending.id).catch(() => {});
+      void get().loadPlanHistory();
+    }
+  },
+
   newConversation: async () => {
     const id = newSessionId();
     set({
@@ -611,11 +582,18 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       messages: [],
       streamingText: "",
       activity: [],
+      streamingSegments: [],
       streaming: false,
       streamStats: null,
+      turnTelemetry: null,
+      prefixTelemetry: null,
       contextUsage: null,
       compactFlipCount: 0,
       error: null,
+      conversationCostUsd: 0,
+      queued: [],
+      holdQueue: false,
+      activeIntakeGoalId: null,
     });
     const list = await api.listAgentConversations().catch(() => get().conversations);
     set({ conversations: list });
@@ -638,17 +616,34 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         targets = [];
       }
     }
+    const settings = useSettingsStore.getState().settings;
+    const providers = useSettingsStore.getState().providers;
+    const activeProvider = providers.find((p) => p.id === settings["agent.active_provider"]);
+    const activeModel = settings["agent.active_model"] || activeProvider?.model;
+    const initialContextUsage = contextUsageFromMessages(
+      messages,
+      activeProvider?.kind ?? undefined,
+      activeModel ?? undefined,
+    );
+
     set({
       sessionId: id,
       messages,
       targets,
       streamingText: "",
       activity: [],
+      streamingSegments: [],
       streaming: false,
-      streamStats: null,
-      contextUsage: null,
+      streamStats: [...messages].reverse().find((m) => m.tokenStats)?.tokenStats ?? null,
+      turnTelemetry: null,
+      prefixTelemetry: null,
+      contextUsage: initialContextUsage,
       compactFlipCount: 0,
       error: null,
+      conversationCostUsd: sessionCostFromMessages(messages),
+      queued: [],
+      holdQueue: false,
+      activeIntakeGoalId: null,
     });
     const list = await api.listAgentConversations().catch(() => get().conversations);
     set({ conversations: list });
@@ -693,33 +688,91 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   exportConversationMarkdown: () => {
     const { messages, conversations, sessionId } = get();
     const meta = conversations.find((c) => c.id === sessionId);
-    const title = meta?.title || "Conversation";
-    const lines: string[] = [`# ${title}`, "", `<!-- session ${sessionId} -->`, ""];
-    for (const m of messages) {
-      if (m.role === "user") {
-        lines.push("## User", "", m.content, "");
-      } else if (m.role === "assistant") {
-        if (m.activity && m.activity.length > 0) {
-          lines.push("### Activity");
-          for (const a of m.activity) {
-            if (a.kind === "status" || a.id === "collapsed-meta") continue;
-            const bit =
-              a.kind === "command"
-                ? `$ ${a.detail || a.label}`
-                : a.kind === "file_edit"
-                  ? `edit ${a.path || a.label}`
-                  : a.label;
-            lines.push(`- ${bit}`);
-          }
-          lines.push("");
-        }
-        lines.push("## Assistant", "", m.content, "");
-      }
-    }
-    return lines.join("\n").trim() + "\n";
+    return renderConversationMarkdown({ title: meta?.title, messages });
   },
 
   setSpeaking: (speaking) => set({ speaking }),
+
+  setActiveIntakeGoal: (id) => set({ activeIntakeGoalId: id }),
+
+  tryRouteChatToPending: (text) => {
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    const s = get();
+    const intent = classifyChat(trimmed);
+
+    if (s.pendingPlan) {
+      const id = s.pendingPlan.id;
+      const fallbackSend = () => {
+        // Waiter already gone (timeout / superseded). Drop the stale modal
+        // and start a normal turn so the chat line is not swallowed.
+        set({ pendingPlan: null, planDraft: "" });
+        void get().send(trimmed);
+      };
+      if (intent.kind === "approve" || intent.kind === "continue") {
+        void get().applyPlan(id).catch(fallbackSend);
+        return true;
+      }
+      if (intent.kind === "reject") {
+        void get()
+          .revisePlan(id, intent.feedback || trimmed)
+          .catch(fallbackSend);
+        return true;
+      }
+      if (intent.kind === "cancel") {
+        void get().cancelPlanAction(id).catch(fallbackSend);
+        return true;
+      }
+      // Free-form notes while the modal is open are revision feedback,
+      // not a second agent turn that would sit behind streaming.
+      void get().revisePlan(id, trimmed).catch(fallbackSend);
+      return true;
+    }
+
+    if (s.pendingQuestions.length > 0) {
+      const q = s.pendingQuestions[0];
+      void get().answerQuestion(q.id, trimmed);
+      return true;
+    }
+
+    if (s.pendingApprovals.length > 0) {
+      if (intent.kind === "approve" || intent.kind === "continue") {
+        void get().resolveApproval(s.pendingApprovals[0].id, true);
+        return true;
+      }
+      if (intent.kind === "reject" || intent.kind === "cancel") {
+        void get().resolveApproval(s.pendingApprovals[0].id, false);
+        return true;
+      }
+    }
+    return false;
+  },
+
+  enqueue: (text, images) => {
+    set((s) => ({ queued: enqueueMessage(s.queued, text, images) }));
+  },
+
+  updateQueued: (id, text) => {
+    set((s) => ({ queued: updateQueuedMessage(s.queued, id, text) }));
+  },
+
+  removeQueued: (id) => {
+    set((s) => ({ queued: removeQueuedMessage(s.queued, id) }));
+  },
+
+  enqueueOrSend: (text, images) => {
+    const trimmed = text.trim();
+    if (!trimmed && !images?.length) return;
+    // Chat typed while a plan / question / command-approval is waiting
+    // must resolve that waiter. Queueing it as a follow-up is how
+    // "ok the plan looks good" used to vanish into a new blocked turn.
+    if (get().tryRouteChatToPending(trimmed)) return;
+    if (get().streaming) {
+      get().enqueue(trimmed, images);
+      return;
+    }
+    void get().send(trimmed, { images });
+  },
 
   stop: async () => {
     // Hush any spoken reply immediately…
@@ -727,28 +780,54 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       cancelSpeech();
       set({ speaking: false });
     }
-    // …and ask the running turn to stop.
+    // …and ask the running turn to stop (backend also interrupts any
+    // interactive plan/question wait for this session).
     if (get().streaming) {
-      await api.agentCancel(get().sessionId).catch(() => {});
+      void api.agentCancel(get().sessionId).catch(() => {});
     }
+    // Clear any pending interactive state so the modal/cards don't linger.
+    // Immediately clear streaming on frontend so the Stop button instantly responds.
+    set({
+      streaming: false,
+      pendingPlan: null,
+      pendingQuestions: [],
+      pendingApprovals: [],
+      planDraft: "",
+      holdQueue: true,
+    });
   },
 
   send: async (text, opts) => {
     const trimmed = text.trim();
-    if (!trimmed || get().streaming) return;
+    const images = opts?.images?.length ? opts.images : undefined;
+    if (!trimmed && !images) return;
+    // Same routing as enqueueOrSend — voice / retry / queue-drain call send
+    // directly. If a waiter is up, resolve it instead of dropping or
+    // starting a second turn.
+    if (trimmed && get().tryRouteChatToPending(trimmed)) return;
+    if (get().streaming) return;
 
-    const userMsg: AgentChatMessage = { role: "user", content: trimmed };
+    const userMsg: AgentChatMessage = {
+      role: "user",
+      content: appendImageMarkers(trimmed, images?.length ?? 0),
+      images,
+    };
     const history = [...get().messages, userMsg];
     set({
       messages: history,
       streaming: true,
+      holdQueue: false,
       streamingText: "",
       activity: [],
+      streamingSegments: [],
       streamStats: null,
+      turnTelemetry: null,
       error: null,
     });
 
     let streamStartedAt: number | null = null;
+    let lastStatsAt = 0;
+    let tokensBeforeBurst = 0;
     let latestStats: TokenStats | null = null;
     // Session-scoped turn state. If the user switches conversations mid-stream we
     // must not read or clobber the now-visible thread, so the turn tracks its own
@@ -756,7 +835,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     // store state, and every shared set() is gated on still being the live session.
     let turnText = "";
     let turnActivity: AgentActivityItem[] = [];
-    let turnMessages: AgentChatMessage[] = history;
+    let turnSegments: TurnSegment[] = [];
 
     const { sessionId, targets, planMode } = get();
     const mySession = sessionId;
@@ -781,25 +860,97 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       }
     };
 
+    let compactionMarker: AgentChatMessage | null = null;
+
     const unlisten = await onAiChatOutput(mySession, (ev) => {
       if (ev.kind === "Text") {
-        if (streamStartedAt === null) streamStartedAt = Date.now();
+        if (streamStartedAt === null) {
+          streamStartedAt = Date.now();
+          tokensBeforeBurst = estimateTokens(turnText);
+        }
         turnText += ev.data;
+        turnSegments = appendTextDelta(turnSegments, ev.data);
         feedSpeech(ev.data);
         if (isCurrent()) {
-          set({ streamingText: turnText, streamStats: liveTokenStats(turnText, streamStartedAt) });
+          const now = Date.now();
+          const shouldUpdateStats = !lastStatsAt || now - lastStatsAt >= 200;
+          let statsUpdate: TokenStats | null = null;
+          if (shouldUpdateStats) {
+            lastStatsAt = now;
+            const live = liveGenerationStats(turnText, streamStartedAt, tokensBeforeBurst);
+            const curStats = get().streamStats;
+            statsUpdate =
+              curStats?.source === "provider"
+                ? {
+                    ...curStats,
+                    completionTokens: live.completionTokens,
+                    tokensPerSec: live.tokensPerSec,
+                  }
+                : live;
+          }
+          set({
+            streamingText: turnText,
+            streamingSegments: turnSegments,
+            ...(statsUpdate ? { streamStats: statsUpdate } : {}),
+          });
         }
         return;
+      }
+      // Next text burst (after tools) gets a fresh generation clock so tok/s
+      // does not include SSH/tool wait time.
+      if (ev.kind === "ToolCall" || ev.kind === "Activity" || ev.kind === "Status") {
+        streamStartedAt = null;
       }
       if (ev.kind === "Stats") {
         latestStats = {
           completionTokens: ev.data.completion_tokens,
           promptTokens: ev.data.prompt_tokens ?? undefined,
           cachedTokens: ev.data.cached_tokens ?? undefined,
+          cacheCreationTokens: ev.data.cache_creation_tokens ?? undefined,
           tokensPerSec: ev.data.tokens_per_sec,
           source: "provider",
         };
         if (isCurrent()) set({ streamStats: latestStats });
+        return;
+      }
+      if (ev.kind === "Cost") {
+        // Provider-estimated cost lands on the latest stats so the footer can show
+        // $ + cache economics. Sums into the conversation running total.
+        const costUsd = ev.data.usd ?? 0;
+        if (latestStats) latestStats = { ...latestStats, costUsd };
+        if (isCurrent()) {
+          set((s) => ({
+            streamStats: s.streamStats ? { ...s.streamStats, costUsd } : s.streamStats,
+            conversationCostUsd: (s.conversationCostUsd ?? 0) + costUsd,
+          }));
+        }
+        return;
+      }
+      if (ev.kind === "TurnTelemetry") {
+        const turnTelemetry: TurnTelemetry = {
+          toolCalls: ev.data.tool_calls,
+          toolCacheLookups: ev.data.tool_cache_lookups,
+          toolCacheHits: ev.data.tool_cache_hits,
+          toolCacheMisses: ev.data.tool_cache_misses,
+          toolCacheWrites: ev.data.tool_cache_writes,
+          toolCacheHitRate: ev.data.tool_cache_hit_rate,
+        };
+        if (isCurrent()) set({ turnTelemetry });
+        return;
+      }
+      if (ev.kind === "PrefixTelemetry") {
+        const prefixTelemetry: PrefixTelemetry = {
+          requestIndex: ev.data.request_index,
+          systemHash: ev.data.system_hash,
+          schemaHash: ev.data.schema_hash,
+          messagePrefixHash: ev.data.message_prefix_hash,
+          systemBytes: ev.data.system_bytes,
+          schemaBytes: ev.data.schema_bytes,
+          messageBytes: ev.data.message_bytes,
+          classification: ev.data.classification,
+          source: ev.data.source,
+        };
+        if (isCurrent()) set({ prefixTelemetry });
         return;
       }
       if (ev.kind === "ContextUsage") {
@@ -807,16 +958,21 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         return;
       }
       if (ev.kind === "ConversationCompacted") {
-        // Preserve tool_calls / tool_call_id so the next request's history keeps
-        // valid tool_use ids (dropping them 400s the Anthropic Messages API).
-        turnMessages = ev.data.messages.map((m) => ({
-          role: m.role as "user" | "assistant" | "system" | "tool",
-          content: m.content,
-          tool_calls: m.tool_calls,
-          tool_call_id: m.tool_call_id,
-        }));
+        // Dual-path history replay: preserve full transcript history in `messages`,
+        // and append a visual compaction divider marker to the timeline.
+        compactionMarker = {
+          role: "system",
+          content: "Context compacted",
+          isCompaction: true,
+          compactionTokensBefore: (ev.data as any)?.tokens_before,
+          compactionTokensAfter: (ev.data as any)?.tokens_after,
+          compactionPrunedTools: (ev.data as any)?.pruned_tools,
+        };
         if (isCurrent()) {
-          set((s) => ({ messages: turnMessages, compactFlipCount: s.compactFlipCount + 1 }));
+          set((s) => ({
+            messages: [...history, compactionMarker!],
+            compactFlipCount: s.compactFlipCount + 1,
+          }));
         }
         return;
       }
@@ -824,8 +980,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         if (isCurrent()) set({ error: ev.data });
         return;
       }
-      turnActivity = applyStreamEvent(turnActivity, ev);
-      if (isCurrent()) set({ activity: turnActivity });
+      turnSegments = applyActivityEvent(turnSegments, ev);
+      turnActivity = flattenActivity(turnSegments);
+      if (isCurrent()) set({ activity: turnActivity, streamingSegments: turnSegments });
     });
 
     try {
@@ -838,20 +995,32 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         workspaceId: useWorkspaceStore.getState().activeId,
         canvas: canvasSnapshot(),
         conversation: opts?.conversation ?? false,
+        goalId: opts?.goalId ?? get().activeIntakeGoalId,
       });
       const tokenStats =
         latestStats ??
         (turnText && streamStartedAt ? liveTokenStats(turnText, streamStartedAt) : undefined);
-      const messages = [
-        ...turnMessages,
+      const messages: AgentChatMessage[] = [
+        ...history,
+        ...(compactionMarker ? [compactionMarker] : []),
         {
           ...assistant,
+          content: assistant.content || textFromSegments(turnSegments),
           activity: turnActivity.length > 0 ? [...turnActivity] : undefined,
+          segments: turnSegments.length > 0 ? [...turnSegments] : undefined,
           tokenStats,
         },
       ];
       if (isCurrent()) {
-        set({ messages, streamingText: "", activity: [], streaming: false, streamStats: null });
+        set({
+          messages,
+          streamingText: "",
+          activity: [],
+          streamingSegments: [],
+          streaming: false,
+          // Keep the last reply's usage so cache rates do not vanish after the turn.
+          streamStats: tokenStats ?? null,
+        });
         if (streamVoice && streamingSpoke) {
           // Speak whatever's left after the last sentence boundary.
           const tail = speechBuf.trim();
@@ -863,17 +1032,29 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       await persistConversation({ sessionId: mySession, messages, targets });
       const list = await api.listAgentConversations().catch(() => get().conversations);
       set({ conversations: list });
+      if (isCurrent() && !get().holdQueue && !get().streaming) {
+        const { next, rest } = takeNextQueued(get().queued);
+        if (next) {
+          set({ queued: rest });
+          void get().send(next.text, { images: next.images });
+        }
+      }
     } catch (e) {
-      const messages = turnText
+      const messages: AgentChatMessage[] = turnText
         ? [
-            ...turnMessages,
+            ...history,
+            ...(compactionMarker ? [compactionMarker] : []),
             {
               role: "assistant" as const,
               content: turnText,
               activity: turnActivity.length > 0 ? [...turnActivity] : undefined,
+              segments: turnSegments.length > 0 ? [...turnSegments] : undefined,
+              tokenStats: latestStats ?? undefined,
             },
           ]
-        : turnMessages;
+        : compactionMarker
+          ? [...history, compactionMarker]
+          : history;
       if (isCurrent()) {
         set({
           streaming: false,
@@ -881,7 +1062,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           messages,
           streamingText: "",
           activity: [],
-          streamStats: null,
+          streamingSegments: [],
+          streamStats: latestStats,
         });
       }
       if (messages.length > 0) {
@@ -907,8 +1089,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
     if (lastUserIdx < 0) return;
     const text = msgs[lastUserIdx].content;
+    const images = msgs[lastUserIdx].images;
     // Drop the failed user turn and any trailing assistant so send() re-appends cleanly.
     set({ messages: msgs.slice(0, lastUserIdx), error: null });
-    await get().send(text);
+    await get().send(text, { images });
   },
 }));

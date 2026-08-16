@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import shell from "highlight.js/lib/languages/shell";
@@ -277,22 +277,62 @@ export function CodeHighlight({
   );
 }
 
-/** Fenced code block for agent markdown replies. */
+/** Fenced code block for agent markdown replies. Copy + Execute (for shell blocks
+ *  with a resolvable host) live in the header. */
 export function MarkdownCodeBlock({
   code,
   className,
+  executeTarget,
+  onExecute,
 }: {
   code: string;
   className?: string;
+  /** When set and the block is shell-ish, an Execute button is shown. */
+  executeTarget?: { name: string; host: string } | null;
+  onExecute?: (code: string) => void;
 }) {
   const lang = langFromMarkdownClass(className);
   const label = lang ?? "code";
+  // Only explicitly-tagged shell blocks get an Execute button (an unlabeled
+  // YAML/Python fence shouldn't be runnable).
+  const shellLike = !!lang && ["bash", "shell", "sh", "zsh"].includes(lang);
+  const canExecute = shellLike && executeTarget != null && !!onExecute;
+  const [copied, setCopied] = useState(false);
+  const copyTimer = useRef<number | null>(null);
+  useEffect(() => () => { if (copyTimer.current != null) clearTimeout(copyTimer.current); }, []);
+
+  const copy = async () => {
+    await navigator.clipboard.writeText(code);
+    setCopied(true);
+    if (copyTimer.current != null) clearTimeout(copyTimer.current);
+    copyTimer.current = window.setTimeout(() => setCopied(false), 1500);
+  };
 
   return (
     <div className="group relative my-2 overflow-hidden rounded-md border border-[var(--border)] bg-[#070a10]">
-      <div className="flex items-center border-b border-[var(--border)]/80 px-3 py-1">
+      <div className="flex items-center gap-2 border-b border-[var(--border)]/80 px-3 py-1">
         <span className="font-mono text-[10px] uppercase tracking-wide text-gray-500">
           {label}
+        </span>
+        <span className="ml-auto flex items-center gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
+          {canExecute && (
+            <button
+              type="button"
+              onClick={() => onExecute?.(code)}
+              data-tooltip={`Execute on ${executeTarget.name}`}
+              className="rounded border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300 hover:bg-emerald-500/20"
+            >
+              ▶ execute
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => void copy()}
+            data-tooltip="Copy code"
+            className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+          >
+            {copied ? "Copied ✓" : "copy"}
+          </button>
         </span>
       </div>
       <pre className="agent-hl m-0 overflow-x-auto px-3 py-2">

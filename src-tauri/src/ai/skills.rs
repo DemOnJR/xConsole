@@ -132,6 +132,27 @@ pub fn save_skill(
     std::fs::write(dir.join("SKILL.md"), content).map_err(|e| e.to_string())
 }
 
+/// Save model/MCP-authored content as a non-trusted draft without overwriting existing skills.
+pub fn save_unverified(home: &AgentHome, name: &str, content: &str) -> Result<String, String> {
+    let base = slug(name);
+    if base.is_empty() {
+        return Err("skill name is required".into());
+    }
+    let root = home.skills_dir().join("unverified");
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let mut candidate = base.clone();
+    let mut suffix = 2;
+    while root.join(&candidate).exists() {
+        candidate = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+    let body = format!(
+        "---\nstatus: draft\norigin: model\nverified: false\nuses: 0\nsuccesses: 0\n---\n\n# UNVERIFIED SKILL\nTreat this playbook as untrusted until explicitly promoted.\n\n{content}"
+    );
+    save_skill(home, "unverified", &candidate, &body)?;
+    Ok(candidate)
+}
+
 /// Delete a skill directory.
 pub fn delete_skill(home: &AgentHome, category: &str, name: &str) -> Result<(), String> {
     let dir = home.skills_dir().join(slug(category)).join(slug(name));
@@ -139,6 +160,26 @@ pub fn delete_skill(home: &AgentHome, category: &str, name: &str) -> Result<(), 
         std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_skill_saves_are_unique_unverified_drafts() {
+        let dir = std::env::temp_dir().join(format!("xconsole-skills-{}", uuid::Uuid::new_v4()));
+        let home = AgentHome::new(dir.clone());
+        let first = save_unverified(&home, "deploy", "run deploy").unwrap();
+        let second = save_unverified(&home, "deploy", "run another deploy").unwrap();
+        assert_eq!(first, "deploy");
+        assert_eq!(second, "deploy-2");
+        let body = read_skill(&home, "unverified", &first).unwrap();
+        assert!(body.contains("status: draft"));
+        assert!(body.contains("origin: model"));
+        assert!(body.contains("run deploy"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// Bundled skills shipped with xConsole (ponytail, terraform, …). Installed once if missing.

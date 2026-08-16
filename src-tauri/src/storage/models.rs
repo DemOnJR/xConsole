@@ -50,6 +50,23 @@ pub struct Vps {
     pub created_at: Option<String>,
 }
 
+/// Public-only login fields the agent may change. Never includes a password or key bytes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VpsLoginPatch {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub auth_type: Option<AuthType>,
+    #[serde(default)]
+    pub key_path: Option<String>,
+}
+
 /// Payload to create or update a VPS (id optional on create).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpsInput {
@@ -128,13 +145,13 @@ pub struct WorkspaceInput {
 pub struct AiProvider {
     pub id: String,
     pub name: String,
-    /// "anthropic" | "openai" | "ollama" | "cursor" | "codex_cli" | "opencode_cli"
+    /// "anthropic" | "openai" | "ollama" | "cursor" | "codex_cli" | "opencode_cli" | "antigravity_cli"
     pub kind: String,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
-    /// Path to the CLI binary (for codex_cli / opencode_cli).
+    /// Path to the CLI binary (for codex_cli / opencode_cli / antigravity_cli).
     #[serde(default)]
     pub bin_path: Option<String>,
     /// Free-form JSON for provider-specific options.
@@ -208,6 +225,102 @@ pub struct CronJobInput {
     pub enabled: bool,
 }
 
+/// A persistent goal session (the /goal autonomous mode). The loop controller in
+/// `ai::goal` drives plan → act → verify cycles against a GoalSpec; kanban cards
+/// and constraint memory live as JSON blobs so the schema stays stable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalSession {
+    pub id: String,
+    /// Short label for the kanban node header.
+    pub title: String,
+    /// The user's original "/goal ..." text.
+    pub raw_request: String,
+    /// Serialized GoalSpec.
+    pub spec_json: String,
+    /// "intake" | "active" | "paused" | "waiting" | "blocked" | "done" | "stopped"
+    pub status: String,
+    /// Serialized Vec<GoalTask>.
+    pub kanban_json: String,
+    /// Serialized constraint memory (facts learned during the run).
+    pub memory_json: String,
+    /// RFC3339; when "waiting", when to resume.
+    #[serde(default)]
+    pub next_check_at: Option<String>,
+    /// How many plan→act→verify cycles have run.
+    pub cycles: i64,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+}
+
+/// The locked-in definition of "done" for a goal session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalSpec {
+    pub objective: String,
+    pub success_criteria: Vec<String>,
+    /// How the agent verifies progress (tool names + procedure).
+    pub check_method: String,
+    /// Tool names allowed for verification, e.g. ["web_search", "run_command"].
+    #[serde(default)]
+    pub check_tooling: Vec<String>,
+    /// Things the agent must never do.
+    #[serde(default)]
+    pub hard_constraints: Vec<String>,
+    /// Safety valve; None = unbounded but still stoppable.
+    #[serde(default)]
+    pub max_cycles: Option<i64>,
+    /// VPS ids the loop may act on (copied from the agent picker at lock time).
+    #[serde(default)]
+    pub vps_targets: Vec<String>,
+}
+
+/// One event on a kanban card (created / moved / result / note / …).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GoalTaskEvent {
+    pub at: String,
+    pub action: String,
+    #[serde(default)]
+    pub column: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// One kanban card for a goal session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalTask {
+    pub id: String,
+    /// "backlog" | "in_progress" | "waiting" | "testing" | "blocked" | "done"
+    pub column: String,
+    pub title: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// "edit" | "test" | "bug" | "research" | "check"
+    #[serde(default)]
+    pub kind: String,
+    /// Touched file paths.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// Outcome once resolved.
+    #[serde(default)]
+    pub result: Option<String>,
+    /// Populated when kind="bug" or a test failed.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Parent card id when this is a sub-task. Roots have `None`.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// What happened on this card, oldest first.
+    #[serde(default)]
+    pub history: Vec<GoalTaskEvent>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
 /// A pending or resolved approval for an agent command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentApproval {
@@ -258,6 +371,42 @@ pub struct AgentConversationInput {
     pub targets: Vec<String>,
     /// JSON array of { role, content, activity? }
     pub messages_json: String,
+}
+
+/// A plan the agent presented via `present_plan` (persisted for history).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPlan {
+    pub id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    pub plan: String,
+    /// presented | applied | archived | cancelled
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+/// List row for the plan history picker (no plan body).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPlanMeta {
+    pub id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
 }
 
 fn default_true() -> bool {

@@ -15,6 +15,20 @@ export interface Vps {
   created_at?: string | null;
 }
 
+/** A file the agent created on this PC (SSH key backup, download, write). */
+export interface Artifact {
+  id: string;
+  name: string;
+  path: string;
+  kind: string;
+  sha256: string;
+  size: number;
+  secret: boolean;
+  session_id?: string | null;
+  vps_id?: string | null;
+  created_at?: string | null;
+}
+
 export interface VpsInput {
   id?: string;
   name: string;
@@ -68,6 +82,33 @@ export interface SystemCaps {
   ram_mb: number;
   vram_mb: number | null;
   gpu_name: string | null;
+}
+
+export interface ResourceSnapshot {
+  ts: string;
+  cpu_pct: number;
+  ram_mb: number;
+  ram_total_mb: number;
+  process_ram_mb: number;
+  gpu_pct: number | null;
+  gpu_mem_mb: number | null;
+  gpu_mem_total_mb: number | null;
+  gpu_name: string | null;
+}
+
+export interface AgentAnalytics {
+  cache: { ts: string; session: string; prompt: number; hit: number; miss: number; pct: number }[];
+  cache_avg_pct: number;
+  conversations: {
+    id: string;
+    title: string;
+    updated_at: string;
+    user_turns: number;
+    tool_calls: number;
+    tools: { name: string; count: number }[];
+  }[];
+  tools_all: { name: string; count: number }[];
+  resource: ResourceSnapshot;
 }
 
 export interface ModelEntry {
@@ -161,7 +202,7 @@ export interface SftpEntry {
   link_broken: boolean;
 }
 
-/** Local filesystem listing for dual-pane SFTP (WinSCP-style). */
+/** Local filesystem listing for dual-pane SFTP. */
 export interface LocalFsEntry {
   name: string;
   path: string;
@@ -345,7 +386,8 @@ export type ProviderKind =
   | "llamacpp"
   | "cursor"
   | "codex_cli"
-  | "opencode_cli";
+  | "opencode_cli"
+  | "antigravity_cli";
 
 export interface AiProvider {
   id: string;
@@ -405,7 +447,24 @@ export interface AgentQuestion {
 export interface AgentPlan {
   id: string;
   session_id: string;
+  workspace_id?: string | null;
   title?: string;
+  plan: string;
+}
+
+/** A plan record from the persisted plan history (no body). */
+export interface AgentPlanMeta {
+  id: string;
+  session_id: string;
+  workspace_id?: string | null;
+  title?: string | null;
+  status: "presented" | "applied" | "archived" | "cancelled";
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+/** A single persisted plan with its full body. */
+export interface AgentPlanFull extends AgentPlanMeta {
   plan: string;
 }
 
@@ -425,7 +484,6 @@ export interface AgentConversation extends AgentConversationMeta {
 export interface AgentDocs {
   soul: string;
   memory: string;
-  user: string;
   taste: string;
 }
 
@@ -467,6 +525,63 @@ export interface CronJobInput {
   payload: string;
   targets_json?: string | null;
   enabled: boolean;
+}
+
+/** A persistent autonomous goal session (/goal). */
+export interface GoalSession {
+  id: string;
+  title: string;
+  raw_request: string;
+  spec_json: string;
+  status: "intake" | "active" | "paused" | "waiting" | "blocked" | "done" | "stopped" | string;
+  kanban_json: string;
+  memory_json: string;
+  next_check_at?: string | null;
+  cycles: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+  finished_at?: string | null;
+}
+
+/** The locked-in definition of "done" for a goal. */
+export interface GoalSpec {
+  objective: string;
+  success_criteria: string[];
+  check_method: string;
+  check_tooling?: string[];
+  hard_constraints?: string[];
+  max_cycles?: number | null;
+  vps_targets?: string[];
+}
+
+/** One event on a kanban card (created / moved / result / note / …). */
+export interface GoalTaskEvent {
+  at: string;
+  action: string;
+  column?: string | null;
+  note?: string | null;
+}
+
+/** One kanban card. Sub-tasks are other cards whose `parent_id` is this id. */
+export interface GoalTask {
+  id: string;
+  column: string;
+  title: string;
+  detail?: string | null;
+  kind?: string;
+  files?: string[];
+  result?: string | null;
+  error?: string | null;
+  parent_id?: string | null;
+  history?: GoalTaskEvent[];
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+/** Constraint memory: learned facts + history. */
+export interface GoalMemory {
+  learned: { key: string; value: string; evidence: string; confidence: string }[];
+  history?: { at: string; action: string; next_check: string }[];
 }
 
 export interface InfraProject {
@@ -525,12 +640,19 @@ export interface ToolCall {
 
 export type ChatRole = "user" | "assistant" | "tool" | "system";
 
+export interface ChatImage {
+  media_type: string;
+  data: string;
+  name?: string;
+}
+
 export interface ChatMessage {
   role: ChatRole;
   content: string;
   tool_calls?: ToolCall[];
   tool_call_id?: string | null;
   activity?: AgentActivityItem[];
+  images?: ChatImage[];
 }
 
 export interface DiffLine {
@@ -585,8 +707,44 @@ export type StreamEvent =
         completion_tokens: number;
         prompt_tokens?: number | null;
         cached_tokens?: number | null;
+        cache_creation_tokens?: number | null;
         duration_ms: number;
         tokens_per_sec: number;
+      };
+    }
+  | {
+      kind: "Cost";
+      data: {
+        input_tokens: number;
+        output_tokens: number;
+        cache_read_tokens: number;
+        cache_write_tokens: number;
+        usd: number;
+      };
+    }
+  | {
+      kind: "TurnTelemetry";
+      data: {
+        tool_calls: number;
+        tool_cache_lookups: number;
+        tool_cache_hits: number;
+        tool_cache_misses: number;
+        tool_cache_writes: number;
+        tool_cache_hit_rate: number;
+      };
+    }
+  | {
+      kind: "PrefixTelemetry";
+      data: {
+        request_index: number;
+        system_hash: string;
+        schema_hash: string;
+        message_prefix_hash: string;
+        system_bytes: number;
+        schema_bytes: number;
+        message_bytes: number;
+        classification: string;
+        source: string;
       };
     }
   | {
@@ -613,6 +771,13 @@ export const api = {
   listVps: () => invoke<Vps[]>("list_vps"),
   saveVps: (input: VpsInput) => invoke<Vps>("save_vps", { input }),
   deleteVps: (id: string) => invoke<void>("delete_vps", { id }),
+
+  listArtifacts: (query?: string | null) =>
+    invoke<Artifact[]>("list_artifacts", { query: query ?? null }),
+  verifyArtifact: (id: string) => invoke<boolean>("verify_artifact", { id }),
+  revealArtifact: (id: string) => invoke<void>("reveal_artifact", { id }),
+  deleteArtifact: (id: string) => invoke<void>("delete_artifact", { id }),
+  artifactsDir: () => invoke<string>("artifacts_dir"),
 
   sshConnect: (vpsId: string, cols: number, rows: number) =>
     invoke<ConnectOutcome>("ssh_connect", { vpsId, cols, rows }),
@@ -659,6 +824,8 @@ export const api = {
   pickFile: (title: string) => invoke<string | null>("pick_file", { title }),
   localFsReadText: (path: string, maxBytes?: number) =>
     invoke<string>("local_fs_read_text", { path, maxBytes: maxBytes ?? null }),
+  localFsReadBytes: (path: string, maxBytes?: number) =>
+    invoke<string>("local_fs_read_bytes", { path, maxBytes: maxBytes ?? null }),
   sftpTransferStart: (
     sessionId: string,
     direction: TransferDirection,
@@ -870,6 +1037,9 @@ export const api = {
     invoke<string>("ai_cli_login", { providerId }),
   aiCliModels: (providerId: string) =>
     invoke<string[]>("ai_cli_models", { providerId }),
+  /** Probe a cloud provider's /models endpoint (flavor: "openai" | "anthropic"). */
+  listModels: (flavor: string, baseUrl: string, apiKey: string) =>
+    invoke<string[]>("ai_list_models", { flavor, baseUrl, apiKey }),
 
   aiChat: (args: {
     sessionId: string;
@@ -880,6 +1050,7 @@ export const api = {
     workspaceId?: string | null;
     canvas?: CanvasSnapshotNode[];
     conversation?: boolean;
+    goalId?: string | null;
   }) =>
     invoke<ChatMessage>("ai_chat", {
       sessionId: args.sessionId,
@@ -890,6 +1061,7 @@ export const api = {
       workspaceId: args.workspaceId ?? null,
       canvas: args.canvas ?? [],
       conversation: args.conversation ?? false,
+      goalId: args.goalId ?? null,
     }),
 
   agentCancel: (sessionId: string) => invoke<void>("agent_cancel", { sessionId }),
@@ -941,9 +1113,23 @@ export const api = {
 
   listFileChanges: (sessionId: string) =>
     invoke<FileChange[]>("list_file_changes", { sessionId }),
+  listFileChangesHistory: (workspaceId?: string | null, sessionId?: string | null) =>
+    invoke<FileChange[]>("list_file_changes_history", {
+      workspaceId: workspaceId ?? null,
+      sessionId: sessionId ?? null,
+    }),
   clearFileChanges: (sessionId: string) =>
     invoke<void>("clear_file_changes", { sessionId }),
   revertFileChange: (id: string) => invoke<void>("revert_file_change", { id }),
+
+  listPlans: (sessionId?: string | null, workspaceId?: string | null) =>
+    invoke<AgentPlanMeta[]>("list_plans", {
+      sessionId: sessionId ?? null,
+      workspaceId: workspaceId ?? null,
+    }),
+  getPlan: (id: string) => invoke<AgentPlanFull | null>("get_plan", { id }),
+  archivePlan: (id: string) => invoke<void>("archive_plan", { id }),
+  cancelPlan: (id: string) => invoke<void>("cancel_plan", { id }),
 
   agentResolveApproval: (
     id: string,
@@ -965,6 +1151,8 @@ export const api = {
 
   listAgentConversations: () =>
     invoke<AgentConversationMeta[]>("list_agent_conversations"),
+  agentAnalytics: () => invoke<AgentAnalytics>("agent_analytics"),
+  appResourceSnapshot: () => invoke<ResourceSnapshot>("app_resource_snapshot"),
   getAgentConversation: (id: string) =>
     invoke<AgentConversation | null>("get_agent_conversation", { id }),
   saveAgentConversation: (args: {
@@ -994,7 +1182,6 @@ export const api = {
   hooksStatus: () => invoke<HooksStatus>("hooks_status"),
   saveMemoryDoc: (content: string) =>
     invoke<void>("save_memory_doc", { content }),
-  saveUserDoc: (content: string) => invoke<void>("save_user_doc", { content }),
   saveTasteDoc: (content: string) => invoke<void>("save_taste_doc", { content }),
 
   listSkills: () => invoke<Skill[]>("list_skills"),
@@ -1010,6 +1197,16 @@ export const api = {
     invoke<CronJob>("save_cron_job", { input }),
   deleteCronJob: (id: string) => invoke<void>("delete_cron_job", { id }),
   runCronJob: (id: string) => invoke<void>("run_cron_job", { id }),
+
+  startGoal: (text: string) => invoke<string>("start_goal", { text }),
+  confirmGoal: (id: string, targets?: string[]) =>
+    invoke<void>("confirm_goal", { id, targets: targets ?? [] }),
+  pauseGoal: (id: string) => invoke<void>("pause_goal", { id }),
+  continueGoal: (id: string) => invoke<void>("continue_goal", { id }),
+  stopGoal: (id: string) => invoke<void>("stop_goal", { id }),
+  getGoal: (id: string) => invoke<GoalSession>("get_goal", { id }),
+  listGoals: () => invoke<GoalSession[]>("list_goals"),
+  deleteGoal: (id: string) => invoke<void>("delete_goal", { id }),
 
   listInfraProjects: () => invoke<InfraProject[]>("list_infra_projects"),
   saveInfraProject: (input: InfraProjectInput) =>
@@ -1105,6 +1302,22 @@ export function onCanvasCommand(
   return listen<CanvasCommand>("canvas://command", (e) => cb(e.payload));
 }
 
+export function onVpsUpdated(cb: () => void): Promise<UnlistenFn> {
+  return listen("vps://updated", () => cb());
+}
+
+export function onArtifactsChanged(cb: () => void): Promise<UnlistenFn> {
+  return listen("artifacts://changed", () => cb());
+}
+
+/** Subscribe to live goal-session events (kanban/status/memory updates). */
+export function onGoalEvent(
+  goalId: string,
+  cb: (ev: StreamEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<StreamEvent>(`goal://${goalId}`, (e) => cb(e.payload));
+}
+
 /** One file the agent edited this session (before/after captured for the diff panel). */
 /** App-lock status (matches the Rust `LockStatus`). */
 /** A file that was uploaded to a server by dropping or pasting it on a terminal. */
@@ -1150,6 +1363,7 @@ export interface ChannelInfo {
 export interface FileChange {
   id: string;
   session_id: string;
+  workspace_id?: string | null;
   scope: "local" | "vps";
   vps_id?: string | null;
   label: string;

@@ -1,4 +1,4 @@
-// xConsole setup — Hermes-style "clone + compile on the user's PC".
+// xConsole setup — source setup and build on the user's PC.
 //
 // The installer is a tiny Tauri app. On "Install" it:
 //   1. ensures the build toolchain (Git, Rust GNU, MinGW, Node+pnpm) — using the
@@ -34,6 +34,34 @@ fn is_valid_branch(s: &str) -> bool {
     matches!(s, "main" | "dev")
 }
 
+fn resolve_install_branch(
+    env_branch: Option<&str>,
+    args: &[String],
+    channel_file: Option<&str>,
+) -> String {
+    if let Some(b) = env_branch.map(str::trim).filter(|b| is_valid_branch(b)) {
+        return b.to_string();
+    }
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--branch" {
+            if let Some(b) = iter.next().map(String::as_str).map(str::trim) {
+                if is_valid_branch(b) {
+                    return b.to_string();
+                }
+            }
+        } else if let Some(b) = arg.strip_prefix("--branch=").map(str::trim) {
+            if is_valid_branch(b) {
+                return b.to_string();
+            }
+        }
+    }
+    if let Some(b) = channel_file.map(str::trim).filter(|b| is_valid_branch(b)) {
+        return b.to_string();
+    }
+    DEFAULT_BRANCH.to_string()
+}
+
 /// Which branch to install / update from.
 ///
 /// Priority:
@@ -42,36 +70,40 @@ fn is_valid_branch(s: &str) -> bool {
 ///   3. `%LOCALAPPDATA%\xConsole\channel` (written by the app on channel switch)
 ///   4. `main`
 pub fn install_branch() -> String {
-    if let Ok(b) = std::env::var("XCONSOLE_UPDATE_BRANCH") {
-        let b = b.trim().to_string();
-        if is_valid_branch(&b) {
-            return b;
-        }
+    let env_branch = std::env::var("XCONSOLE_UPDATE_BRANCH").ok();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let channel = std::fs::read_to_string(base_dir().join("channel")).ok();
+    resolve_install_branch(env_branch.as_deref(), &args, channel.as_deref())
+}
+
+#[cfg(test)]
+mod branch_tests {
+    use super::resolve_install_branch;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
     }
-    let mut args = std::env::args().skip(1);
-    while let Some(a) = args.next() {
-        if a == "--branch" {
-            if let Some(b) = args.next() {
-                let b = b.trim().to_string();
-                if is_valid_branch(&b) {
-                    return b;
-                }
-            }
-        } else if let Some(b) = a.strip_prefix("--branch=") {
-            let b = b.trim();
-            if is_valid_branch(b) {
-                return b.to_string();
-            }
-        }
+
+    #[test]
+    fn environment_branch_wins_over_cli_and_file() {
+        assert_eq!(
+            resolve_install_branch(Some("dev"), &args(&["--branch", "main"]), Some("main")),
+            "dev"
+        );
     }
-    let path = base_dir().join("channel");
-    if let Ok(s) = std::fs::read_to_string(path) {
-        let s = s.trim().to_string();
-        if is_valid_branch(&s) {
-            return s;
-        }
+
+    #[test]
+    fn cli_branch_supports_both_forms() {
+        assert_eq!(resolve_install_branch(None, &args(&["--branch", "dev"]), Some("main")), "dev");
+        assert_eq!(resolve_install_branch(None, &args(&["--branch=dev"]), Some("main")), "dev");
     }
-    DEFAULT_BRANCH.to_string()
+
+    #[test]
+    fn channel_file_is_used_before_main_fallback() {
+        assert_eq!(resolve_install_branch(None, &[], Some("dev")), "dev");
+        assert_eq!(resolve_install_branch(None, &[], Some("stable")), "main");
+        assert_eq!(resolve_install_branch(None, &[], None), "main");
+    }
 }
 
 /// Persist the active channel so future updates (and the next installer run) stay on it.
@@ -1039,7 +1071,7 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
         // The previous updater, renamed aside so the new one could take its place. It is
         // no longer running by now, so it can finally go.
         let _ = std::fs::remove_file(base.join("uninstall.old.exe"));
-        rep.log("xConsole setup — building from source (Hermes-style).");
+        rep.log("xConsole setup — building from source.");
         rep.log(format!("Install location: {}", base.display()));
         rep.log("First run downloads the toolchain + compiles; this can take 10-20 minutes.");
         Ok(())

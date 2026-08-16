@@ -7,8 +7,10 @@ import {
 } from "./icons";
 import { useUiStore } from "../stores/uiStore";
 import { useAgentStore } from "../stores/agentStore";
+import { useCanvasStore } from "../stores/canvasStore";
 import { useTransferStore } from "../stores/transferStore";
 import { useEditsStore } from "../stores/editsStore";
+import { toggleAgentFillPane } from "./agent/AgentNode";
 
 function RailBtn({
   active,
@@ -83,20 +85,24 @@ function DiffIcon({ size = 18 }: { size?: number }) {
 }
 
 /**
- * Compact left icon rail (Xirp / Claude Code–style).
+ * Compact left icon rail.
  * Toggles drawers without crowding the title bar.
  */
 export function NavRail() {
   const leftOpen = useUiStore((s) => s.leftOpen);
+  const mainView = useUiStore((s) => s.mainView);
+  const toggleAnalytics = useUiStore((s) => s.toggleAnalytics);
   const rightOpen = useUiStore((s) => s.rightOpen);
   const bottomOpen = useUiStore((s) => s.bottomOpen);
-  const agentOpen = useUiStore((s) => s.agentOpen);
   const toggleLeft = useUiStore((s) => s.toggleLeft);
   const toggleRight = useUiStore((s) => s.toggleRight);
   const toggleBottom = useUiStore((s) => s.toggleBottom);
-  const toggleAgent = useUiStore((s) => s.toggleAgent);
-  const toggleAgentExpanded = useUiStore((s) => s.toggleAgentExpanded);
   const openSettings = useUiStore((s) => s.openSettings);
+
+  const agentNodeId = useCanvasStore((s) =>
+    s.nodes.find((n) => n.type === "agent")?.id ?? null,
+  );
+  const agentOpen = agentNodeId !== null;
 
   const pendingApprovals = useAgentStore((s) => s.pendingApprovals.length);
   const pendingQuestions = useAgentStore((s) => s.pendingQuestions.length);
@@ -118,11 +124,19 @@ export function NavRail() {
   return (
     <nav className="xc-rail" aria-label="Main navigation">
       <RailBtn
-        active={leftOpen}
+        active={leftOpen && mainView === "canvas"}
         title={leftOpen ? "Hide workspaces" : "Workspaces"}
         onClick={toggleLeft}
       >
         <FolderIcon size={18} />
+      </RailBtn>
+
+      <RailBtn
+        active={mainView === "analytics"}
+        title={mainView === "analytics" ? "Back to canvas" : "Analytics"}
+        onClick={toggleAnalytics}
+      >
+        <ChartIcon size={18} />
       </RailBtn>
 
       <RailBtn
@@ -143,11 +157,17 @@ export function NavRail() {
             : agentBusy
               ? "Agent working…"
               : agentOpen
-                ? "Hide agent (double-click fullscreen)"
-                : "Agent (double-click fullscreen)"
+                ? "Hide agent (double-click fills the canvas)"
+                : "Agent (double-click fills the canvas)"
         }
-        onClick={toggleAgent}
-        onDoubleClick={toggleAgentExpanded}
+        onClick={() => useCanvasStore.getState().addAgent()}
+        onDoubleClick={() => {
+          const node = useCanvasStore.getState().nodes.find((n) => n.type === "agent");
+          if (node) {
+            useCanvasStore.getState().focus(node.id);
+            toggleAgentFillPane(node.id);
+          }
+        }}
         badge={agentNeedsYou > 0 ? agentNeedsYou : undefined}
       >
         <BotIcon size={18} />
@@ -191,6 +211,19 @@ export function NavRail() {
         </RailBtn>
       </div>
     </nav>
+  );
+}
+
+function ChartIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M4 19V5M4 19h16M8 16v-5M12 16V8M16 16v-8"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 

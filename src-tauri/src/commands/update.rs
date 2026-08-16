@@ -73,10 +73,13 @@ pub fn set_channel(db: &Db, channel: &str) -> Result<(), String> {
     db.set_setting(CHANNEL_SETTING, channel)
         .map_err(|e| e.to_string())?;
     write_channel_file(channel);
-    // Best-effort: retarget the local git checkout so the next update/installer
-    // run is already on the right branch (and UI stops saying "install is on main").
+    // Retarget the local source now so the selected channel is visible and authoritative
+    // before the next update check. A failed switch must not be reported as success.
     let src = install_base().join("src");
-    let _ = ensure_checkout_branch(&src, channel);
+    if src.join(".git").exists() {
+        ensure_checkout_branch(&src, channel)
+            .map_err(|e| format!("could not switch source checkout to '{channel}': {e}"))?;
+    }
     Ok(())
 }
 
@@ -194,6 +197,35 @@ fn local_branch(src: &Path) -> Option<String> {
     None
 }
 
+fn update_decision(
+    local_sha: Option<&str>,
+    local_branch: Option<&str>,
+    channel: &str,
+    latest_sha: &str,
+) -> (bool, Option<String>) {
+    let short = |s: &str| s.chars().take(7).collect::<String>();
+    let branch_mismatch = local_branch.map(|b| b != channel).unwrap_or(true);
+    match local_sha {
+        Some(local) if !latest_sha.is_empty() => {
+            let commit_changed = short(local) != short(latest_sha);
+            let available = commit_changed || branch_mismatch;
+            let note = if available && branch_mismatch {
+                Some(format!(
+                    "Will rebuild from the '{channel}' channel (currently on '{}').",
+                    local_branch.unwrap_or("unknown")
+                ))
+            } else {
+                None
+            };
+            (available, note)
+        }
+        _ => (
+            true,
+            Some("Couldn't read the local version — update will re-clone from your selected channel.".into()),
+        ),
+    }
+}
+
 #[derive(Serialize)]
 pub struct UpdateInfo {
     /// A newer commit is on GitHub for the active channel and we can update in place.
@@ -292,41 +324,14 @@ pub async fn check_for_update(db: tauri::State<'_, Db>) -> Result<UpdateInfo, St
         .unwrap_or("")
         .to_string();
 
+    let (available, note) = update_decision(
+        local.as_deref(),
+        local_br.as_deref(),
+        &channel,
+        &latest_sha,
+    );
+    let available = available && can_self_update;
     let short = |s: &str| s.chars().take(7).collect::<String>();
-    // Availability is **commit-based only** (first 7 chars). Branch-name mismatch alone
-    // must NOT keep offering updates forever: main and dev often share the same tip, and
-    // shallow single-branch clones of main used to fail switching to origin/dev.
-    let (available, note) = match &local {
-        Some(l) if !latest_sha.is_empty() => {
-            let available = short(l) != short(&latest_sha);
-            let branch_mismatch = local_br
-                .as_deref()
-                .map(|b| b != channel.as_str())
-                .unwrap_or(false);
-            // Same tip as the selected channel: quietly retarget the git branch so the
-            // UI stops saying "install is on main" without a full rebuild.
-            if !available && branch_mismatch {
-                let _ = ensure_checkout_branch(&src, &channel);
-            }
-            let note = if available && branch_mismatch {
-                Some(format!(
-                    "Will rebuild from the '{channel}' channel (currently on '{}').",
-                    local_br.as_deref().unwrap_or("unknown")
-                ))
-            } else {
-                None
-            };
-            (available, note)
-        }
-        _ => (
-            // No readable checkout — offer an update that re-clones the channel.
-            can_self_update,
-            Some(
-                "Couldn't read the local version — update will re-clone from your selected channel."
-                    .to_string(),
-            ),
-        ),
-    };
 
     Ok(UpdateInfo {
         available,
@@ -435,9 +440,9 @@ pub async fn start_app_update(app: AppHandle, db: tauri::State<'_, Db>) -> Resul
     // older uninstall.exe that still hardcodes `main` will at least build from a tree
     // that was already checked out to dev (and the new installer will reaffirm it).
     let src = install_base().join("src");
-    if let Err(e) = ensure_checkout_branch(&src, &channel) {
-        // Non-fatal: the new installer will re-clone; log-worthy but don't block.
-        eprintln!("[update] pre-switch to {channel}: {e}");
+    if src.join(".git").exists() {
+        ensure_checkout_branch(&src, &channel)
+            .map_err(|e| format!("could not prepare '{channel}' update: {e}"))?;
     }
 
     let backup = backup_user_data(&app)?;
@@ -469,4 +474,37 @@ pub async fn start_app_update(app: AppHandle, db: tauri::State<'_, Db>) -> Resul
         .map_err(|e| format!("failed to launch the updater: {e}"))?;
 
     Ok(backup.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dev_branch_mismatch_requires_rebuild_even_at_same_tip() {
+        let (available, note) = update_decision(Some("abcdef012345"), Some("main"), "dev", "abcdef099999");
+        assert!(available);
+        assert!(note.unwrap().contains("'dev'"));
+    }
+
+    #[test]
+    fn matching_branch_and_tip_is_up_to_date() {
+        let (available, note) = update_decision(Some("abcdef012345"), Some("dev"), "dev", "abcdef099999");
+        assert!(!available);
+        assert!(note.is_none());
+    }
+
+    #[test]
+    fn changed_commit_requires_update_on_matching_branch() {
+        let (available, note) = update_decision(Some("111111122222"), Some("dev"), "dev", "333333344444");
+        assert!(available);
+        assert!(note.is_none());
+    }
+
+    #[test]
+    fn missing_local_checkout_requires_reclone() {
+        let (available, note) = update_decision(None, None, "dev", "abcdef012345");
+        assert!(available);
+        assert!(note.unwrap().contains("re-clone"));
+    }
 }

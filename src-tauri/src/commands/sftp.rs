@@ -210,7 +210,7 @@ pub async fn sftp_edit_external(
 /// Settings key holding the external editor command (e.g. `code`).
 pub const EXTERNAL_EDITOR_SETTING: &str = "sftp.external_editor";
 
-/// List a local directory for the dual-pane SFTP browser (WinSCP-style).
+/// List a local directory for the dual-pane SFTP browser.
 #[tauri::command]
 pub fn local_fs_list(path: Option<String>) -> Result<crate::local::LocalFsList, String> {
     let p = path
@@ -233,6 +233,22 @@ pub fn local_fs_home() -> Result<String, String> {
 #[tauri::command]
 pub fn local_git_branch(path: String) -> Result<Option<crate::local::LocalGitInfo>, String> {
     Ok(crate::local::local_git_branch(path.trim()))
+}
+
+/// Read a local file as base64 (images for /vision). Capped to avoid blowing the IPC channel.
+#[tauri::command]
+pub fn local_fs_read_bytes(path: String, max_bytes: Option<u64>) -> Result<String, String> {
+    let max = max_bytes.unwrap_or(10 * 1024 * 1024);
+    let meta = std::fs::metadata(&path).map_err(|e| format!("stat failed: {e}"))?;
+    if meta.len() > max {
+        return Err(format!(
+            "file too large ({} bytes, max {max})",
+            meta.len()
+        ));
+    }
+    let bytes = std::fs::read(&path).map_err(|e| format!("read failed: {e}"))?;
+    use base64::Engine;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
 /// Read a local text file (SQL dumps, etc.). Capped to avoid blowing the IPC channel.

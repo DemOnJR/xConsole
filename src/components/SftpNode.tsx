@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   onInternalDrop,
   startInternalDrag,
@@ -162,7 +162,7 @@ function TreeNode({
   );
 }
 
-export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeType>) {
+export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeType>) {
   const focus = useCanvasStore((s) => s.focus);
   const removeNode = useCanvasStore((s) => s.removeNode);
   const updateNodeData = useCanvasStore((s) => s.updateNodeData);
@@ -353,7 +353,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       : "external editor"
     : null;
 
-  // Favorite paths for this host (WinSCP-style bookmarks).
+  // Favorite paths for this host (bookmarks).
   const bookmarkKey = `xconsole-sftp-bookmarks:${data.vpsId}`;
   const [bookmarks, setBookmarks] = useState<string[]>(() => {
     try {
@@ -374,7 +374,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
     }
   };
 
-  // Dual-pane: local filesystem (left) | remote (right) — WinSCP-style.
+  // Dual-pane: local filesystem (left) | remote (right).
   const [dualPane, setDualPane] = useState(
     () => localStorage.getItem("xconsole-sftp-dual-pane") === "1",
   );
@@ -1125,7 +1125,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       void bulkDelete(null);
       return;
     }
-    // WinSCP-style dual-pane transfer keys (work when dual pane is open).
+    // Dual-pane transfer keys (work when dual pane is open).
     if (dualPane && e.key === "F5") {
       e.preventDefault();
       if (selection.size > 0) void downloadRemoteToLocal();
@@ -1680,7 +1680,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
         </div>
       </div>
 
-      <div className="nodrag nowheel flex min-h-0 flex-1 flex-col">
+      <div className="nodrag nowheel flex min-h-0 flex-1 cursor-text select-text flex-col">
         <div className="flex items-center gap-1 border-b border-[var(--border)]/80 px-2 py-1">
           {/* Also bound to the mouse's side buttons while the pointer is over this panel. */}
           <button
@@ -1739,7 +1739,7 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
                 : "text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
             }`}
             data-tooltip={
-              dualPane ? "Hide local pane" : "Dual pane: local PC | remote (WinSCP-style)"
+              dualPane ? "Hide local pane" : "Dual pane: local PC | remote"
             }
             onClick={toggleDualPane}
           >
@@ -2655,4 +2655,4 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       )}
     </div>
   );
-}
+});

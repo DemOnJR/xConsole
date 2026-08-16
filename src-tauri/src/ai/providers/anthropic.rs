@@ -28,11 +28,22 @@ impl AnthropicProvider {
     }
 
     /// Convert our portable messages into Anthropic's content-block format.
+    ///
+    /// Do **not** put `cache_control` on the last user message. That breakpoint
+    /// moves every turn (and our dynamic runtime block lives inside it), which
+    /// drops `cache_control` from the previous last-user and busts the history
+    /// prefix. System + last tool stay stable across turns; history then caches
+    /// as an implicit prefix behind those breakpoints.
     fn build_messages(messages: &[ChatMessage]) -> Vec<Value> {
         let mut out: Vec<Value> = Vec::new();
         for m in messages {
             match m.role.as_str() {
-                "user" => out.push(json!({"role": "user", "content": m.content})),
+                "user" => {
+                    out.push(json!({
+                        "role": "user",
+                        "content": crate::ai::vision::anthropic_user_content(&m.content, &m.images),
+                    }));
+                }
                 "assistant" => {
                     let mut blocks: Vec<Value> = Vec::new();
                     if !m.content.is_empty() {
@@ -71,14 +82,23 @@ impl AnthropicProvider {
     }
 
     fn build_tools(req: &ChatRequest) -> Vec<Value> {
+        let count = req.tools.len();
         req.tools
             .iter()
-            .map(|t| {
-                json!({
+            .enumerate()
+            .map(|(i, t)| {
+                let mut def = json!({
                     "name": t.name,
                     "description": t.description,
                     "input_schema": t.parameters,
-                })
+                });
+                // Cache the tools block: mark the LAST tool def as the breakpoint so
+                // the whole tools+system prefix is one cached unit (Anthropic caches
+                // everything up to the last breakpoint).
+                if i == count - 1 {
+                    def["cache_control"] = json!({"type": "ephemeral"});
+                }
+                def
             })
             .collect()
     }
@@ -92,6 +112,8 @@ impl Provider for AnthropicProvider {
         sink: Option<&EventSink>,
     ) -> Result<ChatResponse, String> {
         let url = join_url(&self.base_url, "v1/messages");
+        // Long retention = 1h cache TTL (2× write price); short/empty = 5 min default.
+        let long_cache = req.cache_retention == "long";
         let mut body = json!({
             "model": req.model,
             "max_tokens": req.max_tokens,
@@ -99,18 +121,44 @@ impl Provider for AnthropicProvider {
             "stream": true,
             "messages": Self::build_messages(&req.messages),
         });
+        // Reasoning effort → Anthropic extended thinking budget (only when enabled).
+        // off/empty leaves the provider default; low/medium/high map to token budgets.
+        if !req.reasoning.is_empty() && req.reasoning != "off" {
+            let budget = match req.reasoning.as_str() {
+                "low" => 2048,
+                "high" => 16384,
+                _ => 8192, // medium / anything else
+            };
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": budget,
+            });
+            // Thinking requires temperature 1 (Anthropic constraint).
+            body["temperature"] = json!(1.0);
+        }
         // Prompt caching: mark the static system prefix as ephemeral so multi-turn
         // agent loops reuse Anthropic's server-side cache (up to ~90% latency cut).
         if !req.system.is_empty() {
-            body["system"] = json!([{
+            let mut block = json!({
                 "type": "text",
                 "text": req.system,
                 "cache_control": { "type": "ephemeral" }
-            }]);
+            });
+            if long_cache {
+                block["cache_control"]["ttl"] = json!("1h");
+            }
+            body["system"] = json!([block]);
         }
         let tools = Self::build_tools(req);
         if !tools.is_empty() {
             body["tools"] = json!(tools);
+        }
+
+        let mut beta = "prompt-caching-2024-07-31".to_string();
+        if long_cache {
+            // Extended TTL requires its own beta header; without it the 1h TTL
+            // silently degrades to 5 minutes and re-bills every turn.
+            beta.push_str(",extended-cache-ttl-2025-01-23");
         }
 
         let resp = self
@@ -119,7 +167,7 @@ impl Provider for AnthropicProvider {
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             // Enable prompt-caching beta for cache_control on system blocks.
-            .header("anthropic-beta", "prompt-caching-2024-07-31")
+            .header("anthropic-beta", beta)
             .header("content-type", "application/json")
             .json(&body)
             .send()
@@ -139,6 +187,7 @@ impl Provider for AnthropicProvider {
         let mut input_tokens: Option<u32> = None;
         let mut output_tokens: Option<u32> = None;
         let mut cache_read_tokens: Option<u32> = None;
+        let mut cache_write_tokens: Option<u32> = None;
         let started = std::time::Instant::now();
 
         let mut stream = resp.bytes_stream();
@@ -170,6 +219,11 @@ impl Provider for AnthropicProvider {
                                 .and_then(|v| v.as_u64())
                                 .map(|n| n as u32)
                                 .or(cache_read_tokens);
+                            cache_write_tokens = u
+                                .get("cache_creation_input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .map(|n| n as u32)
+                                .or(cache_write_tokens);
                         }
                     }
                     "content_block_start" => {
@@ -230,6 +284,10 @@ impl Provider for AnthropicProvider {
             out.tool_calls.push(tc);
         }
 
+        out.prompt_tokens = input_tokens;
+        out.cached_tokens = cache_read_tokens;
+        out.completion_tokens = output_tokens;
+
         if let Some(completion) = output_tokens {
             let ms = started.elapsed().as_millis() as u64;
             let secs = (ms as f64 / 1000.0).max(0.05);
@@ -239,12 +297,75 @@ impl Provider for AnthropicProvider {
                     completion_tokens: completion,
                     prompt_tokens: input_tokens,
                     cached_tokens: cache_read_tokens,
+                    cache_creation_tokens: cache_write_tokens,
                     duration_ms: ms.max(1),
                     tokens_per_sec: (completion as f64 / secs) as f32,
                 }),
             );
+            emit(
+                sink,
+                StreamEvent::Cost(crate::ai::cost::turn_cost(
+                    "anthropic",
+                    &req.model,
+                    input_tokens,
+                    completion,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                )),
+            );
         }
 
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::provider::{ChatMessage, ChatRequest, ToolDef};
+
+    #[test]
+    fn last_tool_def_gets_cache_control() {
+        let mut req = ChatRequest::new("claude-sonnet-4");
+        req.tools = vec![
+            ToolDef {
+                name: "a".into(),
+                description: "a".into(),
+                parameters: json!({}),
+            },
+            ToolDef {
+                name: "b".into(),
+                description: "b".into(),
+                parameters: json!({}),
+            },
+        ];
+        let tools = AnthropicProvider::build_tools(&req);
+        assert!(tools[0].get("cache_control").is_none());
+        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn messages_never_carry_moving_cache_breakpoints() {
+        let msgs = vec![
+            ChatMessage::user("one"),
+            ChatMessage::assistant("ok"),
+            ChatMessage::tool_result("call-1", "output"),
+            ChatMessage::user("two"),
+        ];
+        let built = AnthropicProvider::build_messages(&msgs);
+        for m in &built {
+            if m["role"] == "user" && m["content"].is_string() {
+                // Plain user text — no cache_control (would move next turn).
+                continue;
+            }
+            if m["content"].is_array() {
+                for block in m["content"].as_array().unwrap() {
+                    assert!(
+                        block.get("cache_control").is_none(),
+                        "history blocks must not carry cache_control: {block}"
+                    );
+                }
+            }
+        }
     }
 }

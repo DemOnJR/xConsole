@@ -119,7 +119,7 @@ export function Button({
 }
 
 /** Editable markdown document with dirty-tracking and a save button. Reused by
- * the Soul, Memory, and User profile editors. */
+ * the Soul, Memory, and Preferences editors. */
 export function DocEditor({
   value,
   onSave,

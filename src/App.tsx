@@ -1,17 +1,18 @@
 import { useEffect, useRef } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { WorkspacePanel } from "./components/WorkspacePanel";
+import { AnalyticsPage } from "./components/agent/AnalyticsPage";
 import { ServerPanel } from "./components/ServerPanel";
 import { CanvasFlow } from "./components/CanvasFlow";
 import { BottomBar } from "./components/BottomBar";
 import { SettingsModal } from "./components/settings/SettingsModal";
 import { DialogHost } from "./components/Dialog";
 import { TooltipHost } from "./components/Tooltip";
-import { AgentPanel } from "./components/agent/AgentPanel";
 import { AppToolbar } from "./components/AppToolbar";
 import { NavRail } from "./components/NavRail";
 import { StatusStrip } from "./components/StatusStrip";
 import { ChangesPanel } from "./components/agent/ChangesPanel";
+import { PlanModal } from "./components/agent/PlanModal";
 import { UpdateNotice } from "./components/UpdateNotice";
 import { TransfersPanel } from "./components/TransfersPanel";
 import { useUpdateStore } from "./stores/updateStore";
@@ -22,7 +23,8 @@ import { useUiStore } from "./stores/uiStore";
 import { useThemeStore } from "./stores/themeStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { useAgentStatusStore } from "./stores/agentStatusStore";
-import { onAgentWorkspaceStatus, onFileChange, onFileChangeReverted } from "./lib/tauri";
+import { onAgentWorkspaceStatus, onFileChange, onFileChangeReverted, onVpsUpdated } from "./lib/tauri";
+import { useVpsStore } from "./stores/vpsStore";
 import { useLockStore } from "./stores/lockStore";
 import { useAutoLock } from "./hooks/useAutoLock";
 import { useOsFileDrop } from "./hooks/useOsFileDrop";
@@ -118,15 +120,13 @@ function UnlockedApp() {
   useOsFileDrop();
 
   const leftOpen = useUiStore((s) => s.leftOpen);
+  const mainView = useUiStore((s) => s.mainView);
   const rightOpen = useUiStore((s) => s.rightOpen);
   const bottomOpen = useUiStore((s) => s.bottomOpen);
-  const agentOpen = useUiStore((s) => s.agentOpen);
-  const agentExpanded = useUiStore((s) => s.agentExpanded);
   const leftWidth = useUiStore((s) => s.leftWidth);
   const rightWidth = useUiStore((s) => s.rightWidth);
   const setLeftWidth = useUiStore((s) => s.setLeftWidth);
   const setRightWidth = useUiStore((s) => s.setRightWidth);
-  const setAgentOpen = useUiStore((s) => s.setAgentOpen);
 
   const loadTheme = useThemeStore((s) => s.load);
   const agentSessionId = useAgentStore((s) => s.sessionId);
@@ -185,11 +185,21 @@ function UnlockedApp() {
   }, []);
 
   useEffect(() => {
-    // Surface the agent panel whenever it needs the user (approval/question/plan).
+    let un: (() => void) | undefined;
+    onVpsUpdated(() => {
+      void useVpsStore.getState().load();
+    }).then((u) => {
+      un = u;
+    });
+    return () => un?.();
+  }, []);
+
+  useEffect(() => {
+    // Surface the agent window whenever it needs the user (approval/question/plan).
     if (pendingApprovalsCount > 0 || pendingQuestionsCount > 0 || hasPendingPlan) {
-      setAgentOpen(true);
+      useCanvasStore.getState().addAgent();
     }
-  }, [pendingApprovalsCount, pendingQuestionsCount, hasPendingPlan, setAgentOpen]);
+  }, [pendingApprovalsCount, pendingQuestionsCount, hasPendingPlan]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -207,8 +217,6 @@ function UnlockedApp() {
     return () => window.removeEventListener("keydown", onKey);
   }, [focus]);
 
-  const agentOnly = agentOpen && agentExpanded;
-
   return (
     <ReactFlowProvider>
       <div className="flex h-screen w-screen flex-col overflow-hidden bg-[var(--bg)]">
@@ -217,8 +225,8 @@ function UnlockedApp() {
         <div className="flex min-h-0 flex-1 overflow-hidden">
           <NavRail />
 
-          {agentOnly ? (
-            <AgentPanel expanded />
+          {mainView === "analytics" ? (
+            <AnalyticsPage />
           ) : (
             <>
               {leftOpen ? (
@@ -258,15 +266,15 @@ function UnlockedApp() {
                   <ServerPanel width={rightWidth} />
                 </>
               ) : null}
-              {agentOpen ? <AgentPanel /> : null}
             </>
           )}
         </div>
 
-        {bottomOpen && !agentOnly ? <BottomBar /> : null}
+        {mainView === "canvas" && bottomOpen ? <BottomBar /> : null}
         <StatusStrip />
       </div>
       <SettingsModal />
+      <PlanModal />
       <ChangesPanel />
       <TransfersPanel />
       <UpdateNotice />

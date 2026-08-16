@@ -350,8 +350,10 @@ async fn run_prompt_job(
         plan_mode: false,
         workspace_id: None,
         canvas: Vec::new(),
-        edits: crate::ai::edits::EditJournal::new(),
+        edits: crate::ai::edits::EditJournal::with_db(ctx.db.clone()),
         hooks: hooks_cfg,
+        turn_images: Vec::new(),
+        goal_id: None,
     };
 
     let messages = vec![ChatMessage::user(job.payload.clone())];

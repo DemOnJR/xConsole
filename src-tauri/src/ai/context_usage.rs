@@ -55,11 +55,23 @@ pub fn estimate_messages_tokens(messages: &[ChatMessage]) -> u32 {
 }
 
 /// Default context window for providers without an explicit setting.
-pub fn default_context_limit(provider_kind: &str, ollama_num_ctx: Option<u32>) -> u32 {
+///
+/// DeepSeek V4 Flash/Pro advertise 1M. Treating them as 128K made auto-compact
+/// fire around 64K and rewrite the cached prefix — the opposite of a 95%+
+/// long-session hit rate.
+pub fn default_context_limit(
+    provider_kind: &str,
+    model: &str,
+    ollama_num_ctx: Option<u32>,
+) -> u32 {
+    let m = model.to_lowercase();
+    if m.contains("deepseek") {
+        return 1_000_000;
+    }
     match provider_kind {
         "ollama" => ollama_num_ctx.unwrap_or(65_536),
         "anthropic" => 200_000,
-        "cursor" | "codex_cli" | "opencode_cli" => 200_000,
+        "cursor" | "codex_cli" | "opencode_cli" | "antigravity_cli" => 200_000,
         _ => 128_000,
     }
 }
@@ -97,7 +109,7 @@ pub fn compute_usage(
     segments.retain(|s| s.tokens > 0);
 
     let total_tokens: u32 = segments.iter().map(|s| s.tokens).sum();
-    let context_limit = default_context_limit(provider_kind, ctx.ollama_num_ctx);
+    let context_limit = default_context_limit(provider_kind, ctx.model_label, ctx.ollama_num_ctx);
     let percent = if context_limit > 0 {
         ((total_tokens as f64 / context_limit as f64) * 100.0).min(100.0) as f32
     } else {
@@ -112,14 +124,23 @@ pub fn compute_usage(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::default_context_limit;
+
+    #[test]
+    fn deepseek_flash_uses_one_million_context() {
+        assert_eq!(
+            default_context_limit("openai", "deepseek/deepseek-v4-flash", None),
+            1_000_000
+        );
+        assert_eq!(default_context_limit("anthropic", "claude-sonnet-4-6", None), 200_000);
+        assert_eq!(default_context_limit("openai", "gpt-5.6", None), 128_000);
+    }
+}
+
 fn estimate_runtime(ctx: &PromptContext<'_>) -> u32 {
     let mut runtime = format!("Date: {}", chrono::Local::now().format("%A, %B %d, %Y"));
-    if !ctx.model_label.is_empty() {
-        runtime.push_str(&format!("\nModel: {}", ctx.model_label));
-    }
-    if !ctx.provider_label.is_empty() {
-        runtime.push_str(&format!("\nProvider: {}", ctx.provider_label));
-    }
     if !ctx.casual_turn {
         runtime.push_str(&format!(
             "\nReachable VPS targets this session: {}",

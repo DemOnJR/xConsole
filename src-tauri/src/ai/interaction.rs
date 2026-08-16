@@ -12,11 +12,19 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::oneshot;
 
+use crate::ai::prefix_telemetry::RequestFingerprint;
+use crate::ai::provider::ChatMessage;
+use crate::ai::todos::TodoItem;
+
 /// Tracks in-flight `ask_user` / `present_plan` prompts so the UI can resolve
 /// them with the user's answer. Managed Tauri state.
 #[derive(Clone, Default)]
 pub struct PromptRegistry {
     pending: Arc<DashMap<String, oneshot::Sender<String>>>,
+    /// session_id → every still-pending prompt id (plan + ask_user). A new
+    /// plan presentation supersedes earlier plans; Stop / chat-cancel flushes
+    /// the whole list so a blocked turn cannot hang.
+    by_session: Arc<DashMap<String, Vec<String>>>,
 }
 
 impl PromptRegistry {
@@ -31,9 +39,37 @@ impl PromptRegistry {
         rx
     }
 
+    /// Register a prompt that belongs to a session (plans / questions), so Stop
+    /// and a later presentation can find it.
+    pub fn register_for_session(&self, id: String, session_id: &str) -> oneshot::Receiver<String> {
+        let rx = self.register(id.clone());
+        self.by_session
+            .entry(session_id.to_string())
+            .or_default()
+            .push(id);
+        rx
+    }
+
+    /// Resolve (with "CANCEL: superseded") any pending prompt for this session
+    /// other than `keep_id`, so a newer plan presentation replaces the old one.
+    pub fn cancel_superseded(&self, session_id: &str, keep_id: &str) {
+        let old_ids: Vec<String> = self
+            .by_session
+            .get(session_id)
+            .map(|ids| ids.iter().filter(|id| *id != keep_id).cloned().collect())
+            .unwrap_or_default();
+        for old_id in old_ids {
+            if let Some((_, tx)) = self.pending.remove(&old_id) {
+                let _ = tx.send("CANCEL: superseded".into());
+            }
+            self.forget_session_id(session_id, &old_id);
+        }
+    }
+
     /// Deliver the user's answer to a waiting prompt. Returns true if it was awaiting.
     pub fn resolve(&self, id: &str, answer: String) -> bool {
         if let Some((_, tx)) = self.pending.remove(id) {
+            self.forget_id(id);
             let _ = tx.send(answer);
             true
         } else {
@@ -43,7 +79,62 @@ impl PromptRegistry {
 
     /// Drop a pending prompt without answering (e.g. on timeout).
     pub fn cancel(&self, id: &str) -> bool {
-        self.pending.remove(id).is_some()
+        if self.pending.remove(id).is_some() {
+            self.forget_id(id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Resolve every pending prompt for a session with the given answer (used
+    /// by Stop so a blocked plan/question wait can be interrupted).
+    pub fn resolve_all_for_session(&self, session_id: &str, answer: String) -> usize {
+        let ids: Vec<String> = self
+            .by_session
+            .remove(session_id)
+            .map(|(_, v)| v)
+            .unwrap_or_default();
+        let mut n = 0;
+        for id in ids {
+            if let Some((_, tx)) = self.pending.remove(&id) {
+                let _ = tx.send(answer.clone());
+                n += 1;
+            }
+        }
+        n
+    }
+
+    #[allow(dead_code)]
+    pub fn has_pending_for_session(&self, session_id: &str) -> bool {
+        self.by_session
+            .get(session_id)
+            .map(|ids| !ids.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn forget_id(&self, id: &str) {
+        let sessions: Vec<String> = self
+            .by_session
+            .iter()
+            .filter(|e| e.value().iter().any(|x| x == id))
+            .map(|e| e.key().clone())
+            .collect();
+        for s in sessions {
+            self.forget_session_id(&s, id);
+        }
+    }
+
+    fn forget_session_id(&self, session_id: &str, id: &str) {
+        let empty = if let Some(mut ids) = self.by_session.get_mut(session_id) {
+            ids.retain(|x| x != id);
+            ids.is_empty()
+        } else {
+            false
+        };
+        if empty {
+            self.by_session.remove(session_id);
+        }
     }
 }
 
@@ -66,6 +157,14 @@ struct SessionFlags {
     /// clone can be handed to the provider's streaming loop, letting Stop interrupt
     /// an in-flight model response immediately — not just between tool steps.
     cancelled: Arc<AtomicBool>,
+    /// Last provider-visible message list (includes frozen `# Runtime context`
+    /// blocks). Replayed on the next user turn so the prefix stays append-only.
+    last_request_messages: Option<Vec<ChatMessage>>,
+    /// Fingerprint of that last request, so classification is not `first_request`
+    /// on every new `run_turn`.
+    last_prefix: Option<RequestFingerprint>,
+    /// Live working checklist for this chat (TodoWrite). Replaces as a whole.
+    todos: Vec<TodoItem>,
 }
 
 impl SessionState {
@@ -97,6 +196,17 @@ impl SessionState {
     /// Whether a plan has been approved for this session.
     pub fn plan_approved(&self, session_id: &str) -> bool {
         self.map.get(session_id).map(|f| f.plan_approved).unwrap_or(false)
+    }
+
+    pub fn set_todos(&self, session_id: &str, items: Vec<TodoItem>) {
+        self.map.entry(session_id.to_string()).or_default().todos = items;
+    }
+
+    pub fn todos(&self, session_id: &str) -> Vec<TodoItem> {
+        self.map
+            .get(session_id)
+            .map(|f| f.todos.clone())
+            .unwrap_or_default()
     }
 
     /// Clear plan approval at the beginning of a new agent turn.
@@ -139,6 +249,98 @@ impl SessionState {
             .cancelled
             .clone()
     }
+
+    /// Last messages actually sent to the provider for this session.
+    pub fn last_request_messages(&self, session_id: &str) -> Option<Vec<ChatMessage>> {
+        self.map
+            .get(session_id)
+            .and_then(|f| f.last_request_messages.clone())
+    }
+
+    pub fn store_request_messages(&self, session_id: &str, messages: Vec<ChatMessage>) {
+        self.map
+            .entry(session_id.to_string())
+            .or_default()
+            .last_request_messages = Some(messages);
+    }
+
+    pub fn last_prefix(&self, session_id: &str) -> Option<RequestFingerprint> {
+        self.map.get(session_id).and_then(|f| f.last_prefix.clone())
+    }
+
+    pub fn store_prefix(&self, session_id: &str, prefix: RequestFingerprint) {
+        self.map
+            .entry(session_id.to_string())
+            .or_default()
+            .last_prefix = Some(prefix);
+    }
+
+    /// Replay last provider request from disk after an app restart.
+    pub fn load_prefix_cache(&self, data_dir: &std::path::Path, session_id: &str) {
+        if self.last_request_messages(session_id).is_some() {
+            return;
+        }
+        let Some(saved) = read_prefix_cache(data_dir, session_id) else {
+            return;
+        };
+        if let Some(prefix) = saved.prefix {
+            self.store_prefix(session_id, prefix);
+        }
+        self.store_request_messages(session_id, saved.messages);
+    }
+
+    pub fn persist_prefix_cache(&self, data_dir: &std::path::Path, session_id: &str) {
+        let Some(messages) = self.last_request_messages(session_id) else {
+            return;
+        };
+        write_prefix_cache(
+            data_dir,
+            session_id,
+            &PrefixCacheFile {
+                messages,
+                prefix: self.last_prefix(session_id),
+            },
+        );
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PrefixCacheFile {
+    messages: Vec<ChatMessage>,
+    prefix: Option<RequestFingerprint>,
+}
+
+fn prefix_cache_path(data_dir: &std::path::Path, session_id: &str) -> std::path::PathBuf {
+    let safe: String = session_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == ':' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    data_dir.join("prompt-cache").join(format!("{safe}.json"))
+}
+
+fn read_prefix_cache(data_dir: &std::path::Path, session_id: &str) -> Option<PrefixCacheFile> {
+    let path = prefix_cache_path(data_dir, session_id);
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_prefix_cache(data_dir: &std::path::Path, session_id: &str, saved: &PrefixCacheFile) {
+    let path = prefix_cache_path(data_dir, session_id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = serde_json::to_vec(saved) {
+        if std::fs::read(&path).ok().as_deref() == Some(bytes.as_slice()) {
+            return;
+        }
+        let _ = std::fs::write(path, bytes);
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +358,17 @@ mod tests {
         assert!(s.plan_approved("a"));
         // Untouched session stays default.
         assert_eq!(s.safety_override("b"), None);
+    }
+
+    #[test]
+    fn request_prefix_survives_across_lookups() {
+        let s = SessionState::new();
+        assert!(s.last_request_messages("chat").is_none());
+        s.store_request_messages("chat", vec![ChatMessage::user("hi")]);
+        let got = s.last_request_messages("chat").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].content, "hi");
+        assert!(s.last_request_messages("other").is_none());
     }
 
     #[test]
@@ -179,5 +392,52 @@ mod tests {
         assert!(r.resolve("q1", "hello".into()));
         assert_eq!(rx.try_recv().unwrap(), "hello");
         assert!(!r.resolve("q1", "again".into()));
+    }
+
+    #[test]
+    fn session_tracks_plan_and_question_and_stop_flushes_both() {
+        let r = PromptRegistry::new();
+        let mut plan = r.register_for_session("plan1".into(), "s");
+        let mut q = r.register_for_session("q1".into(), "s");
+        assert!(r.has_pending_for_session("s"));
+        assert_eq!(r.resolve_all_for_session("s", "CANCEL".into()), 2);
+        assert_eq!(plan.try_recv().unwrap(), "CANCEL");
+        assert_eq!(q.try_recv().unwrap(), "CANCEL");
+        assert!(!r.has_pending_for_session("s"));
+    }
+
+    #[test]
+    fn newer_plan_supersedes_only_the_old_plan() {
+        let r = PromptRegistry::new();
+        let mut old = r.register_for_session("old".into(), "s");
+        r.cancel_superseded("s", "new");
+        let _new = r.register_for_session("new".into(), "s");
+        assert_eq!(old.try_recv().unwrap(), "CANCEL: superseded");
+        assert!(r.has_pending_for_session("s"));
+        assert!(r.resolve("new", "APPROVE".into()));
+        assert!(!r.has_pending_for_session("s"));
+    }
+
+    #[test]
+    fn prefix_cache_write_skips_identical_bytes() {
+        let dir = std::env::temp_dir().join(format!(
+            "xc-pcache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let s = SessionState::new();
+        s.store_request_messages("chat", vec![ChatMessage::user("hi")]);
+        s.persist_prefix_cache(&dir, "chat");
+        let path = prefix_cache_path(&dir, "chat");
+        let first = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        s.persist_prefix_cache(&dir, "chat");
+        let second = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(first, second, "unchanged prefix cache must not be rewritten");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

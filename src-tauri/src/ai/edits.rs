@@ -7,23 +7,28 @@
 //! O(1) per edit, needs no repository, and works identically for local files and
 //! remote VPS files (where there is usually no git repo at all). We keep the
 //! previous content, so revert is just writing it back.
+//!
+//! Records are also written through to SQLite (`agent_file_change`) so the
+//! history survives restarts and can be browsed per session and per workspace.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+use uuid::Uuid;
+
+use crate::storage::Db;
 
 /// Cap stored content per side so a runaway write can't balloon memory.
 const MAX_CONTENT: usize = 256 * 1024;
-
-static COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Serialize)]
 pub struct EditRecord {
     pub id: String,
     pub session_id: String,
+    /// Workspace the edit happened in (set when the turn has an active workspace).
+    pub workspace_id: Option<String>,
     /// "local" (this PC) | "vps" (a remote server).
     pub scope: String,
     pub vps_id: Option<String>,
@@ -40,14 +45,19 @@ pub struct EditRecord {
 }
 
 /// Per-session journal of agent file edits. Cheap to clone (shared `Arc`).
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct EditJournal {
     inner: Arc<Mutex<HashMap<String, Vec<EditRecord>>>>,
+    db: Option<Db>,
 }
 
 impl EditJournal {
-    pub fn new() -> Self {
-        Self::default()
+    /// Journal with SQLite write-through (the production form).
+    pub fn with_db(db: Db) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            db: Some(db),
+        }
     }
 
     /// Record one edit and notify the UI (`agent://file-change`).
@@ -56,6 +66,7 @@ impl EditJournal {
         &self,
         app: &AppHandle,
         session_id: &str,
+        workspace_id: Option<String>,
         scope: &str,
         vps_id: Option<String>,
         label: &str,
@@ -68,8 +79,11 @@ impl EditJournal {
             return;
         }
         let rec = EditRecord {
-            id: format!("edit-{}", COUNTER.fetch_add(1, Ordering::Relaxed)),
+            // UUID so ids never collide with persisted rows after a restart
+            // (a process-local counter would silently overwrite old history).
+            id: Uuid::new_v4().to_string(),
             session_id: session_id.to_string(),
+            workspace_id: workspace_id.clone(),
             scope: scope.to_string(),
             vps_id,
             label: label.to_string(),
@@ -85,9 +99,14 @@ impl EditJournal {
                 .or_default()
                 .push(rec.clone());
         }
+        if let Some(db) = &self.db {
+            let _ = db.insert_file_change(&rec);
+        }
         let _ = app.emit("agent://file-change", &rec);
     }
 
+    /// In-memory view for the current process (fast path). Callers wanting the
+    /// full persisted history should use the DB-backed commands instead.
     pub fn list(&self, session_id: &str) -> Vec<EditRecord> {
         self.inner
             .lock()
@@ -112,11 +131,17 @@ impl EditJournal {
                 }
             }
         }
+        if let Some(db) = &self.db {
+            let _ = db.mark_file_change_reverted(id);
+        }
     }
 
     pub fn clear(&self, session_id: &str) {
         if let Ok(mut map) = self.inner.lock() {
             map.remove(session_id);
+        }
+        if let Some(db) = &self.db {
+            let _ = db.delete_file_changes(session_id);
         }
     }
 }

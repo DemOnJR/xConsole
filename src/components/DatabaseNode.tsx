@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { NodeResizer, useStore, type NodeProps } from "@xyflow/react";
 import { api, type DbColumn, type DbResultSet, type DbRowKey } from "../lib/tauri";
 import { useCanvasStore, type DbNode as DbNodeType } from "../stores/canvasStore";
@@ -7,6 +7,10 @@ import { dialog } from "../stores/dialogStore";
 import { CodeEditArea } from "./CodeEditArea";
 import { DatabaseTree, newInstance, type DbInstance } from "./DatabaseTree";
 import { DatabaseIcon } from "./icons";
+import { InsertRowModal } from "./database/InsertRowModal";
+import { CreateTableModal } from "./database/CreateTableModal";
+import { AddColumnModal } from "./database/AddColumnModal";
+import { RedisKeyModal } from "./database/RedisKeyModal";
 
 const PAGE_SIZE_OPTIONS = [50, 100, 200, 500, 1000] as const;
 const DEFAULT_PAGE_SIZE = 200;
@@ -50,6 +54,7 @@ function Grid({
   onEdit,
   onDeleteRows,
   onSqlTemplate,
+  onInspectRow,
   tableLabel,
 }: {
   set: DbResultSet;
@@ -59,6 +64,7 @@ function Grid({
   onDeleteRows?: (rowIndices: number[]) => void;
   /** Open selected rows as SQL in the editor (INSERT template). */
   onSqlTemplate?: (sql: string) => void;
+  onInspectRow?: (rowIndex: number) => void;
   tableLabel?: string;
 }) {
   const [editing, setEditing] = useState<{ row: number; col: number } | null>(null);
@@ -314,6 +320,10 @@ function Grid({
                       className="max-w-[320px] truncate border-b border-r border-[var(--border)] px-2 py-0.5 text-gray-300 last:border-r-0"
                       title={cell ?? "NULL"}
                       onDoubleClick={() => {
+                        if (onInspectRow) {
+                          onInspectRow(ri);
+                          return;
+                        }
                         if (!editable) return;
                         setEditing({ row: ri, col: ci });
                         setDraft(cell ?? "");
@@ -368,7 +378,7 @@ function Grid({
  * databases are on this box" is the question you actually have. Credentials are per
  * instance, since a host install and a container rarely share a password.
  */
-export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
+export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
   const focus = useCanvasStore((s) => s.focus);
   const removeNode = useCanvasStore((s) => s.removeNode);
   const layoutMode = useCanvasStore((s) => s.layoutMode);
@@ -444,6 +454,16 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
       saveFavorites([q, ...sqlFavorites].slice(0, 30));
     }
   };
+
+  // Modals for CRUD operations
+  const [insertOpen, setInsertOpen] = useState(false);
+  const [createTableOpen, setCreateTableOpen] = useState(false);
+  const [addColumnOpen, setAddColumnOpen] = useState(false);
+  const [redisKeyInspect, setRedisKeyInspect] = useState<{
+    key: string;
+    type?: string;
+    ttl?: string;
+  } | null>(null);
 
   // Every session opened by this node, so unmount can close all of them. A ref because
   // the cleanup must see the latest set without re-running on every change.
@@ -665,8 +685,30 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     setBusy(true);
     setError(null);
     try {
-      setSqlResult(await api.dbRunSql(sel.sessionId, sql));
-      // Persist recent queries (phpMyAdmin-style history) per server.
+      const statements = splitSqlStatements(sql);
+      if (statements.length > 1) {
+        let lastResult: DbResultSet | null = null;
+        let totalAffected = 0;
+        let executed = 0;
+        for (const stmt of statements) {
+          const res = await api.dbRunSql(sel.sessionId, stmt);
+          lastResult = res;
+          executed += 1;
+          if (typeof res.affected === "number") totalAffected += res.affected;
+        }
+        if (lastResult) {
+          if (!lastResult.message && executed > 1) {
+            lastResult = {
+              ...lastResult,
+              message: `Executed ${executed} statements successfully. Total affected rows: ${totalAffected}`,
+            };
+          }
+          setSqlResult(lastResult);
+        }
+      } else {
+        setSqlResult(await api.dbRunSql(sel.sessionId, sql));
+      }
+      // Persist recent queries per server.
       try {
         const key = `xconsole-sql-history:${data.vpsId}`;
         const next = [sql.trim(), ...sqlHistory.filter((q) => q !== sql.trim())].slice(
@@ -707,7 +749,7 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     URL.revokeObjectURL(url);
   };
 
-  /** Page through the table and export up to a safety cap (phpMyAdmin-style dump). */
+  /** Page through the table and export up to a safety cap. */
   const exportAllCsv = async () => {
     if (!sel) return;
     const ok = await dialog.confirm({
@@ -761,7 +803,7 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     }
   };
 
-  /** Export current page as INSERT statements (phpMyAdmin-style dump of visible rows). */
+  /** Export current page as INSERT statements (SQL dump of visible rows). */
   const exportSqlInserts = (set: DbResultSet | null, tableLabel: string) => {
     if (!set || set.columns.length === 0 || set.rows.length === 0) return;
     const cols = set.columns.join(", ");
@@ -865,7 +907,7 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
 
   /** Import a .sql file from disk and run it against the current connection.
    *  Supports larger dumps (up to 64 MB) and naive multi-statement splitting so
-   *  phpMyAdmin-style exports with many statements still land. */
+   *  SQL exports with many statements still land. */
   const importSqlFile = async () => {
     if (!sel?.sessionId) {
       setError("Connect to a database first.");
@@ -922,39 +964,10 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
     }
   };
 
-  /** Insert a row by prompting for each column (phpMyAdmin-style quick insert). */
-  const insertRow = async () => {
-    if (!sel || columns.length === 0) return;
-    const values: string[] = [];
-    for (const col of columns) {
-      const v = await dialog.prompt({
-        title: `Insert · ${col.name}`,
-        label: `${col.name} (${col.data_type})${col.nullable ? " — empty = NULL" : ""}`,
-        defaultValue: col.default ?? "",
-        confirmText: col === columns[columns.length - 1] ? "Insert" : "Next",
-      });
-      if (v === null) return; // cancelled
-      values.push(v);
-    }
-    const vals = values
-      .map((v, i) => {
-        if (v === "" && columns[i].nullable) return "NULL";
-        return `'${v.replace(/'/g, "''")}'`;
-      })
-      .join(", ");
-    const engineSql = `INSERT INTO ${sel.schema}.${sel.table} (${columns
-      .map((c) => c.name)
-      .join(", ")}) VALUES (${vals})`;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.dbRunSql(sel.sessionId, engineSql);
-      await showTable(sel, page);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
+  /** Open the schema-aware Insert Row or Redis Add Key modal. */
+  const insertRow = () => {
+    if (!sel) return;
+    setInsertOpen(true);
   };
 
   const connectedCount = instances.filter((i) => i.sessionId).length;
@@ -1096,12 +1109,21 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                 <div className="ml-auto flex items-center gap-1 text-[10px] text-gray-500">
                   <button
                     type="button"
-                    disabled={!rows || columns.length === 0 || busy}
-                    onClick={() => void insertRow()}
-                    className="rounded px-1.5 py-0.5 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:opacity-30"
-                    data-tooltip="Insert a new row"
+                    disabled={!sel || busy}
+                    onClick={() => setCreateTableOpen(true)}
+                    className="rounded px-1.5 py-0.5 text-violet-400 hover:bg-[var(--surface-hover)] hover:text-violet-200 disabled:opacity-30"
+                    data-tooltip="Create a new table in this schema"
                   >
-                    Insert
+                    + Table
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!rows || busy}
+                    onClick={() => insertRow()}
+                    className="rounded px-1.5 py-0.5 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:opacity-30"
+                    data-tooltip={instances.find((i) => i.endpoint.id === sel.endpointId)?.endpoint.engine === "redis" ? "Add new Redis key" : "Insert a new row"}
+                  >
+                    {instances.find((i) => i.endpoint.id === sel.endpointId)?.endpoint.engine === "redis" ? "+ Key" : "Insert"}
                   </button>
                   <button
                     type="button"
@@ -1265,6 +1287,20 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                       setSql(text);
                       setTab("sql");
                     }}
+                    onInspectRow={
+                      instances.find((i) => i.endpoint.id === sel?.endpointId)?.endpoint.engine === "redis"
+                        ? (idx) => {
+                            const r = rows.rows[idx];
+                            if (r) {
+                              setRedisKeyInspect({
+                                key: r[0] ?? "",
+                                type: r[1] ?? "string",
+                                ttl: r[2] ?? "-1",
+                              });
+                            }
+                          }
+                        : undefined
+                    }
                   />
                 ) : (
                   <p className="p-3 text-[11px] text-gray-500">
@@ -1279,6 +1315,14 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
                 columns.length > 0 ? (
                   <div className="flex h-full min-h-0 flex-col">
                     <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)] px-2 py-1">
+                      <button
+                        type="button"
+                        className="rounded bg-violet-600/20 px-2 py-0.5 text-[10px] font-medium text-violet-300 hover:bg-violet-600/30"
+                        data-tooltip="Add column to this table"
+                        onClick={() => setAddColumnOpen(true)}
+                      >
+                        + Add Column
+                      </button>
                       <button
                         type="button"
                         className="rounded px-1.5 py-0.5 text-[10px] text-gray-300 hover:bg-[var(--border)]"
@@ -1561,6 +1605,89 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
           </div>
         </div>
       </div>
+
+      {insertOpen && sel ? (
+        <InsertRowModal
+          open={insertOpen}
+          schema={sel.schema}
+          table={sel.table}
+          columns={columns}
+          isRedis={instances.find((i) => i.endpoint.id === sel.endpointId)?.endpoint.engine === "redis"}
+          onClose={() => setInsertOpen(false)}
+          onSubmitSql={(q) => api.dbRunSql(sel.sessionId, q)}
+          onSuccess={() => {
+            void showTable(sel, page);
+          }}
+        />
+      ) : null}
+
+      {createTableOpen && sel ? (
+        <CreateTableModal
+          open={createTableOpen}
+          schema={sel.schema}
+          engine={
+            (instances.find((i) => i.endpoint.id === sel.endpointId)?.endpoint.engine as any) ?? "mysql"
+          }
+          onClose={() => setCreateTableOpen(false)}
+          onSubmitSql={(q) => api.dbRunSql(sel.sessionId, q)}
+          onSuccess={(newTable) => {
+            void (async () => {
+              try {
+                const updated = await api.dbListTables(sel.sessionId, sel.schema);
+                const cur = instances.find((i) => i.endpoint.id === sel.endpointId);
+                patch(sel.endpointId, {
+                  tables: {
+                    ...(cur?.tables ?? {}),
+                    [sel.schema]: updated,
+                  },
+                });
+                openTable({
+                  endpointId: sel.endpointId,
+                  sessionId: sel.sessionId,
+                  schema: sel.schema,
+                  table: newTable,
+                });
+              } catch (e) {
+                setError(String(e));
+              }
+            })();
+          }}
+        />
+      ) : null}
+
+      {addColumnOpen && sel ? (
+        <AddColumnModal
+          open={addColumnOpen}
+          schema={sel.schema}
+          table={sel.table}
+          existingColumns={columns}
+          engine={
+            (instances.find((i) => i.endpoint.id === sel.endpointId)?.endpoint.engine as any) ?? "mysql"
+          }
+          onClose={() => setAddColumnOpen(false)}
+          onSubmitSql={(q) => api.dbRunSql(sel.sessionId, q)}
+          onSuccess={() => {
+            void showTable(sel, page);
+          }}
+        />
+      ) : null}
+
+      {redisKeyInspect && sel ? (
+        <RedisKeyModal
+          open={Boolean(redisKeyInspect)}
+          sessionId={sel.sessionId}
+          schema={sel.schema}
+          keyName={redisKeyInspect.key}
+          initialType={redisKeyInspect.type}
+          initialTtl={redisKeyInspect.ttl}
+          onClose={() => setRedisKeyInspect(null)}
+          onSubmitSql={(q) => api.dbRunSql(sel.sessionId, q)}
+          onSuccess={() => {
+            void showTable(sel, page);
+          }}
+        />
+      ) : null}
     </div>
   );
-}
+});
+

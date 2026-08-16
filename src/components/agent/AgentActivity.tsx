@@ -1,10 +1,11 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { SettingsIcon, TerminalIcon } from "../icons";
 import type { AgentActivityItem } from "../../stores/agentStore";
 import { CodeHighlight, ConsoleOutput, langFromPath, ShellCommand } from "./SyntaxHighlight";
 import { useVpsStore } from "../../stores/vpsStore";
 import { useCanvasStore } from "../../stores/canvasStore";
-import { useUiStore } from "../../stores/uiStore";
+import { redactExportText } from "../../lib/agentExport";
+import { HashSpinner } from "./HashSpinner";
 
 function truncate(s: string, max: number): string {
   const flat = s.replace(/\s+/g, " ").trim();
@@ -17,8 +18,9 @@ export function visibleActivityItems(items: AgentActivityItem[]): AgentActivityI
   const fileEditIds = new Set(items.filter((i) => i.kind === "file_edit").map((i) => i.id));
   return items.filter((item) => {
     if (!item.label.trim() && item.kind !== "file_edit") return false;
-    // Parallel-batch status is the one status line users care about.
+    // Parallel-batch stays in the feed. Cache hit/miss lives on the input bar.
     if (item.kind === "status") {
+      if (item.id.startsWith("cache-") || /^cache /i.test(item.label)) return false;
       return item.id === "parallel-batch" || /parallel/i.test(item.label);
     }
     if (item.id.startsWith("snapshot-")) return false;
@@ -45,8 +47,47 @@ export function isCommandItem(item: AgentActivityItem): boolean {
   return false;
 }
 
+function isTodoItem(item: AgentActivityItem): boolean {
+  return (
+    item.tool === "todo_write" ||
+    /^update checklist$/i.test(item.label.trim()) ||
+    /^todo write$/i.test(item.label.trim())
+  );
+}
+
+function TodoCard({ item }: { item: AgentActivityItem }) {
+  const lines = (item.output || item.detail || "").split("\n").filter(Boolean);
+  return (
+    <div className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface)]/50 px-2.5 py-1.5">
+      <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--text-faint)]">
+        Checklist
+      </div>
+      <ul className="flex flex-col gap-0.5 font-mono text-[11px] text-[var(--text-dim)]">
+        {lines.map((line, i) => {
+          const done = line.startsWith("[x]");
+          const active = line.startsWith("[>]");
+          return (
+            <li
+              key={i}
+              className={
+                done
+                  ? "text-[var(--text-faint)] line-through"
+                  : active
+                    ? "text-[var(--accent)]"
+                    : ""
+              }
+            >
+              {line}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 function isMetaItem(item: AgentActivityItem): boolean {
-  if (item.kind === "file_edit" || isCommandItem(item)) return false;
+  if (item.kind === "file_edit" || isCommandItem(item) || isTodoItem(item)) return false;
   const raw = item.label.trim();
   return (
     raw.startsWith("Read file ·") ||
@@ -78,10 +119,11 @@ function metaLine(item: AgentActivityItem): string {
 }
 
 function commandTitle(item: AgentActivityItem): string {
-  const cmd =
+  const cmd = redactExportText(
     item.detail?.trim() ||
-    item.label.replace(/^(SSH|Shell)\s*›\s*/i, "").trim() ||
-    item.label.replace(/^Run on [^:]+:\s*/i, "").trim();
+      item.label.replace(/^(SSH|Shell)\s*›\s*/i, "").trim() ||
+      item.label.replace(/^Run on [^:]+:\s*/i, "").trim(),
+  );
   const words = cmd.split(/\s+/).slice(0, 4).join(" ");
   return truncate(words, 48);
 }
@@ -99,10 +141,12 @@ function MetaLine({
   text,
   dimmed,
   running,
+  item,
 }: {
   text: string;
   dimmed?: boolean;
   running?: boolean;
+  item?: AgentActivityItem;
 }) {
   return (
     <div
@@ -110,12 +154,7 @@ function MetaLine({
         dimmed ? "text-gray-600" : "text-gray-500"
       }`}
     >
-      {running ? (
-        <span
-          className="inline-block h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-cyan-500/80"
-          aria-hidden
-        />
-      ) : null}
+      {running ? <HashSpinner item={item} /> : null}
       <span className="min-w-0 truncate">{text}</span>
     </div>
   );
@@ -228,10 +267,27 @@ function hostFromCommandLabel(label: string): string | null {
   return m?.[1]?.trim() || null;
 }
 
-function CommandCard({ item }: { item: AgentActivityItem }) {
+function CommandCard({
+  item,
+  defaultCollapsed = false,
+  open,
+  onOpenChange,
+}: {
+  item: AgentActivityItem;
+  defaultCollapsed?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}) {
   const running = item.state === "running";
   const failed = item.state === "error";
-  const cmd = commandBody(item);
+  const [internal, setInternal] = useState(!defaultCollapsed || running || failed);
+  const expanded = open ?? internal;
+  const setExpanded = (next: boolean | ((v: boolean) => boolean)) => {
+    const value = typeof next === "function" ? next(expanded) : next;
+    onOpenChange?.(value);
+    if (open === undefined) setInternal(value);
+  };
+  const cmd = redactExportText(commandBody(item));
   const output = item.output?.trim();
   const hostLabel = hostFromCommandLabel(item.label);
   const vpsList = useVpsStore((s) => s.vpsList);
@@ -255,8 +311,6 @@ function CommandCard({ item }: { item: AgentActivityItem }) {
       const id = addVps(vps);
       focus(id);
     }
-    // Keep agent visible; user can still see the canvas terminal.
-    useUiStore.getState().setAgentExpanded(false);
   };
 
   return (
@@ -269,7 +323,12 @@ function CommandCard({ item }: { item: AgentActivityItem }) {
             : "border-[var(--border)]"
       }`}
     >
-      <div className="flex items-center gap-2 border-b border-[var(--border)]/80 px-2.5 py-1.5">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 border-b border-[var(--border)]/80 px-2.5 py-1.5 text-left hover:bg-[var(--surface-hover)]"
+        onClick={() => setExpanded((v) => !v)}
+        data-tooltip={expanded ? "Collapse" : "Expand command"}
+      >
         <TerminalIcon size={12} className="shrink-0 text-[var(--text-faint)]" />
         <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--text-dim)]">
           {hostLabel ? (
@@ -287,7 +346,10 @@ function CommandCard({ item }: { item: AgentActivityItem }) {
             type="button"
             className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-[var(--text-faint)] transition hover:bg-[var(--surface-hover)] hover:text-[var(--accent)]"
             data-tooltip="Open this host on the canvas"
-            onClick={openOnCanvas}
+            onClick={(e) => {
+              e.stopPropagation();
+              openOnCanvas();
+            }}
           >
             Canvas
           </button>
@@ -302,28 +364,30 @@ function CommandCard({ item }: { item: AgentActivityItem }) {
         ) : (
           <span className="h-1.5 w-1.5 rounded-full bg-[var(--success)]" title="Done" />
         )}
-      </div>
-      <div className="agent-activity-scroll max-h-[280px] overflow-y-auto px-2.5 py-2 font-[family-name:var(--font-mono)]">
-        <div className="flex gap-1.5">
-          <span className="shrink-0 select-none font-mono text-[10px] text-[var(--success)]">
-            $
-          </span>
-          <ShellCommand code={cmd} className="min-w-0 flex-1" />
-        </div>
-        {output && !running ? (
-          <div className="mt-2 border-t border-[var(--border)]/60 pt-2">
-            <ConsoleOutput text={output} />
+      </button>
+      {expanded && (
+        <div className="agent-activity-scroll max-h-[280px] overflow-y-auto px-2.5 py-2 font-[family-name:var(--font-mono)]">
+          <div className="flex gap-1.5">
+            <span className="shrink-0 select-none font-mono text-[10px] text-[var(--success)]">
+              $
+            </span>
+            <ShellCommand code={cmd} className="min-w-0 flex-1" />
           </div>
-        ) : null}
-        {running && !output ? (
-          <div className="mt-2 text-[10px] text-[var(--text-faint)]">Running on host…</div>
-        ) : null}
-      </div>
+          {output && !running ? (
+            <div className="mt-2 border-t border-[var(--border)]/60 pt-2">
+              <ConsoleOutput text={redactExportText(output)} />
+            </div>
+          ) : null}
+          {running && !output ? (
+            <div className="mt-2 text-[10px] text-[var(--text-faint)]">Running on host…</div>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }
 
-function ActivityBlock({ item }: { item: AgentActivityItem }) {
+function ActivityBlock({ item, defaultCollapsed = false }: { item: AgentActivityItem; defaultCollapsed?: boolean }) {
   if (item.kind === "status" && (item.id === "parallel-batch" || /parallel/i.test(item.label))) {
     // Banner is rendered once by the feed when grouping; skip duplicate rows.
     return null;
@@ -331,8 +395,11 @@ function ActivityBlock({ item }: { item: AgentActivityItem }) {
   if (item.kind === "file_edit") {
     return <FileEditCard item={item} />;
   }
+  if (isTodoItem(item)) {
+    return <TodoCard item={item} />;
+  }
   if (isCommandItem(item)) {
-    return <CommandCard item={item} />;
+    return <CommandCard item={item} defaultCollapsed={defaultCollapsed} />;
   }
   if (isMetaItem(item)) {
     return (
@@ -352,15 +419,279 @@ function ActivityBlock({ item }: { item: AgentActivityItem }) {
   );
 }
 
+/** Dynamic thinking verbs. Text opacity only — no blur, canvas, or GPU filters. */
+const THINKING_VERBS = [
+  "Accomplishing",
+  "Actioning",
+  "Actualizing",
+  "Analyzing",
+  "Architecting",
+  "Baking",
+  "Beaming",
+  "Beboppin'",
+  "Befuddling",
+  "Billowing",
+  "Blanching",
+  "Bloviating",
+  "Boogieing",
+  "Boondoggling",
+  "Booping",
+  "Bootstrapping",
+  "Brainstorming",
+  "Breathing",
+  "Brewing",
+  "Bunning",
+  "Burrowing",
+  "Calculating",
+  "Canoodling",
+  "Caramelizing",
+  "Cascading",
+  "Catapulting",
+  "Cerebrating",
+  "Channeling",
+  "Channelling",
+  "Choreographing",
+  "Churning",
+  "Classifying",
+  "Coalescing",
+  "Cogitating",
+  "Combobulating",
+  "Comparing",
+  "Composing",
+  "Computing",
+  "Conceptualizing",
+  "Concluding",
+  "Concocting",
+  "Considering",
+  "Contemplating",
+  "Contrasting",
+  "Cooking",
+  "Crafting",
+  "Creating",
+  "Crunching",
+  "Crystallizing",
+  "Cultivating",
+  "Deciphering",
+  "Deconstructing",
+  "Deliberating",
+  "Determining",
+  "Dilly-dallying",
+  "Discombobulating",
+  "Doing",
+  "Doodling",
+  "Drizzling",
+  "Ebbing",
+  "Effecting",
+  "Elucidating",
+  "Embellishing",
+  "Enchanting",
+  "Envisioning",
+  "Evaluating",
+  "Evaporating",
+  "Fermenting",
+  "Fiddle-faddling",
+  "Finagling",
+  "Flambéing",
+  "Flibbertigibbeting",
+  "Flowing",
+  "Flummoxing",
+  "Fluttering",
+  "Forging",
+  "Forming",
+  "Frolicking",
+  "Frosting",
+  "Gallivanting",
+  "Galloping",
+  "Garnishing",
+  "Generating",
+  "Gesticulating",
+  "Germinating",
+  "Gitifying",
+  "Grooving",
+  "Gusting",
+  "Harmonizing",
+  "Hashing",
+  "Hatching",
+  "Herding",
+  "Honking",
+  "Hullaballooing",
+  "Hyperspacing",
+  "Hypothesizing",
+  "Ideating",
+  "Imagining",
+  "Improvising",
+  "Incubating",
+  "Inferring",
+  "Infusing",
+  "Innovating",
+  "Ionizing",
+  "Jitterbugging",
+  "Julienning",
+  "Kneading",
+  "Leavening",
+  "Levitating",
+  "Lollygagging",
+  "Manifesting",
+  "Marinating",
+  "Meandering",
+  "Metamorphosing",
+  "Misting",
+  "Moonwalking",
+  "Moseying",
+  "Mulling",
+  "Musing",
+  "Mustering",
+  "Nebulizing",
+  "Nesting",
+  "Newspapering",
+  "Noodling",
+  "Noticing",
+  "Nucleating",
+  "Orbiting",
+  "Orchestrating",
+  "Osmosing",
+  "Perambulating",
+  "Perceiving",
+  "Percolating",
+  "Perusing",
+  "Philosophising",
+  "Photosynthesizing",
+  "Pollinating",
+  "Pondering",
+  "Pontificating",
+  "Pouncing",
+  "Precipitating",
+  "Prestidigitating",
+  "Processing",
+  "Proofing",
+  "Propagating",
+  "Puttering",
+  "Puzzling",
+  "Quantumizing",
+  "Razzle-dazzling",
+  "Razzmatazzing",
+  "Recalling",
+  "Recognizing",
+  "Recombobulating",
+  "Reconsidering",
+  "Reflecting",
+  "Remembering",
+  "Reticulating",
+  "Roosting",
+  "Ruminating",
+  "Sautéing",
+  "Scampering",
+  "Schlepping",
+  "Scurrying",
+  "Seasoning",
+  "Shenaniganing",
+  "Shimmying",
+  "Simmering",
+  "Skedaddling",
+  "Sketching",
+  "Slithering",
+  "Smooshing",
+  "Sock-hopping",
+  "Spelunking",
+  "Spinning",
+  "Sprouting",
+  "Stewing",
+  "Sublimating",
+  "Swirling",
+  "Swooping",
+  "Symbioting",
+  "Synthesizing",
+  "Tempering",
+  "Thinking",
+  "Thundering",
+  "Tinkering",
+  "Tomfoolering",
+  "Topsy-turvying",
+  "Transfiguring",
+  "Transmuting",
+  "Twisting",
+  "Undulating",
+  "Unfurling",
+  "Unravelling",
+  "Vibing",
+  "Waddling",
+  "Wandering",
+  "Warping",
+  "Whatchamacalliting",
+  "Whirlpooling",
+  "Whirring",
+  "Whisking",
+  "Wibbling",
+  "Working",
+  "Wrangling",
+  "Zesting",
+  "Zigzagging",
+];
+
+export function liveGerund(item: AgentActivityItem): string {
+  const tool = (item.tool || "").toLowerCase();
+  const label = item.label.trim();
+  const path = item.path || "";
+  if (item.kind === "file_edit" || tool === "write_file" || /^write /i.test(label)) {
+    return `Writing ${truncate(path || label.replace(/^Write( file)? ·\s*/i, ""), 56)}`;
+  }
+  if (tool === "read_file" || /^read /i.test(label) || label.startsWith("Read file")) {
+    return `Reading ${truncate(path || label.replace(/^Read( file)? ·\s*/i, ""), 56)}`;
+  }
+  if (tool === "terminal_send") {
+    return `Typing in terminal ${truncate(item.detail || label.replace(/^Type in live terminal:\s*/i, ""), 48)}`;
+  }
+  if (tool === "terminal_capture") return "Reading live terminal";
+  if (tool === "grep_search" || tool === "local_grep_search") {
+    return `Searching ${truncate(item.detail || item.label.replace(/^Search\s+/i, ""), 48)}`;
+  }
+  if (tool === "edit_file" || tool === "local_edit_file") {
+    return `Editing ${truncate(path || label.replace(/^Edit\s+/i, ""), 56)}`;
+  }
+  if (tool === "todo_write") return "Updating checklist";
+  if (tool === "canvas_open_terminal") return "Opening terminal";
+  if (tool === "canvas_refresh") return "Reconnecting terminal";
+  if (isCommandItem(item)) {
+    const host = hostFromCommandLabel(label);
+    const cmd = commandTitle(item);
+    return host ? `Executing ${cmd} on ${host}` : `Executing ${cmd}`;
+  }
+  if (label) return truncate(label, 72);
+  return "Working";
+}
+
+export function activitySummary(items: AgentActivityItem[]): string {
+  const visible = visibleActivityItems(items);
+  let commands = 0;
+  let reads = 0;
+  let writes = 0;
+  for (const item of visible) {
+    if (isCommandItem(item)) commands += 1;
+    else if (item.kind === "file_edit" || item.tool === "write_file") writes += 1;
+    else if (item.tool === "read_file" || /^read /i.test(item.label)) reads += 1;
+  }
+  const parts: string[] = [];
+  if (commands) parts.push(`executed ${commands} command${commands === 1 ? "" : "s"}`);
+  if (reads) parts.push(`read ${reads} file${reads === 1 ? "" : "s"}`);
+  if (writes) parts.push(`wrote ${writes} file${writes === 1 ? "" : "s"}`);
+  if (parts.length === 0) return `${visible.length} step${visible.length === 1 ? "" : "s"}`;
+  return parts.join(" · ");
+}
+
 export function AgentThinking() {
+  const [i, setI] = useState(() => Math.floor(Math.random() * THINKING_VERBS.length));
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      setI((n) => (n + 1) % THINKING_VERBS.length);
+    }, 2400);
+    return () => window.clearInterval(t);
+  }, []);
   return (
-    <div className="flex items-center gap-2.5 px-1 py-1">
-      <div className="flex gap-1">
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-500 [animation-delay:0ms]" />
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-500 [animation-delay:150ms]" />
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-500 [animation-delay:300ms]" />
-      </div>
-      <span className="text-[11px] text-gray-500">Thinking…</span>
+    <div className="flex items-center gap-2 px-1 py-1">
+      <HashSpinner kind="think" />
+      <span className="xc-think-verb text-[11px] text-[var(--text-faint)]">
+        {THINKING_VERBS[i]}…
+      </span>
     </div>
   );
 }
@@ -373,6 +704,8 @@ export function AgentActivityFeed({
   live?: boolean;
 }) {
   const visible = useMemo(() => visibleActivityItems(items), [items]);
+  const [commandsOpen, setCommandsOpen] = useState(false);
+  const [openCommandId, setOpenCommandId] = useState<string | null>(null);
 
   const parallelMeta = useMemo(() => {
     const banner = visible.find(
@@ -381,15 +714,13 @@ export function AgentActivityFeed({
     const running = visible.filter(
       (i) => i.state === "running" && i.kind !== "status" && i.id !== "parallel-batch",
     );
-    // Show banner when backend announced parallel, or live with 2+ concurrent tools.
     const show = Boolean(banner) || (live && running.length >= 2);
     const done = banner ? banner.state === "done" : false;
     return {
       show,
       done,
-      count: running.length || (banner ? 0 : 0),
+      count: running.length,
       label: banner?.label,
-      // Prefer live running count; fall back to parsing "Running N …" from status.
       displayCount:
         running.length ||
         (() => {
@@ -411,64 +742,47 @@ export function AgentActivityFeed({
     [visible],
   );
 
-  // Collapse long finished meta lines so command/edit cards stay scannable.
-  const META_KEEP_TAIL = 4;
-  const collapsedBlocks = useMemo(() => {
-    if (live) return blocks;
-    const isMetaDone = (item: AgentActivityItem) =>
-      item.state !== "running" &&
-      item.kind !== "file_edit" &&
-      item.kind !== "command" &&
-      !isCommandItem(item);
-    const metaDoneIdxs = blocks
-      .map((b, i) => (isMetaDone(b) ? i : -1))
-      .filter((i) => i >= 0);
-    if (metaDoneIdxs.length <= META_KEEP_TAIL + 2) return blocks;
-    const drop = new Set(metaDoneIdxs.slice(0, metaDoneIdxs.length - META_KEEP_TAIL));
-    const kept: AgentActivityItem[] = [];
-    let collapsed = 0;
-    let inserted = false;
-    for (let i = 0; i < blocks.length; i++) {
-      if (drop.has(i)) {
-        collapsed += 1;
-        if (!inserted) {
-          kept.push({
-            id: "collapsed-meta",
-            kind: "status",
-            label: `${collapsed} earlier steps`,
-            state: "done",
-          });
-          inserted = true;
-        } else {
-          const last = kept[kept.length - 1];
-          if (last.id === "collapsed-meta") {
-            kept[kept.length - 1] = {
-              ...last,
-              label: `${collapsed} earlier steps`,
-            };
-          }
-        }
-        continue;
-      }
-      kept.push(blocks[i]);
-    }
-    return kept;
-  }, [blocks, live]);
+  // For archived (non-live) turns, collapse completed commands into the summary accordion.
+  // For live streaming turns, keep all blocks in-place so items do not jump around.
+  const doneCommands = useMemo(
+    () =>
+      !live
+        ? blocks.filter(
+            (item) => isCommandItem(item) && item.state !== "running" && item.state !== "error",
+          )
+        : [],
+    [blocks, live],
+  );
+  const rest = useMemo(
+    () =>
+      !live
+        ? blocks.filter(
+            (item) => !(isCommandItem(item) && item.state !== "running" && item.state !== "error"),
+          )
+        : blocks,
+    [blocks, live],
+  );
 
   if (visible.length === 0 && !live) return null;
 
   const copyActivity = () => {
-    const lines = collapsedBlocks.map((item) => {
-      if (item.kind === "command") {
-        return `$ ${item.detail || item.label}${item.output ? `\n${item.output}` : ""}`;
+    const lines = blocks.map((item) => {
+      if (isCommandItem(item)) {
+        const cmd = redactExportText(item.detail || item.label);
+        const out = item.output ? redactExportText(item.output) : "";
+        return `$ ${cmd}${out ? `\n${out}` : ""}`;
       }
       if (item.kind === "file_edit") {
-        return `edit ${item.path || item.label} +${item.linesAdded ?? 0}/-${item.linesRemoved ?? 0}`;
+        return `edit ${redactExportText(item.path || item.label)} +${item.linesAdded ?? 0}/-${item.linesRemoved ?? 0}`;
       }
-      return item.label + (item.detail ? ` — ${item.detail}` : "");
+      return redactExportText(item.label + (item.detail ? ` — ${item.detail}` : ""));
     });
     void navigator.clipboard.writeText(lines.join("\n"));
   };
+
+  const n = doneCommands.length;
+  const summary = activitySummary(blocks);
+  const running = rest.filter((item) => item.state === "running");
 
   return (
     <div className="flex w-full flex-col gap-2">
@@ -479,7 +793,7 @@ export function AgentActivityFeed({
           done={parallelMeta.done && !live}
         />
       ) : null}
-      {!live && collapsedBlocks.length > 2 ? (
+      {!live && blocks.length > 2 ? (
         <button
           type="button"
           onClick={copyActivity}
@@ -489,16 +803,47 @@ export function AgentActivityFeed({
           Copy activity
         </button>
       ) : null}
-      {collapsedBlocks.map((item) =>
-        item.id === "collapsed-meta" ? (
-          <MetaLine key="collapsed-meta" text={item.label} dimmed />
-        ) : (
-          <ActivityBlock key={`${item.id}-${item.kind}`} item={item} />
-        ),
+      {live && running.length > 0 ? (
+        <div className="flex flex-col gap-0.5">
+          {running.slice(0, 3).map((item) => (
+            <MetaLine key={`live-${item.id}`} text={`${liveGerund(item)}…`} running item={item} />
+          ))}
+        </div>
+      ) : null}
+      {n > 0 && (
+        <div className="overflow-hidden rounded-md border border-[var(--border)] bg-[var(--surface)]/40">
+          <button
+            type="button"
+            onClick={() => {
+              setCommandsOpen((v) => !v);
+              if (commandsOpen) setOpenCommandId(null);
+            }}
+            className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] text-gray-500 hover:bg-[var(--border)] hover:text-gray-300"
+            data-tooltip={commandsOpen ? "Hide commands" : "Show commands"}
+            aria-expanded={commandsOpen}
+          >
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)]" />
+            <span className="min-w-0 flex-1 truncate">{summary}</span>
+            <span className="text-[10px] text-gray-600">{commandsOpen ? "hide" : "show"}</span>
+          </button>
+          {commandsOpen && (
+            <div className="flex flex-col gap-1.5 border-t border-[var(--border)]/70 p-1.5">
+              {doneCommands.map((item) => (
+                <CommandCard
+                  key={`${item.id}-${item.kind}`}
+                  item={item}
+                  defaultCollapsed
+                  open={openCommandId === item.id}
+                  onOpenChange={(next) => setOpenCommandId(next ? item.id : null)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
       )}
-      {live && blocks.length > 0 && !parallelMeta.show && (
-        <MetaLine text="Planning next moves" dimmed />
-      )}
+      {rest.map((item) => (
+        <ActivityBlock key={`${item.id}-${item.kind}`} item={item} defaultCollapsed={!live} />
+      ))}
       {live && parallelMeta.show && !parallelMeta.done && parallelMeta.displayCount > 0 && (
         <MetaLine text="Tools running together…" dimmed />
       )}

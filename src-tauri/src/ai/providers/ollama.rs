@@ -94,7 +94,13 @@ impl OllamaProvider {
         let history = &req.messages;
         for (idx, m) in history.iter().enumerate() {
             match m.role.as_str() {
-                "user" => out.push(json!({"role": "user", "content": m.content})),
+                "user" => {
+                    let mut msg = json!({"role": "user", "content": m.content});
+                    if !m.images.is_empty() {
+                        msg["images"] = json!(crate::ai::vision::ollama_image_payloads(&m.images));
+                    }
+                    out.push(msg);
+                }
                 "assistant" => {
                     let mut msg = json!({"role": "assistant", "content": m.content});
                     if !m.tool_calls.is_empty() {
@@ -293,6 +299,7 @@ impl OllamaProvider {
             out.tool_calls.push(call);
         }
         out.stop_reason = parsed.done_reason.unwrap_or_else(|| "stop".into());
+        out.completion_tokens = parsed.eval_count.map(|n| n as u32);
         Ok(out)
     }
 }
@@ -329,6 +336,7 @@ fn stats_event(
         completion_tokens: count as u32,
         prompt_tokens: prompt_eval_count.map(|n| n as u32),
         cached_tokens: None,
+        cache_creation_tokens: None,
         duration_ms: (dur_ns / 1_000_000).max(1),
         tokens_per_sec: tps,
     }))
@@ -421,6 +429,7 @@ impl Provider for OllamaProvider {
                 }
 
                 if chunk.done {
+                    out.completion_tokens = chunk.eval_count.map(|n| n as u32);
                     if let Some(ev) =
                         stats_event(chunk.eval_count, chunk.eval_duration, chunk.prompt_eval_count)
                     {

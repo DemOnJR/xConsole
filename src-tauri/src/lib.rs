@@ -9,6 +9,7 @@ pub mod crypto;
 /// The `db.lock.json` manifest (salt + wrapped data key) for the app lock.
 pub mod lock;
 mod infra;
+mod artifacts;
 mod local;
 pub mod mcp;
 mod proc;
@@ -45,8 +46,26 @@ pub(crate) fn diag(msg: &str) {
     }
 }
 
+/// Append one JSON line to a file in the app data dir (prompt-cache traces, etc.).
+///
+/// Release builds have no console, so `eprintln!` never reaches the user. Structured
+/// lines here survive so we can see hit/miss after a real session.
+pub(crate) fn diag_jsonl(filename: &str, json_line: &str) {
+    let Some(dir) = dirs_next_app_data() else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(filename);
+    // Rotate at 2 MiB — a long weekend of agent turns, not an audit archive.
+    if std::fs::metadata(&path).map(|m| m.len() > 2 * 1024 * 1024).unwrap_or(false) {
+        let _ = std::fs::remove_file(&path);
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{json_line}");
+    }
+}
+
 /// The app data dir, resolved without an AppHandle so the panic hook can use it.
-fn dirs_next_app_data() -> Option<std::path::PathBuf> {
+pub(crate) fn dirs_next_app_data() -> Option<std::path::PathBuf> {
     std::env::var_os("APPDATA").map(|p| std::path::PathBuf::from(p).join("com.xconsole.app"))
 }
 
@@ -186,12 +205,15 @@ pub fn run() {
             // Agent home: editable Hermes-format files (SOUL.md / MEMORY.md / ...).
             let agent_home = AgentHome::new(dir.join("agent"));
             ai::skills::seed_defaults(&agent_home);
+            // One-time: fold legacy USER.md into the consolidated TASTE.md store.
+            ai::memory::migrate_user_into_taste(&agent_home);
 
             let approvals = ApprovalRegistry::new();
             let prompts = PromptRegistry::new();
             let session_state = SessionState::new();
             let llama_server = ai::llama::LlamaServer::default();
             let cron_running = ai::cron::CronRunning::default();
+            let goal_running = ai::goal::GoalRunning::default();
 
             // Background cron scheduler. Reuses the same exec/agent/safety paths.
             ai::cron::spawn(ai::cron::CronContext {
@@ -203,14 +225,26 @@ pub fn run() {
                 running: cron_running.clone(),
             });
 
+            // Goal-resume ticker: wakes "waiting" /goal sessions when due.
+            ai::goal::spawn_tick(ai::goal::GoalContext {
+                app: app.handle().clone(),
+                db: db.clone(),
+                sessions: sessions.clone(),
+                home: agent_home.clone(),
+                approvals: approvals.clone(),
+                running: goal_running.clone(),
+                session_state: session_state.clone(),
+            });
+
             app.manage(commands::lock::DataKey(std::sync::Mutex::new(initial_data_key)));
             app.manage(commands::lock::AutoLock::default());
+            app.manage(ai::edits::EditJournal::with_db(db.clone()));
             app.manage(db);
             app.manage(sessions);
             app.manage(sftp);
             app.manage(TransferManager::new());
             app.manage(commands::db::DbSessions::new());
-            // Claude Code–style lifecycle hooks: snapshot hooks.json at startup so a
+            // Lifecycle hooks: snapshot hooks.json at startup so a
             // mid-session edit (incl. one the agent might write) only takes effect on
             // an explicit reload. Loaded before agent_home is moved into managed state.
             app.manage(ai::hooks::HooksState::new(ai::hooks::HooksConfig::load(
@@ -222,7 +256,7 @@ pub fn run() {
             app.manage(session_state);
             app.manage(llama_server);
             app.manage(cron_running);
-            app.manage(ai::edits::EditJournal::new());
+            app.manage(goal_running);
 
             // Idle auto-lock. The timer lives in the backend on purpose: a JS timer stops
             // with a hung or crashed webview, and "the lock quietly stopped working" is the
@@ -334,6 +368,11 @@ pub fn run() {
             commands::vps::delete_vps,
             commands::vps::reorder_vps,
             commands::vps::setup_vps_key_auth,
+            commands::artifacts::list_artifacts,
+            commands::artifacts::verify_artifact,
+            commands::artifacts::reveal_artifact,
+            commands::artifacts::delete_artifact,
+            commands::artifacts::artifacts_dir,
             commands::session::ssh_connect,
             commands::session::remote_git_branch,
             commands::session::ssh_write,
@@ -355,6 +394,7 @@ pub fn run() {
             commands::sftp::local_fs_list,
             commands::sftp::local_fs_home,
             commands::sftp::local_fs_read_text,
+            commands::sftp::local_fs_read_bytes,
             commands::sftp::local_git_branch,
             commands::sftp::sftp_transfer_start,
             commands::sftp::sftp_archive_start,
@@ -393,8 +433,11 @@ pub fn run() {
             commands::update::set_update_channel,
             commands::ai::ai_cli_login,
             commands::ai::ai_cli_models,
+            commands::ai::ai_list_models,
             commands::ai::ai_chat,
             commands::ai::list_agent_conversations,
+            commands::ai::agent_analytics,
+            commands::ai::app_resource_snapshot,
             commands::ai::get_agent_conversation,
             commands::ai::save_agent_conversation,
             commands::ai::delete_agent_conversation,
@@ -402,8 +445,13 @@ pub fn run() {
             commands::ai::agent_answer_prompt,
             commands::ai::agent_cancel,
             commands::ai::list_file_changes,
+            commands::ai::list_file_changes_history,
             commands::ai::clear_file_changes,
             commands::ai::revert_file_change,
+            commands::ai::list_plans,
+            commands::ai::get_plan,
+            commands::ai::archive_plan,
+            commands::ai::cancel_plan,
             commands::ai::scan_skill_path,
             commands::ai::skill_scanner_status,
             commands::ai::install_skill_scanner,
@@ -432,7 +480,6 @@ pub fn run() {
             commands::ai::save_taste_doc,
             commands::ai::save_soul,
             commands::ai::save_memory_doc,
-            commands::ai::save_user_doc,
             commands::ai::get_hooks_config,
             commands::ai::save_hooks_config,
             commands::ai::reload_hooks,
@@ -445,6 +492,14 @@ pub fn run() {
             commands::ai::save_cron_job,
             commands::ai::delete_cron_job,
             commands::ai::run_cron_job,
+            commands::goal::start_goal,
+            commands::goal::confirm_goal,
+            commands::goal::pause_goal,
+            commands::goal::continue_goal,
+            commands::goal::stop_goal,
+            commands::goal::get_goal,
+            commands::goal::list_goals,
+            commands::goal::delete_goal,
             commands::infra::list_infra_projects,
             commands::infra::save_infra_project,
             commands::infra::delete_infra_project,

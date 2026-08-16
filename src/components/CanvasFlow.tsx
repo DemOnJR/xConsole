@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -10,6 +10,7 @@ import {
   useStore,
   useStoreApi,
   type NodeTypes,
+  type Node,
 } from "@xyflow/react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { NODE_W, useCanvasStore } from "../stores/canvasStore";
@@ -18,14 +19,20 @@ import { onCanvasCommand } from "../lib/tauri";
 import { TerminalNode } from "./TerminalNode";
 import { SftpNode } from "./SftpNode";
 import { DatabaseNode } from "./DatabaseNode";
+import { AgentNodeView } from "./agent/AgentNode";
+import { GoalNode } from "./GoalNode";
 import { FloatingEdge } from "./FloatingEdge";
 import { LockIcon, LockOpenIcon, RadarIcon } from "./icons";
 import { onInternalDrop } from "../stores/dragStore";
+import { useSnapDragStore, endSnapDrag } from "../lib/snapDrag";
+import { SnapPreview } from "./SnapPreview";
 
 const nodeTypes: NodeTypes = {
   terminal: TerminalNode,
   sftp: SftpNode,
   db: DatabaseNode,
+  agent: AgentNodeView,
+  goal: GoalNode,
 };
 const edgeTypes = { floating: FloatingEdge };
 
@@ -65,7 +72,16 @@ function CanvasCommandBridge() {
         : undefined;
       switch (cmd.action) {
         case "open_terminal":
-          if (vps) addVps(vps);
+          if (vps) {
+            const existing = useCanvasStore
+              .getState()
+              .nodes.find((n) => n.type === "terminal" && String(n.data.vpsId) === vps.id);
+            if (existing) {
+              useCanvasStore.getState().focus(existing.id);
+            } else {
+              addVps(vps);
+            }
+          }
           break;
         case "open_sftp":
           if (vps) addSftp(vps);
@@ -148,6 +164,32 @@ export function CanvasFlow() {
   // Tile mode is a fixed full-canvas grid: lock zoom/pan and free the corners.
   const tiled = layoutMode === "tile";
 
+  /** Windows-style snap preview: while a node is dragged (freeform OR tile mode),
+   *  track the cursor in pane fractions so the overlay can highlight the zone under
+   *  it. The preview only arms when the cursor is near a zone (see snapDrag). */
+  const paneRect = useRef<DOMRect | null>(null);
+  const onNodeDragStart = (_: MouseEvent | TouchEvent, node: Node) => {
+    const state = useSnapDragStore.getState();
+    if (!state.nodeId) state.begin(node.id);
+    paneRect.current =
+      document.querySelector<HTMLElement>(".react-flow__pane")?.getBoundingClientRect() ?? null;
+  };
+  const onNodeDrag = (_: MouseEvent | TouchEvent) => {
+    const rect = paneRect.current;
+    if (!rect) return;
+    const clientX = "clientX" in _ ? _.clientX : 0;
+    const clientY = "clientY" in _ ? _.clientY : 0;
+    useSnapDragStore.getState().move(
+      (clientX - rect.left) / rect.width,
+      (clientY - rect.top) / rect.height,
+    );
+  };
+
+  const onNodeDragStop = () => {
+    paneRect.current = null;
+    endSnapDrag();
+  };
+
   // A server dropped on the canvas becomes a terminal. The drag is delivered by the
   // pointer-event system (see dragStore) rather than HTML5 DnD, which the webview stops
   // firing once Tauri intercepts native drags to receive files.
@@ -157,7 +199,17 @@ export function CanvasFlow() {
       const vps = useVpsStore.getState().vpsList.find((v) => v.id === payload.vpsId);
       if (!vps) return;
       const p = screenToFlowPosition({ x, y });
-      addVps(vps, { x: p.x - NODE_W / 2, y: p.y - 24 });
+      const snapHint = useSnapDragStore.getState().hint;
+      const curLayoutMode = useCanvasStore.getState().layoutMode;
+
+      if (curLayoutMode === "tile" || snapHint) {
+        const id = addVps(vps, { x: p.x - NODE_W / 2, y: p.y - 24 });
+        if (snapHint) {
+          endSnapDrag(id);
+        }
+      } else {
+        addVps(vps, { x: p.x - NODE_W / 2, y: p.y - 24 });
+      }
     });
     return un;
   }, [addVps, screenToFlowPosition]);
@@ -170,6 +222,9 @@ export function CanvasFlow() {
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
       onConnect={onConnect}
+      onNodeDragStart={onNodeDragStart}
+      onNodeDrag={onNodeDrag}
+      onNodeDragStop={onNodeDragStop}
       nodeTypes={nodeTypes}
       edgeTypes={edgeTypes}
       minZoom={0.05}
@@ -200,6 +255,7 @@ export function CanvasFlow() {
       {!tiled && (
         <CanvasControls miniMap={showMiniMap} onToggleMiniMap={() => setShowMiniMap((v) => !v)} />
       )}
+      <SnapPreview />
       <CanvasCommandBridge />
     </ReactFlow>
     </div>

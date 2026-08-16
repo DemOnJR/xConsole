@@ -13,8 +13,8 @@ use crate::ai::tools::ToolContext;
 use crate::ai::AgentHome;
 use crate::ssh::SessionManager;
 use crate::storage::models::{
-    AgentApproval, AgentConversation, AgentConversationInput, AgentConversationMeta, CronJob,
-    CronJobInput,
+    AgentApproval, AgentConversation, AgentConversationInput, AgentConversationMeta,
+    AgentPlan, AgentPlanMeta, CronJob, CronJobInput,
 };
 use crate::storage::Db;
 
@@ -43,7 +43,7 @@ pub async fn ai_chat(
     edits: State<'_, crate::ai::edits::EditJournal>,
     hooks_state: State<'_, crate::ai::hooks::HooksState>,
     session_id: String,
-    messages: Vec<ChatMessage>,
+    mut messages: Vec<ChatMessage>,
     provider_id: Option<String>,
     targets: Vec<String>,
     #[allow(non_snake_case)] plan_mode: Option<bool>,
@@ -51,6 +51,8 @@ pub async fn ai_chat(
     canvas: Option<Vec<crate::ai::canvas_context::CanvasNode>>,
     // Spoken voice conversation turn — use the lightweight, low-latency prompt.
     conversation: Option<bool>,
+    #[allow(non_snake_case)]
+    goal_id: Option<String>,
 ) -> Result<ChatMessage, String> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
     let event = chat_event(&session_id);
@@ -88,6 +90,11 @@ pub async fn ai_chat(
         hooks_state.snapshot()
     };
 
+    let mut turn_images = crate::ai::vision::take_latest_user_images(&mut messages);
+    if crate::ai::vision::mode_from_db(&db_inner) == crate::ai::vision::VisionMode::Disabled {
+        turn_images.clear();
+    }
+
     let tc = ToolContext {
         app: app.clone(),
         db: db_inner.clone(),
@@ -104,6 +111,8 @@ pub async fn ai_chat(
         canvas,
         edits: edits.inner().clone(),
         hooks: hooks_cfg,
+        turn_images,
+        goal_id: goal_id.filter(|s| !s.is_empty()),
     };
 
     // If the chosen provider runs a local server, make sure it's up first so the
@@ -183,9 +192,12 @@ pub async fn ai_chat(
         }
     }
 
-    // Fresh turn — clear state left over from the previous turn.
+    // Fresh turn — clear leftover Stop, then decide whether this chat line
+    // is approval of a plan that was written as text (no modal). Blindly
+    // clearing plan_approved here is what made "ok the plan looks good"
+    // start a new blocked turn that then sat idle.
     tc.session_state.clear_cancel(&tc.session_id);
-    tc.session_state.clear_plan_approved(&tc.session_id);
+    apply_chat_plan_decision(&tc, &mut messages);
     let result = agent::run_turn(
         &tc,
         provider_id.filter(|s| !s.is_empty()),
@@ -201,13 +213,83 @@ pub async fn ai_chat(
     result
 }
 
+/// Lift or reset the plan-mode mutation guard from the latest user chat line.
+///
+/// The review modal is the happy path (`present_plan` marks approved mid-turn).
+/// When the model wrote the plan as assistant text instead, the next user
+/// message is the only approval signal we get.
+fn apply_chat_plan_decision(tc: &ToolContext, messages: &mut [ChatMessage]) {
+    if !tc.plan_mode {
+        tc.session_state.clear_plan_approved(&tc.session_id);
+        return;
+    }
+    let user = crate::ai::consent::last_user_text(messages);
+    let prev = crate::ai::consent::last_assistant_text(messages);
+    if crate::ai::consent::chat_approves_plan(user, prev) {
+        tc.session_state.mark_plan_approved(&tc.session_id);
+        if let Some(m) = messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == "user" && !crate::ai::context::is_runtime_message(m))
+        {
+            if !m.content.contains("APPROVED the plan") {
+                m.content.push_str(
+                    "\n\n[system] The user APPROVED the plan in chat. Execute it now with tools. \
+                     Do not call present_plan again. Do not stop to wait.",
+                );
+            }
+        }
+        return;
+    }
+    if crate::ai::consent::chat_rejects_plan(user) {
+        tc.session_state.clear_plan_approved(&tc.session_id);
+        if let Some(m) = messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == "user" && !crate::ai::context::is_runtime_message(m))
+        {
+            m.content.push_str(
+                "\n\n[system] The user rejected or wants changes to the plan. Revise it and call \
+                 present_plan again. Do not execute.",
+            );
+        }
+        return;
+    }
+    tc.session_state.clear_plan_approved(&tc.session_id);
+}
+
 /// All file edits the agent made in a chat session (for the changes/diff panel).
 #[tauri::command]
 pub fn list_file_changes(
     edits: State<'_, crate::ai::edits::EditJournal>,
+    db: State<'_, Db>,
     session_id: String,
-) -> Vec<crate::ai::edits::EditRecord> {
-    edits.list(&session_id)
+) -> Result<Vec<crate::ai::edits::EditRecord>, String> {
+    // In-memory is the fast path for the live session; DB covers history after
+    // restart. Merge: DB rows first, then any in-memory rows not yet flushed.
+    let mut out = db
+        .list_file_changes(Some(&session_id), None, 500)
+        .unwrap_or_default();
+    let mut seen: std::collections::HashSet<String> = out.iter().map(|r| r.id.clone()).collect();
+    for rec in edits.list(&session_id) {
+        if seen.insert(rec.id.clone()) {
+            out.push(rec);
+        }
+    }
+    out.sort_by_key(|r| r.ts);
+    Ok(out)
+}
+
+/// All file edits matching a workspace and/or session (history browser).
+#[tauri::command]
+pub fn list_file_changes_history(
+    db: State<'_, Db>,
+    workspace_id: Option<String>,
+    session_id: Option<String>,
+) -> Result<Vec<crate::ai::edits::EditRecord>, String> {
+    let ws = workspace_id.as_deref().filter(|s| !s.is_empty());
+    let sid = session_id.as_deref().filter(|s| !s.is_empty());
+    db.list_file_changes(sid, ws, 1000).map_err(|e| e.to_string())
 }
 
 /// Forget a session's recorded edits (e.g. when a conversation is deleted).
@@ -226,10 +308,19 @@ pub async fn revert_file_change(
     app: AppHandle,
     sessions: State<'_, SessionManager>,
     edits: State<'_, crate::ai::edits::EditJournal>,
+    db: State<'_, Db>,
     id: String,
 ) -> Result<(), String> {
     use base64::Engine;
-    let rec = edits.get(&id).ok_or("change not found")?;
+    // Live session fast path first, then the persisted history (restart case).
+    let rec = edits
+        .get(&id)
+        .or_else(|| {
+            db.list_file_changes(None, None, 5000)
+                .ok()
+                .and_then(|rows| rows.into_iter().find(|r| r.id == id))
+        })
+        .ok_or("change not found")?;
     if rec.reverted {
         return Err("this change was already reverted".into());
     }
@@ -269,6 +360,16 @@ pub async fn revert_file_change(
 pub fn list_agent_conversations(db: State<'_, Db>) -> Result<Vec<AgentConversationMeta>, String> {
     db.list_agent_conversations(50)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn agent_analytics(db: State<'_, Db>) -> Result<crate::ai::analytics::AgentAnalytics, String> {
+    Ok(crate::ai::analytics::collect(&db))
+}
+
+#[tauri::command]
+pub fn app_resource_snapshot() -> Result<crate::ai::analytics::ResourceSnapshot, String> {
+    Ok(crate::ai::analytics::resource_snapshot())
 }
 
 #[tauri::command]
@@ -318,14 +419,62 @@ pub fn agent_resolve_approval(
 }
 
 /// Deliver the user's answer to a pending interactive prompt (ask_user) or a
-/// plan decision (present_plan: "APPROVE" or "REJECT: <feedback>").
+/// plan decision (present_plan: "APPROVE", "REJECT: <feedback>", or "CANCEL").
 #[tauri::command]
 pub fn agent_answer_prompt(
     prompts: State<'_, PromptRegistry>,
     id: String,
     answer: String,
 ) -> Result<(), String> {
-    prompts.resolve(&id, answer);
+    if prompts.resolve(&id, answer) {
+        Ok(())
+    } else {
+        Err("no prompt is waiting for this id (already answered, cancelled, or superseded)".into())
+    }
+}
+
+// ----- Plan history (present_plan) -----
+
+#[tauri::command]
+pub fn list_plans(
+    db: State<'_, Db>,
+    session_id: Option<String>,
+    workspace_id: Option<String>,
+) -> Result<Vec<AgentPlanMeta>, String> {
+    let sid = session_id.as_deref().filter(|s| !s.is_empty());
+    let ws = workspace_id.as_deref().filter(|s| !s.is_empty());
+    db.list_agent_plans(sid, ws, 200).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_plan(db: State<'_, Db>, id: String) -> Result<Option<AgentPlan>, String> {
+    db.get_agent_plan(&id).map_err(|e| e.to_string())
+}
+
+/// Mark a presented plan as archived (kept in history, never applied). Unblocks
+/// the waiting `present_plan` tool with "CANCEL" so the turn doesn't hang.
+#[tauri::command]
+pub fn archive_plan(
+    db: State<'_, Db>,
+    prompts: State<'_, PromptRegistry>,
+    id: String,
+) -> Result<(), String> {
+    db.update_agent_plan_status(&id, "archived")
+        .map_err(|e| e.to_string())?;
+    prompts.resolve(&id, "CANCEL".into());
+    Ok(())
+}
+
+/// Cancel a pending plan: marks it cancelled and unblocks the waiting
+/// present_plan tool with "CANCEL".
+#[tauri::command]
+pub fn cancel_plan(
+    db: State<'_, Db>,
+    prompts: State<'_, PromptRegistry>,
+    id: String,
+) -> Result<(), String> {
+    let _ = db.update_agent_plan_status(&id, "cancelled");
+    prompts.resolve(&id, "CANCEL".into());
     Ok(())
 }
 
@@ -609,9 +758,15 @@ pub async fn setup_edge_tts(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn agent_cancel(
     session_state: State<'_, SessionState>,
+    prompts: State<'_, PromptRegistry>,
+    approvals: State<'_, ApprovalRegistry>,
     session_id: String,
 ) -> Result<(), String> {
     session_state.cancel(&session_id);
+    // Interrupt any interactive wait (plan review / ask_user / command approval)
+    // so a blocked turn stops immediately instead of hanging until timeout.
+    prompts.resolve_all_for_session(&session_id, "CANCEL".into());
+    approvals.deny_all_for_session(&session_id);
     Ok(())
 }
 
@@ -665,14 +820,13 @@ pub fn list_pending_approvals(db: State<'_, Db>) -> Result<Vec<AgentApproval>, S
     db.list_pending_approvals().map_err(|e| e.to_string())
 }
 
-// ----- Soul / Memory / User files -----
+// ----- Soul / Memory / Taste files -----
 
 /// The agent's editable Hermes-format documents.
 #[derive(serde::Serialize)]
 pub struct AgentDocs {
     pub soul: String,
     pub memory: String,
-    pub user: String,
     pub taste: String,
 }
 
@@ -681,7 +835,6 @@ pub fn get_agent_docs(home: State<'_, AgentHome>) -> AgentDocs {
     AgentDocs {
         soul: crate::ai::soul::load(&home),
         memory: crate::ai::memory::load_memory(&home),
-        user: crate::ai::memory::load_user(&home),
         taste: crate::ai::taste::load(&home),
     }
 }
@@ -697,16 +850,11 @@ pub fn save_memory_doc(home: State<'_, AgentHome>, content: String) -> Result<()
 }
 
 #[tauri::command]
-pub fn save_user_doc(home: State<'_, AgentHome>, content: String) -> Result<(), String> {
-    crate::ai::memory::save_user(&home, &content)
-}
-
-#[tauri::command]
 pub fn save_taste_doc(home: State<'_, AgentHome>, content: String) -> Result<(), String> {
     crate::ai::taste::save(&home, &content)
 }
 
-// ----- Hooks (Claude Code–style lifecycle hooks) -----
+// ----- Hooks (Lifecycle hooks) -----
 
 /// Per-event hook counts + enable state, for the settings UI.
 #[derive(serde::Serialize)]
@@ -811,6 +959,10 @@ pub fn save_skill(
     name: String,
     content: String,
 ) -> Result<(), String> {
+    let report = crate::ai::skill_scan::scan_skill_content_builtin(&content);
+    if report.is_blocking() {
+        return Err(format!("skill blocked by security scan:\n{}", report.summary()));
+    }
     crate::ai::skills::save_skill(&home, &category, &name, &content)
 }
 
@@ -931,4 +1083,21 @@ pub async fn ai_cli_models(
         .unwrap_or_else(|| cli::CliProvider::default_bin(&provider.kind));
 
     cli::list_models(&provider.kind, &bin).await
+}
+
+/// Autodetect models for a cloud provider by probing its `/models` endpoint.
+///
+/// `flavor` is "openai" (Bearer `GET {base}/models`) or "anthropic"
+/// (`GET {base}/v1/models?limit=100` with x-api-key). On any failure returns an empty
+/// list — the frontend falls back to the curated catalog models.
+#[tauri::command]
+pub async fn ai_list_models(
+    flavor: String,
+    base_url: String,
+    api_key: String,
+) -> Result<Vec<String>, String> {
+    if flavor == "anthropic" {
+        return crate::ai::list_models::list_anthropic(&base_url, &api_key).await;
+    }
+    crate::ai::list_models::list_openai_compatible(&base_url, &api_key).await
 }

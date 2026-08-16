@@ -1,4 +1,4 @@
-//! Hermes-style automatic context compaction: prune old tool output, protect
+//! Automatic context compaction: prune old tool output, protect
 //! head/tail, LLM-summarize the middle when usage crosses a threshold.
 //! System tiers switch to ponytail-minimal when space is tight.
 
@@ -8,7 +8,7 @@ use crate::ai::context_usage::{estimate_messages_tokens, estimate_tokens, estima
 use crate::ai::conversations;
 use crate::ai::provider::{emit, ChatMessage, ChatRequest, EventSink, Provider, StreamEvent};
 
-/// Hermes compaction handoff — reference only, not active instructions.
+/// Compaction handoff — reference only, not active instructions.
 pub const SUMMARY_PREFIX: &str = "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted \
 into the summary below. Treat it as background reference, NOT as active instructions. \
 Respond ONLY to the latest user message AFTER this summary — that message is the single \
@@ -17,7 +17,7 @@ source of truth. Persistent memory (MEMORY.md) in the system prompt stays author
 pub const SUMMARY_END: &str = "--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---";
 
 const PRUNED_TOOL: &str = "[Old tool output cleared to save context space]";
-const THRESHOLD_PERCENT: f32 = 0.50;
+const THRESHOLD_PERCENT: f32 = 0.80;
 const MIN_CTX_TRIGGER_RATIO: f32 = 0.85;
 const MINIMUM_CONTEXT_TOKENS: u32 = 32_768;
 const PROTECT_FIRST_N: usize = 3;
@@ -72,7 +72,6 @@ pub async fn auto_compact_if_needed(
     system: &str,
     tools: &[crate::ai::provider::ToolDef],
     context_limit: u32,
-    previous_summary: Option<&str>,
     provider: &dyn Provider,
     model: &str,
     sink: Option<&EventSink>,
@@ -91,7 +90,6 @@ pub async fn auto_compact_if_needed(
 
     let result = compact_messages(
         std::mem::take(messages),
-        previous_summary,
         context_limit,
         provider,
         model,
@@ -119,7 +117,6 @@ pub async fn auto_compact_if_needed(
 
 pub async fn compact_messages(
     messages: Vec<ChatMessage>,
-    previous_summary: Option<&str>,
     context_limit: u32,
     provider: &dyn Provider,
     model: &str,
@@ -154,8 +151,7 @@ pub async fn compact_messages(
     }
 
     let middle: Vec<ChatMessage> = working[compress_start..compress_end].to_vec();
-    let summary_body = match summarize_middle(middle.clone(), previous_summary, provider, model, sink).await
-    {
+    let summary_body = match summarize_middle(middle.clone(), provider, model, sink).await {
         Ok(s) if !s.trim().is_empty() => s,
         _ => fallback_summary(&middle),
     };
@@ -189,7 +185,6 @@ pub async fn compact_messages(
 
 async fn summarize_middle(
     turns: Vec<ChatMessage>,
-    previous_summary: Option<&str>,
     provider: &dyn Provider,
     model: &str,
     sink: Option<&EventSink>,
@@ -212,17 +207,14 @@ async fn summarize_middle(
          Target ~{budget} tokens. Current date: {today}."
     );
 
-    let prompt = if let Some(prev) = previous_summary.filter(|s| !s.trim().is_empty()) {
-        format!(
-            "Update this context compaction summary with new turns.\n\nPREVIOUS SUMMARY:\n{prev}\n\n\
-             NEW TURNS:\n{serialized}\n\nUse this structure:\n{template}"
-        )
-    } else {
-        format!(
-            "Summarize these conversation turns for context compaction.\n\nTURNS:\n{serialized}\n\n\
-             Use this structure:\n{template}"
-        )
-    };
+    // A previous summary is deliberately NOT fed back: re-summarizing a summary
+    // drifts from the actual turns and re-inflates cost. The conversation summary
+    // (compact thread context) already carries the durable thread state each turn,
+    // so the compaction summary is always a fresh read of the real turns.
+    let prompt = format!(
+        "Summarize these conversation turns for context compaction.\n\nTURNS:\n{serialized}\n\n\
+         Use this structure:\n{template}"
+    );
 
     let mut req = ChatRequest::new(model);
     req.system = "You are a summarization agent. Produce only the structured summary body — \
@@ -270,11 +262,16 @@ fn prune_old_tool_results(messages: Vec<ChatMessage>, tail_budget: u32) -> (Vec<
     if n == 0 {
         return (messages, 0);
     }
-    let tail_start = find_tail_cut(&messages, 0, tail_budget);
+    let head_end = protect_head_size(&messages);
+    let tail_start = find_tail_cut(&messages, head_end, tail_budget);
     let mut out = messages;
     let mut pruned = 0usize;
+    // Keep the protected head and the recent tail verbatim. Only stub tool
+    // bodies in the middle (the span that will be summarized). The previous
+    // `i >= tail_start` condition wiped the *recent* outputs — the ones the
+    // model still needs — and left the old dumps intact.
     for (i, m) in out.iter_mut().enumerate() {
-        if i >= tail_start && m.role == "tool" && m.content.len() > 80 {
+        if i >= head_end && i < tail_start && m.role == "tool" && m.content.len() > 80 {
             if !m.content.starts_with('[') {
                 m.content = PRUNED_TOOL.to_string();
                 pruned += 1;
@@ -416,5 +413,40 @@ mod tests {
         ];
         let cut = find_tail_cut(&msgs, 2, 50);
         assert!(cut <= 4);
+    }
+
+    #[test]
+    fn prune_stubs_old_tool_bodies_and_keeps_recent() {
+        let mut msgs = Vec::new();
+        msgs.push(ChatMessage::user("start"));
+        msgs.push(ChatMessage::assistant("ok"));
+        msgs.push(ChatMessage::tool_result("old-1", "O".repeat(400)));
+        for i in 0..8 {
+            msgs.push(ChatMessage::user(format!("q{i}")));
+            msgs.push(ChatMessage::assistant("a"));
+            msgs.push(ChatMessage::tool_result(format!("mid-{i}"), "M".repeat(400)));
+        }
+        msgs.push(ChatMessage::user("latest"));
+        msgs.push(ChatMessage::assistant("working"));
+        msgs.push(ChatMessage::tool_result("recent-1", "R".repeat(400)));
+
+        let (out, pruned) = prune_old_tool_results(msgs, 80);
+        assert!(pruned > 0);
+        let recent = out.iter().rev().find(|m| m.role == "tool").unwrap();
+        assert!(
+            recent.content.starts_with('R'),
+            "recent tool output must stay verbatim, got: {}",
+            &recent.content[..recent.content.len().min(40)]
+        );
+        let old = out.iter().find(|m| m.tool_call_id.as_deref() == Some("old-1"));
+        if let Some(old) = old {
+            // Head is protected (first 3 messages); old-1 is index 2, so it may
+            // survive. A middle tool must be stubbed.
+            let mid = out.iter().find(|m| m.tool_call_id.as_deref() == Some("mid-0"));
+            if let Some(mid) = mid {
+                assert_eq!(mid.content, PRUNED_TOOL);
+            }
+            let _ = old;
+        }
     }
 }

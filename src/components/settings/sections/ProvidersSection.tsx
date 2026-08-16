@@ -6,6 +6,7 @@ import type { AiProvider, AiProviderInput, ProviderKind } from "../../../lib/tau
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { PlusIcon, TrashIcon } from "../../icons";
 import { Button, Card, Field, SectionHeader, Select, TextInput } from "../ui";
+import { catalogGroups, searchCatalog, type CatalogProvider } from "../../../lib/providerCatalog";
 
 const KIND_LABELS: Record<ProviderKind, string> = {
   anthropic: "Anthropic API",
@@ -15,6 +16,7 @@ const KIND_LABELS: Record<ProviderKind, string> = {
   cursor: "Cursor (Agent CLI)",
   codex_cli: "Codex CLI",
   opencode_cli: "OpenCode CLI",
+  antigravity_cli: "Antigravity CLI (agy)",
 };
 
 const OLLAMA_CTX_PRESETS: { value: number; label: string }[] = [
@@ -54,12 +56,13 @@ const KIND_DEFAULTS: Record<ProviderKind, Partial<AiProviderInput>> = {
   cursor: { model: "auto", bin_path: "agent" },
   codex_cli: { bin_path: "codex" },
   opencode_cli: { bin_path: "opencode" },
+  antigravity_cli: { bin_path: "agy", model: "gemini-3.7-flash-high" },
 };
 
 // One-click presets for popular providers. Most are OpenAI-compatible, so they
 // use the `openai` kind with a base URL; Anthropic uses its own kind. Model ids
 // are sensible defaults the user can edit.
-const PROVIDER_PRESETS: {
+export const PROVIDER_PRESETS: {
   id: string;
   label: string;
   kind: ProviderKind;
@@ -82,6 +85,13 @@ const PROVIDER_PRESETS: {
     base_url: "https://api.commandcode.ai/provider",
     model: "claude-sonnet-4-5",
   },
+  {
+    id: "commandcode-deepseek-v4-flash",
+    label: "Command Code · DeepSeek V4 Flash",
+    kind: "openai",
+    base_url: "https://api.commandcode.ai/provider/v1",
+    model: "deepseek/deepseek-v4-flash",
+  },
   { id: "openrouter", label: "OpenRouter", kind: "openai", base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4o" },
   { id: "xai", label: "xAI (Grok)", kind: "openai", base_url: "https://api.x.ai/v1", model: "grok-4" },
   { id: "groq", label: "Groq", kind: "openai", base_url: "https://api.groq.com/openai/v1", model: "llama-3.3-70b-versatile" },
@@ -91,6 +101,13 @@ const PROVIDER_PRESETS: {
   { id: "fireworks", label: "Fireworks AI", kind: "openai", base_url: "https://api.fireworks.ai/inference/v1", model: "accounts/fireworks/models/llama-v3p3-70b-instruct" },
   { id: "perplexity", label: "Perplexity", kind: "openai", base_url: "https://api.perplexity.ai", model: "sonar" },
   { id: "gemini", label: "Google Gemini", kind: "openai", base_url: "https://generativelanguage.googleapis.com/v1beta/openai/", model: "gemini-2.5-flash" },
+  {
+    id: "antigravity",
+    label: "Antigravity CLI (agy)",
+    kind: "antigravity_cli",
+    base_url: "",
+    model: "gemini-3.7-flash-high",
+  },
 ];
 
 const isHttpApi = (kind: ProviderKind) =>
@@ -99,7 +116,7 @@ const isHttpApi = (kind: ProviderKind) =>
 const isOllama = (kind: ProviderKind) => kind === "ollama";
 
 const isCli = (kind: ProviderKind) =>
-  kind === "codex_cli" || kind === "opencode_cli" || kind === "cursor";
+  kind === "codex_cli" || kind === "opencode_cli" || kind === "cursor" || kind === "antigravity_cli";
 
 function parseOllamaExtra(raw?: string | null) {
   if (!raw?.trim()) return { ...OLLAMA_EXTRA_DEFAULT };
@@ -200,6 +217,15 @@ function ProviderForm({
   onClose: () => void;
 }) {
   const saveProvider = useSettingsStore((s) => s.saveProvider);
+  // Catalog-based add flow: when a catalog provider is picked, the form is pre-filled
+  // from the catalog and model autodetect runs. "Advanced" keeps the manual form.
+  const [catalogPick, setCatalogPick] = useState<CatalogProvider | null>(null);
+  const [showCatalog, setShowCatalog] = useState(!initial);
+  const [catalogQuery, setCatalogQuery] = useState("");
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [detecting, setDetecting] = useState(false);
+  const [detectedModels, setDetectedModels] = useState<string[]>([]);
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [form, setForm] = useState<AiProviderInput>(
     initial
       ? {
@@ -259,7 +285,10 @@ function ProviderForm({
         } else if (form.kind === "llamacpp") {
           const files = await api.listLocalFiles();
           if (alive) setLocalModels(files.map((f) => f.file));
-        } else if (form.kind === "opencode_cli" && form.id) {
+        } else if (
+          (form.kind === "opencode_cli" || form.kind === "antigravity_cli") &&
+          form.id
+        ) {
           const models = await api.aiCliModels(form.id);
           if (alive) setLocalModels(models);
         } else if (alive) {
@@ -283,17 +312,69 @@ function ProviderForm({
     }
   };
 
-  const applyPreset = (id: string) => {
-    const p = PROVIDER_PRESETS.find((x) => x.id === id);
-    if (!p) return;
+  /** Pick a catalog provider: pre-fill the form, then autodetect models. */
+  const pickCatalog = async (p: CatalogProvider) => {
+    setCatalogPick(p);
+    setShowCatalog(false);
     setForm((f) => ({
       ...f,
-      name: f.name.trim() ? f.name : p.label,
+      name: f.name.trim() ? f.name : p.name,
       kind: p.kind,
-      base_url: p.base_url,
-      model: p.model,
+      base_url: p.baseUrl,
+      model: p.defaultModel,
+      bin_path: p.binPath,
     }));
+    // Curated fallback models are always available for the dropdown.
+    setModelOptions(p.models ?? []);
+    setDetectedModels(p.models ?? []);
+    // Local / CLI kinds list models from the machine; cloud kinds probe /models.
+    // The probe needs the API key, so it re-runs when the secret is filled (below).
+    if (p.flavor === "local") {
+      setDetecting(true);
+      try {
+        const list =
+          p.kind === "ollama"
+            ? await api.searchModels("ollama", "", p.baseUrl || undefined)
+            : [];
+        const ids = list.filter((m) => m.installed).map((m) => m.id);
+        if (ids.length > 0) {
+          setDetectedModels(ids);
+          setModelOptions([...(p.models ?? []), ...ids]);
+        }
+      } catch {
+        /* fall back to curated */
+      } finally {
+        setDetecting(false);
+      }
+    }
   };
+
+  // When the API key is filled for a cloud catalog provider, probe /models live.
+  const secret = form.secret?.trim() ?? "";
+  useEffect(() => {
+    if (!catalogPick || catalogPick.flavor === "local" || catalogPick.flavor === "cli") return;
+    if (secret.length < 8) return;
+    let alive = true;
+    setDetecting(true);
+    (async () => {
+      try {
+        const ids = await api.listModels(catalogPick.flavor, form.base_url ?? "", secret);
+        if (alive && ids.length > 0) {
+          setDetectedModels(ids);
+          setModelOptions([...(catalogPick.models ?? []), ...ids]);
+          setForm((f) => ({ ...f, model: f.model || ids[0] }));
+        }
+      } catch {
+        /* fall back to curated */
+      } finally {
+        if (alive) setDetecting(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [secret, catalogPick?.id]);
 
   const submit = async () => {
     if (!form.name.trim()) return;
@@ -325,17 +406,118 @@ function ProviderForm({
           {initial ? "Edit provider" : "Add provider"}
         </h3>
 
-        {!initial && (
-          <Field label="Quick add" hint="Prefill a popular provider, then just paste your API key.">
-            <Select defaultValue="" onChange={(e) => applyPreset(e.target.value)}>
-              <option value="">Choose a provider…</option>
-              {PROVIDER_PRESETS.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.label}
-                </option>
-              ))}
-            </Select>
-          </Field>
+        {!initial && showCatalog && (
+          <div className="mb-4">
+            <Field
+              label="Provider"
+              hint="Search, pick a provider, then paste your API key — the model list is detected automatically. Custom endpoints go in Advanced."
+            >
+              <div className="relative">
+                <input
+                  value={catalogQuery}
+                  onChange={(e) => {
+                    setCatalogQuery(e.target.value);
+                    setCatalogOpen(true);
+                  }}
+                  onFocus={() => setCatalogOpen(true)}
+                  onBlur={() => setTimeout(() => setCatalogOpen(false), 150)}
+                  placeholder="Search providers… (e.g. deepseek, groq)"
+                  className="w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-2.5 py-1.5 text-sm text-[var(--text)] outline-none focus:border-[var(--accent)]"
+                />
+                {catalogOpen && (
+                  <div className="absolute left-0 right-0 z-20 mt-1 max-h-72 overflow-auto rounded-md border border-[var(--border)] bg-[var(--surface)] shadow-xl">
+                    {searchCatalog(catalogQuery).length === 0 && (
+                      <div className="px-3 py-2 text-xs text-gray-500">
+                        No match — use{" "}
+                        <button
+                          type="button"
+                          className="underline"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            setShowCatalog(false);
+                          }}
+                        >
+                          Advanced (custom)
+                        </button>
+                      </div>
+                    )}
+                    {catalogGroups()
+                      .map((g) => ({
+                        ...g,
+                        providers: searchCatalog(catalogQuery).filter(
+                          (p) => p.group === g.letter,
+                        ),
+                      }))
+                      .filter((g) => g.providers.length > 0)
+                      .map((g) => (
+                        <div key={g.letter}>
+                          <div className="sticky top-0 bg-[var(--surface)] px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-[var(--text-faint)]">
+                            {g.letter}
+                          </div>
+                          {g.providers.map((p) => (
+                            <button
+                              key={p.id}
+                              type="button"
+                              onMouseDown={(e) => {
+                                e.preventDefault();
+                                void pickCatalog(p);
+                              }}
+                              className="flex w-full items-center justify-between px-2.5 py-1.5 text-left text-xs text-[var(--text-dim)] hover:bg-[var(--border)] hover:text-[var(--text)]"
+                            >
+                              <span>{p.name}</span>
+                              <span className="text-[10px] text-[var(--text-faint)]">
+                                {p.kind === "ollama" || p.kind === "llamacpp" ? "local" : p.flavor}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      ))}
+                    <div className="border-t border-[var(--border)]" />
+                    <button
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        setShowCatalog(false);
+                      }}
+                      className="block w-full px-2.5 py-2 text-left text-xs text-[var(--text-dim)] hover:bg-[var(--border)] hover:text-[var(--text)]"
+                    >
+                      Advanced (custom provider)…
+                    </button>
+                  </div>
+                )}
+              </div>
+            </Field>
+          </div>
+        )}
+
+        {!initial && !showCatalog && catalogPick && (
+          <div className="mb-3 flex items-center justify-between rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2">
+            <span className="text-xs text-gray-200">
+              {catalogPick.name}
+              {detecting ? (
+                <span className="ml-2 text-[10px] text-gray-500">detecting models…</span>
+              ) : null}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setShowCatalog(true);
+                setCatalogPick(null);
+                setDetectedModels([]);
+                setModelOptions([]);
+              }}
+              className="text-[10px] text-[var(--text-dim)] hover:text-white"
+            >
+              Change
+            </button>
+          </div>
+        )}
+
+        {!initial && !showCatalog && !catalogPick && (
+          <div className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+            Advanced custom provider — all fields are manual. For the one-click flow
+            pick a provider from the list.
+          </div>
         )}
 
         <Field label="Type">
@@ -367,14 +549,16 @@ function ProviderForm({
               hint={
                 form.kind === "llamacpp" && localModels.length > 0
                   ? "Downloaded GGUF files on this machine — or type the model id your server reports."
-                  : undefined
+                  : catalogPick && detectedModels.length > 0
+                    ? "Detected from the provider — or type any model id."
+                    : undefined
               }
             >
-              {form.kind === "llamacpp" ? (
+              {form.kind === "llamacpp" || (catalogPick && modelOptions.length > 0) ? (
                 <ModelCombo
                   value={form.model ?? ""}
                   onChange={(v) => patch({ model: v })}
-                  options={localModels}
+                  options={modelOptions}
                   placeholder="model id"
                 />
               ) : (
@@ -557,27 +741,39 @@ function ProviderForm({
               <TextInput
                 value={form.bin_path ?? ""}
                 onChange={(e) => patch({ bin_path: e.target.value })}
-                placeholder={form.kind === "codex_cli" ? "codex" : "opencode"}
+                placeholder={
+                  form.kind === "antigravity_cli"
+                    ? "agy"
+                    : form.kind === "codex_cli"
+                    ? "codex"
+                    : "opencode"
+                }
               />
             </Field>
             <Field
               label="Model"
               hint={
-                form.kind === "opencode_cli"
+                form.kind === "opencode_cli" || form.kind === "antigravity_cli"
                   ? localModels.length > 0
-                    ? "Pick a model or type a provider/model ID."
+                    ? "Pick a model from the CLI list or type an id."
                     : form.id
-                      ? "Type a provider/model ID (e.g. opencode/big-pickle)."
+                      ? form.kind === "antigravity_cli"
+                        ? "Type a Gemini model id (e.g. gemini-3.7-flash-high)."
+                        : "Type a provider/model ID (e.g. opencode/big-pickle)."
                       : "Save the provider first, then re-edit to load available models."
                   : undefined
               }
             >
-              {form.kind === "opencode_cli" ? (
+              {form.kind === "opencode_cli" || form.kind === "antigravity_cli" ? (
                 <ModelCombo
                   value={form.model ?? ""}
                   onChange={(v) => patch({ model: v })}
                   options={localModels}
-                  placeholder="opencode/big-pickle"
+                  placeholder={
+                    form.kind === "antigravity_cli"
+                      ? "gemini-3.7-flash-high"
+                      : "opencode/big-pickle"
+                  }
                 />
               ) : (
                 <TextInput
