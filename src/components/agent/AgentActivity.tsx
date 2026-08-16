@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { AgentActivityItem } from "../../stores/agentStore";
+import { useAgentStore, type AgentActivityItem } from "../../stores/agentStore";
 import type { DiffLine } from "../../lib/tauri";
 import { CodeHighlight, ConsoleOutput, langFromPath, ShellCommand } from "./SyntaxHighlight";
 import { useVpsStore } from "../../stores/vpsStore";
@@ -534,18 +534,54 @@ const THINKING_VERBS = [
 
 export function AgentThinking() {
   const [i, setI] = useState(() => Math.floor(Math.random() * THINKING_VERBS.length));
+  const turnStartTime = useAgentStore((s) => s.turnStartTime);
+  const [elapsedSecs, setElapsedSecs] = useState(0);
+
   useEffect(() => {
     const t = window.setInterval(() => {
       setI((n) => (n + 1) % THINKING_VERBS.length);
     }, 2400);
     return () => window.clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    const updateElapsed = () => {
+      if (turnStartTime) {
+        setElapsedSecs(Math.max(0, Math.floor((Date.now() - turnStartTime) / 1000)));
+      } else {
+        setElapsedSecs(0);
+      }
+    };
+    updateElapsed();
+    const interval = window.setInterval(updateElapsed, 500);
+    return () => window.clearInterval(interval);
+  }, [turnStartTime]);
+
+  const formatElapsed = (sec: number) => {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    if (h > 0) {
+      return `${h}h ${m}m ${s.toString().padStart(2, "0")}s`;
+    }
+    return `${m}:${s.toString().padStart(2, "0")}`;
+  };
+
   return (
     <div className="flex items-center gap-2 px-1 py-1 font-mono text-[11px]">
       <HashSpinner kind="think" />
       <span className="xc-think-verb text-[11px] text-[var(--text-faint)]">
         {THINKING_VERBS[i]}…
       </span>
+      {turnStartTime && (
+        <span className="flex items-center gap-1 rounded bg-cyan-950/60 px-1.5 py-0.5 text-[10px] text-cyan-300 font-mono border border-cyan-500/20">
+          <span className="relative flex h-1.5 w-1.5">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-400 opacity-75"></span>
+            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-cyan-500"></span>
+          </span>
+          {formatElapsed(elapsedSecs)}
+        </span>
+      )}
     </div>
   );
 }

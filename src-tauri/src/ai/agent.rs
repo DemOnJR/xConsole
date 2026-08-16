@@ -784,6 +784,7 @@ pub async fn run_turn(
             break;
         }
         iters_used = iter + 1;
+        crate::ai::output_compress::age_historical_tool_results(&mut messages, 4, 1500);
         let mut req = ChatRequest::new(&resolved.model);
         req.system = system.clone();
         req.messages = messages.clone();
@@ -885,6 +886,7 @@ pub async fn run_turn(
             tool_calls: resp.tool_calls.clone(),
             tool_call_id: None,
             images: vec![],
+            reasoning_content: resp.reasoning_content.clone(),
         };
         messages.push(assistant.clone());
         last = assistant;
@@ -1364,3 +1366,28 @@ fn unwrap_markdown_path(raw: &str) -> Option<String> {
     }
     None
 }
+
+/// Send a lightweight 1-token probe to pre-warm the prompt cache prefix before a heavy turn
+/// or scheduled task (adaptive eviction-gap warming).
+#[allow(dead_code)]
+pub async fn warm_cache_prefix(tc: &ToolContext, prompt_hint: Option<&str>) -> Result<(), String> {
+    let resolved = match registry::build(
+        &tc.db,
+        &tc.db
+            .get_setting("agent.provider")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "openai".into()),
+    ) {
+        Ok(r) => r,
+        Err(e) => return Err(e),
+    };
+    let mut req = ChatRequest::new(&resolved.model);
+    req.max_tokens = 1;
+    req.session_id = tc.session_id.clone();
+    req.system = prompt_hint.unwrap_or("System ready.").to_string();
+    req.messages = vec![ChatMessage::user("ping")];
+    let _ = resolved.provider.chat(&req, None).await;
+    Ok(())
+}
+

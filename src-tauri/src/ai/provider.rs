@@ -48,6 +48,10 @@ pub struct ChatMessage {
     /// Pixels for this turn. Only the latest user message is sent to the model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ChatImage>,
+    /// Reasoning content from reasoning models (e.g. DeepSeek R1 / o1 / o3-mini).
+    /// Preserved across intermediate tool turns to maintain unbroken KV cache continuity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl ChatMessage {
@@ -58,6 +62,7 @@ impl ChatMessage {
             tool_calls: vec![],
             tool_call_id: None,
             images: vec![],
+            reasoning_content: None,
         }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
@@ -67,6 +72,7 @@ impl ChatMessage {
             tool_calls: vec![],
             tool_call_id: None,
             images: vec![],
+            reasoning_content: None,
         }
     }
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
@@ -76,6 +82,7 @@ impl ChatMessage {
             tool_calls: vec![],
             tool_call_id: Some(tool_call_id.into()),
             images: vec![],
+            reasoning_content: None,
         }
     }
 }
@@ -194,6 +201,8 @@ pub struct ChatResponse {
     pub cached_tokens: Option<u32>,
     /// Completion tokens when the provider reported usage (used to detect a cap hit).
     pub completion_tokens: Option<u32>,
+    /// Provider reasoning continuation content (e.g. DeepSeek R1 / o-series).
+    pub reasoning_content: Option<String>,
 }
 
 /// True when the model stopped because it hit the output-token cap, not because

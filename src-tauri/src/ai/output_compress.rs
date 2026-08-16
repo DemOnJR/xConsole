@@ -1236,6 +1236,53 @@ tmpfs           7.8G     0  7.8G   0% /dev/shm
     ]
 }
 
+/// Truncate/age bulky tool result outputs from historical turns (e.g. > 3 turns ago)
+/// to keep the active context window lean and prevent KV-cache bloat on long conversations.
+pub fn age_historical_tool_results(
+    messages: &mut [crate::ai::provider::ChatMessage],
+    keep_recent_turns: usize,
+    max_aged_bytes: usize,
+) -> usize {
+    let len = messages.len();
+    if len <= keep_recent_turns {
+        return 0;
+    }
+
+    let cutoff_idx = len.saturating_sub(keep_recent_turns);
+    let mut aged_count = 0;
+
+    for msg in &mut messages[..cutoff_idx] {
+        if msg.role == "tool" && msg.content.len() > max_aged_bytes {
+            let orig_len = msg.content.len();
+            let lines: Vec<&str> = msg.content.lines().collect();
+            if lines.len() > 10 {
+                let head = &lines[..4];
+                let tail = &lines[lines.len().saturating_sub(4)..];
+                let truncated_lines = lines.len().saturating_sub(8);
+                msg.content = format!(
+                    "{}\n\n[... output aged: {} lines ({} bytes) truncated from earlier turn ...]\n\n{}",
+                    head.join("\n"),
+                    truncated_lines,
+                    orig_len,
+                    tail.join("\n")
+                );
+            } else {
+                let head = &msg.content[..max_aged_bytes / 2];
+                let tail = &msg.content[msg.content.len().saturating_sub(max_aged_bytes / 2)..];
+                msg.content = format!(
+                    "{}\n[... output aged: {} bytes truncated from earlier turn ...]\n{}",
+                    head,
+                    orig_len.saturating_sub(max_aged_bytes),
+                    tail
+                );
+            }
+            aged_count += 1;
+        }
+    }
+
+    aged_count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1246,5 +1293,19 @@ mod tests {
         assert_eq!(results.len(), 50);
         let failed: Vec<_> = results.iter().filter(|(_, ok)| !ok).map(|(n, _)| *n).collect();
         assert!(failed.is_empty(), "failed: {failed:?}");
+    }
+
+    #[test]
+    fn ages_older_tool_results_while_preserving_recent() {
+        let mut msgs = vec![
+            crate::ai::provider::ChatMessage::tool_result("call_1", "line\n".repeat(50)),
+            crate::ai::provider::ChatMessage::assistant("thought"),
+            crate::ai::provider::ChatMessage::tool_result("call_2", "line\n".repeat(50)),
+        ];
+        // Keep the last 1 turn: call_1 is aged, call_2 is preserved untouched
+        let aged = age_historical_tool_results(&mut msgs, 1, 100);
+        assert_eq!(aged, 1);
+        assert!(msgs[0].content.contains("output aged"));
+        assert!(!msgs[2].content.contains("output aged"));
     }
 }

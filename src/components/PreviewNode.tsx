@@ -1,23 +1,33 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { NodeResizer, type NodeProps } from "@xyflow/react";
 import { useCanvasStore, type PreviewNode } from "../stores/canvasStore";
 
 type ViewportMode = "responsive" | "tablet" | "mobile";
+type ViewTab = "preview" | "editor";
 
 export function PreviewNode({ id, data, selected }: NodeProps<PreviewNode>) {
+  const [viewTab, setViewTab] = useState<ViewTab>("preview");
   const [viewportMode, setViewportMode] = useState<ViewportMode>("responsive");
   const [key, setKey] = useState(0);
   const [copied, setCopied] = useState(false);
+  const [liveCode, setLiveCode] = useState(data.html || "");
+
+  const updateNodeData = useCanvasStore((s) => s.updateNodeData);
   const removeNode = useCanvasStore((s) => s.removeNode);
   const isTileMode = useCanvasStore((s) => s.layoutMode === "tile");
 
   const title = data.title || "Live HTML Sandbox";
-  const html = data.html || "<div style='padding:20px;color:#888;'>No preview content</div>";
+
+  // Keep local editor in sync with external updates to data.html
+  useEffect(() => {
+    setLiveCode(data.html || "");
+  }, [data.html]);
 
   // Build sandboxed HTML with Tailwind CSS and Inter font auto-injected if not present
   const fullHtml = useMemo(() => {
-    if (html.includes("<html") || html.includes("<head")) {
-      return html;
+    const raw = data.html || "";
+    if (raw.includes("<html") || raw.includes("<head")) {
+      return raw;
     }
     return `<!DOCTYPE html>
 <html lang="en">
@@ -41,17 +51,17 @@ export function PreviewNode({ id, data, selected }: NodeProps<PreviewNode>) {
   </style>
 </head>
 <body>
-  ${html}
+  ${raw}
 </body>
 </html>`;
-  }, [html]);
+  }, [data.html]);
 
   const reload = () => {
     setKey((k) => k + 1);
   };
 
   const copyHtml = async () => {
-    await navigator.clipboard.writeText(html);
+    await navigator.clipboard.writeText(data.html || "");
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
@@ -60,6 +70,12 @@ export function PreviewNode({ id, data, selected }: NodeProps<PreviewNode>) {
     const blob = new Blob([fullHtml], { type: "text/html" });
     const url = URL.createObjectURL(blob);
     window.open(url, "_blank");
+  };
+
+  const handleCodeChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value;
+    setLiveCode(val);
+    updateNodeData(id, { html: val });
   };
 
   const viewportWidths: Record<ViewportMode, string> = {
@@ -104,45 +120,73 @@ export function PreviewNode({ id, data, selected }: NodeProps<PreviewNode>) {
 
         {/* Viewport Presets & Controls */}
         <div className="flex items-center gap-1.5">
-          {/* Viewport Switcher */}
+          {/* Tab Switcher (Preview vs Code Editor) */}
           <div className="flex items-center rounded-lg border border-[var(--border)] bg-[#1e293b]/60 p-0.5">
             <button
               type="button"
-              onClick={() => setViewportMode("responsive")}
-              className={`rounded px-1.5 py-0.5 text-[10px] transition ${
-                viewportMode === "responsive"
+              onClick={() => setViewTab("preview")}
+              className={`rounded px-2 py-0.5 text-[11px] transition ${
+                viewTab === "preview"
                   ? "bg-blue-500/20 text-blue-300 font-medium"
                   : "text-gray-400 hover:text-gray-200"
               }`}
-              title="Responsive (100% width)"
             >
-              Desktop
+              Preview
             </button>
             <button
               type="button"
-              onClick={() => setViewportMode("tablet")}
-              className={`rounded px-1.5 py-0.5 text-[10px] transition ${
-                viewportMode === "tablet"
+              onClick={() => setViewTab("editor")}
+              className={`rounded px-2 py-0.5 text-[11px] transition ${
+                viewTab === "editor"
                   ? "bg-blue-500/20 text-blue-300 font-medium"
                   : "text-gray-400 hover:text-gray-200"
               }`}
-              title="Tablet (768px)"
             >
-              Tablet
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewportMode("mobile")}
-              className={`rounded px-1.5 py-0.5 text-[10px] transition ${
-                viewportMode === "mobile"
-                  ? "bg-blue-500/20 text-blue-300 font-medium"
-                  : "text-gray-400 hover:text-gray-200"
-              }`}
-              title="Mobile (375px)"
-            >
-              Mobile
+              Edit Code
             </button>
           </div>
+
+          {/* Viewport Switcher */}
+          {viewTab === "preview" && (
+            <div className="flex items-center rounded-lg border border-[var(--border)] bg-[#1e293b]/60 p-0.5">
+              <button
+                type="button"
+                onClick={() => setViewportMode("responsive")}
+                className={`rounded px-1.5 py-0.5 text-[10px] transition ${
+                  viewportMode === "responsive"
+                    ? "bg-blue-500/20 text-blue-300 font-medium"
+                    : "text-gray-400 hover:text-gray-200"
+                }`}
+                title="Responsive (100% width)"
+              >
+                Desktop
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewportMode("tablet")}
+                className={`rounded px-1.5 py-0.5 text-[10px] transition ${
+                  viewportMode === "tablet"
+                    ? "bg-blue-500/20 text-blue-300 font-medium"
+                    : "text-gray-400 hover:text-gray-200"
+                }`}
+                title="Tablet (768px)"
+              >
+                Tablet
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewportMode("mobile")}
+                className={`rounded px-1.5 py-0.5 text-[10px] transition ${
+                  viewportMode === "mobile"
+                    ? "bg-blue-500/20 text-blue-300 font-medium"
+                    : "text-gray-400 hover:text-gray-200"
+                }`}
+                title="Mobile (375px)"
+              >
+                Mobile
+              </button>
+            </div>
+          )}
 
           {/* Reload Button */}
           <button
@@ -196,18 +240,35 @@ export function PreviewNode({ id, data, selected }: NodeProps<PreviewNode>) {
         </div>
       </div>
 
-      {/* Sandboxed iframe viewport */}
-      <div className="relative flex flex-1 items-center justify-center overflow-auto bg-[#070a12] p-2">
-        <div className={`h-full transition-all shadow-inner overflow-hidden rounded-md border border-[var(--border)]/60 bg-white ${viewportWidths[viewportMode]}`}>
-          <iframe
-            key={key}
-            srcDoc={fullHtml}
-            title={title}
-            sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-popups"
-            className="h-full w-full border-0 bg-transparent"
+      {/* Main Viewport / Code Editor Area */}
+      {viewTab === "editor" ? (
+        <div className="relative flex flex-1 flex-col bg-[#070a12] p-2.5">
+          <div className="mb-1.5 flex items-center justify-between text-[11px] text-gray-400 font-mono">
+            <span>Live HTML / CSS / JS Source (auto-syncs with canvas)</span>
+            <span className="text-[10px] text-emerald-400">● Live syncing</span>
+          </div>
+          <textarea
+            value={liveCode}
+            onChange={handleCodeChange}
+            placeholder="Write HTML / CSS / JS code here..."
+            spellCheck={false}
+            className="flex-1 w-full resize-none rounded-lg border border-[var(--border)] bg-[#0c121e] p-3 font-mono text-[12px] leading-relaxed text-emerald-200/90 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
           />
         </div>
-      </div>
+      ) : (
+        <div className="relative flex flex-1 items-center justify-center overflow-auto bg-[#070a12] p-2">
+          <div className={`h-full transition-all shadow-inner overflow-hidden rounded-md border border-[var(--border)]/60 bg-white ${viewportWidths[viewportMode]}`}>
+            <iframe
+              key={key}
+              srcDoc={fullHtml}
+              title={title}
+              sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-popups"
+              className="h-full w-full border-0 bg-transparent"
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+

@@ -95,6 +95,68 @@ export function findLatestChecklist(
   return null;
 }
 
+/** Elegant inline card in chat when a checklist is 100% complete with execution duration. */
+export function CompletedChecklistCard({
+  rawChecklist,
+  duration,
+}: {
+  rawChecklist: string;
+  duration?: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const items = useMemo(() => parseChecklist(rawChecklist), [rawChecklist]);
+  if (items.length === 0) return null;
+
+  const doneCount = items.filter((i) => i.status === "done").length;
+  const totalCount = items.length;
+
+  return (
+    <div className="my-2 flex w-full flex-col overflow-hidden rounded-lg border border-emerald-500/30 bg-emerald-950/20 shadow-sm backdrop-blur-sm">
+      <div
+        onClick={() => setExpanded((v) => !v)}
+        className="flex cursor-pointer select-none items-center justify-between gap-2 px-3 py-2 text-[11px] font-mono hover:bg-emerald-950/30"
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400 font-bold">
+            ✓
+          </span>
+          <span className="font-semibold text-emerald-300">
+            Completed all {doneCount}/{totalCount} tasks
+          </span>
+          {duration && (
+            <span className="text-[10px] text-emerald-400/80 font-normal">
+              · {duration}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setExpanded((v) => !v);
+          }}
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-emerald-400/80 hover:bg-emerald-500/20 hover:text-emerald-200"
+        >
+          <span>{expanded ? "Hide details ▾" : "Show details ▸"}</span>
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="border-t border-emerald-500/20 bg-black/40 px-3 py-2">
+          <ul className="flex flex-col gap-1 font-mono text-[11px]">
+            {items.map((item, idx) => (
+              <li key={idx} className="flex items-start gap-2 text-emerald-300/80">
+                <span className="shrink-0 text-emerald-400 font-bold">✓</span>
+                <span className="flex-1 line-through opacity-80 break-words">{item.text}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function StickyChecklist({
   rawChecklist,
   streaming = false,
@@ -105,20 +167,26 @@ export function StickyChecklist({
   position?: "top" | "bottom";
 }) {
   const [collapsed, setCollapsed] = useState(true);
+  const [dismissed, setDismissed] = useState(false);
 
   const items = useMemo(() => {
     if (!rawChecklist) return [];
     return parseChecklist(rawChecklist);
   }, [rawChecklist]);
 
-  if (!rawChecklist || items.length === 0) return null;
+  if (!rawChecklist || items.length === 0 || dismissed) return null;
 
   const doneCount = items.filter((i) => i.status === "done").length;
   const totalCount = items.length;
   const activeItem =
     items.find((i) => i.status === "active") || items.find((i) => i.status === "pending");
-  const allDone = doneCount === totalCount;
+  const allDone = doneCount === totalCount && totalCount > 0;
   const isBottom = position === "bottom";
+
+  // When all tasks are completed and turn is idle, the checklist is rendered in chat — auto-hide sticky bar!
+  if (allDone && !streaming) {
+    return null;
+  }
 
   const renderExpandedList = () => (
     <div
@@ -217,27 +285,43 @@ export function StickyChecklist({
           )}
         </div>
 
-        {/* Toggle Expand / Collapse button */}
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            setCollapsed((v) => !v);
-          }}
-          className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-white"
-        >
-          {collapsed ? (
-            <>
-              <span>{totalCount - doneCount} left</span>
-              <span>{isBottom ? "▴" : "▾"}</span>
-            </>
-          ) : (
-            <>
-              <span>Collapse</span>
-              <span>{isBottom ? "▾" : "▴"}</span>
-            </>
-          )}
-        </button>
+        {/* Action buttons */}
+        <div className="flex items-center gap-1.5">
+          {/* Toggle Expand / Collapse button */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setCollapsed((v) => !v);
+            }}
+            className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-white"
+          >
+            {collapsed ? (
+              <>
+                <span>{totalCount - doneCount} left</span>
+                <span>{isBottom ? "▴" : "▾"}</span>
+              </>
+            ) : (
+              <>
+                <span>Collapse</span>
+                <span>{isBottom ? "▾" : "▴"}</span>
+              </>
+            )}
+          </button>
+
+          {/* Dismiss button */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setDismissed(true);
+            }}
+            className="flex shrink-0 items-center rounded p-1 text-gray-500 hover:bg-[var(--border)] hover:text-gray-300"
+            title="Dismiss checklist bar"
+          >
+            ✕
+          </button>
+        </div>
       </div>
 
       {/* If positioned at top, expanded list renders BELOW the summary header */}

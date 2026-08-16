@@ -6,7 +6,8 @@ import { AgentActivityFeed, AgentThinking } from "./AgentActivity";
 import { segmentsFromMessage } from "../../stores/turnSegments";
 import { previewSrc } from "../../lib/vision";
 import { useMaskHost } from "../../lib/privacy";
-import { StickyChecklist, findLatestChecklist } from "./StickyChecklist";
+import { StickyChecklist, findLatestChecklist, CompletedChecklistCard, parseChecklist } from "./StickyChecklist";
+import { isTodoItem } from "./AgentActivity";
 
 function AssistantTurn({
   segments,
@@ -14,16 +15,49 @@ function AssistantTurn({
   expanded,
   executeTarget,
   onExecute,
+  durationFormatted,
+  tokenStats,
 }: {
   segments: TurnSegment[];
   live?: boolean;
   expanded: boolean;
   executeTarget?: { name: string; host: string } | null;
   onExecute?: (code: string) => void;
+  durationFormatted?: string;
+  tokenStats?: import("../../stores/agentStore").TokenStats;
 }) {
   const maskHost = useMaskHost();
+
+  // Find if this turn has a completed checklist
+  const completedChecklist = useMemo(() => {
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const seg = segments[i];
+      if (seg.type === "activity") {
+        for (let j = seg.items.length - 1; j >= 0; j--) {
+          const item = seg.items[j];
+          if (isTodoItem(item) && (item.output || item.detail)) {
+            const raw = (item.output || item.detail)!.trim();
+            const parsed = parseChecklist(raw);
+            const done = parsed.filter((x) => x.status === "done").length;
+            if (parsed.length > 0 && done === parsed.length) {
+              return raw;
+            }
+          }
+        }
+      }
+    }
+    return null;
+  }, [segments]);
+
   return (
     <div className="flex flex-col gap-2">
+      {/* If this turn completed all checklist tasks, render the satisfying summary card */}
+      {completedChecklist && !live && (
+        <div className="pl-4">
+          <CompletedChecklistCard rawChecklist={completedChecklist} duration={durationFormatted} />
+        </div>
+      )}
+
       {segments.map((seg, i) => {
         if (seg.type === "text") {
           if (!seg.content.trim()) return null;
@@ -51,6 +85,24 @@ function AssistantTurn({
           </div>
         );
       })}
+
+      {/* Execution time & token metrics footer (Claude Code / Cursor / Antigravity style) */}
+      {(durationFormatted || tokenStats) && !live && (
+        <div className="flex items-center gap-2 pl-4 text-[10px] text-gray-500 font-mono select-none">
+          {durationFormatted && (
+            <span className="flex items-center gap-1 text-gray-400">
+              <span>⏱</span>
+              <span>{durationFormatted}</span>
+            </span>
+          )}
+          {tokenStats && (
+            <span>
+              · {tokenStats.completionTokens || 0} tok
+              {tokenStats.tokensPerSec > 0 ? ` (${tokenStats.tokensPerSec.toFixed(1)} t/s)` : ""}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -175,6 +227,8 @@ export function AgentConsole({
                 expanded={expanded}
                 executeTarget={executeTarget}
                 onExecute={onExecute}
+                durationFormatted={message.durationFormatted}
+                tokenStats={message.tokenStats}
               />
             );
           }

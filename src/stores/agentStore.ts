@@ -175,11 +175,38 @@ export interface AgentActivityItem {
 /** Token throughput for a completed or streaming assistant message. */
 export type { TokenStats, ContextUsage, TurnTelemetry } from "../lib/streamStats";
 
+/** Format execution duration cleanly e.g. "Worked for 42s", "Worked for 2m 15s", "Worked for 1h 12m 4s". */
+export function formatWorkingDuration(ms: number, prefix: string = "Worked for"): string {
+  const totalSeconds = Math.max(1, Math.round(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  let timeStr = "";
+  if (hours > 0) {
+    if (minutes > 0) {
+      timeStr = `${hours}h ${minutes}m ${seconds}s`;
+    } else {
+      timeStr = `${hours}h ${seconds}s`;
+    }
+  } else if (minutes > 0) {
+    timeStr = `${minutes}m ${seconds}s`;
+  } else {
+    timeStr = `${seconds}s`;
+  }
+
+  return prefix ? `${prefix} ${timeStr}` : timeStr;
+}
+
 export interface AgentChatMessage extends ChatMessage {
   activity?: AgentActivityItem[];
   /** Chronological text / tool bursts for this turn. Prefer this when rendering. */
   segments?: TurnSegment[];
   tokenStats?: TokenStats;
+  /** Milliseconds the turn took from start to finish. */
+  durationMs?: number;
+  /** Formatted duration string e.g. "Worked for 42s" / "Worked for 2m 15s" */
+  durationFormatted?: string;
   isCompaction?: boolean;
   compactionTokensBefore?: number;
   compactionTokensAfter?: number;
@@ -196,6 +223,8 @@ interface AgentState {
   /** Live turn timeline (text then tools then more text). */
   streamingSegments: TurnSegment[];
   streaming: boolean;
+  /** Epoch timestamp (Date.now()) when the active turn started. */
+  turnStartTime: number | null;
   /** TTS is currently reading a reply aloud (so the user can press Stop to hush it). */
   speaking: boolean;
   streamStats: TokenStats | null;
@@ -359,6 +388,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   activity: [],
   streamingSegments: [],
   streaming: false,
+  turnStartTime: null,
   speaking: false,
   streamStats: null,
   turnTelemetry: null,
@@ -848,10 +878,12 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       content: appendImageMarkers(trimmed, images?.length ?? 0),
       images,
     };
+    const turnStartTime = Date.now();
     const history = [...get().messages, userMsg];
     set({
       messages: history,
       streaming: true,
+      turnStartTime,
       holdQueue: false,
       streamingText: "",
       activity: [],
@@ -1036,6 +1068,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       const tokenStats =
         latestStats ??
         (turnText && streamStartedAt ? liveTokenStats(turnText, streamStartedAt) : undefined);
+      const turnDurationMs = turnStartTime ? Date.now() - turnStartTime : undefined;
+      const turnDurationFormatted = turnDurationMs ? formatWorkingDuration(turnDurationMs) : undefined;
       const messages: AgentChatMessage[] = [
         ...history,
         ...(compactionMarker ? [compactionMarker] : []),
@@ -1045,6 +1079,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           activity: turnActivity.length > 0 ? [...turnActivity] : undefined,
           segments: turnSegments.length > 0 ? [...turnSegments] : undefined,
           tokenStats,
+          durationMs: turnDurationMs,
+          durationFormatted: turnDurationFormatted,
         },
       ];
       if (isCurrent()) {
@@ -1054,6 +1090,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           activity: [],
           streamingSegments: [],
           streaming: false,
+          turnStartTime: null,
           // Keep the last reply's usage so cache rates do not vanish after the turn.
           streamStats: tokenStats ?? null,
         });

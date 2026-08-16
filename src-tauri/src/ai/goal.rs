@@ -150,8 +150,26 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
         }
         lines
     };
+
+    // Deterministic state & criteria sorting (Rick-style EpochHash)
+    let mut sorted_criteria = spec.success_criteria.clone();
+    sorted_criteria.sort();
+    let mut sorted_constraints = spec.hard_constraints.clone();
+    sorted_constraints.sort();
+    let mut sorted_targets = spec.vps_targets.clone();
+    sorted_targets.sort();
+
+    let raw_epoch = format!(
+        "{}:{}:{}:{}",
+        spec.objective.trim(),
+        sorted_criteria.join("|"),
+        sorted_constraints.join("|"),
+        sorted_targets.join("|")
+    );
+    let epoch_hash = format!("{:08x}", raw_epoch.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32)));
+
     let prompt = format!(
-        "You are driving an autonomous goal. Keep the kanban LIVE this cycle.\n\
+        "You are driving an autonomous goal (Epoch: {epoch_hash}). Keep the kanban LIVE this cycle.\n\
          Objective: {objective}\n\
          Success criteria (you may ONLY conclude 'done' via goal_check_criteria with evidence):\n\
          {criteria}\n\
@@ -169,18 +187,19 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
          - Do NOT call goal_schedule_wait unless the user specified a delay/timeout.\n\
          - If nothing is waiting, keep going: next check, next card.\n\
          This cycle: pick the next unfinished card (or add one), execute it with tools, update the board, then goal_check_criteria (verdict not_yet unless truly done).",
+        epoch_hash = epoch_hash,
         objective = spec.objective,
-        criteria = spec.success_criteria.iter().map(|c| format!("- {c}")).collect::<Vec<_>>().join("\n"),
+        criteria = sorted_criteria.iter().map(|c| format!("- {c}")).collect::<Vec<_>>().join("\n"),
         check = spec.check_method,
-        constraints = if spec.hard_constraints.is_empty() {
+        constraints = if sorted_constraints.is_empty() {
             "(none)".to_string()
         } else {
-            spec.hard_constraints.join("; ")
+            sorted_constraints.join("; ")
         },
-        targets = if spec.vps_targets.is_empty() {
+        targets = if sorted_targets.is_empty() {
             "(none selected — call list_vps_targets / ask, or use hosts the user named)".to_string()
         } else {
-            spec.vps_targets.iter().map(|t| format!("- {t}")).collect::<Vec<_>>().join("\n")
+            sorted_targets.iter().map(|t| format!("- {t}")).collect::<Vec<_>>().join("\n")
         },
         kanban = if kanban_summary.is_empty() {
             "(empty — add the first card now)".to_string()

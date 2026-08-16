@@ -64,6 +64,12 @@ impl OpenAiProvider {
                                 },
                             }))
                             .collect::<Vec<_>>());
+                        // Pass back reasoning_content when intermediate tool calls exist to maintain KV-cache prefix
+                        if let Some(r) = &m.reasoning_content {
+                            if !r.is_empty() {
+                                msg["reasoning_content"] = json!(r);
+                            }
+                        }
                     }
                     out.push(msg);
                 }
@@ -353,7 +359,8 @@ impl Provider for OpenAiProvider {
 
         // Provider reasoning is opaque continuation state, not user-visible content.
         // Never promote it into ChatResponse.content, persistence, compaction, or export.
-        out.content = visible_response_content(out.content, reasoning);
+        out.content = visible_response_content(out.content, reasoning.clone());
+        out.reasoning_content = if reasoning.is_empty() { None } else { Some(reasoning) };
 
         out.prompt_tokens = usage.prompt_tokens;
         out.cached_tokens = usage.cached_tokens;
