@@ -36,5 +36,7 @@ export function plainText(md: string): string {
   out = out.replace(/<[^>]+>/g, "");
   // Collapse 3+ newlines to 2.
   out = out.replace(/\n{3,}/g, "\n\n");
-  return out.trim();
+  const trimmed = out.trim();
+  const hasTrailingSpace = /\s$/.test(md);
+  return hasTrailingSpace && trimmed ? `${trimmed} ` : trimmed;
 }

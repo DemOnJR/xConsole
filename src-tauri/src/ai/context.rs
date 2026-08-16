@@ -148,6 +148,9 @@ pub struct PromptContext<'a> {
 const TOOL_GUIDANCE: &str = "You can act on the user's servers AND on their local machine through your tools. \
 Prefer running a real command/tool over describing what you would do. Inspect \
 before you change, make minimal reversible edits, and verify the result. \
+AUTONOMOUS EXECUTION: Chain your tool calls (investigate -> execute -> verify) until the user's objective \
+is completed. Do NOT stop after 1 or 2 commands just to post conversational commentary or repeat command outputs. \
+Only return text in chat when the overall task is finished or when you need user clarification. \
 For the user's own PC (when they say 'my pc', 'locally', 'this machine', or ask about local software \
 such as local docker containers), use the local_* tools (local_run_command, local_read_file, \
 local_write_file, local_list_dir). For a remote server use run_command and the file tools. \
@@ -170,6 +173,11 @@ While executing a 3+ step task, call todo_write and keep exactly one item in_pro
 block is your memory so you do not repeat finished steps. \
 Find bugs the cheap way: grep_search first (get path:line), then read_file with offset/limit around \
 that line, then edit_file with a unique old_string. Do not cat whole large files or rewrite them. \
+ENCODED/BINARY CODE (ionCube, SourceGuardian, Zend, etc.): Never use sed, regex, or text editors to alter \
+or strip headers from encoded/binary PHP files — modifying any byte corrupts bytecode and breaks execution. \
+Encoded PHP requires its matching loader extension (e.g. zend_extension) and compatible PHP version (check with php -v). \
+When encountering unfamiliar software, proprietary loaders, or unexpected errors, use web_search to find official \
+documentation and correct configuration before taking action. \
 Be cheap with tools: combine related checks into ONE command; do not re-read a file unless write_file \
 says it changed (mtime); do not call canvas_open_terminal if that host already has a canvas terminal — \
 drive it with terminal_send or use run_command for private one-offs. \
@@ -182,6 +190,7 @@ When a task is complete, stop.";
 const VPS_TOOL_GUIDANCE: &str = "You can act on the user's VPS targets through your tools. \
 When the user asks about both/all/each server, use run_command_all (one call covers every selected target). \
 Live SSH commands may already have run — see snapshot and live command sections below. \
+AUTONOMOUS EXECUTION: Chain your tool calls until the task is complete. Do not stop after each command to chat. \
 If the user has terminals/SFTP open, a '# Live canvas' section shows them with each terminal's \
 recent output — answer about it directly (use terminal_capture for more, terminal_send to run a \
 command, read_file/write_file to edit a file shown in an SFTP panel). \
@@ -190,6 +199,8 @@ For uptime/reboot: use the INTERPRETATION line (e.g. '20:59' = ~21 hours) — ne
 For write_file on Linux VPS as root: use /root/ or /tmp/ paths (e.g. /root/hello.py) — never /home/root/. \
 Use underscores in filenames (hello.py not hello world.py) unless the user asked for spaces. \
 Do not SSH or write files when the user only asked for example code in chat — answer in the message instead. \
+ENCODED/BINARY CODE: Never edit or sed encoded/binary files (ionCube, SourceGuardian, etc.). Check loaders \
+and PHP version with php -v, and use web_search when encountering unfamiliar errors. \
 SSH lockout: never ban an IP on all ports; honeypot/fail2ban dest must be the decoy port only. \
 Do not reopen a canvas terminal that is already listed. Combine related checks into one command. \
 Use grep_search then read_file(offset,limit) then edit_file. For 3+ steps call todo_write. \
