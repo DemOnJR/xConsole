@@ -45,7 +45,15 @@ export function TooltipHost() {
 
     const onOver = (e: MouseEvent) => {
       const el = (e.target as HTMLElement | null)?.closest?.("[data-tooltip]") as HTMLElement | null;
-      if (!el || el === current) return;
+      if (!el) return;
+      if (el === current) {
+        // While still hovering over the same element, update the text live if it changed (e.g. streaming tokens)
+        const text = el.getAttribute("data-tooltip");
+        if (text) {
+          setAnchor((a) => (a && a.text !== text ? { ...a, text } : a));
+        }
+        return;
+      }
       current = el;
       if (timer) window.clearTimeout(timer);
       timer = window.setTimeout(() => show(el), SHOW_DELAY);
@@ -53,6 +61,14 @@ export function TooltipHost() {
     const onOut = (e: MouseEvent) => {
       const related = e.relatedTarget as HTMLElement | null;
       if (current && related && current.contains(related)) return;
+      // React re-renders during text streaming can emit phantom mouseout events on child nodes
+      if (current && document.contains(current)) {
+        try {
+          if (current.matches(":hover") || current.querySelector(":hover")) return;
+        } catch {
+          // ignore selector errors
+        }
+      }
       clear();
     };
 

@@ -78,10 +78,11 @@ export function activeSnapZone(): DropTarget | null {
   return activeDropHint();
 }
 
-export function endSnapDrag(): boolean {
-  const { nodeId, hint, prevLayout, prevMode } = useSnapDragStore.getState();
+export function endSnapDrag(overrideNodeId?: string): boolean {
+  const { nodeId: storeNodeId, hint, prevLayout, prevMode } = useSnapDragStore.getState();
+  const nodeId = overrideNodeId || storeNodeId;
   useSnapDragStore.getState().end();
-  if (!nodeId) return false;
+  if (!nodeId || nodeId === "__new_vps__") return false;
 
   if (!hint) {
     const canvas = useCanvasStore.getState();

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { persist, createJSONStorage } from "zustand/middleware";
 import {
   applyEdgeChanges,
   applyNodeChanges,
@@ -244,6 +244,16 @@ export const useCanvasStore = create<CanvasState>()(
 
       onNodesChange: (changes) =>
         set((s) => {
+          // React Flow emits measurement ticks that don't change size. Applying
+          // them still clones the node list and re-renders every window.
+          const meaningful = changes.filter((c) => {
+            if (c.type !== "dimensions" || !c.dimensions || c.resizing) return true;
+            const n = s.nodes.find((node) => node.id === c.id);
+            if (!n) return true;
+            return n.width !== c.dimensions.width || n.height !== c.dimensions.height;
+          });
+          if (meaningful.length === 0) return s;
+
           // In tile mode a node's size is derived from the layout, so writing pixel
           // dimensions straight onto the node does nothing lasting — the next reflow
           // overwrites them. Dragging an edge has to become a change to the *layout*.
@@ -252,7 +262,7 @@ export const useCanvasStore = create<CanvasState>()(
             // measurements as dimension changes too, and those must not be read as user
             // intent: on the first one a node has no width yet, so the "delta" would be
             // the node's entire width and the layout would be thrown across the pane.
-            const resizes = changes.filter(
+            const resizes = meaningful.filter(
               (c): c is Extract<NodeChange<CanvasNode>, { type: "dimensions" }> =>
                 c.type === "dimensions" && !!c.dimensions && c.resizing === true,
             );
@@ -301,7 +311,7 @@ export const useCanvasStore = create<CanvasState>()(
               return applyTiles({ ...s, tileLayout: layout }, s.paneSize);
             }
           }
-          return { ...s, nodes: applyNodeChanges(changes, s.nodes) };
+          return { ...s, nodes: applyNodeChanges(meaningful, s.nodes) };
         }),
 
       onEdgesChange: (changes) => {
@@ -706,6 +716,24 @@ export const useCanvasStore = create<CanvasState>()(
     {
       name: "xconsole-canvas",
       version: 1,
+      // Tile resize rewrites tileLayout every pointer move. Writing localStorage
+      // on each frame is what made dragging feel like the disk was wedged.
+      storage: createJSONStorage(() => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let pending: string | null = null;
+        return {
+          getItem: (name) => localStorage.getItem(name),
+          setItem: (name, value) => {
+            pending = value;
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(() => {
+              if (pending != null) localStorage.setItem(name, pending);
+              pending = null;
+            }, 400);
+          },
+          removeItem: (name) => localStorage.removeItem(name),
+        };
+      }),
       // The arrangement rides along with the mode so a hand-tuned grid survives a
       // restart. It references node ids that may be gone by then; `reconcile` drops
       // stale ids and places new ones on the next tile.

@@ -7,18 +7,21 @@ export function CacheMeter({
   stats,
   sessionCache,
   costUsd,
+  onClick,
 }: {
   stats: TokenStats | null;
   sessionCache?: SessionCacheTotals | null;
   costUsd?: number;
+  onClick?: () => void;
 }) {
   const turn = stats ? cacheBreakdown(stats) : null;
   const sessionRate =
     sessionCache && sessionCache.turns > 0 ? sessionCache.rate : null;
   const rate = turn?.rate ?? sessionRate;
   const pct = rate != null ? Math.round(rate * 100) : null;
-  const tooltip = formatCacheTooltip(stats, sessionCache, costUsd);
-  if (!tooltip) return null;
+  const tooltip =
+    formatCacheTooltip(stats, sessionCache, costUsd) ||
+    "Prompt cache · 0 turns\nLive token hit/miss stats";
 
   const tone =
     pct == null
@@ -30,12 +33,15 @@ export function CacheMeter({
           : "text-red-300";
 
   return (
-    <span
-      className={`xc-cache-meter ${tone}`}
+    <button
+      type="button"
+      className={`xc-cache-meter flex items-center justify-center ${tone} bg-transparent border-0 p-0 outline-none`}
       data-tooltip={tooltip}
       data-tooltip-side="top"
-      role="img"
       aria-label={tooltip.replace(/\n/g, ", ")}
+      onClick={onClick}
+      onPointerDown={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
     >
       <span
         className="xc-cache-rail"
@@ -43,6 +49,6 @@ export function CacheMeter({
         aria-hidden
       />
       <CacheIcon size={13} />
-    </span>
+    </button>
   );
 }

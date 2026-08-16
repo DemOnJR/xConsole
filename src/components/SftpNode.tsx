@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   onInternalDrop,
   startInternalDrag,
@@ -162,7 +162,7 @@ function TreeNode({
   );
 }
 
-export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeType>) {
+export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeType>) {
   const focus = useCanvasStore((s) => s.focus);
   const removeNode = useCanvasStore((s) => s.removeNode);
   const updateNodeData = useCanvasStore((s) => s.updateNodeData);
@@ -2655,4 +2655,4 @@ export function SftpNode({ id, data, selected, dragging }: NodeProps<SftpNodeTyp
       )}
     </div>
   );
-}
+});

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { NodeResizer, useStore, type NodeProps } from "@xyflow/react";
 import { api, type DbColumn, type DbResultSet, type DbRowKey } from "../lib/tauri";
 import { useCanvasStore, type DbNode as DbNodeType } from "../stores/canvasStore";
@@ -378,7 +378,7 @@ function Grid({
  * databases are on this box" is the question you actually have. Credentials are per
  * instance, since a host install and a container rarely share a password.
  */
-export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
+export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
   const focus = useCanvasStore((s) => s.focus);
   const removeNode = useCanvasStore((s) => s.removeNode);
   const layoutMode = useCanvasStore((s) => s.layoutMode);
@@ -1689,5 +1689,5 @@ export function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
       ) : null}
     </div>
   );
-}
+});
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useVpsStore } from "../stores/vpsStore";
 import { startInternalDrag, useDragStore } from "../stores/dragStore";
 import { useCanvasStore } from "../stores/canvasStore";
@@ -13,6 +13,7 @@ export function ServerPanel({ width }: { width?: number }) {
   const addVps = useCanvasStore((s) => s.addVps);
   const addSftp = useCanvasStore((s) => s.addSftp);
   const addDb = useCanvasStore((s) => s.addDb);
+  const isDraggingRef = useRef(false);
   // Highlight comes from the shared drag state now that the drag is pointer-based.
   const dragOver = useDragStore((s) => s.over);
 
@@ -123,6 +124,7 @@ export function ServerPanel({ width }: { width?: number }) {
             data-drop={`server-row:${v.id}`}
             onPointerDown={(e) => {
               if (e.button !== 0) return;
+              isDraggingRef.current = false;
               startInternalDrag(
                 e,
                 { kind: "vps", vpsId: v.id, label: v.name },
@@ -134,18 +136,25 @@ export function ServerPanel({ width }: { width?: number }) {
                   // CanvasFlow's own target handles adding the terminal.
                   if (row && row !== payload.vpsId) void reorder(payload.vpsId, row);
                 },
+                () => {
+                  isDraggingRef.current = true;
+                },
               );
             }}
-            className={`group mb-1 cursor-grab rounded-md border px-2 py-2 hover:border-[var(--border)] hover:bg-[var(--surface)] active:cursor-grabbing ${
+            className={`group mb-1 cursor-grab select-none rounded-md border px-2 py-2 hover:border-[var(--border)] hover:bg-[var(--surface)] active:cursor-grabbing ${
               dragOver === `server-row:${v.id}` ? "border-blue-500" : "border-transparent"
             }`}
+            style={{ touchAction: "none" }}
             data-tooltip="Drag onto another server to reorder, or onto the canvas for an SSH terminal"
           >
             <div className="relative flex items-center gap-2">
               <span className="select-none text-gray-600">⋮⋮</span>
               <button
                 className="min-w-0 flex-1 text-left"
-                onClick={() => addVps(v)}
+                onClick={() => {
+                  if (isDraggingRef.current) return;
+                  addVps(v);
+                }}
               >
                 <div className="flex items-center gap-1 truncate text-sm text-gray-200">
                   {pinned.includes(v.id) ? (

@@ -47,7 +47,7 @@ export function ContextGauge({
             strokeLinecap="round"
           />
         </svg>
-        <span className="tabular-nums">{usage ? `${pct}%` : "—"}</span>
+        <span className="xc-gauge-pct tabular-nums">{usage ? `${pct}%` : "—"}</span>
       </button>
 
       {hover && usage && (

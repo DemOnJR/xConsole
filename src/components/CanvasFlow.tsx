@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -167,12 +167,16 @@ export function CanvasFlow() {
   /** Windows-style snap preview: while a node is dragged (freeform OR tile mode),
    *  track the cursor in pane fractions so the overlay can highlight the zone under
    *  it. The preview only arms when the cursor is near a zone (see snapDrag). */
-  const onNodeDrag = (_: MouseEvent | TouchEvent, node: Node) => {
+  const paneRect = useRef<DOMRect | null>(null);
+  const onNodeDragStart = (_: MouseEvent | TouchEvent, node: Node) => {
     const state = useSnapDragStore.getState();
     if (!state.nodeId) state.begin(node.id);
-    const pane = document.querySelector<HTMLElement>(".react-flow__pane");
-    if (!pane) return;
-    const rect = pane.getBoundingClientRect();
+    paneRect.current =
+      document.querySelector<HTMLElement>(".react-flow__pane")?.getBoundingClientRect() ?? null;
+  };
+  const onNodeDrag = (_: MouseEvent | TouchEvent) => {
+    const rect = paneRect.current;
+    if (!rect) return;
     const clientX = "clientX" in _ ? _.clientX : 0;
     const clientY = "clientY" in _ ? _.clientY : 0;
     useSnapDragStore.getState().move(
@@ -182,6 +186,7 @@ export function CanvasFlow() {
   };
 
   const onNodeDragStop = () => {
+    paneRect.current = null;
     endSnapDrag();
   };
 
@@ -194,7 +199,17 @@ export function CanvasFlow() {
       const vps = useVpsStore.getState().vpsList.find((v) => v.id === payload.vpsId);
       if (!vps) return;
       const p = screenToFlowPosition({ x, y });
-      addVps(vps, { x: p.x - NODE_W / 2, y: p.y - 24 });
+      const snapHint = useSnapDragStore.getState().hint;
+      const curLayoutMode = useCanvasStore.getState().layoutMode;
+
+      if (curLayoutMode === "tile" || snapHint) {
+        const id = addVps(vps, { x: p.x - NODE_W / 2, y: p.y - 24 });
+        if (snapHint) {
+          endSnapDrag(id);
+        }
+      } else {
+        addVps(vps, { x: p.x - NODE_W / 2, y: p.y - 24 });
+      }
     });
     return un;
   }, [addVps, screenToFlowPosition]);
@@ -207,6 +222,7 @@ export function CanvasFlow() {
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
       onConnect={onConnect}
+      onNodeDragStart={onNodeDragStart}
       onNodeDrag={onNodeDrag}
       onNodeDragStop={onNodeDragStop}
       nodeTypes={nodeTypes}

@@ -772,11 +772,12 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     // …and ask the running turn to stop (backend also interrupts any
     // interactive plan/question wait for this session).
     if (get().streaming) {
-      await api.agentCancel(get().sessionId).catch(() => {});
+      void api.agentCancel(get().sessionId).catch(() => {});
     }
     // Clear any pending interactive state so the modal/cards don't linger.
-    // Keep the follow-up queue; do not auto-send it after an interrupt.
+    // Immediately clear streaming on frontend so the Stop button instantly responds.
     set({
+      streaming: false,
       pendingPlan: null,
       pendingQuestions: [],
       pendingApprovals: [],
@@ -814,6 +815,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     });
 
     let streamStartedAt: number | null = null;
+    let lastStatsAt = 0;
     let tokensBeforeBurst = 0;
     let latestStats: TokenStats | null = null;
     // Session-scoped turn state. If the user switches conversations mid-stream we
@@ -859,21 +861,27 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         turnSegments = appendTextDelta(turnSegments, ev.data);
         feedSpeech(ev.data);
         if (isCurrent()) {
-          const live = liveGenerationStats(turnText, streamStartedAt, tokensBeforeBurst);
-          set((s) => ({
-            streamingText: turnText,
-            streamingSegments: turnSegments,
-            // Keep provider cache fields if Stats already landed — a later
-            // token delta must not wipe hit/miss back to an estimate.
-            streamStats:
-              s.streamStats?.source === "provider"
+          const now = Date.now();
+          const shouldUpdateStats = !lastStatsAt || now - lastStatsAt >= 200;
+          let statsUpdate: TokenStats | null = null;
+          if (shouldUpdateStats) {
+            lastStatsAt = now;
+            const live = liveGenerationStats(turnText, streamStartedAt, tokensBeforeBurst);
+            const curStats = get().streamStats;
+            statsUpdate =
+              curStats?.source === "provider"
                 ? {
-                    ...s.streamStats,
+                    ...curStats,
                     completionTokens: live.completionTokens,
                     tokensPerSec: live.tokensPerSec,
                   }
-                : live,
-          }));
+                : live;
+          }
+          set({
+            streamingText: turnText,
+            streamingSegments: turnSegments,
+            ...(statsUpdate ? { streamStats: statsUpdate } : {}),
+          });
         }
         return;
       }

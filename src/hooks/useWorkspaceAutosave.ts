@@ -101,8 +101,13 @@ export function useWorkspaceAutosave() {
     // Layout only. Focus, WebGL LRU, pane-size ticks, and select/measure noise
     // used to resave the workspace every 800 ms, which rewrote the encrypted DB
     // at ~10 MB/s. Save() used to setNodes back into the store and retrigger this.
-    const unsubCanvas = useCanvasStore.subscribe(() => {
+    const unsubCanvas = useCanvasStore.subscribe((s) => {
       if (savingRef.current) return;
+      // Drag/resize fires 60×/s. Don't stringify the canvas until it stops.
+      if (s.nodes.some((n) => n.dragging)) {
+        schedule();
+        return;
+      }
       if (persistKey() === lastSavedRef.current) return;
       schedule();
     });

@@ -1,6 +1,7 @@
-import type { MouseEvent, PointerEvent } from "react";
+import { memo, type MouseEvent, type PointerEvent } from "react";
 import type { AiProvider } from "../../lib/tauri";
 import type { ContextUsage, SessionCacheTotals, TokenStats } from "../../lib/streamStats";
+import { BrainIcon, EyeIcon, PlanIcon, ShieldIcon, SparkIcon } from "../icons";
 import { ContextGauge } from "./ContextGauge";
 import { CacheMeter } from "./AgentTokenStats";
 
@@ -20,7 +21,7 @@ export function reasoningCapable(kind: string | undefined, _model: string | unde
 
 /** t3code-style composer footer: provider·model · reasoning · plan · permissions ·
  *  ctx gauge · cost · git branch · send/stop. */
-export function InputBar({
+export const InputBar = memo(function InputBar({
   activeProvider,
   activeModel,
   reasoning,
@@ -66,103 +67,111 @@ export function InputBar({
   const model = activeModel || activeProvider?.model;
   const canReason = reasoningCapable(activeProvider?.kind, model ?? undefined);
   const stopNode = (e: PointerEvent | MouseEvent) => e.stopPropagation();
-
-  const pill =
-    "flex items-center gap-1 rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--border)]/40 transition";
+  const modelTip = [activeProvider?.name ?? "no provider", model].filter(Boolean).join(" · ");
+  const safety = safetyMode || "approve";
+  const safetyTone =
+    safety === "full"
+      ? "text-emerald-300"
+      : safety === "allowlist"
+        ? "text-amber-300"
+        : "text-red-300";
+  const cycleReasoning = () => {
+    const order: ReasoningLevel[] = ["off", "low", "medium", "high"];
+    const i = order.indexOf(reasoning);
+    onReasoning(order[(i + 1) % order.length] ?? "off");
+  };
+  const iconBtn =
+    "flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--text-dim)] transition hover:bg-[var(--border)]/50 hover:text-[var(--text)]";
 
   return (
-    <div className="flex select-none flex-wrap items-center gap-1.5 border-t border-[var(--border)]/60 px-2 pb-2 pt-1.5">
-      {/* Provider · model */}
+    <div className="xc-input-bar flex select-none flex-wrap items-center gap-0.5 border-t border-[var(--border)]/60 px-1.5 pb-1.5 pt-1">
       <button
         type="button"
-        className={pill}
+        className={iconBtn}
         onClick={onPickModel}
         onPointerDown={stopNode}
         onMouseDown={stopNode}
-        data-tooltip="Switch provider/model (/model)"
+        aria-label="Switch model"
+        data-tooltip={`${modelTip}\nSwitch provider/model (/model)`}
       >
-        <span className="max-w-[120px] truncate text-gray-300">
-          {activeProvider?.name ?? "no provider"}
-        </span>
-        {model ? <span className="max-w-[140px] truncate text-[var(--text-faint)]">· {model}</span> : null}
+        <SparkIcon size={14} />
       </button>
 
-      {/* Reasoning / effort (capability-driven) */}
-      {canReason && (
-        <select
-          value={reasoning}
-          onChange={(e) => onReasoning(e.target.value as ReasoningLevel)}
-          data-tooltip="Reasoning effort"
-          className="rounded border border-[var(--border)] bg-[var(--surface)] px-1 py-0.5 text-[10px] text-[var(--text-dim)] outline-none"
-        >
-          <option value="off">off</option>
-          <option value="low">low</option>
-          <option value="medium">medium</option>
-          <option value="high">high</option>
-        </select>
-      )}
-
-      {/* Plan toggle */}
       <button
         type="button"
-        className={`${pill} ${planMode ? "border-indigo-500/50 bg-indigo-500/20 text-indigo-300" : ""}`}
-        onClick={onTogglePlan}
-        data-tooltip="Plan mode (Shift+Tab)"
+        className={`${iconBtn} ${safetyTone}`}
+        onClick={onCycleSafety}
+        onPointerDown={stopNode}
+        onMouseDown={stopNode}
+        aria-label={`Safety profile ${safety}`}
+        data-tooltip={`Safety: ${safety}\nClick to cycle (full / allowlist / approve)`}
       >
-        plan
+        <ShieldIcon size={14} />
       </button>
 
-      {onPickVision && (
+      <button
+        type="button"
+        className={`${iconBtn} ${planMode ? "bg-indigo-500/20 text-indigo-300" : ""}`}
+        onClick={onTogglePlan}
+        onPointerDown={stopNode}
+        onMouseDown={stopNode}
+        aria-label="Plan mode"
+        data-tooltip={planMode ? "Plan mode on (Shift+Tab)" : "Plan mode (Shift+Tab)"}
+      >
+        <PlanIcon size={14} />
+      </button>
+
+      {onPickVision ? (
         <button
           type="button"
-          className={pill}
+          className={iconBtn}
           onClick={onPickVision}
           onPointerDown={stopNode}
           onMouseDown={stopNode}
-          data-tooltip="Image vision — model used to look at screenshots (/vision)"
+          aria-label="Vision model"
+          data-tooltip={`${visionLabel || "vision"}\nImage vision — screenshots (/vision)`}
         >
-          <span className="max-w-[180px] truncate">{visionLabel || "vision"}</span>
+          <EyeIcon size={14} />
         </button>
-      )}
+      ) : null}
 
-      {/* Permissions (safety mode) */}
-      <button
-        type="button"
-        className={pill}
-        onClick={onCycleSafety}
-        data-tooltip="Safety mode — click to cycle (full / allowlist / approve)"
-      >
-        <span
-          className={
-            safetyMode === "full"
-              ? "text-emerald-300"
-              : safetyMode === "allowlist"
-                ? "text-amber-300"
-                : "text-red-300"
-          }
+      {canReason ? (
+        <button
+          type="button"
+          className={`${iconBtn} ${reasoning !== "off" ? "text-violet-300" : ""}`}
+          onClick={cycleReasoning}
+          onPointerDown={stopNode}
+          onMouseDown={stopNode}
+          aria-label={`Reasoning ${reasoning}`}
+          data-tooltip={`Reasoning: ${reasoning}\nClick to cycle (off / low / medium / high)`}
         >
-          {safetyMode || "approve"}
-        </span>
-      </button>
+          <BrainIcon size={14} />
+        </button>
+      ) : null}
 
-      <div className="ml-auto flex items-center gap-1.5">
-        {/* Git branch */}
-        {gitLabel && (
-          <span className="max-w-[140px] truncate rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--text-faint)]" data-tooltip="Project repo">
+      <div className="ml-auto flex min-w-0 items-center gap-0.5">
+        {gitLabel ? (
+          <span
+            className="xc-git-pill max-w-[88px] truncate px-1 text-[10px] text-[var(--text-faint)]"
+            data-tooltip={`Repo: ${gitLabel}`}
+          >
             ⎇ {gitLabel}
           </span>
-        )}
+        ) : null}
 
-        <CacheMeter stats={streamStats} sessionCache={sessionCache} costUsd={costUsd} />
+        <CacheMeter
+          stats={streamStats}
+          sessionCache={sessionCache}
+          costUsd={costUsd}
+          onClick={onPickContext}
+        />
 
-        {/* Context gauge — opens the /ctx breakdown, not the model list */}
         <ContextGauge
           usage={contextUsage}
           onClick={onPickContext}
           onPointerDown={stopNode}
         />
 
-        {/* Send / Stop — while running, Send queues a follow-up */}
         {streaming ? (
           <>
             <button
@@ -172,17 +181,23 @@ export function InputBar({
               onMouseDown={stopNode}
               aria-label="Queue follow-up"
               data-tooltip="Queue this message — you can edit it before it sends"
-              className="flex h-6 w-6 items-center justify-center rounded border border-[var(--border)] text-[var(--text-dim)] transition hover:bg-[var(--border)] hover:text-[var(--text)]"
+              className={iconBtn}
             >
               <span className="block h-0 w-0 border-y-[4px] border-l-[6px] border-y-transparent border-l-current" />
             </button>
             <button
               type="button"
               onClick={onStop}
-              onPointerDown={stopNode}
-              onMouseDown={stopNode}
+              onPointerDown={(e) => {
+                stopNode(e);
+                onStop();
+              }}
+              onMouseDown={(e) => {
+                stopNode(e);
+              }}
               aria-label="Stop generation"
-              className="flex h-6 w-6 items-center justify-center rounded bg-red-600/90 text-white transition hover:bg-red-600"
+              data-tooltip="Stop generation"
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-red-600/90 text-white transition hover:bg-red-600 active:scale-95"
             >
               <span className="block h-2 w-2 rounded-[2px] bg-white" />
             </button>
@@ -194,7 +209,8 @@ export function InputBar({
             onPointerDown={stopNode}
             onMouseDown={stopNode}
             aria-label="Send"
-            className="flex h-6 w-6 items-center justify-center rounded bg-blue-600 text-white transition hover:bg-blue-500"
+            data-tooltip="Send"
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-blue-600 text-white transition hover:bg-blue-500"
           >
             <span className="block h-0 w-0 border-y-[4px] border-l-[6px] border-y-transparent border-l-white" />
           </button>
@@ -202,4 +218,4 @@ export function InputBar({
       </div>
     </div>
   );
-}
+});

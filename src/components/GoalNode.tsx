@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { NodeResizer, useStore, type NodeProps } from "@xyflow/react";
 import { api, onGoalEvent, type GoalMemory, type GoalSession, type GoalSpec, type GoalTask } from "../lib/tauri";
 import { goalRootTasks, goalTaskChildren, parseGoalSessionViews } from "../lib/goalParse";
@@ -69,13 +69,13 @@ function applySession(
 }
 
 /** Kanban board node for a /goal session. Live-updates via goal:// events. */
-export function GoalNode(props: NodeProps<GoalNodeType>) {
+export const GoalNode = memo(function GoalNode(props: NodeProps<GoalNodeType>) {
   return (
     <NodeErrorBoundary label="Goal">
       <GoalBoard {...props} />
     </NodeErrorBoundary>
   );
-}
+});
 
 function GoalBoard({ id, data, selected }: NodeProps<GoalNodeType>) {
   const focus = useCanvasStore((s) => s.focus);

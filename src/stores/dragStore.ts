@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { useSnapDragStore } from "../lib/snapDrag";
 
 /**
  * Internal drag-and-drop, built on pointer events instead of HTML5 DnD.
@@ -58,6 +59,18 @@ export function dropTargetAt(x: number, y: number): string | null {
   return target?.dataset.drop ?? null;
 }
 
+export function targetForPayload(target: string | null, payload: DragPayload, x: number, y: number): string | null {
+  if (payload.kind === "vps") {
+    if (target && target.startsWith("server-row:")) return target;
+    const canvas = document.querySelector<HTMLElement>("[data-drop='canvas']");
+    const el = document.elementFromPoint(x, y);
+    if (canvas && el && (canvas === el || canvas.contains(el))) {
+      return "canvas";
+    }
+  }
+  return target;
+}
+
 type DropFn = (payload: DragPayload, x: number, y: number, target: string) => void;
 const dropHandlers = new Map<string, Set<DropFn>>();
 
@@ -99,6 +112,7 @@ export function startInternalDrag(
   e: React.PointerEvent,
   payload: DragPayload,
   onDrop?: (target: string, payload: DragPayload) => void,
+  onStart?: () => void,
 ) {
   const startX = e.clientX;
   const startY = e.clientY;
@@ -109,22 +123,42 @@ export function startInternalDrag(
     if (!armed) {
       if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < THRESHOLD) return;
       armed = true;
+      onStart?.();
       useDragStore.getState().begin(payload, ev.clientX, ev.clientY);
     }
-    useDragStore
-      .getState()
-      .move(ev.clientX, ev.clientY, dropTargetAt(ev.clientX, ev.clientY));
+    const raw = dropTargetAt(ev.clientX, ev.clientY);
+    const target = targetForPayload(raw, payload, ev.clientX, ev.clientY);
+    useDragStore.getState().move(ev.clientX, ev.clientY, target);
+
+    if (payload.kind === "vps" && target === "canvas") {
+      const pane = document.querySelector<HTMLElement>(".react-flow__pane")?.getBoundingClientRect();
+      if (pane && pane.width > 0 && pane.height > 0) {
+        const snapState = useSnapDragStore.getState();
+        if (!snapState.nodeId) snapState.begin("__new_vps__");
+        snapState.move(
+          (ev.clientX - pane.left) / pane.width,
+          (ev.clientY - pane.top) / pane.height,
+        );
+      }
+    } else if (payload.kind === "vps" && useSnapDragStore.getState().nodeId === "__new_vps__") {
+      useSnapDragStore.getState().end();
+    }
   };
 
   const onUp = (ev: PointerEvent) => {
     window.removeEventListener("pointermove", onMove);
     window.removeEventListener("pointerup", onUp);
     if (!armed) return;
-    const target = dropTargetAt(ev.clientX, ev.clientY);
+    const raw = dropTargetAt(ev.clientX, ev.clientY);
+    const target = targetForPayload(raw, payload, ev.clientX, ev.clientY);
     useDragStore.getState().end();
-    if (!target) return;
-    onDrop?.(target, payload);
-    dispatchDrop(target, payload, ev.clientX, ev.clientY);
+    if (target) {
+      onDrop?.(target, payload);
+      dispatchDrop(target, payload, ev.clientX, ev.clientY);
+    }
+    if (useSnapDragStore.getState().nodeId === "__new_vps__") {
+      useSnapDragStore.getState().end();
+    }
   };
 
   window.addEventListener("pointermove", onMove);

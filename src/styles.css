@@ -506,6 +506,23 @@ body,
   cursor: text;
 }
 
+/* Agent chat stays usable from ~200px: icon toolbar, hide duplicate chrome. */
+[data-agent-root] {
+  container-type: inline-size;
+  container-name: agent;
+}
+@container agent (max-width: 280px) {
+  .xc-git-pill,
+  .xc-gauge-pct {
+    display: none;
+  }
+}
+@container agent (max-width: 220px) {
+  .xc-agent-title {
+    display: none;
+  }
+}
+
 /*
  * Hash spinner — four bars that start as a # and rearrange into figures.
  * Transform + opacity only (no filter / canvas). Each bar is the same

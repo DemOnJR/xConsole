@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Handle, NodeResizer, Position, useReactFlow, useStore, type NodeProps } from "@xyflow/react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -46,7 +46,7 @@ const STATUS_COLOR: Record<ConnState, string> = {
   error: "#f7768e",
 };
 
-export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNode>) {
+export const TerminalNode = memo(function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNode>) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -682,4 +682,4 @@ export function TerminalNode({ id, data, selected, dragging }: NodeProps<TermNod
       />
     </div>
   );
-}
+});

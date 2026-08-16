@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { NodeResizer, useStore, type NodeProps } from "@xyflow/react";
 
 import { useAgentStore } from "../../stores/agentStore";
@@ -57,6 +57,7 @@ import {
 } from "./agentCommands";
 import { notify } from "../../lib/notify";
 import { catalogForProvider } from "../../lib/providerCatalog";
+import { ImageIcon } from "../icons";
 import { InputBar, type ReasoningLevel } from "./InputBar";
 import { QueuedMessages } from "./QueuedMessages";
 import { useGitBranch } from "../../hooks/useGitBranch";
@@ -229,7 +230,7 @@ function QuestionCard({
   );
 }
 
-export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
+export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
   const openSettings = useUiStore((s) => s.openSettings);
 
   // Node chrome: focus on click, drag by header (React Flow), tile counter-scale.
@@ -318,10 +319,26 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     const v = useSettingsStore.getState().settings["agent.reasoning_level"];
     return v === "low" || v === "medium" || v === "high" || v === "off" ? v : "off";
   });
-  const setReasoningPersisted = (r: ReasoningLevel) => {
+  const setReasoningPersisted = useCallback((r: ReasoningLevel) => {
     setReasoning(r);
     void useSettingsStore.getState().set("agent.reasoning_level", r);
-  };
+  }, []);
+
+  const handleCycleSafety = useCallback(() => {
+    const settings = useSettingsStore.getState().settings;
+    const cur = settings["agent.safety_mode"] ?? "approve";
+    const next = cur === "full" ? "allowlist" : cur === "allowlist" ? "approve" : "full";
+    void useSettingsStore.getState().set("agent.safety_mode", next);
+  }, []);
+
+  const handleStop = useCallback(() => {
+    setLoopTask(null);
+    void stop();
+  }, [stop]);
+
+  const handlePickModel = useCallback(() => setPicker({ kind: "model" }), []);
+  const handlePickContext = useCallback(() => setPicker({ kind: "ctx" }), []);
+  const handlePickVision = useCallback(() => setPicker({ kind: "vision" }), []);
 
   // Git pill: the repo the agent is working on (active workspace project).
   const activeWsId = useWorkspaceStore((s) => s.activeId);
@@ -1261,7 +1278,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
       }}
     >
       <NodeResizer
-        minWidth={340}
+        minWidth={200}
         minHeight={240}
         isVisible
         lineClassName="!border-blue-500"
@@ -1269,28 +1286,19 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
       />
 
       {/* Slim terminal status line (no buttons — everything is a command). */}
-      <div className="flex cursor-move select-none items-center gap-2 border-b border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 font-mono text-[11px]">
-        <span className="text-cyan-400">{streaming ? "●" : "❯"}</span>
-        <span className="text-[var(--text-dim)]">agent</span>
-        <span className="text-[var(--text-faint)]">·</span>
-        <button
-          type="button"
-          onClick={() => setPicker({ kind: "model" })}
-          onMouseDown={(e) => e.stopPropagation()}
-          data-tooltip="Switch provider (/model)"
-          className="truncate text-gray-300 hover:text-cyan-300"
-        >
-          {activeProvider?.name ?? "no provider"}
-          {activeModel || activeProvider?.model ? ` · ${activeModel || activeProvider?.model}` : ""}
-        </button>
-        {planMode && <span className="rounded bg-indigo-500/20 px-1 text-[9px] text-indigo-300">plan</span>}
-        {loopTask && (
+      <div className="flex cursor-move select-none items-center gap-1 border-b border-[var(--border)] bg-[var(--surface)] px-2 py-1 font-mono text-[11px]">
+        <span className="shrink-0 text-cyan-400">{streaming ? "●" : "❯"}</span>
+        <span className="xc-agent-title shrink-0 text-[var(--text-dim)]">agent</span>
+        {planMode ? (
+          <span className="rounded bg-indigo-500/20 px-1 text-[9px] text-indigo-300">plan</span>
+        ) : null}
+        {loopTask ? (
           <span className="rounded bg-cyan-500/20 px-1 text-[9px] text-cyan-300">
-            ⟳ loop {loopCount}/{loopMax}
+            ⟳ {loopCount}/{loopMax}
           </span>
-        )}
-        {ttsEnabled && <span className="text-[9px] text-[var(--text-faint)]">🔊</span>}
-        <span className="ml-auto flex items-center gap-1">
+        ) : null}
+        {ttsEnabled ? <span className="text-[9px] text-[var(--text-faint)]">🔊</span> : null}
+        <span className="ml-auto flex items-center gap-0.5">
           <button
             type="button"
             onMouseDown={(e) => e.stopPropagation()}
@@ -1309,15 +1317,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
           >
             A+
           </button>
-        </span>
-        <span className="flex items-center gap-2 text-[var(--text-faint)]">
-          {contextUsage ? <span>{contextUsage.percent}% ctx</span> : null}
-          {conversationCostUsd > 0 ? (
-            <span>${conversationCostUsd.toFixed(4)}</span>
-          ) : null}
-          {streaming ? (
-            <span className="animate-pulse text-emerald-400">working…</span>
-          ) : null}
         </span>
       </div>
 
@@ -1802,11 +1801,12 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
             />
             <button
               type="button"
-              className="shrink-0 rounded px-1 py-0.5 text-[12px] text-[var(--text-faint)] hover:bg-[var(--border)] hover:text-[var(--text)]"
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--text-faint)] hover:bg-[var(--border)] hover:text-[var(--text)]"
               data-tooltip="Attach image — Ctrl+V anywhere in this window, drop, or pick a file"
               onClick={() => fileInputRef.current?.click()}
+              aria-label="Attach image"
             >
-              +img
+              <ImageIcon size={14} />
             </button>
           </div>
 
@@ -1840,12 +1840,7 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
             planMode={planMode}
             onTogglePlan={togglePlanMode}
             safetyMode={effectiveSafetyMode}
-            onCycleSafety={() => {
-              const settings = useSettingsStore.getState().settings;
-              const cur = settings["agent.safety_mode"] ?? "approve";
-              const next = cur === "full" ? "allowlist" : cur === "allowlist" ? "approve" : "full";
-              void useSettingsStore.getState().set("agent.safety_mode", next);
-            }}
+            onCycleSafety={handleCycleSafety}
             contextUsage={contextUsage}
             streamStats={displayStats}
             sessionCache={sessionCache}
@@ -1853,18 +1848,15 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
             gitLabel={gitLabel}
             streaming={streaming}
             onSend={submit}
-            onStop={() => {
-              setLoopTask(null);
-              void stop();
-            }}
-            onPickModel={() => setPicker({ kind: "model" })}
-            onPickContext={() => setPicker({ kind: "ctx" })}
+            onStop={handleStop}
+            onPickModel={handlePickModel}
+            onPickContext={handlePickContext}
             visionLabel={visionLabel(
               visionMode,
               visionProvider?.name,
               visionModelLabel || undefined,
             )}
-            onPickVision={() => setPicker({ kind: "vision" })}
+            onPickVision={handlePickVision}
           />
 
         </div>
@@ -1875,7 +1867,6 @@ export function AgentNodeView({ id, selected }: NodeProps<AgentNodeType>) {
     </div>
 
   );
-
-}
+});
 
 
