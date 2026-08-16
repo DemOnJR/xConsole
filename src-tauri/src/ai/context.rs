@@ -82,11 +82,19 @@ pub fn compress_window_to(messages: Vec<ChatMessage>, budget_tokens: usize) -> V
     }
 
     // Only ever cut at a turn boundary: advance the cut forward until it lands on a
-    // `user` message (the start of a turn). Cutting anywhere else would orphan a
-    // tool_result from the assistant tool_call it answers, or split a reply.
-    while keep_from < messages.len() && messages[keep_from].role != "user" {
-        keep_from += 1;
+    // `user` message (the start of a turn). If no user message exists forward, search
+    // backwards to avoid dropping the entire conversation.
+    let mut user_cut = keep_from;
+    while user_cut < messages.len() && messages[user_cut].role != "user" {
+        user_cut += 1;
     }
+    if user_cut >= messages.len() {
+        user_cut = keep_from;
+        while user_cut > 0 && messages[user_cut].role != "user" {
+            user_cut -= 1;
+        }
+    }
+    keep_from = user_cut;
     if keep_from == 0 {
         return messages;
     }
@@ -358,7 +366,7 @@ pub fn is_runtime_message(message: &ChatMessage) -> bool {
 /// Always returns true (runtime can be attached even when there is no user
 /// message yet). Empty `dynamic` only drops a leftover trailing runtime block.
 pub fn inject_dynamic_into_last_user(messages: &mut Vec<ChatMessage>, dynamic: &str) -> bool {
-    if messages.last().is_some_and(is_runtime_message) {
+    while messages.last().is_some_and(is_runtime_message) {
         messages.pop();
     }
     let dynamic = dynamic.trim();
@@ -421,8 +429,15 @@ fn append_flattened_user_turn(
     last_core: &[ChatMessage],
     incoming_core: &[ChatMessage],
 ) -> Option<Vec<ChatMessage>> {
+    if incoming_core.len() <= last_core.len() {
+        return None;
+    }
     let prev_user = last_core.iter().rev().find(|m| m.role == "user")?;
-    let pos = incoming_core
+    // Search only in the prior portion of incoming_core (matching up to last_core.len())
+    // so a repeated user message (e.g. "continue", "yes", "retry") does not match the
+    // newly-appended user message at the very end.
+    let search_limit = last_core.len().min(incoming_core.len().saturating_sub(1));
+    let pos = incoming_core[..search_limit]
         .iter()
         .rposition(|m| m.role == "user" && m.content == prev_user.content)?;
     let mut rest = incoming_core[pos + 1..].to_vec();
@@ -473,11 +488,16 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
             rules.push_str(safety_guidance(ctx.safety));
         }
         let mem = truncate_chars(&memory::format_for_prompt(ctx.home), 1200);
+        let mut infra_tokens = 0;
+        if !ctx.target_ids.is_empty() {
+            let catalog = crate::ai::tools::format_targets_catalog(ctx.db, ctx.target_ids);
+            infra_tokens = count_tokens(&catalog);
+        }
         return PromptParts {
             rules_tokens: count_tokens(&rules),
             skills_tokens: 0,
             memory_tokens: count_tokens(&mem),
-            infra_tokens: 0,
+            infra_tokens,
             summary_tokens: 0,
         };
     }
@@ -519,6 +539,12 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
             rules.push(note.trim().to_string());
         }
     }
+    if !ctx.model_label.is_empty() {
+        rules.push(format!("Model: {}", ctx.model_label));
+    }
+    if !ctx.provider_label.is_empty() {
+        rules.push(format!("Provider: {}", ctx.provider_label));
+    }
 
     let (_, skills_text, mutable_infra) = mutable_context_parts(ctx, minimal);
 
@@ -527,7 +553,7 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
         infra_parts.push(ws.clone());
     }
     if let Some(canvas) = ctx.canvas_context.as_ref().filter(|s| !s.trim().is_empty()) {
-        infra_parts.push(canvas.clone());
+        infra_parts.push(truncate_chars(canvas, DYNAMIC_CANVAS_CHARS));
     }
     if let Some(todos) = ctx.todo_context.as_ref().filter(|s| !s.trim().is_empty()) {
         infra_parts.push(todos.clone());
@@ -542,11 +568,19 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
         infra_parts.push(mutable_infra.clone());
     }
 
-    let mem = if !minimal {
-        truncate_chars(&memory::format_for_prompt(ctx.home), DYNAMIC_MEMORY_CHARS)
-    } else {
-        String::new()
-    };
+    let mut mem_parts: Vec<String> = Vec::new();
+    if !minimal {
+        let mem = memory::format_for_prompt(ctx.home);
+        if !mem.trim().is_empty() {
+            mem_parts.push(truncate_chars(&mem, DYNAMIC_MEMORY_CHARS));
+        }
+        if !ctx.casual_turn && !ctx.target_ids.is_empty() {
+            let hosts = crate::ai::host_memory::format_for_prompt(ctx.home, ctx.db, ctx.target_ids);
+            if !hosts.trim().is_empty() {
+                mem_parts.push(truncate_chars(&hosts, DYNAMIC_HOST_CHARS));
+            }
+        }
+    }
 
     let summary = ctx
         .conversation_summary
@@ -559,7 +593,7 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
         // Taste now lives in the stable rules tier (included in `rules`).
         rules_tokens: count_tokens(&rules.join("\n\n")),
         skills_tokens: count_tokens(&skills_text),
-        memory_tokens: count_tokens(&mem),
+        memory_tokens: count_tokens(&mem_parts.join("\n\n")),
         infra_tokens: count_tokens(&infra_parts.join("\n\n")),
         summary_tokens: count_tokens(&summary),
     }
@@ -571,14 +605,18 @@ fn count_tokens(text: &str) -> u32 {
 
 /// Char-boundary-safe truncation with an ellipsis marker.
 fn truncate_chars(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.trim().to_string();
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.len() <= max {
+        return trimmed.to_string();
     }
     let mut cut = max;
-    while !s.is_char_boundary(cut) && cut > 0 {
+    while !trimmed.is_char_boundary(cut) && cut > 0 {
         cut -= 1;
     }
-    format!("{}\n…", s[..cut].trim())
+    format!("{}\n…", trimmed[..cut].trim())
 }
 
 /// The minimal three tiers for a spoken voice turn. Deliberately omits the soul,
@@ -1098,5 +1136,23 @@ mod tests {
         let continued = continue_cached_prefix(&last_sent, &incoming).unwrap();
         assert_eq!(&continued[..last_sent.len()], last_sent.as_slice());
         assert_eq!(continued.last().unwrap().content, "re check the vps");
+    }
+
+    #[test]
+    fn cache13_repeated_user_prompt_reuses_prefix() {
+        // When the user repeats the exact same message (e.g. "retry" or "continue"),
+        // the matcher must not match the newly appended message with itself.
+        let mut last_sent = vec![ChatMessage::user("retry")];
+        inject_dynamic_into_last_user(&mut last_sent, "canvas A");
+        last_sent.push(ChatMessage::assistant("done 1"));
+
+        let incoming = vec![
+            ChatMessage::user("retry"),
+            ChatMessage::assistant("done 1"),
+            ChatMessage::user("retry"),
+        ];
+        let continued = continue_cached_prefix(&last_sent, &incoming).unwrap();
+        assert_eq!(&continued[..last_sent.len()], last_sent.as_slice());
+        assert_eq!(continued.last().unwrap().content, "retry");
     }
 }

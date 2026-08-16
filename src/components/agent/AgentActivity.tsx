@@ -549,19 +549,25 @@ export function AgentActivityFeed({
     [visible],
   );
 
+  // For archived (non-live) turns, collapse completed commands into the summary accordion.
+  // For live streaming turns, keep all blocks in-place so items do not jump around.
   const doneCommands = useMemo(
     () =>
-      blocks.filter(
-        (item) => isCommandItem(item) && item.state !== "running" && item.state !== "error",
-      ),
-    [blocks],
+      !live
+        ? blocks.filter(
+            (item) => isCommandItem(item) && item.state !== "running" && item.state !== "error",
+          )
+        : [],
+    [blocks, live],
   );
   const rest = useMemo(
     () =>
-      blocks.filter(
-        (item) => !(isCommandItem(item) && item.state !== "running" && item.state !== "error"),
-      ),
-    [blocks],
+      !live
+        ? blocks.filter(
+            (item) => !(isCommandItem(item) && item.state !== "running" && item.state !== "error"),
+          )
+        : blocks,
+    [blocks, live],
   );
 
   if (visible.length === 0 && !live) return null;
@@ -645,7 +651,6 @@ export function AgentActivityFeed({
       {rest.map((item) => (
         <ActivityBlock key={`${item.id}-${item.kind}`} item={item} defaultCollapsed={!live} />
       ))}
-      {live && running.length === 0 && !parallelMeta.show && <AgentThinking />}
       {live && parallelMeta.show && !parallelMeta.done && parallelMeta.displayCount > 0 && (
         <MetaLine text="Tools running together…" dimmed />
       )}

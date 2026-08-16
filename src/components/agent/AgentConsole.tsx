@@ -19,14 +19,16 @@ function AssistantTurn({
   executeTarget?: { name: string; host: string } | null;
   onExecute?: (code: string) => void;
 }) {
-  const lastActivity = live
-    ? [...segments].reverse().findIndex((s) => s.type === "activity")
-    : -1;
-  const lastActivityIdx = lastActivity >= 0 ? segments.length - 1 - lastActivity : -1;
+  const hasRunningActivity = live
+    ? segments.some(
+        (s) =>
+          s.type === "activity" &&
+          s.items.some((i) => i.state === "running" && i.kind !== "status"),
+      )
+    : false;
 
-  if (live && segments.length === 0) {
-    return <AgentThinking />;
-  }
+  const isLastSegmentStreamingText =
+    live && segments.length > 0 && segments[segments.length - 1].type === "text";
 
   return (
     <div className="flex flex-col gap-2">
@@ -53,10 +55,16 @@ function AssistantTurn({
         }
         return (
           <div key={`act-${i}`} className="pl-4">
-            <AgentActivityFeed items={seg.items} live={live && i === lastActivityIdx} />
+            <AgentActivityFeed items={seg.items} live={live} />
           </div>
         );
       })}
+
+      {live && !hasRunningActivity && !isLastSegmentStreamingText && (
+        <div className="pl-4">
+          <AgentThinking />
+        </div>
+      )}
     </div>
   );
 }
