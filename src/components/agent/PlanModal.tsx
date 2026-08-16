@@ -31,7 +31,7 @@ export function PlanModal() {
   const planDraft = useAgentStore((s) => s.planDraft);
   const planHistory = useAgentStore((s) => s.planHistory);
   const planHistoryOpen = useAgentStore((s) => s.planHistoryOpen);
-  const streaming = useAgentStore((s) => s.streaming);
+  const planRevising = useAgentStore((s) => s.planRevising);
   const streamingText = useAgentStore((s) => s.streamingText);
   const activity = useAgentStore((s) => s.activity);
   const setPlanDraft = useAgentStore((s) => s.setPlanDraft);
@@ -295,7 +295,7 @@ export function PlanModal() {
                     value={planDraft}
                     onChange={(e) => setPlanDraft(e.target.value)}
                     spellCheck={false}
-                    disabled={streaming}
+                    disabled={sending || planRevising}
                     className="min-h-0 flex-1 resize-none bg-transparent px-4 py-3 font-mono text-[12px] leading-relaxed text-[var(--text)] outline-none disabled:opacity-60"
                   />
                 )}
@@ -314,7 +314,7 @@ export function PlanModal() {
             <div className="flex w-72 shrink-0 flex-col border-l border-[var(--border)] bg-[var(--surface-1)]">
               <div className="border-b border-[var(--border)] px-3 py-2 text-[10px] font-medium uppercase tracking-wide text-[var(--text-faint)] flex items-center justify-between">
                 <span>Refine with the agent</span>
-                {streaming && (
+                {planRevising && (
                   <span className="flex items-center gap-1 text-amber-400 text-[10px] font-normal normal-case">
                     <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
                     Running
@@ -324,7 +324,7 @@ export function PlanModal() {
 
               <div className="flex min-h-0 flex-1 flex-col gap-2.5 px-3 py-2.5 overflow-y-auto">
                 {/* Live Progress Card when agent is revising */}
-                {streaming && (
+                {planRevising && (
                   <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 flex flex-col gap-2">
                     <div className="flex items-center gap-2 text-[11px] font-semibold text-amber-300">
                       <span className="relative flex h-2 w-2">
@@ -362,22 +362,22 @@ export function PlanModal() {
                   onChange={(e) => setFeedback(e.target.value)}
                   placeholder="e.g. add a rollback step, split into phases, use less downtime…"
                   rows={5}
-                  disabled={streaming}
+                  disabled={sending || planRevising}
                   className="resize-none rounded border border-[var(--border)] bg-[var(--bg)] px-2.5 py-2 font-mono text-[11px] text-[var(--text)] outline-none placeholder:text-[var(--text-faint)] focus:border-[var(--accent)] disabled:opacity-50"
                 />
 
                 <button
                   type="button"
-                  disabled={sending || streaming || !feedback.trim()}
+                  disabled={sending || planRevising || !feedback.trim()}
                   onClick={() => void sendRevision("feedback")}
                   className="rounded bg-[var(--accent-muted)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--accent)] hover:bg-[var(--accent)] hover:text-black transition disabled:opacity-40"
                 >
-                  {sending || streaming ? "Sending…" : "Send changes"}
+                  {sending || planRevising ? "Sending…" : "Send changes"}
                 </button>
 
                 <button
                   type="button"
-                  disabled={sending || streaming}
+                  disabled={sending || planRevising}
                   onClick={() => void sendRevision("apply-draft")}
                   className="rounded border border-[var(--border)] px-2.5 py-1.5 text-[11px] text-[var(--text-faint)] hover:bg-[var(--border)] hover:text-white transition disabled:opacity-40"
                 >
@@ -393,11 +393,11 @@ export function PlanModal() {
               <div className="flex flex-col gap-2 border-t border-[var(--border)] p-3 bg-[var(--surface-2)]">
                 <button
                   type="button"
-                  disabled={sending || streaming}
+                  disabled={sending || planRevising}
                   onClick={() => void applyPlan(pendingPlan.id)}
                   className="rounded bg-emerald-600/90 px-3 py-2 text-[12px] font-semibold text-white hover:bg-emerald-600 disabled:opacity-40 flex items-center justify-center gap-1.5 transition shadow-sm"
                 >
-                  {streaming ? (
+                  {planRevising ? (
                     <>
                       <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-white" />
                       Agent is revising…
@@ -412,7 +412,7 @@ export function PlanModal() {
                 <div className="flex gap-2">
                   <button
                     type="button"
-                    disabled={sending || streaming}
+                    disabled={sending || planRevising}
                     onClick={() => void archivePlanAction(pendingPlan.id)}
                     className="flex-1 rounded border border-[var(--border)] px-2 py-1.5 text-[11px] text-[var(--text-faint)] hover:bg-[var(--border)] hover:text-white transition disabled:opacity-40"
                   >
@@ -420,7 +420,7 @@ export function PlanModal() {
                   </button>
                   <button
                     type="button"
-                    disabled={sending || streaming}
+                    disabled={sending || planRevising}
                     onClick={() => void cancelPlanAction(pendingPlan.id)}
                     className="flex-1 rounded border border-[var(--border)] px-2 py-1.5 text-[11px] text-[var(--text-faint)] hover:bg-[var(--border)] hover:text-white transition disabled:opacity-40"
                   >
