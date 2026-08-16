@@ -2,6 +2,7 @@ import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { MarkdownCodeBlock } from "./SyntaxHighlight";
+import { useMaskHost } from "../../lib/privacy";
 
 /** Strip accidental whole-message code fences some models wrap replies in. */
 export function normalizeAgentMarkdown(content: string): string {
@@ -87,7 +88,9 @@ export function AgentMarkdown({
   executeTarget?: { name: string; host: string } | null;
   onExecute?: (code: string) => void;
 }) {
-  const body = normalizeAgentMarkdown(content);
+  const maskHost = useMaskHost();
+  const rawBody = normalizeAgentMarkdown(content);
+  const body = maskHost(rawBody);
 
   if (variant === "user") {
     return <span className="whitespace-pre-wrap">{body}</span>;

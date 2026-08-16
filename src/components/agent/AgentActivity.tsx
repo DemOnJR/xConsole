@@ -6,6 +6,7 @@ import { useVpsStore } from "../../stores/vpsStore";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { redactExportText } from "../../lib/agentExport";
 import { HashSpinner } from "./HashSpinner";
+import { useMaskHost } from "../../lib/privacy";
 
 function truncate(s: string, max: number): string {
   const flat = s.replace(/\s+/g, " ").trim();
@@ -148,6 +149,7 @@ function MetaLine({
   running?: boolean;
   item?: AgentActivityItem;
 }) {
+  const maskHost = useMaskHost();
   return (
     <div
       className={`flex items-center gap-1.5 text-[11px] leading-[1.35] ${
@@ -155,7 +157,7 @@ function MetaLine({
       }`}
     >
       {running ? <HashSpinner item={item} /> : null}
-      <span className="min-w-0 truncate">{text}</span>
+      <span className="min-w-0 truncate">{maskHost(text)}</span>
     </div>
   );
 }
@@ -278,14 +280,15 @@ function CommandCard({
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
 }) {
+  const maskHost = useMaskHost();
   const running = item.state === "running";
   const failed = item.state === "error";
   const [internal, setInternal] = useState(!defaultCollapsed);
   const expanded = open ?? internal;
   const setExpanded = (next: boolean | ((v: boolean) => boolean)) => {
-    const value = typeof next === "function" ? next(expanded) : next;
-    onOpenChange?.(value);
-    if (open === undefined) setInternal(value);
+    const computed = typeof next === "function" ? next(expanded) : next;
+    setInternal(computed);
+    onOpenChange?.(computed);
   };
   const cmd = redactExportText(commandBody(item));
   const output = item.output?.trim();
@@ -334,11 +337,11 @@ function CommandCard({
         </span>
         <span className="shrink-0 font-mono text-[10px] text-[var(--success)]">$</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--text-dim)]">
-          {cmd || commandTitle(item)}
+          {maskHost(cmd || commandTitle(item))}
         </span>
         {hostLabel ? (
           <span className="shrink-0 rounded bg-[var(--border)]/60 px-1 py-0.5 font-mono text-[9px] text-[var(--text-faint)]">
-            {hostLabel}
+            {maskHost(hostLabel)}
           </span>
         ) : null}
         {running ? (
@@ -355,12 +358,12 @@ function CommandCard({
       {expanded && (
         <div className="agent-activity-scroll max-h-[280px] overflow-y-auto border-t border-[var(--border)]/60 bg-[var(--bg)] px-2.5 py-2 font-[family-name:var(--font-mono)]">
           <div className="flex items-center justify-between gap-2 pb-1 text-[10px] text-[var(--text-faint)]">
-            <span className="truncate">{commandTitle(item)}</span>
+            <span className="truncate">{maskHost(commandTitle(item))}</span>
             {hostLabel ? (
               <button
                 type="button"
                 className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-[var(--text-faint)] transition hover:bg-[var(--surface-hover)] hover:text-[var(--accent)]"
-                data-tooltip="Open this host on the canvas"
+                data-tooltip={`Open ${maskHost(hostLabel)} on the canvas`}
                 onClick={(e) => {
                   e.stopPropagation();
                   openOnCanvas();
@@ -374,11 +377,11 @@ function CommandCard({
             <span className="shrink-0 select-none font-mono text-[10px] text-[var(--success)]">
               $
             </span>
-            <ShellCommand code={cmd} className="min-w-0 flex-1" />
+            <ShellCommand code={maskHost(cmd)} className="min-w-0 flex-1" />
           </div>
           {output && !running ? (
             <div className="mt-2 border-t border-[var(--border)]/60 pt-2">
-              <ConsoleOutput text={redactExportText(output)} />
+              <ConsoleOutput text={maskHost(redactExportText(output))} />
             </div>
           ) : null}
           {running && !output ? (

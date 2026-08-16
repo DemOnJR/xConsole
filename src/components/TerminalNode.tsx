@@ -22,6 +22,7 @@ import { onOsDropHover, onOsFilesDropped } from "../hooks/useOsFileDrop";
 import { onInternalDrop, useDragStore } from "../stores/dragStore";
 import { bytesToB64 } from "../lib/tauri";
 import { GitBranchBadge, useGitBranch } from "../hooks/useGitBranch";
+import { useMaskHost } from "../lib/privacy";
 
 /** A file that was just put on the server, shown as a dismissible chip. */
 interface DroppedChip {
@@ -59,6 +60,7 @@ export const TerminalNode = memo(function TerminalNode({ id, data, selected, dra
 
   const focus = useCanvasStore((s) => s.focus);
   const removeNode = useCanvasStore((s) => s.removeNode);
+  const maskHost = useMaskHost();
   const { fitView } = useReactFlow();
   const setInfo = useSessionStore((s) => s.setInfo);
   const removeInfo = useSessionStore((s) => s.remove);
@@ -500,7 +502,7 @@ export const TerminalNode = memo(function TerminalNode({ id, data, selected, dra
             void navigator.clipboard.writeText(String(data.host ?? ""));
           }}
         >
-          {data.host}
+          {maskHost(String(data.host ?? ""))}
         </button>
         {info?.cwd && (
           <button

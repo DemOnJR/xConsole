@@ -62,6 +62,7 @@ import { SftpPermissionsDialog } from "./SftpPermissionsDialog";
 import { SftpCodeEditor } from "./SftpCodeEditor";
 import { GitBranchBadge, useGitBranch } from "../hooks/useGitBranch";
 import { shellQuote } from "../lib/terminalClipboard";
+import { useMaskHost } from "../lib/privacy";
 
 type ConnState = "connecting" | "connected" | "error" | "disconnected";
 
@@ -166,6 +167,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
   const focus = useCanvasStore((s) => s.focus);
   const removeNode = useCanvasStore((s) => s.removeNode);
   const updateNodeData = useCanvasStore((s) => s.updateNodeData);
+  const maskHost = useMaskHost();
   const { fitView } = useReactFlow();
 
   const linkedTerminalId = data.linkedTerminalId;
@@ -1643,7 +1645,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
             void navigator.clipboard.writeText(String(data.host ?? ""));
           }}
         >
-          SFTP · {data.host}
+          SFTP · {maskHost(String(data.host ?? ""))}
         </button>
         {linkedTerminalId && (
           <button

@@ -3,6 +3,7 @@ import { api, type KnownHost, type LockStatus } from "../../../lib/tauri";
 import { dialog } from "../../../stores/dialogStore";
 import { Button, Card, SectionHeader, Toggle } from "../ui";
 import { TrashIcon } from "../../icons";
+import { useMaskHost } from "../../../lib/privacy";
 
 const inputCls =
   "w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-gray-100 outline-none focus:border-[var(--accent)]";
@@ -278,6 +279,7 @@ function AppLockCard() {
 }
 
 export function SecuritySection() {
+  const maskHost = useMaskHost();
   const [hosts, setHosts] = useState<KnownHost[]>([]);
 
   const load = () => api.listKnownHosts().then(setHosts);
@@ -289,7 +291,7 @@ export function SecuritySection() {
     if (
       !(await dialog.confirm({
         title: "Forget host key",
-        message: `Forget pinned key for ${h.host}:${h.port}?`,
+        message: `Forget pinned key for ${maskHost(h.host)}:${h.port}?`,
         danger: true,
         confirmText: "Forget",
       }))
@@ -323,7 +325,7 @@ export function SecuritySection() {
           <Card key={`${h.host}:${h.port}`} className="flex items-center gap-3">
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm text-gray-200">
-                {h.host}:{h.port}
+                {maskHost(h.host)}:{h.port}
               </div>
               <div className="truncate font-mono text-[11px] text-gray-500">
                 {h.key_type} · {h.fingerprint}

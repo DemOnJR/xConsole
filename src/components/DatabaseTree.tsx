@@ -7,6 +7,7 @@ import {
   type DbTable,
 } from "../lib/tauri";
 import { DatabaseIcon } from "./icons";
+import { useMaskHost } from "../lib/privacy";
 
 /**
  * One database server found on the host, plus whatever we've learned about it.
@@ -287,6 +288,7 @@ export function DatabaseTree({
   onSavedChanged: () => void;
   onForget: (id: string) => void;
 }) {
+  const maskHost = useMaskHost();
   const [filter, setFilter] = useState("");
   const filterQ = filter.trim().toLowerCase();
 
@@ -364,7 +366,7 @@ export function DatabaseTree({
               <button
                 onClick={() => toggleInstance(inst)}
                 className="flex w-full items-center gap-1 px-2 py-0.5 text-left text-[11px] text-gray-200 hover:bg-[var(--border)]"
-                title={`${ep.host}:${ep.port}${ep.image ? ` · ${ep.image}` : ""}`}
+                title={`${maskHost(ep.host)}:${ep.port}${ep.image ? ` · ${ep.image}` : ""}`}
               >
                 <span className="w-2 shrink-0 text-gray-600">
                   {inst.expanded ? "▾" : "▸"}

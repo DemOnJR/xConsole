@@ -6,11 +6,14 @@ import { dialog } from "../stores/dialogStore";
 import { api } from "../lib/tauri";
 import {
   EraserIcon,
+  EyeIcon,
+  EyeOffIcon,
   GridIcon,
   MaximizeIcon,
   SaveAsIcon,
   SaveIcon,
 } from "./icons";
+import { usePrivacyStore } from "../stores/privacyStore";
 
 
 const MODES: { id: LayoutMode; label: string; title: string }[] = [
@@ -26,6 +29,8 @@ const ICON_BTN =
   "flex items-center justify-center rounded-md border border-[var(--border)] p-1.5 text-gray-300 hover:bg-[var(--border)] hover:text-white";
 
 export function Toolbar() {
+  const maskIps = usePrivacyStore((s) => s.maskIps);
+  const toggleMaskIps = usePrivacyStore((s) => s.toggleMaskIps);
   const layoutMode = useCanvasStore((s) => s.layoutMode);
   const setLayout = useCanvasStore((s) => s.setLayout);
   const retileFromPositions = useCanvasStore((s) => s.retileFromPositions);
@@ -157,6 +162,24 @@ export function Toolbar() {
           disabled={nodes.length === 0}
         >
           <EraserIcon size={15} />
+        </button>
+
+        <div className="mx-0.5 h-5 w-px bg-[var(--border)]" />
+
+        <button
+          data-tooltip={
+            maskIps
+              ? "Mask server IPs: ON (click to reveal)"
+              : "Mask server IPs: OFF (click to hide)"
+          }
+          onClick={toggleMaskIps}
+          className={`${ICON_BTN} ${
+            maskIps
+              ? "border-amber-500/40 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 hover:text-amber-200"
+              : ""
+          }`}
+        >
+          {maskIps ? <EyeOffIcon size={15} /> : <EyeIcon size={15} />}
         </button>
     </div>
   );

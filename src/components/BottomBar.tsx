@@ -24,6 +24,7 @@ import {
 } from "./icons";
 import { extractCwdFromOutput } from "../lib/terminalCwd";
 import { GitBranchBadge, useGitBranch } from "../hooks/useGitBranch";
+import { useMaskHost } from "../lib/privacy";
 const STATUS_COLOR: Record<ConnState, string> = {
   connecting: "#e0af68",
   connected: "#9ece6a",
@@ -71,6 +72,7 @@ function ConsolePane({
   const sessionIdRef = useRef<string | null>(null);
   const [status, setStatus] = useState<ConnState>("connecting");
   const [cwd, setCwd] = useState<string | null>(null);
+  const maskHost = useMaskHost();
   const gitInfo = useGitBranch({
     enabled: status === "connected",
     path: cwd,
@@ -230,7 +232,7 @@ function ConsolePane({
           data-tooltip={status}
         />
         <span className="truncate font-medium text-gray-200">{target.name}</span>
-        <span className="truncate text-gray-500">{target.host}</span>
+        <span className="truncate text-gray-500">{maskHost(target.host)}</span>
         {cwd ? (
           <span
             className="max-w-[100px] truncate font-mono text-[10px] text-gray-600"
@@ -258,6 +260,7 @@ function ConsolePane({
 }
 
 export function BottomBar() {
+  const maskHost = useMaskHost();
   const vpsList = useVpsStore((s) => s.vpsList);
   const loadVps = useVpsStore((s) => s.load);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
@@ -433,7 +436,7 @@ export function BottomBar() {
               <button
                 key={t.vpsId}
                 onClick={() => toggleTarget(t.vpsId)}
-                data-tooltip={`${t.name} (${t.host})`}
+                data-tooltip={`${t.name} (${maskHost(t.host)})`}
                 className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] ${
                   on
                     ? "border-blue-500 bg-blue-600/30 text-blue-100"

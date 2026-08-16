@@ -5,6 +5,7 @@ import { useCloudStore } from "../../../stores/cloudStore";
 import type { InfraProject, InfraProjectInput } from "../../../lib/tauri";
 import { PlusIcon, TrashIcon } from "../../icons";
 import { Button, Card, Field, SectionHeader, Select, TextInput } from "../ui";
+import { useMaskHost } from "../../../lib/privacy";
 
 function emptyProject(): InfraProjectInput {
   return {
@@ -25,6 +26,7 @@ function ProjectForm({
   initial: InfraProject | null;
   onClose: () => void;
 }) {
+  const maskHost = useMaskHost();
   const save = useProjectStore((s) => s.save);
   const vpsList = useVpsStore((s) => s.vpsList);
   const loadVps = useVpsStore((s) => s.load);
@@ -142,7 +144,7 @@ function ProjectForm({
               <option value="">— select —</option>
               {vpsList.map((v) => (
                 <option key={v.id} value={v.id}>
-                  {v.name} ({v.host})
+                  {v.name} ({maskHost(v.host)})
                 </option>
               ))}
             </Select>

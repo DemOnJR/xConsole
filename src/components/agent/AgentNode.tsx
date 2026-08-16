@@ -38,6 +38,7 @@ import {
 } from "../../lib/vision";
 
 import { useUiStore } from "../../stores/uiStore";
+import { useMaskHost } from "../../lib/privacy";
 
 import { useVpsStore } from "../../stores/vpsStore";
 import { useCanvasStore, NODE_W, NODE_H, type AgentNode as AgentNodeType } from "../../stores/canvasStore";
@@ -300,6 +301,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
 
 
 
+  const maskHost = useMaskHost();
   const vpsList = useVpsStore((s) => s.vpsList);
 
   const loadVps = useVpsStore((s) => s.load);
@@ -762,10 +764,10 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
       vpsList.map((v) => ({
         id: v.id,
         label: v.name,
-        detail: v.host,
+        detail: maskHost(v.host),
         selected: targets.includes(v.id),
       })),
-    [vpsList, targets],
+    [vpsList, targets, maskHost],
   );
 
   const historyOptions = useMemo<CLIPickerOption[]>(
@@ -1354,8 +1356,8 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     () =>
       vpsList
         .filter((v) => targets.includes(v.id))
-        .map((v) => ({ id: v.id, name: v.name, host: v.host })),
-    [vpsList, targets],
+        .map((v) => ({ id: v.id, name: v.name, host: maskHost(v.host) })),
+    [vpsList, targets, maskHost],
   );
 
   const handlePickTargets = () => {

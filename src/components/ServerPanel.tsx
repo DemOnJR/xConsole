@@ -7,9 +7,11 @@ import { VpsForm } from "./VpsForm";
 import { dialog } from "../stores/dialogStore";
 import { PlusIcon, TrashIcon, FolderIcon, DatabaseIcon } from "./icons";
 import { DrawerHeader } from "./DrawerHeader";
+import { useMaskHost } from "../lib/privacy";
 
 export function ServerPanel({ width }: { width?: number }) {
   const { vpsList, load, remove, reorder } = useVpsStore();
+  const maskHost = useMaskHost();
   const addVps = useCanvasStore((s) => s.addVps);
   const addSftp = useCanvasStore((s) => s.addSftp);
   const addDb = useCanvasStore((s) => s.addDb);
@@ -165,7 +167,7 @@ export function ServerPanel({ width }: { width?: number }) {
                   <span className="truncate">{v.name}</span>
                 </div>
                 <div className="truncate text-xs text-gray-500">
-                  {v.username}@{v.host}:{v.port}
+                  {v.username}@{maskHost(v.host)}:{v.port}
                 </div>
               </button>
               {/* Icons overlay the row on hover so they never steal text width.
@@ -185,7 +187,7 @@ export function ServerPanel({ width }: { width?: number }) {
                 </button>
                 <button
                   className="rounded p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
-                  data-tooltip="Copy user@host"
+                  data-tooltip={`Copy ${v.username}@${maskHost(v.host)}`}
                   onClick={(e) => {
                     e.stopPropagation();
                     void navigator.clipboard.writeText(`${v.username}@${v.host}`);

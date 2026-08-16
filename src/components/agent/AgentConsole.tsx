@@ -5,6 +5,7 @@ import { AgentMarkdown } from "./AgentMarkdown";
 import { AgentActivityFeed, AgentThinking } from "./AgentActivity";
 import { segmentsFromMessage } from "../../stores/turnSegments";
 import { previewSrc } from "../../lib/vision";
+import { useMaskHost } from "../../lib/privacy";
 
 function AssistantTurn({
   segments,
@@ -19,6 +20,7 @@ function AssistantTurn({
   executeTarget?: { name: string; host: string } | null;
   onExecute?: (code: string) => void;
 }) {
+  const maskHost = useMaskHost();
   return (
     <div className="flex flex-col gap-2">
       {segments.map((seg, i) => {
@@ -29,7 +31,7 @@ function AssistantTurn({
               <span className="shrink-0 text-emerald-400">•</span>
               <div className={`min-w-0 ${expanded ? "w-full" : "w-[92%]"}`}>
                 {live ? (
-                  <div className="whitespace-pre-wrap break-words">{plainText(seg.content)}</div>
+                  <div className="whitespace-pre-wrap break-words">{maskHost(plainText(seg.content))}</div>
                 ) : (
                   <AgentMarkdown
                     content={seg.content}
@@ -73,6 +75,7 @@ export function AgentConsole({
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
+  const maskHost = useMaskHost();
 
   const handleScroll = () => {
     const el = scrollRef.current;
@@ -139,7 +142,7 @@ export function AgentConsole({
               <div key={key} className="flex gap-2 text-[var(--text)]">
                 <span className="shrink-0 font-bold text-cyan-400">~#</span>
                 <div className="min-w-0 flex-1">
-                  <div className="whitespace-pre-wrap break-words">{plainText(message.content)}</div>
+                  <div className="whitespace-pre-wrap break-words">{maskHost(plainText(message.content))}</div>
                   {message.images && message.images.length > 0 ? (
                     <div className="mt-1.5 flex flex-wrap gap-1.5">
                       {message.images.map((img, i) => (

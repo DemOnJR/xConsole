@@ -4,6 +4,7 @@ import type { ContextUsage, SessionCacheTotals, TokenStats } from "../../lib/str
 import { BrainIcon, EyeIcon, PlanIcon, ServerIcon, ShieldIcon, SparkIcon } from "../icons";
 import { ContextGauge } from "./ContextGauge";
 import { CacheMeter } from "./AgentTokenStats";
+import { useMaskHost } from "../../lib/privacy";
 
 export interface TargetServerInfo {
   id: string;
@@ -94,14 +95,15 @@ export const InputBar = memo(function InputBar({
     const i = order.indexOf(reasoning);
     onReasoning(order[(i + 1) % order.length] ?? "off");
   };
+  const maskHost = useMaskHost();
   const targetsTip = useMemo(() => {
     if (!activeTargets || activeTargets.length === 0) {
       return "Targets: None active\nSelect target servers (/targets)";
     }
     const countStr = `Targets (${activeTargets.length} active):`;
-    const listStr = activeTargets.map((t) => `• ${t.name} (${t.host})`).join("\n");
+    const listStr = activeTargets.map((t) => `• ${t.name} (${maskHost(t.host)})`).join("\n");
     return `${countStr}\n${listStr}\nManage targets (/targets)`;
-  }, [activeTargets]);
+  }, [activeTargets, maskHost]);
   const iconBtn =
     "flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--text-dim)] transition hover:bg-[var(--border)]/50 hover:text-[var(--text)]";
 
