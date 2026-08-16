@@ -6,7 +6,12 @@ import type { AiProvider, AiProviderInput, ProviderKind } from "../../../lib/tau
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { PlusIcon, TrashIcon } from "../../icons";
 import { Button, Card, Field, SectionHeader, Select, TextInput } from "../ui";
-import { catalogGroups, searchCatalog, type CatalogProvider } from "../../../lib/providerCatalog";
+import {
+  catalogForProvider,
+  catalogGroups,
+  searchCatalog,
+  type CatalogProvider,
+} from "../../../lib/providerCatalog";
 
 const KIND_LABELS: Record<ProviderKind, string> = {
   anthropic: "Anthropic API",
@@ -219,13 +224,14 @@ function ProviderForm({
   const saveProvider = useSettingsStore((s) => s.saveProvider);
   // Catalog-based add flow: when a catalog provider is picked, the form is pre-filled
   // from the catalog and model autodetect runs. "Advanced" keeps the manual form.
-  const [catalogPick, setCatalogPick] = useState<CatalogProvider | null>(null);
+  const initialCatalog = initial ? catalogForProvider(initial) ?? null : null;
+  const [catalogPick, setCatalogPick] = useState<CatalogProvider | null>(initialCatalog);
   const [showCatalog, setShowCatalog] = useState(!initial);
   const [catalogQuery, setCatalogQuery] = useState("");
   const [catalogOpen, setCatalogOpen] = useState(false);
   const [detecting, setDetecting] = useState(false);
   const [detectedModels, setDetectedModels] = useState<string[]>([]);
-  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [modelOptions, setModelOptions] = useState<string[]>(() => initialCatalog?.models ?? []);
   const [form, setForm] = useState<AiProviderInput>(
     initial
       ? {
@@ -312,6 +318,40 @@ function ProviderForm({
     }
   };
 
+  const fetchCloudModels = async (
+    baseUrl?: string,
+    apiKey?: string,
+    fallbackCatalog?: CatalogProvider | null,
+  ) => {
+    const url = baseUrl || form.base_url || "";
+    if (!url) return;
+    const cat = fallbackCatalog ?? catalogPick;
+    const flavor =
+      cat?.flavor || (form.kind === "anthropic" ? "anthropic" : "openai");
+    if (flavor === "local" || flavor === "cli") return;
+
+    setDetecting(true);
+    try {
+      const ids = await api.listModels(
+        flavor,
+        url,
+        apiKey ?? (form.secret?.trim() ?? ""),
+      );
+      if (ids.length > 0) {
+        setDetectedModels(ids);
+        const combined = Array.from(
+          new Set([...(cat?.models ?? []), ...ids]),
+        );
+        setModelOptions(combined);
+        setForm((f) => ({ ...f, model: f.model || ids[0] }));
+      }
+    } catch {
+      /* fall back to curated */
+    } finally {
+      setDetecting(false);
+    }
+  };
+
   /** Pick a catalog provider: pre-fill the form, then autodetect models. */
   const pickCatalog = async (p: CatalogProvider) => {
     setCatalogPick(p);
@@ -327,8 +367,6 @@ function ProviderForm({
     // Curated fallback models are always available for the dropdown.
     setModelOptions(p.models ?? []);
     setDetectedModels(p.models ?? []);
-    // Local / CLI kinds list models from the machine; cloud kinds probe /models.
-    // The probe needs the API key, so it re-runs when the secret is filled (below).
     if (p.flavor === "local") {
       setDetecting(true);
       try {
@@ -346,35 +384,17 @@ function ProviderForm({
       } finally {
         setDetecting(false);
       }
+    } else if (p.flavor === "openai" || p.flavor === "anthropic") {
+      void fetchCloudModels(p.baseUrl, form.secret?.trim() ?? "", p);
     }
   };
 
-  // When the API key is filled for a cloud catalog provider, probe /models live.
-  const secret = form.secret?.trim() ?? "";
   useEffect(() => {
-    if (!catalogPick || catalogPick.flavor === "local" || catalogPick.flavor === "cli") return;
-    if (secret.length < 8) return;
-    let alive = true;
-    setDetecting(true);
-    (async () => {
-      try {
-        const ids = await api.listModels(catalogPick.flavor, form.base_url ?? "", secret);
-        if (alive && ids.length > 0) {
-          setDetectedModels(ids);
-          setModelOptions([...(catalogPick.models ?? []), ...ids]);
-          setForm((f) => ({ ...f, model: f.model || ids[0] }));
-        }
-      } catch {
-        /* fall back to curated */
-      } finally {
-        if (alive) setDetecting(false);
-      }
-    })();
-    return () => {
-      alive = false;
-    };
+    if (form.base_url && (form.kind === "openai" || form.kind === "anthropic")) {
+      void fetchCloudModels(form.base_url, form.secret?.trim() ?? "", catalogPick);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [secret, catalogPick?.id]);
+  }, [form.base_url, form.secret, catalogPick?.id]);
 
   const submit = async () => {
     if (!form.name.trim()) return;
@@ -549,25 +569,46 @@ function ProviderForm({
               hint={
                 form.kind === "llamacpp" && localModels.length > 0
                   ? "Downloaded GGUF files on this machine — or type the model id your server reports."
-                  : catalogPick && detectedModels.length > 0
-                    ? "Detected from the provider — or type any model id."
+                  : detectedModels.length > 0
+                    ? `Detected ${detectedModels.length} model(s) from provider API — or type any custom id.`
                     : undefined
               }
             >
-              {form.kind === "llamacpp" || (catalogPick && modelOptions.length > 0) ? (
-                <ModelCombo
-                  value={form.model ?? ""}
-                  onChange={(v) => patch({ model: v })}
-                  options={modelOptions}
-                  placeholder="model id"
-                />
-              ) : (
-                <TextInput
-                  value={form.model ?? ""}
-                  onChange={(e) => patch({ model: e.target.value })}
-                  placeholder="model id"
-                />
-              )}
+              <div className="flex gap-2">
+                <div className="flex-1">
+                  {form.kind === "llamacpp" || modelOptions.length > 0 ? (
+                    <ModelCombo
+                      value={form.model ?? ""}
+                      onChange={(v) => patch({ model: v })}
+                      options={modelOptions}
+                      placeholder="model id"
+                    />
+                  ) : (
+                    <TextInput
+                      value={form.model ?? ""}
+                      onChange={(e) => patch({ model: e.target.value })}
+                      placeholder="model id"
+                    />
+                  )}
+                </div>
+                {(form.kind === "openai" || form.kind === "anthropic") && form.base_url && (
+                  <button
+                    type="button"
+                    disabled={detecting}
+                    onClick={() =>
+                      void fetchCloudModels(
+                        form.base_url || undefined,
+                        form.secret?.trim() ?? "",
+                        catalogPick,
+                      )
+                    }
+                    className="inline-flex items-center justify-center rounded-md border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1 text-xs text-[var(--text-dim)] hover:text-[var(--text)] disabled:opacity-50"
+                    title="Fetch available models directly from provider API"
+                  >
+                    {detecting ? "Detecting…" : "Detect"}
+                  </button>
+                )}
+              </div>
             </Field>
             <Field
               label="Base URL"

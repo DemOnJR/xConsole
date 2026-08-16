@@ -918,32 +918,47 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     [],
   );
 
-  const [cliModels, setCliModels] = useState<string[]>([]);
+  const [providerDynamicModels, setProviderDynamicModels] = useState<string[]>([]);
   useEffect(() => {
     if (picker?.kind !== "model-models" || !pendingProviderId) {
-      setCliModels([]);
+      setProviderDynamicModels([]);
       return;
     }
     const p = providers.find((x) => x.id === pendingProviderId);
-    const cli =
-      p &&
-      (p.kind === "opencode_cli" ||
-        p.kind === "antigravity_cli" ||
-        p.kind === "cursor" ||
-        p.kind === "codex_cli");
-    if (!cli) {
-      setCliModels([]);
+    if (!p) {
+      setProviderDynamicModels([]);
       return;
     }
+    const cli =
+      p.kind === "opencode_cli" ||
+      p.kind === "antigravity_cli" ||
+      p.kind === "cursor" ||
+      p.kind === "codex_cli";
+
     let alive = true;
-    api
-      .aiCliModels(p.id)
-      .then((list) => {
-        if (alive) setCliModels(list);
-      })
-      .catch(() => {
-        if (alive) setCliModels([]);
-      });
+    if (cli) {
+      api
+        .aiCliModels(p.id)
+        .then((list) => {
+          if (alive) setProviderDynamicModels(list);
+        })
+        .catch(() => {
+          if (alive) setProviderDynamicModels([]);
+        });
+    } else if (p.base_url && (p.kind === "openai" || p.kind === "anthropic")) {
+      const catalog = catalogForProvider(p);
+      const flavor = catalog?.flavor || (p.kind === "anthropic" ? "anthropic" : "openai");
+      api
+        .listModels(flavor, p.base_url, "")
+        .then((list) => {
+          if (alive && list.length > 0) setProviderDynamicModels(list);
+        })
+        .catch(() => {
+          if (alive) setProviderDynamicModels([]);
+        });
+    } else {
+      setProviderDynamicModels([]);
+    }
     return () => {
       alive = false;
     };
@@ -967,10 +982,10 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
       });
     };
     add(p.model || "", "configured");
-    for (const m of cliModels) add(m, "agy / cli");
+    for (const m of providerDynamicModels) add(m, "api / live");
     for (const m of catalog?.models ?? []) add(m, "catalog");
     return opts;
-  }, [providers, pendingProviderId, activeModel, cliModels]);
+  }, [providers, pendingProviderId, activeModel, providerDynamicModels]);
 
   /** Handle a picker selection. */
   const onPickerPick = (opt: CLIPickerOption) => {
