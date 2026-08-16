@@ -1302,6 +1302,21 @@ export function onCanvasCommand(
   return listen<CanvasCommand>("canvas://command", (e) => cb(e.payload));
 }
 
+export interface CanvasPreviewPayload {
+  id: string;
+  title: string;
+  html: string;
+  width: number;
+  height: number;
+}
+
+/** Subscribe to live HTML/design sandbox preview requests from the agent. */
+export function onCanvasPreview(
+  cb: (payload: CanvasPreviewPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<CanvasPreviewPayload>("canvas://open-preview", (e) => cb(e.payload));
+}
+
 export function onVpsUpdated(cb: () => void): Promise<UnlistenFn> {
   return listen("vps://updated", () => cb());
 }

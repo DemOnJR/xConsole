@@ -1011,29 +1011,39 @@ pub async fn run_turn(
             break;
         }
         emit_ws(if testing { "testing" } else { "working" });
+        // Pre-execution tool call auto-repair (Rick-style resilience against malformed calls,
+        // markdown file link syntax, string-quoted numbers, and single-item arrays).
+        let mut repaired_calls = resp.tool_calls.clone();
+        let mut repair_notes: Vec<Option<String>> = Vec::new();
+        for call in &mut repaired_calls {
+            let note = repair_tool_call(call);
+            repair_notes.push(note);
+        }
+
         // Parallelize read-only tool batches (e.g. run_command_all-style multi-host
         // checks issued as separate run_command calls, list/read tools). Mutating tools
         // stay sequential so safety/approvals and ordering stay predictable.
-        let all_readonly = resp
-            .tool_calls
+        let all_readonly = repaired_calls
             .iter()
             .all(|c| !tools::tool_is_mutating(&c.name, &c.arguments));
-        if all_readonly && resp.tool_calls.len() > 1 {
+        if all_readonly && repaired_calls.len() > 1 {
             emit(
                 Some(sink),
                 StreamEvent::Status(format!(
                     "Running {} read-only tools in parallel…",
-                    resp.tool_calls.len()
+                    repaired_calls.len()
                 )),
             );
-            let futs: Vec<_> = resp
-                .tool_calls
-                .iter()
-                .map(|call| {
-                    let call = call.clone();
+            let futs: Vec<_> = repaired_calls
+                .into_iter()
+                .zip(repair_notes.into_iter())
+                .map(|(call, repair_note)| {
                     let telemetry = telemetry.clone();
                     async move {
-                        let output = tools::dispatch_with_telemetry(tc, &call, sink, Some(&telemetry)).await;
+                        let mut output = tools::dispatch_with_telemetry(tc, &call, sink, Some(&telemetry)).await;
+                        if let Some(note) = repair_note {
+                            output = format!("<repaired: {note}>\n{output}");
+                        }
                         (call, output)
                     }
                 })
@@ -1051,11 +1061,14 @@ pub async fn run_turn(
                 messages.push(ChatMessage::tool_result(call.id, capped));
             }
         } else {
-            for call in &resp.tool_calls {
+            for (call, repair_note) in repaired_calls.into_iter().zip(repair_notes.into_iter()) {
                 // The provider already streamed StreamEvent::ToolCall for each call;
                 // the single ToolResult is emitted by this loop below. No re-emit here.
-                let output = tools::dispatch_with_telemetry(tc, call, sink, Some(&telemetry)).await;
-                let capped = cap_tool_result(call, &output);
+                let mut output = tools::dispatch_with_telemetry(tc, &call, sink, Some(&telemetry)).await;
+                if let Some(note) = repair_note {
+                    output = format!("<repaired: {note}>\n{output}");
+                }
+                let capped = cap_tool_result(&call, &output);
                 emit(
                     Some(sink),
                     StreamEvent::ToolResult {
@@ -1212,4 +1225,142 @@ pub async fn run_turn(
     }
 
     Ok(last)
+}
+
+/// Pre-execution sanitizer for tool calls.
+/// Fixes markdown-wrapped file links, string-encoded numbers, booleans, and single-item arrays.
+/// Returns a description of what was repaired if any modification occurred.
+pub fn repair_tool_call(call: &mut crate::ai::provider::ToolCall) -> Option<String> {
+    let mut repairs: Vec<String> = Vec::new();
+
+    // 1. Unwrap Markdown file links in string parameters (e.g. path, local_path, remote_path)
+    let path_keys = [
+        "path",
+        "local_path",
+        "remote_path",
+        "source",
+        "glob",
+        "backup_dir",
+        "key_path",
+        "target_dir",
+    ];
+    for key in &path_keys {
+        if let Some(val) = call.arguments.get_mut(*key) {
+            if let Some(s) = val.as_str() {
+                if let Some(unwrapped) = unwrap_markdown_path(s) {
+                    *val = json!(unwrapped);
+                    repairs.push(format!("unwrapped markdown link in '{key}'"));
+                }
+            }
+        }
+    }
+
+    // 2. Coerce string numbers into JSON integers
+    let int_keys = [
+        "offset",
+        "limit",
+        "port",
+        "head_limit",
+        "delay_secs",
+        "max_cycles",
+        "max_tokens",
+        "width",
+        "height",
+    ];
+    for key in &int_keys {
+        if let Some(val) = call.arguments.get_mut(*key) {
+            if let Some(s) = val.as_str() {
+                if let Ok(num) = s.parse::<i64>() {
+                    *val = json!(num);
+                    repairs.push(format!("coerced '{key}' string to integer ({num})"));
+                }
+            }
+        }
+    }
+
+    // 3. Coerce boolean strings into JSON booleans
+    let bool_keys = [
+        "case_insensitive",
+        "replace_all",
+        "submit",
+        "multi",
+        "save_backup",
+        "plan_mode",
+    ];
+    for key in &bool_keys {
+        if let Some(val) = call.arguments.get_mut(*key) {
+            if let Some(s) = val.as_str() {
+                match s.trim().to_lowercase().as_str() {
+                    "true" | "yes" | "1" => {
+                        *val = json!(true);
+                        repairs.push(format!("coerced '{key}' string to boolean (true)"));
+                    }
+                    "false" | "no" | "0" => {
+                        *val = json!(false);
+                        repairs.push(format!("coerced '{key}' string to boolean (false)"));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // 4. Wrap single string/object into array if schema expects an array
+    let array_keys = [
+        "todos",
+        "files",
+        "questions",
+        "success_criteria",
+        "check_tooling",
+        "hard_constraints",
+        "options",
+    ];
+    for key in &array_keys {
+        if let Some(val) = call.arguments.get_mut(*key) {
+            if val.is_string() || val.is_object() {
+                let single = val.clone();
+                *val = json!([single]);
+                repairs.push(format!("wrapped single '{key}' item into an array"));
+            }
+        }
+    }
+
+    if repairs.is_empty() {
+        None
+    } else {
+        Some(repairs.join(", "))
+    }
+}
+
+fn unwrap_markdown_path(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    // [filename](file:///path) or [filename](path)
+    if trimmed.starts_with('[') && trimmed.contains("](") && trimmed.ends_with(')') {
+        let parts: Vec<&str> = trimmed.split("](").collect();
+        if parts.len() == 2 {
+            let mut target = parts[1].trim_end_matches(')').trim();
+            if let Some(stripped) = target.strip_prefix("file:///") {
+                target = stripped;
+            } else if let Some(stripped) = target.strip_prefix("file://") {
+                target = stripped;
+            }
+            return Some(target.to_string());
+        }
+    }
+    // `file:///path` or `file://path` or `path`
+    if trimmed.starts_with('`') && trimmed.ends_with('`') && trimmed.len() > 2 {
+        let inside = trimmed[1..trimmed.len() - 1].trim();
+        let target = inside
+            .strip_prefix("file:///")
+            .or_else(|| inside.strip_prefix("file://"))
+            .unwrap_or(inside);
+        return Some(target.to_string());
+    }
+    if let Some(target) = trimmed.strip_prefix("file:///") {
+        return Some(target.to_string());
+    }
+    if let Some(target) = trimmed.strip_prefix("file://") {
+        return Some(target.to_string());
+    }
+    None
 }

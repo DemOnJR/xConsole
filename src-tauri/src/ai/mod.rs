@@ -22,6 +22,7 @@ pub mod gpu;
 pub mod goal;
 pub mod hooks;
 pub mod host_memory;
+pub mod image_gen;
 pub mod infra_tools;
 pub mod interaction;
 pub mod list_models;

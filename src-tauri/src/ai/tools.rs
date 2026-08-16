@@ -734,6 +734,55 @@ server, to see the result of what you typed.".into(),
                 "required": []
             }),
         },
+        ToolDef {
+            name: "generate_svg".into(),
+            description: "Generate a standalone vector graphic in SVG format (system architecture \
+diagram, network topology, process flow, icon, or infographic). Validates XML and writes to \
+artifacts/svg/ or the active workspace. Renders directly in the chat and on the canvas."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Short identifier/filename without extension, e.g. 'architecture_flow'"},
+                    "svg_content": {"type": "string", "description": "The complete <svg ...>...</svg> XML content"},
+                    "description": {"type": "string", "description": "Optional short summary of what this graphic represents"},
+                    "target_dir": {"type": "string", "description": "Optional destination directory on local PC"}
+                },
+                "required": ["name", "svg_content"]
+            }),
+        },
+        ToolDef {
+            name: "generate_image".into(),
+            description: "Generate an image or illustration from a detailed text prompt. Uses Flux / \
+Pollinations by default (free, zero-API-key) or OpenAI DALL-E 3 if configured. Saves PNG to \
+artifacts/images/ and renders inline."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Detailed prompt describing the image, subject, lighting, and composition"},
+                    "aspect_ratio": {"type": "string", "enum": ["1:1", "16:9", "9:16", "4:3", "3:2"], "description": "Image aspect ratio (default 1:1)"},
+                    "name": {"type": "string", "description": "Optional short name for the output image file"}
+                },
+                "required": ["prompt"]
+            }),
+        },
+        ToolDef {
+            name: "canvas_open_preview".into(),
+            description: "Open an interactive live HTML/CSS/JS preview or UI sandbox node directly on \
+the xConsole canvas flow. Use this to demonstrate web components, designs, dashboards, or prototypes to the user."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Title of the preview window (e.g. 'Hero Banner Component')"},
+                    "html": {"type": "string", "description": "The complete HTML/CSS/JS code to render in the sandbox iframe"},
+                    "width": {"type": "integer", "description": "Suggested width in px (default 800)"},
+                    "height": {"type": "integer", "description": "Suggested height in px (default 600)"}
+                },
+                "required": ["title", "html"]
+            }),
+        },
     ];
     defs.extend(web_tools::definitions());
     defs.extend(infra_tools::definitions());
@@ -765,9 +814,12 @@ const OLLAMA_VPS_TOOLS: &[&str] = &[
     "terminal_capture",
     "canvas_open_terminal",
     "canvas_open_sftp",
+    "canvas_open_preview",
     "canvas_tile",
     "canvas_close",
     "canvas_refresh",
+    "generate_svg",
+    "generate_image",
     "ask_user",
     "present_plan",
     "rename_session",
@@ -793,6 +845,9 @@ const OLLAMA_LOCAL_TOOLS: &[&str] = &[
     "local_write_file",
     "local_list_dir",
     "todo_write",
+    "canvas_open_preview",
+    "generate_svg",
+    "generate_image",
     "ask_user",
     "present_plan",
     "rename_session",
@@ -1007,6 +1062,9 @@ pub async fn dispatch_with_telemetry(
         "skill_view" => skill_view(ctx, args),
         "skill_save" => skill_save(ctx, args).await,
         "learn_skill" => learn_skill(ctx, args, sink).await,
+        "generate_svg" => generate_svg_tool(ctx, args).await,
+        "generate_image" => generate_image_tool(ctx, args).await,
+        "canvas_open_preview" => canvas_open_preview(ctx, args),
         name if web_tools::is_web_tool(name) => {
             // Gate `web_fetch` like a command. Its URL is model-controlled, so with a
             // file read in front of it this is a complete read-then-exfiltrate chain —
@@ -1362,7 +1420,8 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
         "read_file" | "local_read_file" | "local_list_dir" | "list_vps_targets"
         | "artifact_list" | "ssh_key_status" | "memory_save" | "skills_list" | "skill_view"
         | "learn_skill" | "ask_user" | "present_plan" | "terminal_capture" | "canvas_open_terminal"
-        | "canvas_open_sftp" | "canvas_tile" | "canvas_close" | "canvas_refresh" | "vision"
+        | "canvas_open_sftp" | "canvas_open_preview" | "canvas_tile" | "canvas_close" | "canvas_refresh" | "vision"
+        | "generate_svg" | "generate_image"
         | "grep_search" | "local_grep_search" | "todo_write" | "rename_session" => false,
         // Typing into a live shell runs commands → mutating.
         "terminal_send" => true,
@@ -3508,4 +3567,136 @@ async fn goal_schedule_wait(ctx: &ToolContext, args: &Value) -> String {
     }
     emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("waiting".into()));
     format!("Goal paused until {until}. Reason: {reason}")
+}
+
+// ---------------------------------------------------------------------------
+// Creative & Visual Tools: SVG Generation, Image Generation, Live Canvas Preview
+// ---------------------------------------------------------------------------
+
+async fn generate_svg_tool(ctx: &ToolContext, args: &Value) -> String {
+    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("graphic");
+    let svg_content = args.get("svg_content").and_then(|v| v.as_str()).unwrap_or("");
+    let description = args.get("description").and_then(|v| v.as_str()).unwrap_or("");
+    let target_dir_str = args.get("target_dir").and_then(|v| v.as_str());
+
+    if svg_content.trim().is_empty() {
+        return "error: missing required 'svg_content'".to_string();
+    }
+    if !svg_content.contains("<svg") || !svg_content.contains("</svg>") {
+        return "error: 'svg_content' must contain valid <svg ...>...</svg> markup".to_string();
+    }
+
+    let clean_name: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let filename = format!("{clean_name}.svg");
+
+    let dest_dir = if let Some(td) = target_dir_str.filter(|s| !s.trim().is_empty()) {
+        std::path::PathBuf::from(td)
+    } else {
+        ctx.home.0.join("artifacts").join("svg")
+    };
+
+    if let Err(e) = tokio::fs::create_dir_all(&dest_dir).await {
+        return format!("error creating destination directory: {e}");
+    }
+
+    let file_path = dest_dir.join(&filename);
+    if let Err(e) = tokio::fs::write(&file_path, svg_content.as_bytes()).await {
+        return format!("error writing svg file: {e}");
+    }
+
+    let abs_path = file_path.to_string_lossy().to_string();
+    let size_bytes = svg_content.len();
+    let desc_str = if description.is_empty() { String::new() } else { format!(" · {description}") };
+
+    let _ = ctx.app.emit("agent://artifact-created", json!({
+        "name": filename,
+        "path": abs_path,
+        "kind": "svg",
+        "size": size_bytes,
+        "description": description,
+    }));
+
+    format!("Generated SVG graphic '{filename}' ({size_bytes} bytes){desc_str}\nPath: {abs_path}\n\n```svg\n{svg_content}\n```")
+}
+
+async fn generate_image_tool(ctx: &ToolContext, args: &Value) -> String {
+    let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+    if prompt.trim().is_empty() {
+        return "error: missing required 'prompt'".to_string();
+    }
+    let aspect_ratio = args.get("aspect_ratio").and_then(|v| v.as_str()).unwrap_or("1:1");
+    let name = args.get("name").and_then(|v| v.as_str());
+
+    let (width, height) = crate::ai::image_gen::dimensions_from_aspect(aspect_ratio);
+
+    let dest_dir = ctx.home.0.join("artifacts").join("images");
+
+    let openai_key: Option<String> = ctx
+        .db
+        .get_provider("openai")
+        .ok()
+        .flatten()
+        .and_then(|p| crate::secrets::get_secret(&crate::secrets::provider_key(&p.id)).ok().flatten().map(|z| z.to_string()))
+        .filter(|k| !k.is_empty());
+
+    let (saved_path, provider_used) = if let Some(key) = &openai_key {
+        match crate::ai::image_gen::generate_openai(key, prompt, width, height, &dest_dir, name).await {
+            Ok(p) => (p, "OpenAI DALL-E 3"),
+            Err(e) => {
+                crate::diag(&format!("OpenAI image generation failed, falling back to Pollinations/Flux: {e}"));
+                match crate::ai::image_gen::generate_pollinations(prompt, width, height, &dest_dir, name).await {
+                    Ok(p) => (p, "Flux (Pollinations)"),
+                    Err(e2) => return format!("error generating image: {e} | fallback error: {e2}"),
+                }
+            }
+        }
+    } else {
+        match crate::ai::image_gen::generate_pollinations(prompt, width, height, &dest_dir, name).await {
+            Ok(p) => (p, "Flux (Pollinations)"),
+            Err(e) => return format!("error generating image: {e}"),
+        }
+    };
+
+    let abs_path = saved_path.to_string_lossy().to_string();
+    let filename = saved_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "image.png".to_string());
+
+    let _ = ctx.app.emit("agent://artifact-created", json!({
+        "name": filename,
+        "path": abs_path,
+        "kind": "image",
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "provider": provider_used,
+    }));
+
+    format!("Generated image via {provider_used} ({width}x{height})\nPath: {abs_path}\n\n![{prompt}](file:///{abs_path})")
+}
+
+fn canvas_open_preview(ctx: &ToolContext, args: &Value) -> String {
+    let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("Live Preview");
+    let html = args.get("html").and_then(|v| v.as_str()).unwrap_or("");
+    let width = args.get("width").and_then(|v| v.as_i64()).unwrap_or(800) as i32;
+    let height = args.get("height").and_then(|v| v.as_i64()).unwrap_or(600) as i32;
+
+    if html.trim().is_empty() {
+        return "error: missing required 'html'".to_string();
+    }
+
+    let node_id = format!("preview-{}", &Uuid::new_v4().to_string()[..8]);
+    let _ = ctx.app.emit("canvas://open-preview", json!({
+        "id": node_id,
+        "title": title,
+        "html": html,
+        "width": width,
+        "height": height,
+    }));
+
+    format!("Opened preview sandbox '{title}' (node_id: {node_id}) on the canvas.")
 }

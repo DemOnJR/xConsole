@@ -128,12 +128,20 @@ fn usage_counts(event: &Value) -> UsageCounts {
     }
 }
 
-/// GPT-5.x / native OpenAI accept `prompt_cache_options`. DeepSeek, Command Code,
-/// and most gateways ignore or 400 on the field — only send it where it is proven.
-fn wants_openai_cache_options(model: &str, base_url: &str) -> bool {
+/// GPT-5.x / native OpenAI accept `prompt_cache_options`.
+fn wants_openai_explicit_cache_options(model: &str, base_url: &str) -> bool {
     let m = model.to_lowercase();
     let url = base_url.to_lowercase();
-    m.contains("gpt-5") || url.contains("api.openai.com")
+    (m.contains("gpt-5") || m.contains("gpt-4.5") || url.contains("api.openai.com"))
+        && !url.contains("openrouter")
+        && !url.contains("deepseek")
+}
+
+fn wants_openai_implicit_cache_options(model: &str, base_url: &str) -> bool {
+    let m = model.to_lowercase();
+    let url = base_url.to_lowercase();
+    !wants_openai_explicit_cache_options(model, base_url)
+        && (m.contains("gpt-4") || url.contains("api.openai.com"))
 }
 
 /// Accumulator for one streamed tool call (arguments arrive as string fragments).
@@ -177,7 +185,9 @@ impl Provider for OpenAiProvider {
             // rare and cheaper than a full miss on a routed-away prefix.
             if !req.session_id.is_empty() {
                 body["prompt_cache_key"] = json!(format!("xc-{}", req.session_id));
-                if wants_openai_cache_options(&req.model, &self.base_url) {
+                if wants_openai_explicit_cache_options(&req.model, &self.base_url) {
+                    body["prompt_cache_options"] = json!({ "mode": "explicit", "ttl": "30m" });
+                } else if wants_openai_implicit_cache_options(&req.model, &self.base_url) {
                     body["prompt_cache_options"] = json!({ "mode": "implicit" });
                 }
             }
@@ -448,13 +458,13 @@ mod tests {
 
     #[test]
     fn openai_cache_options_only_for_native_openai() {
-        assert!(wants_openai_cache_options("gpt-5.6-luna", "https://api.openai.com/v1"));
-        assert!(wants_openai_cache_options("gpt-5", "https://example.com/v1"));
-        assert!(!wants_openai_cache_options(
+        assert!(wants_openai_explicit_cache_options("gpt-5.6-luna", "https://api.openai.com/v1"));
+        assert!(wants_openai_explicit_cache_options("gpt-5", "https://example.com/v1"));
+        assert!(!wants_openai_explicit_cache_options(
             "deepseek/deepseek-v4-flash",
             "https://api.commandcode.ai/provider/v1"
         ));
-        assert!(!wants_openai_cache_options(
+        assert!(!wants_openai_explicit_cache_options(
             "deepseek-v4-flash",
             "https://api.deepseek.com/v1"
         ));

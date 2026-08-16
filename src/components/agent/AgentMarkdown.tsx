@@ -2,6 +2,8 @@ import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { MarkdownCodeBlock } from "./SyntaxHighlight";
+import { SvgPreview } from "./SvgPreview";
+import { ImagePreview } from "./ImagePreview";
 import { useMaskHost } from "../../lib/privacy";
 
 /** Strip accidental whole-message code fences some models wrap replies in. */
@@ -42,6 +44,10 @@ const assistantComponents: Components = {
       {children}
     </a>
   ),
+  img: ({ src, alt }) => {
+    if (!src) return null;
+    return <ImagePreview src={src} alt={typeof alt === "string" ? alt : undefined} />;
+  },
   blockquote: ({ children }) => (
     <blockquote className="my-2 border-l-2 border-[#334155] pl-3 text-gray-400 italic">
       {children}
@@ -50,6 +56,11 @@ const assistantComponents: Components = {
   hr: () => <hr className="my-3 border-[var(--border)]" />,
   code: ({ className, children }) => {
     const text = String(children).replace(/\n$/, "");
+    const isSvgLang = className?.includes("language-svg");
+    const isSvgContent = (text.trim().startsWith("<svg") && text.trim().endsWith("</svg>")) || (isSvgLang && text.includes("<svg"));
+    if (isSvgContent) {
+      return <SvgPreview svgContent={text} />;
+    }
     const isBlock = className?.includes("language-") || text.includes("\n");
     if (isBlock) {
       return <MarkdownCodeBlock code={text} className={className} />;
@@ -100,6 +111,11 @@ export function AgentMarkdown({
     ...assistantComponents,
     code: ({ className, children }) => {
       const text = String(children).replace(/\n$/, "");
+      const isSvgLang = className?.includes("language-svg");
+      const isSvgContent = (text.trim().startsWith("<svg") && text.trim().endsWith("</svg>")) || (isSvgLang && text.includes("<svg"));
+      if (isSvgContent) {
+        return <SvgPreview svgContent={text} />;
+      }
       const isBlock = className?.includes("language-") || text.includes("\n");
       if (isBlock) {
         return (

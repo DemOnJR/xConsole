@@ -78,6 +78,13 @@ export interface GoalData {
   [key: string]: unknown;
 }
 
+/** A live HTML/design sandbox preview node. */
+export interface PreviewData {
+  title: string;
+  html: string;
+  [key: string]: unknown;
+}
+
 export type CanvasEdge = Edge<{ kind: "sftp-terminal" }>;
 
 export type TermNode = Node<TermData, "terminal">;
@@ -85,7 +92,8 @@ export type SftpNode = Node<SftpData, "sftp">;
 export type DbNode = Node<DbData, "db">;
 export type AgentNode = Node<AgentData, "agent">;
 export type GoalNode = Node<GoalData, "goal">;
-export type CanvasNode = TermNode | SftpNode | DbNode | AgentNode | GoalNode;
+export type PreviewNode = Node<PreviewData, "preview">;
+export type CanvasNode = TermNode | SftpNode | DbNode | AgentNode | GoalNode | PreviewNode;
 
 export const NODE_W = 460;
 export const NODE_H = 320;
@@ -118,7 +126,7 @@ interface CanvasState {
   onNodesChange: (changes: NodeChange<CanvasNode>[]) => void;
   onEdgesChange: (changes: EdgeChange<CanvasEdge>[]) => void;
   onConnect: (connection: Connection) => void;
-  updateNodeData: (id: string, partial: Partial<SftpData>) => void;
+  updateNodeData: (id: string, partial: Partial<SftpData & PreviewData>) => void;
   addVps: (vps: Vps, position?: { x: number; y: number }) => string;
   addSftp: (vps: Vps, position?: { x: number; y: number }) => string;
   /** Drop a database browser for this server onto the canvas. */
@@ -127,6 +135,15 @@ interface CanvasState {
   addAgent: (position?: { x: number; y: number }) => string;
   /** Open a kanban board node for a goal session (multiple allowed). */
   addGoal: (goalId: string, position?: { x: number; y: number }) => string;
+  /** Open a live HTML/design sandbox preview node on the canvas. */
+  addPreview: (opts: {
+    id?: string;
+    title: string;
+    html: string;
+    width?: number;
+    height?: number;
+    position?: { x: number; y: number };
+  }) => string;
   removeNode: (id: string) => void;
   setLayout: (mode: LayoutMode) => void;
   focus: (id: string | null) => void;
@@ -547,6 +564,34 @@ export const useCanvasStore = create<CanvasState>()(
           width: Math.round(NODE_W * 1.6),
           height: NODE_H + 60,
           data: { goalId, name: "Goal" },
+        };
+        set((s) => ({ nodes: [...s.nodes, node] }));
+        if (get().layoutMode === "tile") get().arrangeTiles();
+        get().focus(id);
+        return id;
+      },
+
+      addPreview: ({ id: customId, title, html, width, height, position }) => {
+        const id = customId || `preview-${crypto.randomUUID().slice(0, 8)}`;
+        const existing = get().nodes.find((n) => n.id === id);
+        if (existing) {
+          get().updateNodeData(id, { title, html });
+          get().focus(id);
+          return id;
+        }
+        const count = get().nodes.length;
+        const pos =
+          position ?? {
+            x: 80 + (count % 4) * (NODE_W + GAP),
+            y: 80 + Math.floor(count / 4) * (NODE_H + GAP),
+          };
+        const node: PreviewNode = {
+          id,
+          type: "preview",
+          position: pos,
+          width: width ?? Math.round(NODE_W * 1.6),
+          height: height ?? Math.round(NODE_H * 1.5),
+          data: { title, html },
         };
         set((s) => ({ nodes: [...s.nodes, node] }));
         if (get().layoutMode === "tile") get().arrangeTiles();

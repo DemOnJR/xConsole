@@ -15,12 +15,13 @@ import {
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { NODE_W, useCanvasStore } from "../stores/canvasStore";
 import { useVpsStore } from "../stores/vpsStore";
-import { onCanvasCommand } from "../lib/tauri";
+import { onCanvasCommand, onCanvasPreview } from "../lib/tauri";
 import { TerminalNode } from "./TerminalNode";
 import { SftpNode } from "./SftpNode";
 import { DatabaseNode } from "./DatabaseNode";
 import { AgentNodeView } from "./agent/AgentNode";
 import { GoalNode } from "./GoalNode";
+import { PreviewNode } from "./PreviewNode";
 import { FloatingEdge } from "./FloatingEdge";
 import { LockIcon, LockOpenIcon, RadarIcon } from "./icons";
 import { onInternalDrop } from "../stores/dragStore";
@@ -33,14 +34,16 @@ const nodeTypes: NodeTypes = {
   db: DatabaseNode,
   agent: AgentNodeView,
   goal: GoalNode,
+  preview: PreviewNode,
 };
 const edgeTypes = { floating: FloatingEdge };
 
-/** Executes canvas actions the agent requests (open/close nodes, tile). Lives
+/** Executes canvas actions the agent requests (open/close nodes, tile, open previews). Lives
  *  inside <ReactFlow> so it has the pane dimensions + viewport controls. */
 function CanvasCommandBridge() {
   const addVps = useCanvasStore((s) => s.addVps);
   const addSftp = useCanvasStore((s) => s.addSftp);
+  const addPreview = useCanvasStore((s) => s.addPreview);
   const retileFromPositions = useCanvasStore((s) => s.retileFromPositions);
   const setPaneSize = useCanvasStore((s) => s.setPaneSize);
   const removeNode = useCanvasStore((s) => s.removeNode);
@@ -65,7 +68,19 @@ function CanvasCommandBridge() {
   }, [layoutMode, paneW, paneH, setViewport]);
 
   useEffect(() => {
-    let un: UnlistenFn | undefined;
+    let unCmd: UnlistenFn | undefined;
+    let unPrev: UnlistenFn | undefined;
+
+    onCanvasPreview((p) => {
+      addPreview({
+        id: p.id,
+        title: p.title,
+        html: p.html,
+        width: p.width,
+        height: p.height,
+      });
+    }).then((u) => (unPrev = u));
+
     onCanvasCommand((cmd) => {
       const vps = cmd.vps_id
         ? useVpsStore.getState().vpsList.find((v) => v.id === cmd.vps_id)
@@ -102,9 +117,13 @@ function CanvasCommandBridge() {
           break;
         // "reconnect" is handled inside each TerminalNode (it owns the SSH session).
       }
-    }).then((u) => (un = u));
-    return () => un?.();
-  }, [addVps, addSftp, retileFromPositions, removeNode, setViewport, paneW, paneH]);
+    }).then((u) => (unCmd = u));
+
+    return () => {
+      unCmd?.();
+      unPrev?.();
+    };
+  }, [addVps, addSftp, addPreview, retileFromPositions, removeNode, setViewport, paneW, paneH]);
 
   return null;
 }
