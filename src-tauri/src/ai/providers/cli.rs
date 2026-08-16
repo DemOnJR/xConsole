@@ -81,10 +81,10 @@ impl CliProvider {
                 a
             }
             "antigravity_cli" => {
-                // `agy` (not the IDE) is the agent CLI: print mode + --model.
-                // --mode is accept-edits|plan, not a model id.
+                // `agy` CLI in headless mode: print mode, auto-approve permissions, text output.
                 let mut a = vec![
                     "-p".to_string(),
+                    "--dangerously-skip-permissions".to_string(),
                     "--output-format".to_string(),
                     "text".to_string(),
                 ];
@@ -292,15 +292,19 @@ fn spawn_cli_program(bin: &str) -> Result<Command, String> {
             cmd.arg("/C").arg(bin);
             return Ok(cmd);
         }
-        // Bare name with no path separators and no extension (e.g. "opencode",
-        // "codex"): npm-installed CLIs only create .cmd/.ps1 shims on Windows,
-        // so a direct spawn fails.  Probe PATH for the .cmd wrapper and route
-        // through `cmd /C` when found.
-        if !bin.contains('\\') && !bin.contains('/') && !bin.contains('.') {
-            if let Some(resolved) = resolve_cmd_on_path(bin) {
-                let mut cmd = crate::proc::quiet_tokio("cmd");
-                cmd.arg("/C").arg(resolved);
-                return Ok(cmd);
+        if !Path::new(bin).exists() {
+            if lower == "agy" || lower == "antigravity" {
+                let def = CliProvider::default_bin("antigravity_cli");
+                if Path::new(&def).exists() {
+                    return Ok(crate::proc::quiet_tokio(def));
+                }
+            }
+            if !bin.contains('\\') && !bin.contains('/') && !bin.contains('.') {
+                if let Some(resolved) = resolve_cmd_on_path(bin) {
+                    let mut cmd = crate::proc::quiet_tokio("cmd");
+                    cmd.arg("/C").arg(resolved);
+                    return Ok(cmd);
+                }
             }
         }
     }
@@ -1058,13 +1062,58 @@ pub async fn list_models(kind: &str, bin: &str) -> Result<Vec<String>, String> {
         .spawn()
         .map_err(|e| format!("failed to launch '{bin}': {e}"))?;
 
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| format!("failed to read output from '{bin}': {e}"))?;
+    let timeout = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        child.wait_with_output(),
+    )
+    .await;
+
+    let output = match timeout {
+        Ok(Ok(out)) => out,
+        _ => {
+            if kind == "antigravity_cli" {
+                return Ok(vec![
+                    "gemini-3.7-flash-high".into(),
+                    "gemini-3.7-flash-medium".into(),
+                    "gemini-3.7-flash-low".into(),
+                    "gemini-3.6-flash-high".into(),
+                    "gemini-3.6-flash-medium".into(),
+                    "gemini-3.6-flash-low".into(),
+                    "gemini-3.5-flash-high".into(),
+                    "gemini-3.5-flash-medium".into(),
+                    "gemini-3.5-flash-low".into(),
+                    "gemini-3.1-pro-high".into(),
+                    "gemini-3.1-pro-low".into(),
+                    "claude-sonnet-4-6".into(),
+                    "claude-opus-4-6-thinking".into(),
+                    "gpt-oss-120b-medium".into(),
+                ]);
+            }
+            return Ok(Vec::new());
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_cli_model_ids(&stdout))
+    let parsed = parse_cli_model_ids(&stdout);
+    if parsed.is_empty() && kind == "antigravity_cli" {
+        return Ok(vec![
+            "gemini-3.7-flash-high".into(),
+            "gemini-3.7-flash-medium".into(),
+            "gemini-3.7-flash-low".into(),
+            "gemini-3.6-flash-high".into(),
+            "gemini-3.6-flash-medium".into(),
+            "gemini-3.6-flash-low".into(),
+            "gemini-3.5-flash-high".into(),
+            "gemini-3.5-flash-medium".into(),
+            "gemini-3.5-flash-low".into(),
+            "gemini-3.1-pro-high".into(),
+            "gemini-3.1-pro-low".into(),
+            "claude-sonnet-4-6".into(),
+            "claude-opus-4-6-thinking".into(),
+            "gpt-oss-120b-medium".into(),
+        ]);
+    }
+    Ok(parsed)
 }
 
 /// Saved providers may still point at the IDE (`antigravity-ide`). Model listing
@@ -1072,8 +1121,16 @@ pub async fn list_models(kind: &str, bin: &str) -> Result<Vec<String>, String> {
 fn resolve_models_bin(kind: &str, bin: &str) -> String {
     if kind == "antigravity_cli" {
         let lower = bin.to_ascii_lowercase();
-        if lower.contains("antigravity-ide") || bin.trim().is_empty() {
-            return CliProvider::default_bin(kind);
+        if lower == "agy"
+            || lower == "antigravity"
+            || lower.contains("antigravity-ide")
+            || bin.trim().is_empty()
+            || !Path::new(bin).exists()
+        {
+            let def = CliProvider::default_bin(kind);
+            if Path::new(&def).exists() {
+                return def;
+            }
         }
     }
     bin.to_string()
