@@ -2456,7 +2456,7 @@ async fn probe_commandcode_usage(req: &ChatRequest) -> Result<(Option<u32>, Opti
 
 // ---- Hooks overhead benchmark (no model needed) --------------------------
 
-/// Measure what a Claude Code–style hook costs the agent loop: the pure config/select
+/// Measure what a lifecycle hook costs the agent loop: the pure config/select
 /// path (nanoseconds) and a real no-op hook subprocess (the per-tool-call latency a
 /// configured PreToolUse hook adds). No Ollama, fully headless.
 async fn bench_hooks(out: Option<String>) -> i32 {
@@ -3699,7 +3699,7 @@ fn selftest() -> i32 {
         let cfg = hooks::HooksConfig::parse(
             r#"{"hooks":{"PreToolUse":[{"matcher":"run_command","hooks":[{"command":"exit 2"}]}],"UserPromptSubmit":[{"hooks":[{"command":"echo hi"}]}]}}"#,
         );
-        check("parses the Claude Code hooks.json shape", cfg.is_ok());
+        check("parses the hooks.json shape", cfg.is_ok());
         if let Ok(cfg) = &cfg {
             check("counts PreToolUse hooks", cfg.count(HookEvent::PreToolUse) == 1);
             check(

@@ -1,7 +1,6 @@
 # Hooks
 
-xConsole's agent supports **lifecycle hooks** — the same model
-[Claude Code](https://docs.claude.com/en/docs/claude-code/hooks) uses. A hook is one
+xConsole's agent supports **lifecycle hooks**. A hook is one
 of *your* shell commands that the agent runs at a defined point in a turn. A hook can:
 
 - **block a tool** before it runs (a guardrail),
@@ -15,8 +14,7 @@ Hooks are **opt-in**: with none configured the agent loop skips the hook path en
 ## Configuration
 
 Hooks live in `hooks.json` in the agent home
-(`%APPDATA%\com.xconsole.app\agent\hooks.json` on Windows). The format is Claude Code's
-`settings.json` `hooks` block — either wrapped in `"hooks"` or bare:
+(`%APPDATA%\com.xconsole.app\agent\hooks.json` on Windows). The format is:
 
 ```json
 {
@@ -33,7 +31,7 @@ Hooks live in `hooks.json` in the agent home
 }
 ```
 
-The config is **snapshotted at startup** (exactly like Claude Code), so a mid-session
+The config is **snapshotted at startup**, so a mid-session
 edit — including one the agent itself might write — only takes effect after **Save & apply**
 or **Reload** in Settings → Hooks (or a restart). Toggle the whole system off without
 deleting your config via the **Enabled** switch (the `agent.hooks_enabled` setting).
@@ -107,8 +105,7 @@ For finer control, print a JSON object on stdout (combinable with the exit code)
 
 > `permissionDecision: "deny"` blocks the tool. xConsole's **command-approval safety mode
 > is independent** of hooks: a hook's `"allow"` does **not** bypass the approval gate (a
-> deliberate, safer divergence from Claude Code — a hook can add a guardrail but can't
-> silently remove the one the user set).
+> hook can add a guardrail but can't silently remove the one the user set).
 
 ## Examples
 
@@ -157,11 +154,10 @@ exit 0
 
 ## Security
 
-Hooks run shell commands **you** configure, with your account's permissions — the same
-trust model as Claude Code. Only add commands you trust. Because the config is
-snapshotted at startup, a prompt-injected agent can't add a hook that takes effect in the
-same session. The command-approval safety mode still applies to every tool regardless of
-hooks.
+Hooks run shell commands **you** configure, with your account's permissions.
+Only add commands you trust. Because the config is snapshotted at startup,
+a prompt-injected agent can't add a hook that takes effect in the same session.
+The command-approval safety mode still applies to every tool regardless of hooks.
 
 ## Implementation / verification
 

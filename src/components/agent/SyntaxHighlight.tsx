@@ -278,7 +278,7 @@ export function CodeHighlight({
 }
 
 /** Fenced code block for agent markdown replies. Copy + Execute (for shell blocks
- *  with a resolvable host) live in the header — t3code/Claude Code style. */
+ *  with a resolvable host) live in the header. */
 export function MarkdownCodeBlock({
   code,
   className,

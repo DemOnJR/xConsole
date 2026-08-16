@@ -1,8 +1,8 @@
-//! Claude Code–style hooks: user-defined shell commands that fire on agent
-//! lifecycle events. The same model Claude Code uses — a JSON config maps an
-//! event (and, for tool events, a tool-name matcher) to one or more shell
-//! commands. Each command receives the event payload as JSON on **stdin** and
-//! controls the agent through its **exit code** and/or a JSON object on **stdout**.
+//! Lifecycle hooks: user-defined shell commands that fire on agent
+//! lifecycle events. A JSON config maps an event (and, for tool events,
+//! a tool-name matcher) to one or more shell commands. Each command receives
+//! the event payload as JSON on **stdin** and controls the agent through its
+//! **exit code** and/or a JSON object on **stdout**.
 //!
 //! Events wired into xConsole's agent loop:
 //! - `UserPromptSubmit` — before the turn runs (can inject extra context, or block).
@@ -10,7 +10,7 @@
 //! - `PostToolUse`       — after a tool runs (can feed the result back / add context).
 //! - `Stop`              — after the turn finishes (side-effects, notifications).
 //!
-//! Decision protocol (mirrors Claude Code):
+//! Decision protocol:
 //! - exit `0`  → success. For `UserPromptSubmit`, plain stdout is injected as context.
 //! - exit `2`  → blocking error. The tool/prompt is blocked; stderr is the reason.
 //! - other     → non-blocking error (logged, the agent proceeds).
@@ -19,8 +19,8 @@
 //!   "additionalContext":…}}`, `systemMessage`, …
 //!
 //! Config is read from `hooks.json` in the agent home and **snapshotted at startup**
-//! (managed [`HooksState`]) — exactly like Claude Code, so a mid-session edit (including
-//! one the agent itself might write) does not take effect until an explicit reload.
+//! (managed [`HooksState`]) — so a mid-session edit (including one the agent itself might write)
+//! does not take effect until an explicit reload.
 //!
 //! The config parsing, matcher matching, and output interpretation are PURE functions
 //! (no I/O) so they're deterministic and unit-testable; only [`run_one`] spawns a process.
@@ -33,8 +33,7 @@ use serde_json::{json, Value};
 
 use crate::ai::AgentHome;
 
-/// File in the agent home that holds the hooks config (Claude Code's `settings.json`
-/// `hooks` block, standalone).
+/// File in the agent home that holds the hooks config.
 pub const HOOKS_FILE: &str = "hooks.json";
 
 /// Default per-hook timeout when the config doesn't set one. Clamped to [1, 600].
@@ -94,7 +93,7 @@ fn default_kind() -> String {
 /// One shell command to run for a matched event.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct HookCommand {
-    /// Only `"command"` is supported (matches Claude Code's hook type).
+    /// Only `"command"` is supported.
     #[serde(rename = "type", default = "default_kind")]
     pub kind: String,
     /// The shell command line, run via `cmd /C` on Windows or `sh -c` elsewhere.
@@ -122,8 +121,8 @@ pub struct HooksConfig {
 
 impl HooksConfig {
     /// Parse a `hooks.json` document. Accepts either the wrapped form
-    /// `{"hooks":{"PreToolUse":[…]}}` (Claude Code's settings.json shape) or the bare
-    /// `{"PreToolUse":[…]}`. Unknown event keys are ignored. Pure.
+    /// `{"hooks":{"PreToolUse":[…]}}` or the bare `{"PreToolUse":[…]}`.
+    /// Unknown event keys are ignored. Pure.
     pub fn parse(text: &str) -> Result<Self, String> {
         let v: Value =
             serde_json::from_str(text).map_err(|e| format!("hooks.json is not valid JSON: {e}"))?;
@@ -208,9 +207,8 @@ impl HooksConfig {
 }
 
 /// Whether a matcher pattern selects a tool. Empty / `None` / `"*"` matches everything.
-/// Otherwise the pattern is a `|`-separated list of exact tool names — Claude Code's
-/// common matcher form, e.g. `"write_file|run_command"`. (Full regex isn't supported to
-/// avoid a new dependency; alternation + wildcard covers the practical cases.) Pure.
+/// Otherwise the pattern is a `|`-separated list of exact tool names,
+/// e.g. `"write_file|run_command"`. (Alternation + wildcard covers practical cases.) Pure.
 pub fn matcher_matches(pattern: Option<&str>, tool: Option<&str>) -> bool {
     let p = pattern.unwrap_or("").trim();
     if p.is_empty() || p == "*" {
@@ -225,9 +223,8 @@ pub fn matcher_matches(pattern: Option<&str>, tool: Option<&str>) -> bool {
 
 // ---- Event input (stdin payload) ----------------------------------------
 
-/// The JSON payload handed to a hook on stdin. Field set mirrors Claude Code's
-/// (`session_id`, `cwd`, `hook_event_name`, `tool_name`, `tool_input`, `tool_response`,
-/// `prompt`) plus xConsole context (`workspace_id`, `vps_targets`).
+/// The JSON payload handed to a hook on stdin (`session_id`, `cwd`, `hook_event_name`,
+/// `tool_name`, `tool_input`, `tool_response`, `prompt`, `workspace_id`, `vps_targets`).
 pub struct HookEventInput<'a> {
     pub event: HookEvent,
     pub session_id: &'a str,
@@ -515,7 +512,7 @@ pub async fn run_event(config: &HooksConfig, input: &HookEventInput<'_>) -> Hook
 
 /// The startup snapshot of the hooks config, shared as Tauri-managed state. Loaded once
 /// at launch so mid-session edits to `hooks.json` (including ones the agent might write)
-/// take effect only on an explicit reload — the same safety property Claude Code has.
+/// take effect only on an explicit reload.
 #[derive(Clone)]
 pub struct HooksState(Arc<RwLock<HooksConfig>>);
 

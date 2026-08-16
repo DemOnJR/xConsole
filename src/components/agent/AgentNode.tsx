@@ -104,7 +104,7 @@ export function toggleAgentFillPane(id: string) {
 
 
 
-// ---- Interactive popups (Claude-Code-style) -------------------------------
+// ---- Interactive popups ----------------------------------------------------
 
 function ApprovalCard({
   approval,
@@ -1759,7 +1759,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
               }}
               onKeyDown={(e) => {
                 const mod = e.ctrlKey || e.metaKey;
-                // Ctrl+R — fast provider cycle (Claude Code-style)
+                // Ctrl+R — fast provider cycle
                 if (mod && (e.key === "r" || e.key === "R")) {
                   e.preventDefault();
                   const enabled = providers.filter((p) => p.enabled);
@@ -1772,7 +1772,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
                   }
                   return;
                 }
-                // Shift+Tab — toggle plan mode (Claude Code-style)
+                // Shift+Tab — toggle plan mode
                 if (e.key === "Tab" && e.shiftKey) {
                   e.preventDefault();
                   togglePlanMode();

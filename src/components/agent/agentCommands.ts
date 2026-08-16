@@ -144,7 +144,7 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
   },
 ];
 
-/** Claude Code-style keybinds shown in /help. */
+/** Keybinds shown in /help. */
 export const KEYBINDS: { keys: string; action: string }[] = [
   { keys: "Ctrl+K", action: "command palette (/)" },
   { keys: "Ctrl+L", action: "clear input" },

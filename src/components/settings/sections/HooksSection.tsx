@@ -31,7 +31,7 @@ const EXAMPLE = `{
   }
 }`;
 
-/** Claude Code–style lifecycle hooks: edit hooks.json, toggle the system, see status. */
+/** Lifecycle hooks: edit hooks.json, toggle the system, see status. */
 export function HooksSection() {
   const enabledSetting = useSettingsStore((s) => s.settings["agent.hooks_enabled"]);
   const setSetting = useSettingsStore((s) => s.set);
@@ -93,7 +93,7 @@ export function HooksSection() {
     <div>
       <SectionHeader
         title="Hooks"
-        description="Run your own shell commands on agent lifecycle events — the same model Claude Code uses. A hook can block a tool before it runs, feed context back to the model, or fire a side-effect (notification, formatter, audit log) when the turn ends."
+        description="Run your own shell commands on agent lifecycle events. A hook can block a tool before it runs, feed context back to the model, or fire a side-effect (notification, formatter, audit log) when the turn ends."
         action={
           <Toggle
             checked={enabled}

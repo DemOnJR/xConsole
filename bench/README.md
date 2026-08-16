@@ -70,7 +70,7 @@ must get right; the pass-rate is the quality signal we track:
 Columns: `ttft_ms` (time to first token), `total_ms` (whole turn), `gen_t/s`
 (generation tokens/sec), `ptok` (prompt tokens — how heavy the system prompt is).
 
-**Hooks overhead** (`hooks` mode) — measures the cost of the Claude Code–style hooks
+**Hooks overhead** (`hooks` mode) — measures the cost of the lifecycle hooks
 system (see [`HOOKS.md`](../HOOKS.md)):
 
 | metric | meaning | dev-machine baseline |

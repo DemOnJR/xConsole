@@ -854,7 +854,7 @@ pub fn save_taste_doc(home: State<'_, AgentHome>, content: String) -> Result<(),
     crate::ai::taste::save(&home, &content)
 }
 
-// ----- Hooks (Claude Code–style lifecycle hooks) -----
+// ----- Hooks (Lifecycle hooks) -----
 
 /// Per-event hook counts + enable state, for the settings UI.
 #[derive(serde::Serialize)]

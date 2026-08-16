@@ -45,7 +45,7 @@ pub struct ToolContext {
     pub canvas: Vec<crate::ai::canvas_context::CanvasNode>,
     /// Journal of files the agent edits this session (for the diff/changes panel).
     pub edits: crate::ai::edits::EditJournal,
-    /// Claude Code–style lifecycle hooks (snapshotted at startup). Empty = disabled.
+    /// Lifecycle hooks (snapshotted at startup). Empty = disabled.
     pub hooks: crate::ai::hooks::HooksConfig,
     /// Images from the latest user turn (for the `vision` side-call). Empty when
     /// the session model already received native image blocks.

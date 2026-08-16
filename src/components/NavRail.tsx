@@ -85,7 +85,7 @@ function DiffIcon({ size = 18 }: { size?: number }) {
 }
 
 /**
- * Compact left icon rail (Xirp / Claude Code–style).
+ * Compact left icon rail.
  * Toggles drawers without crowding the title bar.
  */
 export function NavRail() {

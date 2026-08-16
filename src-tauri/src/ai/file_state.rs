@@ -1,6 +1,6 @@
 //! Per-session file freshness: remember mtime after a read so a later write
-//! can refuse to clobber a file the agent has not re-read (Claude/claw-code
-//! style). Keys are session + vps + path.
+//! can refuse to clobber a file the agent has not re-read (optimistic concurrency
+//! protection). Keys are session + vps + path.
 
 use std::sync::OnceLock;
 

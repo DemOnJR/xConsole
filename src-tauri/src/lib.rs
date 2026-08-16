@@ -244,7 +244,7 @@ pub fn run() {
             app.manage(sftp);
             app.manage(TransferManager::new());
             app.manage(commands::db::DbSessions::new());
-            // Claude Code–style lifecycle hooks: snapshot hooks.json at startup so a
+            // Lifecycle hooks: snapshot hooks.json at startup so a
             // mid-session edit (incl. one the agent might write) only takes effect on
             // an explicit reload. Loaded before agent_home is moved into managed state.
             app.manage(ai::hooks::HooksState::new(ai::hooks::HooksConfig::load(
