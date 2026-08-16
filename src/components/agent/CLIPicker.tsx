@@ -35,6 +35,12 @@ export function CLIPicker({
   );
   const inputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    if (multi) {
+      setSelected(new Set(options.filter((o) => o.selected).map((o) => o.id)));
+    }
+  }, [options, multi]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return options;
@@ -59,6 +65,7 @@ export function CLIPicker({
       if (next.has(opt.id)) next.delete(opt.id);
       else next.add(opt.id);
       setSelected(next);
+      onPick(opt);
       return;
     }
     onPick(opt);
@@ -73,7 +80,11 @@ export function CLIPicker({
       setIndex((i) => Math.max(0, i - 1));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      if (!multi) confirm();
+      if (multi) {
+        onPick({ id: "__done__", label: "Done", selected: selected.size > 0 });
+      } else {
+        confirm();
+      }
     } else if (e.key === "Escape") {
       e.preventDefault();
       onCancel();
@@ -136,6 +147,7 @@ export function CLIPicker({
                   if (next.has(o.id)) next.delete(o.id);
                   else next.add(o.id);
                   setSelected(next);
+                  onPick(o);
                 } else {
                   onPick(o);
                 }
