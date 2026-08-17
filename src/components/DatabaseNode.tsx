@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NodeResizer, useStore, type NodeProps } from "@xyflow/react";
 import { api, type DbColumn, type DbResultSet, type DbRowKey } from "../lib/tauri";
 import { useCanvasStore, type DbNode as DbNodeType } from "../stores/canvasStore";
@@ -6,22 +6,49 @@ import { useMouseNavButtons, useNavHistory } from "../hooks/useNavHistory";
 import { dialog } from "../stores/dialogStore";
 import { CodeEditArea } from "./CodeEditArea";
 import { DatabaseTree, newInstance, type DbInstance } from "./DatabaseTree";
-import { DatabaseIcon } from "./icons";
+import {
+  DatabaseIcon,
+  SettingsIcon,
+  PanelLeftIcon,
+  PanelLeftCloseIcon,
+  PlusIcon,
+  TrashIcon,
+  EraserIcon,
+  DownloadIcon,
+  UploadIcon,
+  PlayIcon,
+  StarFilledIcon,
+  StarOutlineIcon,
+  CopyIcon,
+  CloseIcon,
+  DuplicateIcon,
+  SortAscIcon,
+  SortDescIcon,
+  TableIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  RefreshIcon,
+  SlidersIcon,
+  SearchIcon,
+} from "./icons";
 import { InsertRowModal } from "./database/InsertRowModal";
 import { CreateTableModal } from "./database/CreateTableModal";
 import { AddColumnModal } from "./database/AddColumnModal";
 import { RedisKeyModal } from "./database/RedisKeyModal";
+import {
+  DbSettingsModal,
+  loadDbSettings,
+  type DbSettings,
+} from "./database/DbSettingsModal";
+import { RowInspectorModal } from "./database/RowInspectorModal";
 
-const PAGE_SIZE_OPTIONS = [50, 100, 200, 500, 1000] as const;
-const DEFAULT_PAGE_SIZE = 200;
+const PAGE_SIZE_OPTIONS = [25, 50, 100, 200, 500, 1000] as const;
 
 /**
  * Split a SQL dump into statements for sequential import.
- * Handles `--` line comments and `/* … *​/` block comments; does not fully parse
- * string literals (good enough for typical mysqldump / pg_dump style files).
+ * Handles `--` line comments and `/* … *​/` block comments.
  */
 function splitSqlStatements(script: string): string[] {
-  // Strip block comments then line comments.
   const stripped = script
     .replace(/\/\*[\s\S]*?\*\//g, "\n")
     .replace(/^[ \t]*--[^\n]*$/gm, "");
@@ -33,7 +60,6 @@ function splitSqlStatements(script: string): string[] {
     const t = script.trim();
     return t ? [t] : [];
   }
-  // Re-attach semicolon is not required by most engines; keep bare statements.
   return parts;
 }
 
@@ -51,6 +77,7 @@ interface Selection {
 function Grid({
   set,
   columns,
+  settings,
   onEdit,
   onDeleteRows,
   onSqlTemplate,
@@ -59,6 +86,7 @@ function Grid({
 }: {
   set: DbResultSet;
   columns?: DbColumn[];
+  settings?: DbSettings;
   onEdit?: (rowIndex: number, column: string, next: string | null) => void;
   /** Delete the given row indices. Absent for result sets that aren't a real table. */
   onDeleteRows?: (rowIndices: number[]) => void;
@@ -70,45 +98,103 @@ function Grid({
   const [editing, setEditing] = useState<{ row: number; col: number } | null>(null);
   const [draft, setDraft] = useState("");
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
+  const [sortCol, setSortCol] = useState<number | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [filterText, setFilterText] = useState("");
+  const [showFilterBar, setShowFilterBar] = useState(false);
   const lastClicked = useRef<number | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const hasKey = (columns ?? []).some((c) => c.primary);
   const editable = Boolean(onEdit) && hasKey;
-  /** Row selection is always on so users can copy JSON/CSV; delete only with a PK. */
   const selectable = true;
   const canDelete = Boolean(onDeleteRows) && hasKey;
 
-  // A new result set invalidates the old indices — keeping them would delete whatever
-  // now happens to sit at those positions.
+  const density = settings?.density ?? "compact";
+  const fontSize = settings?.fontSize ?? "xs";
+  const nullLabel = settings?.nullLabel ?? "NULL";
+  const showRowNumbers = settings?.showRowNumbers ?? true;
+
+  const cellPadding = density === "comfortable" ? "py-1.5 px-2.5" : "py-0.5 px-2";
+  const textSize =
+    fontSize === "sm" ? "text-[12px]" : fontSize === "base" ? "text-[13px]" : "text-[11px]";
+
+  // A new result set invalidates the old indices
   useEffect(() => {
     setSelected(new Set());
     lastClicked.current = null;
+    setSortCol(null);
+    setFilterText("");
   }, [set]);
 
-  /** Click, ctrl-click to toggle, shift-click for a range — as a file list behaves. */
-  const toggleRow = (index: number, e: React.MouseEvent) => {
+  /** Filter and sort rows locally on this page */
+  const processedRows = useMemo(() => {
+    let list = set.rows.map((row, originalIndex) => ({ row, originalIndex }));
+
+    if (filterText.trim()) {
+      const q = filterText.trim().toLowerCase();
+      list = list.filter((item) =>
+        item.row.some((cell) => cell != null && cell.toLowerCase().includes(q)),
+      );
+    }
+
+    if (sortCol !== null && sortCol < set.columns.length) {
+      list.sort((a, b) => {
+        const va = a.row[sortCol];
+        const vb = b.row[sortCol];
+        if (va === null && vb === null) return 0;
+        if (va === null) return 1;
+        if (vb === null) return -1;
+        const na = Number(va);
+        const nb = Number(vb);
+        if (!isNaN(na) && !isNaN(nb)) {
+          return sortDir === "asc" ? na - nb : nb - na;
+        }
+        return sortDir === "asc"
+          ? va.localeCompare(vb, undefined, { numeric: true })
+          : vb.localeCompare(va, undefined, { numeric: true });
+      });
+    }
+
+    return list;
+  }, [set.rows, set.columns.length, filterText, sortCol, sortDir]);
+
+  /** Click, ctrl-click to toggle, shift-click for a range */
+  const toggleRow = (originalIndex: number, e: React.MouseEvent) => {
     setSelected((prev) => {
       const next = new Set(prev);
       if (e.shiftKey && lastClicked.current !== null) {
-        const [from, to] = [lastClicked.current, index].sort((a, b) => a - b);
+        const [from, to] = [lastClicked.current, originalIndex].sort((a, b) => a - b);
         for (let i = from; i <= to; i += 1) next.add(i);
-      } else if (next.has(index)) {
-        next.delete(index);
+      } else if (next.has(originalIndex)) {
+        next.delete(originalIndex);
       } else {
-        next.add(index);
+        next.add(originalIndex);
       }
       return next;
     });
-    lastClicked.current = index;
+    lastClicked.current = originalIndex;
   };
 
-  const allSelected = set.rows.length > 0 && selected.size === set.rows.length;
+  const allSelected =
+    processedRows.length > 0 &&
+    processedRows.every((item) => selected.has(item.originalIndex));
 
-  // Ctrl+wheel scrolls sideways. A wide table is the normal case here and reaching for
-  // the horizontal scrollbar is tedious; the browser would otherwise treat ctrl+wheel as
-  // page zoom, hence preventDefault. Registered non-passively because a passive listener
-  // is not allowed to preventDefault.
+  const toggleSort = (colIndex: number) => {
+    if (sortCol === colIndex) {
+      if (sortDir === "asc") {
+        setSortDir("desc");
+      } else {
+        setSortCol(null);
+        setSortDir("asc");
+      }
+    } else {
+      setSortCol(colIndex);
+      setSortDir("asc");
+    }
+  };
+
+  // Ctrl+wheel scrolls sideways
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -132,21 +218,59 @@ function Grid({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-full min-h-0 flex-col select-none">
+      {/* Quick in-grid filter bar toggle */}
+      {showFilterBar && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)] bg-[var(--surface-2)] px-2 py-1">
+          <SearchIcon size={12} className="text-gray-500" />
+          <input
+            type="text"
+            autoFocus
+            value={filterText}
+            onChange={(e) => setFilterText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                setFilterText("");
+                setShowFilterBar(false);
+              }
+            }}
+            placeholder="Search loaded rows on this page (Esc to close)…"
+            className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 text-[11px] text-gray-200 outline-none focus:border-violet-500"
+          />
+          {filterText && (
+            <span className="font-mono text-[10px] text-violet-300 shrink-0">
+              {processedRows.length} / {set.rows.length} rows
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              setFilterText("");
+              setShowFilterBar(false);
+            }}
+            className="rounded p-0.5 text-gray-400 hover:text-white"
+          >
+            <CloseIcon size={11} />
+          </button>
+        </div>
+      )}
+
+      {/* Selected rows toolbar */}
       {selected.size > 0 ? (
-        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)] bg-violet-950/30 px-2 py-1 text-[11px]">
-          <span className="text-violet-200">
+        <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--border)] bg-violet-950/40 px-2 py-1 text-[11px] overflow-x-auto">
+          <span className="font-medium text-violet-200 shrink-0">
             {selected.size} row{selected.size === 1 ? "" : "s"} selected
           </span>
           <button
             onClick={() => setSelected(new Set())}
-            className="text-gray-400 hover:text-gray-200"
+            className="rounded px-1 text-gray-400 hover:text-gray-200"
           >
             Clear
           </button>
+          <div className="mx-1 h-3 w-px bg-[var(--border)]" />
           <button
             type="button"
-            className="rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--border)]"
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--border)]"
             data-tooltip="Copy selected rows as JSON"
             onClick={() => {
               const idxs = [...selected].sort((a, b) => a - b);
@@ -161,11 +285,12 @@ function Grid({
               void navigator.clipboard.writeText(JSON.stringify(objs, null, 2));
             }}
           >
-            Copy JSON
+            <CopyIcon size={11} />
+            <span>JSON</span>
           </button>
           <button
             type="button"
-            className="rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--border)]"
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--border)]"
             data-tooltip="Copy selected rows as CSV"
             onClick={() => {
               const idxs = [...selected].sort((a, b) => a - b);
@@ -181,11 +306,12 @@ function Grid({
               void navigator.clipboard.writeText(lines.join("\n"));
             }}
           >
-            Copy CSV
+            <DownloadIcon size={11} />
+            <span>CSV</span>
           </button>
           <button
             type="button"
-            className="rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--border)]"
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--border)]"
             data-tooltip="Copy selected rows as Markdown table"
             onClick={() => {
               const idxs = [...selected].sort((a, b) => a - b);
@@ -193,17 +319,16 @@ function Grid({
                 String(v ?? "NULL").replace(/\|/g, "\\|").replace(/\n/g, " ");
               const header = `| ${set.columns.map(cell).join(" | ")} |`;
               const sep = `| ${set.columns.map(() => "---").join(" | ")} |`;
-              const body = idxs.map(
-                (i) => `| ${set.rows[i].map(cell).join(" | ")} |`,
-              );
+              const body = idxs.map((i) => `| ${set.rows[i].map(cell).join(" | ")} |`);
               void navigator.clipboard.writeText([header, sep, ...body].join("\n"));
             }}
           >
-            Copy MD
+            <CopyIcon size={11} />
+            <span>MD</span>
           </button>
           <button
             type="button"
-            className="rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--border)]"
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--border)]"
             data-tooltip="Copy selected as INSERT statements"
             onClick={() => {
               const idxs = [...selected].sort((a, b) => a - b);
@@ -221,12 +346,13 @@ function Grid({
               void navigator.clipboard.writeText(lines.join("\n"));
             }}
           >
-            Copy INSERT
+            <CopyIcon size={11} />
+            <span>INSERT</span>
           </button>
           {onSqlTemplate ? (
             <button
               type="button"
-              className="rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--border)]"
+              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-violet-300 hover:bg-[var(--border)]"
               data-tooltip="Load selected as INSERT in the SQL tab"
               onClick={() => {
                 const idxs = [...selected].sort((a, b) => a - b);
@@ -244,121 +370,185 @@ function Grid({
                 onSqlTemplate(lines.join("\n"));
               }}
             >
-              → SQL
+              <span>→ SQL</span>
             </button>
           ) : null}
           {canDelete ? (
             <button
               onClick={() => onDeleteRows?.([...selected].sort((a, b) => a - b))}
-              className="ml-auto rounded bg-red-700 px-2 py-0.5 text-white hover:bg-red-600"
+              className="ml-auto flex items-center gap-1 rounded bg-red-700/90 px-2 py-0.5 text-white hover:bg-red-600 transition-colors"
+              data-tooltip="Delete selected rows"
             >
-              Delete selected
+              <TrashIcon size={11} />
+              <span>Delete</span>
             </button>
           ) : null}
         </div>
       ) : null}
 
-      {/* The scroll container. `overflow-auto` with a bounded height is what makes
-          vertical scrolling work; the table below is sized to its content (not w-full)
-          so it can exceed this box and scroll horizontally too. */}
+      {/* The scroll container */}
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
-        <table className="w-max min-w-full border-collapse text-left font-mono text-[11px]">
-        <thead className="sticky top-0 z-10 bg-[var(--surface)]">
-          <tr>
-            {selectable ? (
-              <th className="sticky left-0 z-20 w-6 border-b border-r border-[var(--border)] bg-[var(--surface)] px-1 py-1">
-                <input
-                  type="checkbox"
-                  checked={allSelected}
-                  onChange={() =>
-                    setSelected(
-                      allSelected ? new Set() : new Set(set.rows.map((_, i) => i)),
-                    )
-                  }
-                  data-tooltip="Select all on this page"
-                />
-              </th>
-            ) : null}
-            {set.columns.map((c) => {
-              const meta = columns?.find((m) => m.name === c);
-              return (
-                <th
-                  key={c}
-                  className="whitespace-nowrap border-b border-r border-[var(--border)] px-2 py-1 font-medium text-gray-300 last:border-r-0"
-                  title={meta ? `${meta.data_type}${meta.primary ? " · primary key" : ""}` : c}
-                >
-                  {meta?.primary ? <span className="text-amber-400">🔑 </span> : null}
-                  {c}
+        <table className={`w-max min-w-full border-collapse text-left font-mono ${textSize}`}>
+          <thead className="sticky top-0 z-10 bg-[var(--surface)] shadow-xs">
+            <tr>
+              {selectable ? (
+                <th className="sticky left-0 z-20 w-6 border-b border-r border-[var(--border)] bg-[var(--surface)] px-1 py-1 text-center">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={() =>
+                      setSelected(
+                        allSelected
+                          ? new Set()
+                          : new Set(processedRows.map((item) => item.originalIndex)),
+                      )
+                    }
+                    data-tooltip="Select all on this page"
+                    className="accent-violet-600 rounded"
+                  />
                 </th>
+              ) : null}
+
+              {showRowNumbers && (
+                <th className="sticky left-6 z-20 w-8 border-b border-r border-[var(--border)] bg-[var(--surface)] px-1.5 py-1 text-right text-[10px] text-gray-500 font-normal">
+                  <button
+                    type="button"
+                    onClick={() => setShowFilterBar((v) => !v)}
+                    className="hover:text-violet-300"
+                    data-tooltip="Filter rows on this page (Ctrl+F)"
+                  >
+                    #
+                  </button>
+                </th>
+              )}
+
+              {set.columns.map((c, colIdx) => {
+                const meta = columns?.find((m) => m.name === c);
+                const isSorted = sortCol === colIdx;
+                return (
+                  <th
+                    key={c}
+                    onClick={() => toggleSort(colIdx)}
+                    className="cursor-pointer whitespace-nowrap border-b border-r border-[var(--border)] px-2 py-1 font-medium text-gray-300 hover:bg-[var(--surface-hover)] transition-colors last:border-r-0"
+                    title={
+                      meta
+                        ? `${meta.data_type}${meta.primary ? " · Primary key" : ""}`
+                        : c
+                    }
+                  >
+                    <div className="flex items-center gap-1.5">
+                      {meta?.primary ? (
+                        <span className="text-amber-400 text-[10px]">🔑</span>
+                      ) : null}
+                      <span>{c}</span>
+                      {isSorted ? (
+                        sortDir === "asc" ? (
+                          <SortAscIcon size={11} className="text-violet-400" />
+                        ) : (
+                          <SortDescIcon size={11} className="text-violet-400" />
+                        )
+                      ) : (
+                        <span className="opacity-0 hover:opacity-50 text-[9px] text-gray-500">
+                          ⇅
+                        </span>
+                      )}
+                    </div>
+                  </th>
+                );
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {processedRows.map(({ row, originalIndex }) => {
+              const isSelected = selected.has(originalIndex);
+              return (
+                <tr
+                  key={originalIndex}
+                  className={`group transition-colors ${
+                    isSelected ? "bg-violet-600/25" : "hover:bg-[var(--border)]/40"
+                  }`}
+                >
+                  {selectable ? (
+                    <td
+                      className={`sticky left-0 z-10 border-b border-r border-[var(--border)] px-1 text-center ${
+                        isSelected ? "bg-violet-900/60" : "bg-[var(--bg)]"
+                      }`}
+                      onClick={(e) => toggleRow(originalIndex, e)}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        readOnly
+                        tabIndex={-1}
+                        className="accent-violet-600 rounded pointer-events-none"
+                      />
+                    </td>
+                  ) : null}
+
+                  {showRowNumbers && (
+                    <td
+                      className={`sticky left-6 z-10 border-b border-r border-[var(--border)] px-1.5 text-right font-mono text-[10px] text-gray-600 cursor-pointer ${
+                        isSelected ? "bg-violet-900/60" : "bg-[var(--bg)]"
+                      }`}
+                      onClick={() => onInspectRow?.(originalIndex)}
+                      data-tooltip="Inspect full row"
+                    >
+                      {originalIndex + 1}
+                    </td>
+                  )}
+
+                  {row.map((cell, ci) => {
+                    const isEditing = editing?.row === originalIndex && editing?.col === ci;
+                    return (
+                      <td
+                        key={ci}
+                        className={`max-w-[340px] truncate border-b border-r border-[var(--border)] ${cellPadding} text-gray-300 last:border-r-0 select-text`}
+                        title={cell ?? "NULL"}
+                        onDoubleClick={() => {
+                          if (onInspectRow && !editable) {
+                            onInspectRow(originalIndex);
+                            return;
+                          }
+                          if (!editable) return;
+                          setEditing({ row: originalIndex, col: ci });
+                          setDraft(cell ?? "");
+                        }}
+                      >
+                        {isEditing ? (
+                          <input
+                            autoFocus
+                            value={draft}
+                            onChange={(e) => setDraft(e.target.value)}
+                            onBlur={() => setEditing(null)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Escape") setEditing(null);
+                              if (e.key === "Enter") {
+                                onEdit?.(originalIndex, set.columns[ci], draft);
+                                setEditing(null);
+                              }
+                            }}
+                            className="w-full rounded bg-[var(--bg)] border border-violet-500 px-1 py-0 text-[11px] text-gray-100 outline-none"
+                          />
+                        ) : cell === null ? (
+                          <span className="italic text-gray-600 font-mono text-[10px]">
+                            {nullLabel}
+                          </span>
+                        ) : (
+                          cell
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
               );
             })}
-          </tr>
-        </thead>
-        <tbody>
-          {set.rows.map((row, ri) => {
-            const isSelected = selected.has(ri);
-            return (
-              <tr
-                key={ri}
-                className={isSelected ? "bg-violet-600/25" : "hover:bg-[var(--border)]/40"}
-              >
-                {selectable ? (
-                  <td
-                    className={`sticky left-0 z-10 border-b border-r border-[var(--border)] px-1 ${
-                      isSelected ? "bg-violet-900/60" : "bg-[var(--bg)]"
-                    }`}
-                    onClick={(e) => toggleRow(ri, e)}
-                  >
-                    <input type="checkbox" checked={isSelected} readOnly tabIndex={-1} />
-                  </td>
-                ) : null}
-                {row.map((cell, ci) => {
-                  const isEditing = editing?.row === ri && editing?.col === ci;
-                  return (
-                    <td
-                      key={ci}
-                      className="max-w-[320px] truncate border-b border-r border-[var(--border)] px-2 py-0.5 text-gray-300 last:border-r-0"
-                      title={cell ?? "NULL"}
-                      onDoubleClick={() => {
-                        if (onInspectRow) {
-                          onInspectRow(ri);
-                          return;
-                        }
-                        if (!editable) return;
-                        setEditing({ row: ri, col: ci });
-                        setDraft(cell ?? "");
-                      }}
-                    >
-                      {isEditing ? (
-                        <input
-                          autoFocus
-                          value={draft}
-                          onChange={(e) => setDraft(e.target.value)}
-                          onBlur={() => setEditing(null)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Escape") setEditing(null);
-                            if (e.key === "Enter") {
-                              onEdit?.(ri, set.columns[ci], draft);
-                              setEditing(null);
-                            }
-                          }}
-                          className="w-full bg-[var(--bg)] px-1 text-[11px] text-gray-100 outline-none"
-                        />
-                      ) : cell === null ? (
-                        <span className="italic text-gray-600">NULL</span>
-                      ) : (
-                        cell
-                      )}
-                    </td>
-                  );
-                })}
-              </tr>
-            );
-          })}
-        </tbody>
+          </tbody>
         </table>
-        {set.rows.length === 0 ? (
-          <p className="p-3 text-[11px] text-gray-500">No rows.</p>
+
+        {processedRows.length === 0 ? (
+          <p className="p-3 text-[11px] text-gray-500">
+            {filterText ? "No rows match your search." : "No rows."}
+          </p>
         ) : null}
       </div>
     </div>
@@ -366,19 +556,13 @@ function Grid({
 }
 
 /**
- * A database browser for one server.
- *
- * Everything reaches the databases **through the existing SSH connection** — queries run
- * via the host's own `mysql` client over an exec channel, and a container is reached with
- * `docker exec`. Nothing needs port 3306 open to the internet, and a container does not
- * need a published port.
- *
- * The tree lists every instance found on the host at once — native installs and Docker
- * containers, named — rather than making the user pick one up front, because "what
- * databases are on this box" is the question you actually have. Credentials are per
- * instance, since a host install and a container rarely share a password.
+ * A comprehensive, responsive database browser for MySQL / MariaDB, PostgreSQL, Redis / Valkey.
  */
-export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: NodeProps<DbNodeType>) {
+export const DatabaseNode = memo(function DatabaseNode({
+  id,
+  data,
+  selected,
+}: NodeProps<DbNodeType>) {
   const focus = useCanvasStore((s) => s.focus);
   const removeNode = useCanvasStore((s) => s.removeNode);
   const layoutMode = useCanvasStore((s) => s.layoutMode);
@@ -390,19 +574,28 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
   const [scanning, setScanning] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    return localStorage.getItem("xconsole-db-sidebar-open") !== "false";
+  });
+  const setSidebarOpenPersist = (val: boolean) => {
+    setSidebarOpen(val);
+    try {
+      localStorage.setItem("xconsole-db-sidebar-open", String(val));
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settings, setSettings] = useState<DbSettings>(loadDbSettings);
+  const [inspectRowIndex, setInspectRowIndex] = useState<number | null>(null);
+
   const [sel, setSel] = useState<Selection | null>(null);
   const [columns, setColumns] = useState<DbColumn[]>([]);
   const [rows, setRows] = useState<DbResultSet | null>(null);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState<number>(() => {
-    try {
-      const n = Number(localStorage.getItem("xconsole-db-page-size"));
-      return PAGE_SIZE_OPTIONS.includes(n as (typeof PAGE_SIZE_OPTIONS)[number])
-        ? n
-        : DEFAULT_PAGE_SIZE;
-    } catch {
-      return DEFAULT_PAGE_SIZE;
-    }
+    return settings.pageSize || 200;
   });
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [tab, setTab] = useState<Tab>(() => {
@@ -417,9 +610,11 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
       /* ignore */
     }
   };
+
   const [sql, setSql] = useState("SELECT * FROM ");
   const [sqlResult, setSqlResult] = useState<DbResultSet | null>(null);
   const [busy, setBusy] = useState(false);
+
   const [sqlHistory, setSqlHistory] = useState<string[]>(() => {
     try {
       return JSON.parse(
@@ -437,6 +632,7 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
       return [];
     }
   });
+
   const saveFavorites = (next: string[]) => {
     setSqlFavorites(next);
     try {
@@ -445,6 +641,7 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
       /* ignore */
     }
   };
+
   const toggleFavorite = () => {
     const q = sql.trim();
     if (!q) return;
@@ -465,25 +662,19 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
     ttl?: string;
   } | null>(null);
 
-  // Every session opened by this node, so unmount can close all of them. A ref because
-  // the cleanup must see the latest set without re-running on every change.
   const sessionsRef = useRef<Set<string>>(new Set());
-  /** Scopes the mouse back/forward buttons to this panel. */
   const panelRef = useRef<HTMLDivElement | null>(null);
 
   const scan = useCallback(async () => {
     setScanning(true);
     setError(null);
     try {
-      // Discovery and remembered logins together, so an instance appears with its saved
-      // credential already attached rather than briefly offering an empty form.
       const [found, saved] = await Promise.all([
         api.dbDiscover(data.vpsId),
         api.dbListConnections(data.vpsId).catch(() => []),
       ]);
       const savedByEndpoint = new Map(saved.map((s) => [s.endpoint_id, s]));
       setInstances((prev) => {
-        // Keep live sessions across a rescan rather than making the user sign in again.
         const byId = new Map(prev.map((i) => [i.endpoint.id, i]));
         return found.map((ep) => {
           const existing = byId.get(ep.id);
@@ -498,7 +689,6 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
     }
   }, [data.vpsId]);
 
-  /** Re-read just the saved logins, after one is added or forgotten. */
   const refreshSaved = useCallback(async () => {
     try {
       const saved = await api.dbListConnections(data.vpsId);
@@ -507,7 +697,7 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
         prev.map((i) => ({ ...i, saved: byEndpoint.get(i.endpoint.id) })),
       );
     } catch {
-      // Non-fatal: the tree still works, it just won't show the saved login yet.
+      /* ignore */
     }
   }, [data.vpsId]);
 
@@ -527,14 +717,6 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
     void scan();
   }, [scan]);
 
-  // No teardown on unmount, by design.
-  //
-  // A node unmounts whenever something re-renders it out of the tree — the agent panel
-  // expanding, a workspace switch — none of which mean the user is finished with their
-  // database. Disconnecting there closed every open connection and threw away the
-  // browsing state behind it. Terminals and the SFTP browser already keep their sessions;
-  // this matches them. `closeNode` is what actually disconnects.
-
   const patch = useCallback((endpointId: string, p: Partial<DbInstance>) => {
     if (p.sessionId) sessionsRef.current.add(p.sessionId);
     setInstances((prev) =>
@@ -544,7 +726,7 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
 
   const [tableRowCount, setTableRowCount] = useState<number | null>(null);
 
-  /** Load a table without touching history — used when replaying back/forward. */
+  /** Load a table without touching history */
   const showTable = useCallback(
     async (next: Selection, atPage = 0) => {
       setSel(next);
@@ -552,6 +734,9 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
       setBusy(true);
       setError(null);
       try {
+        // Ensure session database context is set
+        void api.dbUseDatabase(next.sessionId, next.schema).catch(() => {});
+
         const [cols, data] = await Promise.all([
           api.dbDescribeTable(next.sessionId, next.schema, next.table),
           api.dbSelectPage(next.sessionId, next.schema, next.table, pageSize, atPage * pageSize),
@@ -559,13 +744,17 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
         setColumns(cols);
         setRows(data);
         setTab("data");
-        // Best-effort exact count for the pager (ignored if engine refuses).
+
+        // Best-effort exact count
         if (atPage === 0) {
+          const inst = instances.find((i) => i.endpoint.id === next.endpointId);
+          const isPostgres = inst?.endpoint.engine === "postgres";
+          const countSql = isPostgres
+            ? `SELECT COUNT(*) AS c FROM "${next.table}"`
+            : `SELECT COUNT(*) AS c FROM ${next.schema}.${next.table}`;
+
           void api
-            .dbRunSql(
-              next.sessionId,
-              `SELECT COUNT(*) AS c FROM ${next.schema}.${next.table}`,
-            )
+            .dbRunSql(next.sessionId, countSql)
             .then((r) => {
               const v = r.rows[0]?.[0];
               const n = v != null ? Number(v) : NaN;
@@ -579,11 +768,10 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
         setBusy(false);
       }
     },
-    [pageSize],
+    [pageSize, instances],
   );
 
-  // Optional live refresh of the current data page (e.g. watching a queue table).
-  // Quiet path: no busy spinner so the grid does not flash every 5s.
+  // Optional live refresh
   useEffect(() => {
     if (!autoRefresh || !sel || tab !== "data") return;
     const sessionId = sel.sessionId;
@@ -591,19 +779,16 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
     const table = sel.table;
     const at = page;
     const size = pageSize;
+    const intervalMs = (settings.refreshInterval || 5) * 1000;
     const t = window.setInterval(() => {
       void api
         .dbSelectPage(sessionId, schema, table, size, at * size)
         .then((data) => setRows(data))
-        .catch(() => {
-          /* keep previous page on transient errors */
-        });
-    }, 5000);
+        .catch(() => {});
+    }, intervalMs);
     return () => window.clearInterval(t);
-  }, [autoRefresh, sel, page, pageSize, tab]);
+  }, [autoRefresh, sel, page, pageSize, tab, settings.refreshInterval]);
 
-  // Back/forward across tables, like the SFTP panel. Paging and post-edit refreshes call
-  // showTable directly so they don't pile up history entries for the same table.
   const history = useNavHistory<Selection>({
     current: sel,
     go: useCallback((entry: Selection) => void showTable(entry), [showTable]),
@@ -612,7 +797,7 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
   });
   useMouseNavButtons(panelRef, history);
 
-  /** Open a table and record it in history. */
+  /** Open a table and record it in history */
   const openTable = useCallback(
     (next: Selection) => {
       history.visit(next);
@@ -621,7 +806,6 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
     [history, showTable],
   );
 
-  /** Identify a row by its primary key, so an edit can never touch more than one. */
   const rowKey = (rowIndex: number): DbRowKey | null => {
     if (!rows) return null;
     const pk = columns.filter((c) => c.primary);
@@ -649,7 +833,6 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
     }
   };
 
-  /** Delete the selected rows, after confirming — this cannot be undone. */
   const deleteRows = async (rowIndices: number[]) => {
     if (!sel || !rows || rowIndices.length === 0) return;
     const keys = rowIndices.map(rowKey);
@@ -657,15 +840,17 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
       setError("This table has no primary key, so rows can't be deleted individually.");
       return;
     }
-    const ok = await dialog.confirm({
-      title: `Delete ${rowIndices.length} row${rowIndices.length === 1 ? "" : "s"}?`,
-      message: `This permanently deletes ${rowIndices.length} row${
-        rowIndices.length === 1 ? "" : "s"
-      } from ${sel.schema}.${sel.table}. It can't be undone.`,
-      danger: true,
-      confirmText: "Delete",
-    });
-    if (!ok) return;
+    if (settings.confirmDestructive) {
+      const ok = await dialog.confirm({
+        title: `Delete ${rowIndices.length} row${rowIndices.length === 1 ? "" : "s"}?`,
+        message: `Permanently delete ${rowIndices.length} row${
+          rowIndices.length === 1 ? "" : "s"
+        } from ${sel.schema}.${sel.table}. This cannot be undone.`,
+        danger: true,
+        confirmText: "Delete",
+      });
+      if (!ok) return;
+    }
     setBusy(true);
     try {
       await api.dbDeleteRows(sel.sessionId, sel.schema, sel.table, keys as DbRowKey[]);
@@ -679,7 +864,7 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
 
   const runSql = async () => {
     if (!sel?.sessionId || !sql.trim()) {
-      setError("Open a table first, so the query knows which server to run against.");
+      setError("Connect to a server and select a database first.");
       return;
     }
     setBusy(true);
@@ -708,7 +893,6 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
       } else {
         setSqlResult(await api.dbRunSql(sel.sessionId, sql));
       }
-      // Persist recent queries per server.
       try {
         const key = `xconsole-sql-history:${data.vpsId}`;
         const next = [sql.trim(), ...sqlHistory.filter((q) => q !== sql.trim())].slice(
@@ -718,7 +902,7 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
         localStorage.setItem(key, JSON.stringify(next));
         setSqlHistory(next);
       } catch {
-        /* ignore quota */
+        /* ignore */
       }
     } catch (e) {
       setError(String(e));
@@ -728,7 +912,6 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
     }
   };
 
-  /** Export current grid (data tab or SQL result) as CSV via the browser download path. */
   const exportCsv = (set: DbResultSet | null, filename: string) => {
     if (!set || set.columns.length === 0) return;
     const esc = (v: string | null) => {
@@ -749,12 +932,12 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
     URL.revokeObjectURL(url);
   };
 
-  /** Page through the table and export up to a safety cap. */
   const exportAllCsv = async () => {
     if (!sel) return;
+    const maxCap = settings.maxExportLimit || 50000;
     const ok = await dialog.confirm({
       title: "Export full table CSV?",
-      message: `Fetch ${sel.schema}.${sel.table} page-by-page (up to 50,000 rows) and download as CSV. Large tables may take a while.`,
+      message: `Fetch ${sel.schema}.${sel.table} page-by-page (up to ${maxCap.toLocaleString()} rows) and download as CSV.`,
       confirmText: "Export",
     });
     if (!ok) return;
@@ -766,11 +949,10 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
         if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
         return s;
       };
-      const MAX_ROWS = 50_000;
       const lines: string[] = [];
       let offset = 0;
       let cols: string[] | null = null;
-      while (offset < MAX_ROWS) {
+      while (offset < maxCap) {
         const pageData = await api.dbSelectPage(
           sel.sessionId,
           sel.schema,
@@ -786,8 +968,8 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
         if (pageData.rows.length < pageSize) break;
         offset += pageSize;
       }
-      if (offset >= MAX_ROWS) {
-        setError(`Export capped at ${MAX_ROWS} rows.`);
+      if (offset >= maxCap) {
+        setError(`Export reached limit of ${maxCap.toLocaleString()} rows.`);
       }
       const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
       const url = URL.createObjectURL(blob);
@@ -803,7 +985,6 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
     }
   };
 
-  /** Export current page as INSERT statements (SQL dump of visible rows). */
   const exportSqlInserts = (set: DbResultSet | null, tableLabel: string) => {
     if (!set || set.columns.length === 0 || set.rows.length === 0) return;
     const cols = set.columns.join(", ");
@@ -827,46 +1008,94 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
     URL.revokeObjectURL(url);
   };
 
-  /** Drop the current table after typing its name to confirm. */
+  const duplicateTable = async () => {
+    if (!sel) return;
+    const newName = await dialog.prompt({
+      title: `Duplicate ${sel.table}`,
+      label: "Enter new table name:",
+      defaultValue: `${sel.table}_copy`,
+      confirmText: "Duplicate",
+    });
+    if (!newName || !newName.trim()) return;
+    const targetName = newName.trim();
+    const inst = instances.find((i) => i.endpoint.id === sel.endpointId);
+    const isPostgres = inst?.endpoint.engine === "postgres";
+
+    setBusy(true);
+    setError(null);
+    try {
+      if (isPostgres) {
+        await api.dbRunSql(
+          sel.sessionId,
+          `CREATE TABLE "${targetName}" AS TABLE "${sel.table}";`,
+        );
+      } else {
+        await api.dbRunSql(
+          sel.sessionId,
+          `CREATE TABLE ${sel.schema}.${targetName} LIKE ${sel.schema}.${sel.table};`,
+        );
+        await api.dbRunSql(
+          sel.sessionId,
+          `INSERT INTO ${sel.schema}.${targetName} SELECT * FROM ${sel.schema}.${sel.table};`,
+        );
+      }
+      const updated = await api.dbListTables(sel.sessionId, sel.schema);
+      patch(sel.endpointId, {
+        tables: {
+          ...(inst?.tables ?? {}),
+          [sel.schema]: updated,
+        },
+      });
+      openTable({
+        endpointId: sel.endpointId,
+        sessionId: sel.sessionId,
+        schema: sel.schema,
+        table: targetName,
+      });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const dropTable = async () => {
     if (!sel) return;
-    const typed = await dialog.prompt({
-      title: `Drop table ${sel.schema}.${sel.table}?`,
-      label: `Type the table name "${sel.table}" to confirm permanent DROP`,
-      defaultValue: "",
-      confirmText: "Drop table",
-    });
-    if (typed === null) return;
-    if (typed.trim() !== sel.table) {
-      setError("Drop cancelled — table name did not match.");
-      return;
+    const inst = instances.find((i) => i.endpoint.id === sel.endpointId);
+    const isPostgres = inst?.endpoint.engine === "postgres";
+
+    if (settings.confirmDestructive) {
+      const typed = await dialog.prompt({
+        title: `Drop table ${sel.schema}.${sel.table}?`,
+        label: `Type table name "${sel.table}" to confirm permanent DROP:`,
+        defaultValue: "",
+        confirmText: "Drop table",
+      });
+      if (typed === null) return;
+      if (typed.trim() !== sel.table) {
+        setError("Drop cancelled — table name did not match.");
+        return;
+      }
     }
     setBusy(true);
     setError(null);
     try {
-      await api.dbRunSql(sel.sessionId, `DROP TABLE ${sel.schema}.${sel.table}`);
+      const dropSql = isPostgres
+        ? `DROP TABLE "${sel.table}"`
+        : `DROP TABLE ${sel.schema}.${sel.table}`;
+      await api.dbRunSql(sel.sessionId, dropSql);
       const droppedSchema = sel.schema;
       const droppedSession = sel.sessionId;
       setSel(null);
       setRows(null);
       setColumns([]);
-      // Clear cached tables so the tree reloads without the dropped table.
-      setInstances((prev) =>
-        prev.map((inst) =>
-          inst.sessionId === droppedSession ? { ...inst, tables: {} } : inst,
-        ),
-      );
       try {
         const tables = await api.dbListTables(droppedSession, droppedSchema);
-        setInstances((prev) =>
-          prev.map((inst) =>
-            inst.sessionId === droppedSession
-              ? { ...inst, tables: { ...inst.tables, [droppedSchema]: tables } }
-              : inst,
-          ),
-        );
+        patch(sel.endpointId, {
+          tables: { ...(inst?.tables ?? {}), [droppedSchema]: tables },
+        });
       } catch {
-        /* tree will reload when schema is re-opened */
+        /* ignore */
       }
     } catch (e) {
       setError(String(e));
@@ -875,27 +1104,33 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
     }
   };
 
-  /** Empty the current table (TRUNCATE / DELETE) after a strong confirm. */
   const truncateTable = async () => {
     if (!sel) return;
-    const ok = await dialog.confirm({
-      title: `Truncate ${sel.schema}.${sel.table}?`,
-      message: `This deletes ALL rows in ${sel.schema}.${sel.table}. It cannot be undone from this app.`,
-      danger: true,
-      confirmText: "Truncate",
-    });
-    if (!ok) return;
+    const inst = instances.find((i) => i.endpoint.id === sel.endpointId);
+    const isPostgres = inst?.endpoint.engine === "postgres";
+
+    if (settings.confirmDestructive) {
+      const ok = await dialog.confirm({
+        title: `Truncate ${sel.schema}.${sel.table}?`,
+        message: `Delete ALL rows in ${sel.schema}.${sel.table}. This cannot be undone.`,
+        danger: true,
+        confirmText: "Truncate",
+      });
+      if (!ok) return;
+    }
     setBusy(true);
     setError(null);
     try {
-      // Prefer TRUNCATE; fall back to DELETE for engines that refuse TRUNCATE.
+      const truncSql = isPostgres
+        ? `TRUNCATE TABLE "${sel.table}"`
+        : `TRUNCATE TABLE ${sel.schema}.${sel.table}`;
       try {
-        await api.dbRunSql(
-          sel.sessionId,
-          `TRUNCATE TABLE ${sel.schema}.${sel.table}`,
-        );
+        await api.dbRunSql(sel.sessionId, truncSql);
       } catch {
-        await api.dbRunSql(sel.sessionId, `DELETE FROM ${sel.schema}.${sel.table}`);
+        const delSql = isPostgres
+          ? `DELETE FROM "${sel.table}"`
+          : `DELETE FROM ${sel.schema}.${sel.table}`;
+        await api.dbRunSql(sel.sessionId, delSql);
       }
       await showTable(sel, 0);
     } catch (e) {
@@ -905,9 +1140,6 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
     }
   };
 
-  /** Import a .sql file from disk and run it against the current connection.
-   *  Supports larger dumps (up to 64 MB) and naive multi-statement splitting so
-   *  SQL exports with many statements still land. */
   const importSqlFile = async () => {
     if (!sel?.sessionId) {
       setError("Connect to a database first.");
@@ -923,8 +1155,6 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
         setError("SQL file is empty.");
         return;
       }
-      // Strip SQL comments and split on semicolons at end-of-line (common dump style).
-      // Falls back to whole-file exec if only one chunk.
       const statements = splitSqlStatements(text);
       let last: DbResultSet | null = null;
       let ok = 0;
@@ -935,7 +1165,6 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
           ok += 1;
         } catch (e) {
           errors.push(String(e));
-          // Keep going so a single bad statement does not abort a 10k-line dump mid-way.
           if (errors.length >= 20) {
             errors.push("…stopped after 20 statement errors");
             break;
@@ -946,15 +1175,13 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
       setTab("sql");
       setSql(
         text.length > 4000
-          ? `${text.slice(0, 4000)}\n/* …truncated for editor · imported ${ok}/${statements.length} statements */`
+          ? `${text.slice(0, 4000)}\n/* …imported ${ok}/${statements.length} statements */`
           : text,
       );
       if (errors.length > 0) {
         setError(
           `Imported ${ok}/${statements.length} statements with ${errors.length} error(s): ${errors[0]}`,
         );
-      } else if (statements.length > 1) {
-        setError(null);
       }
       if (sel) await showTable(sel, page).catch(() => {});
     } catch (e) {
@@ -964,10 +1191,26 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
     }
   };
 
-  /** Open the schema-aware Insert Row or Redis Add Key modal. */
-  const insertRow = () => {
-    if (!sel) return;
-    setInsertOpen(true);
+  const handleDisconnect = async (inst: DbInstance) => {
+    if (inst.sessionId) {
+      try {
+        await api.dbDisconnect(inst.sessionId);
+        sessionsRef.current.delete(inst.sessionId);
+        patch(inst.endpoint.id, {
+          sessionId: null,
+          schemas: [],
+          tables: {},
+          openSchemas: [],
+        });
+        if (sel?.endpointId === inst.endpoint.id) {
+          setSel(null);
+          setRows(null);
+          setColumns([]);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
   };
 
   const connectedCount = instances.filter((i) => i.sessionId).length;
@@ -979,24 +1222,40 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
         tiled ? "rounded-none" : "rounded-lg"
       } ${selected ? "border-violet-500" : "border-[var(--border)]"}`}
       onMouseDown={() => focus(id)}
-      style={freeform ? undefined : { transform: `scale(${1 / zoom})`, transformOrigin: "top left" }}
+      onKeyDown={(e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b") {
+          e.preventDefault();
+          setSidebarOpenPersist(!sidebarOpen);
+        }
+      }}
+      style={
+        freeform
+          ? undefined
+          : { transform: `scale(${1 / zoom})`, transformOrigin: "top left" }
+      }
     >
       <NodeResizer
-        minWidth={520}
-        minHeight={280}
-        // Always mounted, not just when selected: needing to click a node before you
-        // could resize it was the whole reason edges were "hard to grab". The handles
-        // stay invisible until hover — see .xc-resize-* in styles.css, which also gives
-        // them a hit area far wider than the 1px line they draw.
+        minWidth={480}
+        minHeight={260}
         isVisible
         lineClassName="border-violet-500"
         handleClassName="h-2 w-2 rounded bg-violet-500"
       />
 
+      {/* Top Title Bar */}
       <div
-        className="flex shrink-0 cursor-move items-center gap-2 border-b border-[var(--border)] bg-[var(--surface)] px-2 py-1.5"
+        className="flex shrink-0 cursor-move items-center gap-1.5 border-b border-[var(--border)] bg-[var(--surface)] px-2 py-1 select-none"
         onDoubleClick={() => focus(id)}
       >
+        <button
+          type="button"
+          onClick={() => setSidebarOpenPersist(!sidebarOpen)}
+          className="rounded p-1 text-gray-400 hover:bg-[var(--border)] hover:text-white transition-colors"
+          data-tooltip={sidebarOpen ? "Hide database list (Ctrl+B)" : "Show database list (Ctrl+B)"}
+        >
+          {sidebarOpen ? <PanelLeftCloseIcon size={13} /> : <PanelLeftIcon size={13} />}
+        </button>
+
         <DatabaseIcon size={13} className="shrink-0 text-violet-400" />
         <button
           type="button"
@@ -1009,15 +1268,16 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
         >
           {data.name}
         </button>
-        <span className="shrink-0 text-[10px] text-gray-600">
-          {instances.length} instance{instances.length === 1 ? "" : "s"}
-          {connectedCount > 0 ? ` · ${connectedCount} connected` : ""}
+        <span className="shrink-0 text-[10px] text-gray-500 font-mono">
+          {instances.length} inst{instances.length === 1 ? "" : "s"}
+          {connectedCount > 0 ? ` · ${connectedCount} live` : ""}
         </span>
+
         {sel ? (
           <button
             type="button"
-            className="truncate text-[10px] text-violet-300 hover:text-violet-100"
-            data-tooltip="Click to copy schema.table"
+            className="truncate text-[10px] font-mono text-violet-300 hover:text-violet-100 max-w-[200px]"
+            data-tooltip="Click to copy database.table"
             onClick={(e) => {
               e.stopPropagation();
               void navigator.clipboard.writeText(`${sel.schema}.${sel.table}`);
@@ -1026,18 +1286,31 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
             {sel.schema}.{sel.table}
           </button>
         ) : null}
-        <button
-          className="ml-auto shrink-0 rounded px-1 text-gray-500 hover:bg-[var(--border)] hover:text-white"
-          onClick={() => {
-            // The one place a database connection is really finished with.
-            for (const sid of sessionsRef.current) void api.dbDisconnect(sid).catch(() => {});
-            sessionsRef.current.clear();
-            removeNode(id);
-          }}
-          data-tooltip="Close"
-        >
-          ✕
-        </button>
+
+        {/* Top-Right Tools */}
+        <div className="ml-auto flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            className="rounded p-1 text-gray-400 hover:bg-[var(--border)] hover:text-violet-300 transition-colors"
+            data-tooltip="Database manager settings"
+          >
+            <SettingsIcon size={13} />
+          </button>
+          <button
+            type="button"
+            className="rounded p-1 text-gray-500 hover:bg-[var(--border)] hover:text-white"
+            onClick={() => {
+              for (const sid of sessionsRef.current)
+                void api.dbDisconnect(sid).catch(() => {});
+              sessionsRef.current.clear();
+              removeNode(id);
+            }}
+            data-tooltip="Close Database Manager"
+          >
+            <CloseIcon size={12} />
+          </button>
+        </div>
       </div>
 
       <div className="nodrag nowheel flex min-h-0 flex-1 flex-col">
@@ -1050,170 +1323,227 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
               onClick={() => setError(null)}
               data-tooltip="Dismiss"
             >
-              ✕
+              <CloseIcon size={10} />
             </button>
           </div>
         ) : null}
 
         <div className="flex min-h-0 flex-1">
-          <DatabaseTree
-            instances={instances}
-            vpsId={data.vpsId}
-            scanning={scanning}
-            selected={sel}
-            onPatch={patch}
-            onSelectTable={(inst, schema, table) => {
-              if (!inst.sessionId) return;
-              openTable({
-                endpointId: inst.endpoint.id,
-                sessionId: inst.sessionId,
-                schema,
-                table,
-              });
-            }}
-            onRescan={() => void scan()}
-            onSavedChanged={() => void refreshSaved()}
-            onForget={(id) => void forgetSaved(id)}
-          />
+          {/* Collapsible Sidebar */}
+          {sidebarOpen && (
+            <DatabaseTree
+              instances={instances}
+              vpsId={data.vpsId}
+              scanning={scanning}
+              selected={sel}
+              onPatch={patch}
+              onSelectTable={(inst, schema, table) => {
+                if (!inst.sessionId) return;
+                openTable({
+                  endpointId: inst.endpoint.id,
+                  sessionId: inst.sessionId,
+                  schema,
+                  table,
+                });
+              }}
+              onRescan={() => void scan()}
+              onSavedChanged={() => void refreshSaved()}
+              onForget={(fid) => void forgetSaved(fid)}
+              onDisconnect={handleDisconnect}
+            />
+          )}
 
+          {/* Right Main Pane */}
           <div className="flex min-w-0 flex-1 flex-col">
-            <div className="flex shrink-0 items-center gap-1 border-b border-[var(--border)] px-2 py-1">
+            {/* Toolbar */}
+            <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-[var(--border)] bg-[var(--surface-2)] px-2 py-1">
               <button
                 onClick={history.back}
                 disabled={!history.canBack}
-                className="rounded px-1 py-0.5 text-[11px] text-gray-400 hover:bg-[var(--border)] disabled:opacity-30"
+                className="rounded p-1 text-gray-400 hover:bg-[var(--border)] disabled:opacity-30"
                 data-tooltip="Back (mouse button 4)"
               >
-                ‹
+                <ChevronLeftIcon size={12} />
               </button>
               <button
                 onClick={history.forward}
                 disabled={!history.canForward}
-                className="mr-1 rounded px-1 py-0.5 text-[11px] text-gray-400 hover:bg-[var(--border)] disabled:opacity-30"
+                className="mr-1 rounded p-1 text-gray-400 hover:bg-[var(--border)] disabled:opacity-30"
                 data-tooltip="Forward (mouse button 5)"
               >
-                ›
+                <ChevronRightIcon size={12} />
               </button>
-              {(["data", "structure", "sql"] as Tab[]).map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setTabPersist(t)}
-                  className={`rounded px-2 py-0.5 text-[11px] capitalize ${
-                    tab === t ? "bg-violet-600 text-white" : "text-gray-400 hover:bg-[var(--border)]"
-                  }`}
-                >
-                  {t}
-                </button>
-              ))}
+
+              {/* Tab Selector */}
+              <div className="flex rounded border border-[var(--border)] bg-[var(--bg)] p-0.5">
+                {(["data", "structure", "sql"] as Tab[]).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setTabPersist(t)}
+                    className={`flex items-center gap-1 rounded px-2 py-0.5 text-[11px] capitalize font-medium transition-colors ${
+                      tab === t
+                        ? "bg-violet-600 text-white"
+                        : "text-gray-400 hover:text-gray-200"
+                    }`}
+                  >
+                    {t === "data" && <TableIcon size={11} />}
+                    {t === "structure" && <SlidersIcon size={11} />}
+                    {t === "sql" && <PlayIcon size={10} />}
+                    <span>{t}</span>
+                  </button>
+                ))}
+              </div>
+
+              {/* Tab-specific actions */}
               {tab === "data" && sel ? (
-                <div className="ml-auto flex items-center gap-1 text-[10px] text-gray-500">
+                <div className="ml-auto flex flex-wrap items-center gap-1 text-[10px]">
                   <button
                     type="button"
                     disabled={!sel || busy}
                     onClick={() => setCreateTableOpen(true)}
-                    className="rounded px-1.5 py-0.5 text-violet-400 hover:bg-[var(--surface-hover)] hover:text-violet-200 disabled:opacity-30"
-                    data-tooltip="Create a new table in this schema"
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-violet-300 hover:bg-[var(--surface-hover)] hover:text-violet-100 disabled:opacity-30"
+                    data-tooltip="Create a new table in this database"
                   >
-                    + Table
+                    <PlusIcon size={11} />
+                    <span>Table</span>
                   </button>
+
                   <button
                     type="button"
                     disabled={!rows || busy}
-                    onClick={() => insertRow()}
-                    className="rounded px-1.5 py-0.5 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:opacity-30"
-                    data-tooltip={instances.find((i) => i.endpoint.id === sel.endpointId)?.endpoint.engine === "redis" ? "Add new Redis key" : "Insert a new row"}
+                    onClick={() => setInsertOpen(true)}
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--surface-hover)] hover:text-white disabled:opacity-30"
+                    data-tooltip={
+                      instances.find((i) => i.endpoint.id === sel.endpointId)?.endpoint
+                        .engine === "redis"
+                        ? "Add new Redis key"
+                        : "Insert new row"
+                    }
                   >
-                    {instances.find((i) => i.endpoint.id === sel.endpointId)?.endpoint.engine === "redis" ? "+ Key" : "Insert"}
+                    <PlusIcon size={11} />
+                    <span>
+                      {instances.find((i) => i.endpoint.id === sel.endpointId)?.endpoint
+                        .engine === "redis"
+                        ? "Key"
+                        : "Row"}
+                    </span>
                   </button>
+
+                  <button
+                    type="button"
+                    disabled={!rows || busy}
+                    onClick={() => void duplicateTable()}
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--surface-hover)] hover:text-white disabled:opacity-30"
+                    data-tooltip="Clone / duplicate this table"
+                  >
+                    <DuplicateIcon size={11} />
+                    <span>Clone</span>
+                  </button>
+
                   <button
                     type="button"
                     disabled={busy}
                     onClick={() => void truncateTable()}
-                    className="rounded px-1.5 py-0.5 text-red-400/80 hover:bg-red-950/40 hover:text-red-300 disabled:opacity-30"
-                    data-tooltip="Delete all rows in this table"
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-amber-400/90 hover:bg-amber-950/40 hover:text-amber-300 disabled:opacity-30"
+                    data-tooltip="Delete all rows in this table (TRUNCATE)"
                   >
-                    Truncate
+                    <EraserIcon size={11} />
+                    <span>Truncate</span>
                   </button>
+
                   <button
                     type="button"
                     disabled={busy}
                     onClick={() => void dropTable()}
-                    className="rounded px-1.5 py-0.5 text-red-500/90 hover:bg-red-950/50 hover:text-red-200 disabled:opacity-30"
-                    data-tooltip="DROP TABLE permanently (type name to confirm)"
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-red-400 hover:bg-red-950/50 hover:text-red-200 disabled:opacity-30"
+                    data-tooltip="DROP TABLE permanently"
                   >
-                    Drop
+                    <TrashIcon size={11} />
+                    <span>Drop</span>
                   </button>
+
+                  <div className="mx-0.5 h-3 w-px bg-[var(--border)]" />
+
                   <button
                     type="button"
                     disabled={busy}
                     onClick={() => void importSqlFile()}
-                    className="rounded px-1.5 py-0.5 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:opacity-30"
-                    data-tooltip="Import a .sql file (up to 64 MB, multi-statement)"
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--surface-hover)] hover:text-white disabled:opacity-30"
+                    data-tooltip="Import .sql dump file (up to 64 MB)"
                   >
-                    Import
+                    <UploadIcon size={11} />
+                    <span>Import</span>
                   </button>
+
                   <button
                     type="button"
                     disabled={!rows}
                     onClick={() =>
                       exportCsv(rows, `${sel.schema}_${sel.table}_p${page + 1}.csv`)
                     }
-                    className="rounded px-1.5 py-0.5 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:opacity-30"
-                    data-tooltip="Export this page as CSV"
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--surface-hover)] hover:text-white disabled:opacity-30"
+                    data-tooltip="Export current page as CSV"
                   >
-                    CSV
+                    <DownloadIcon size={11} />
+                    <span>CSV</span>
                   </button>
+
                   <button
                     type="button"
                     disabled={busy || !sel}
                     onClick={() => void exportAllCsv()}
-                    className="rounded px-1.5 py-0.5 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:opacity-30"
-                    data-tooltip="Export entire table as CSV (paged, max 50k rows)"
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--surface-hover)] hover:text-white disabled:opacity-30"
+                    data-tooltip="Export full table as CSV (paged)"
                   >
-                    CSV all
+                    <DownloadIcon size={11} />
+                    <span>All CSV</span>
                   </button>
+
                   <button
                     type="button"
                     disabled={!rows || (rows?.rows.length ?? 0) === 0}
-                    onClick={() =>
-                      exportSqlInserts(rows, `${sel.schema}.${sel.table}`)
-                    }
-                    className="rounded px-1.5 py-0.5 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:opacity-30"
-                    data-tooltip="Export this page as INSERT SQL"
+                    onClick={() => exportSqlInserts(rows, `${sel.schema}.${sel.table}`)}
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--surface-hover)] hover:text-white disabled:opacity-30"
+                    data-tooltip="Export page as SQL INSERT dump"
                   >
-                    SQL
+                    <DownloadIcon size={11} />
+                    <span>SQL</span>
                   </button>
-                  <button
-                    disabled={page === 0}
-                    onClick={() => void showTable(sel, page - 1)}
-                    className="rounded px-1 hover:bg-[var(--border)] disabled:opacity-30"
-                  >
-                    ‹
-                  </button>
-                  <span className="tabular-nums">
-                    {page * pageSize + 1}–{page * pageSize + (rows?.rows.length ?? 0)}
-                    {tableRowCount != null ? (
-                      <span className="text-gray-600"> / {tableRowCount.toLocaleString()}</span>
-                    ) : null}
-                  </span>
-                  <button
-                    disabled={(rows?.rows.length ?? 0) < pageSize}
-                    onClick={() => void showTable(sel, page + 1)}
-                    className="rounded px-1 hover:bg-[var(--border)] disabled:opacity-30"
-                  >
-                    ›
-                  </button>
+
+                  <div className="mx-0.5 h-3 w-px bg-[var(--border)]" />
+
+                  {/* Paging controls */}
+                  <div className="flex items-center gap-1 bg-[var(--bg)] px-1 py-0.5 rounded border border-[var(--border)]">
+                    <button
+                      disabled={page === 0 || busy}
+                      onClick={() => void showTable(sel, page - 1)}
+                      className="rounded p-0.5 text-gray-400 hover:text-white disabled:opacity-30"
+                      data-tooltip="Previous page"
+                    >
+                      <ChevronLeftIcon size={11} />
+                    </button>
+                    <span className="tabular-nums font-mono text-[10px] text-gray-300 px-1">
+                      {page * pageSize + 1}–{page * pageSize + (rows?.rows.length ?? 0)}
+                      {tableRowCount != null ? (
+                        <span className="text-gray-500"> / {tableRowCount.toLocaleString()}</span>
+                      ) : null}
+                    </span>
+                    <button
+                      disabled={(rows?.rows.length ?? 0) < pageSize || busy}
+                      onClick={() => void showTable(sel, page + 1)}
+                      className="rounded p-0.5 text-gray-400 hover:text-white disabled:opacity-30"
+                      data-tooltip="Next page"
+                    >
+                      <ChevronRightIcon size={11} />
+                    </button>
+                  </div>
+
                   <select
-                    className="rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-gray-400"
+                    className="rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-gray-300 outline-none"
                     value={pageSize}
                     onChange={(e) => {
                       const n = Number(e.target.value);
                       setPageSize(n);
-                      try {
-                        localStorage.setItem("xconsole-db-page-size", String(n));
-                      } catch {
-                        /* ignore */
-                      }
                       if (!sel) return;
                       setPage(0);
                       setBusy(true);
@@ -1227,59 +1557,69 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
                   >
                     {PAGE_SIZE_OPTIONS.map((n) => (
                       <option key={n} value={n}>
-                        {n}/page
+                        {n}/pg
                       </option>
                     ))}
                   </select>
+
                   <button
                     type="button"
-                    className={`rounded px-1.5 py-0.5 text-[10px] ${
+                    className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] transition-colors ${
                       autoRefresh
-                        ? "bg-emerald-900/40 text-emerald-300"
-                        : "text-gray-500 hover:bg-[var(--border)]"
+                        ? "bg-emerald-950/60 text-emerald-300 border border-emerald-800/50"
+                        : "text-gray-500 hover:bg-[var(--border)] hover:text-gray-300"
                     }`}
                     onClick={() => setAutoRefresh((v) => !v)}
                     data-tooltip={
                       autoRefresh
-                        ? "Auto-refresh on (every 5s) — click to stop"
-                        : "Auto-refresh this page every 5 seconds"
+                        ? `Live auto-refresh active (${settings.refreshInterval}s) — click to stop`
+                        : `Auto-refresh page every ${settings.refreshInterval}s`
                     }
                   >
-                    {autoRefresh ? "↻ live" : "↻"}
+                    <RefreshIcon
+                      size={10}
+                      className={autoRefresh ? "animate-spin text-emerald-400" : ""}
+                    />
+                    <span>{autoRefresh ? "Live" : "Refresh"}</span>
                   </button>
                 </div>
               ) : null}
+
               {tab === "sql" ? (
-                <div className="ml-auto flex items-center gap-1">
+                <div className="ml-auto flex items-center gap-1 text-[10px]">
                   <button
                     type="button"
                     disabled={busy || !sel?.sessionId}
                     onClick={() => void importSqlFile()}
-                    className="rounded px-1.5 py-0.5 text-[10px] text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] disabled:opacity-30"
-                    data-tooltip="Import a .sql file (max 8 MB)"
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--surface-hover)] hover:text-white disabled:opacity-30"
+                    data-tooltip="Import .sql script"
                   >
-                    Import
+                    <UploadIcon size={11} />
+                    <span>Import</span>
                   </button>
                   {sqlResult ? (
                     <button
                       type="button"
                       onClick={() => exportCsv(sqlResult, "query_result.csv")}
-                      className="rounded px-1.5 py-0.5 text-[10px] text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
+                      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-gray-300 hover:bg-[var(--surface-hover)] hover:text-white"
                       data-tooltip="Export query result as CSV"
                     >
-                      CSV
+                      <DownloadIcon size={11} />
+                      <span>CSV</span>
                     </button>
                   ) : null}
                 </div>
               ) : null}
             </div>
 
+            {/* Content Area */}
             <div className="min-h-0 flex-1 overflow-hidden">
               {tab === "data" ? (
                 rows ? (
                   <Grid
                     set={rows}
                     columns={columns}
+                    settings={settings}
                     tableLabel={sel ? `${sel.schema}.${sel.table}` : undefined}
                     onEdit={(r, c, v) => void editCell(r, c, v)}
                     onDeleteRows={(idx) => void deleteRows(idx)}
@@ -1287,46 +1627,36 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
                       setSql(text);
                       setTab("sql");
                     }}
-                    onInspectRow={
-                      instances.find((i) => i.endpoint.id === sel?.endpointId)?.endpoint.engine === "redis"
-                        ? (idx) => {
-                            const r = rows.rows[idx];
-                            if (r) {
-                              setRedisKeyInspect({
-                                key: r[0] ?? "",
-                                type: r[1] ?? "string",
-                                ttl: r[2] ?? "-1",
-                              });
-                            }
-                          }
-                        : undefined
-                    }
+                    onInspectRow={(idx) => setInspectRowIndex(idx)}
                   />
                 ) : (
-                  <p className="p-3 text-[11px] text-gray-500">
-                    {busy
-                      ? "Loading…"
-                      : "Expand a server on the left, sign in, then pick a table."}
-                  </p>
+                  <div className="flex h-full flex-col items-center justify-center p-6 text-center text-gray-500">
+                    <DatabaseIcon size={28} className="text-violet-500/40 mb-2" />
+                    <p className="text-[12px] font-medium text-gray-300">No table selected</p>
+                    <p className="text-[11px] text-gray-500 max-w-sm mt-1">
+                      Expand a database on the left sidebar, sign in, and click any table to browse its data.
+                    </p>
+                  </div>
                 )
               ) : null}
 
               {tab === "structure" ? (
                 columns.length > 0 ? (
                   <div className="flex h-full min-h-0 flex-col">
-                    <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)] px-2 py-1">
+                    <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)] bg-[var(--surface-2)] px-2 py-1">
                       <button
                         type="button"
-                        className="rounded bg-violet-600/20 px-2 py-0.5 text-[10px] font-medium text-violet-300 hover:bg-violet-600/30"
+                        className="flex items-center gap-1 rounded bg-violet-600/20 px-2 py-0.5 text-[10px] font-medium text-violet-300 hover:bg-violet-600/30"
                         data-tooltip="Add column to this table"
                         onClick={() => setAddColumnOpen(true)}
                       >
-                        + Add Column
+                        <PlusIcon size={11} />
+                        <span>Add Column</span>
                       </button>
                       <button
                         type="button"
-                        className="rounded px-1.5 py-0.5 text-[10px] text-gray-300 hover:bg-[var(--border)]"
-                        data-tooltip="Copy column definitions as SQL fragment"
+                        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gray-300 hover:bg-[var(--border)]"
+                        data-tooltip="Copy column definitions as CREATE TABLE SQL"
                         onClick={() => {
                           const lines = columns.map((c) => {
                             const nullish = c.nullable ? "NULL" : "NOT NULL";
@@ -1345,22 +1675,24 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
                           void navigator.clipboard.writeText(sqlFrag);
                         }}
                       >
-                        Copy CREATE
+                        <CopyIcon size={11} />
+                        <span>Copy CREATE</span>
                       </button>
                       <button
                         type="button"
-                        className="rounded px-1.5 py-0.5 text-[10px] text-gray-300 hover:bg-[var(--border)]"
-                        data-tooltip="Copy column names as comma-separated list"
+                        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-gray-300 hover:bg-[var(--border)]"
+                        data-tooltip="Copy column names list"
                         onClick={() => {
                           void navigator.clipboard.writeText(
                             columns.map((c) => c.name).join(", "),
                           );
                         }}
                       >
-                        Copy names
+                        <CopyIcon size={11} />
+                        <span>Copy Names</span>
                       </button>
-                      <span className="ml-auto text-[10px] text-gray-600">
-                        {columns.length} column{columns.length === 1 ? "" : "s"}
+                      <span className="ml-auto font-mono text-[10px] text-gray-500">
+                        {columns.length} columns
                       </span>
                     </div>
                     <div className="min-h-0 flex-1">
@@ -1378,16 +1710,18 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
                           affected: null,
                           message: null,
                         }}
+                        settings={settings}
                       />
                     </div>
                   </div>
                 ) : (
-                  <p className="p-3 text-[11px] text-gray-500">Pick a table on the left.</p>
+                  <p className="p-3 text-[11px] text-gray-500">Select a table on the left.</p>
                 )
               ) : null}
 
               {tab === "sql" ? (
                 <div className="flex h-full flex-col">
+                  {/* Editor */}
                   <div className="h-1/2 min-h-0 p-1">
                     <CodeEditArea
                       value={sql}
@@ -1396,39 +1730,26 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
                       onKeyDown={(e) => {
                         if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
                           e.preventDefault();
-                          if (e.shiftKey && sel?.sessionId && sql.trim()) {
-                            void (async () => {
-                              setBusy(true);
-                              setError(null);
-                              try {
-                                const q = sql.trim().replace(/;+\s*$/, "");
-                                setSqlResult(
-                                  await api.dbRunSql(sel.sessionId, `EXPLAIN ${q}`),
-                                );
-                              } catch (err) {
-                                setError(String(err));
-                              } finally {
-                                setBusy(false);
-                              }
-                            })();
-                          } else {
-                            void runSql();
-                          }
+                          void runSql();
                           return true;
                         }
                         return false;
                       }}
                     />
                   </div>
-                  <div className="flex shrink-0 items-center gap-2 border-y border-[var(--border)] px-2 py-1">
+
+                  {/* SQL Action Bar */}
+                  <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-y border-[var(--border)] bg-[var(--surface-2)] px-2 py-1 text-[11px]">
                     <button
                       onClick={() => void runSql()}
                       disabled={busy}
-                      className="rounded bg-violet-600 px-2 py-0.5 text-[11px] text-white hover:bg-violet-500 disabled:opacity-50"
+                      className="flex items-center gap-1.5 rounded bg-violet-600 px-2.5 py-0.5 font-medium text-white hover:bg-violet-500 disabled:opacity-50 transition-colors"
                       data-tooltip="Run query (Ctrl+Enter)"
                     >
-                      {busy ? "Running…" : "Run"}
+                      <PlayIcon size={11} />
+                      <span>{busy ? "Running…" : "Run"}</span>
                     </button>
+
                     <button
                       type="button"
                       disabled={busy || !sql.trim() || !sel?.sessionId}
@@ -1438,7 +1759,6 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
                           setBusy(true);
                           setError(null);
                           try {
-                            // MySQL/MariaDB/Postgres-style EXPLAIN; Redis will error clearly.
                             const q = sql.trim().replace(/;+\s*$/, "");
                             const result = await api.dbRunSql(
                               sel.sessionId,
@@ -1452,16 +1772,16 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
                           }
                         })();
                       }}
-                      className="rounded border border-[var(--border)] px-2 py-0.5 text-[11px] text-gray-300 hover:bg-[var(--border)] disabled:opacity-40"
-                      data-tooltip="Run EXPLAIN (Ctrl+Shift+Enter)"
+                      className="rounded border border-[var(--border)] px-2 py-0.5 text-gray-300 hover:bg-[var(--border)] disabled:opacity-40"
+                      data-tooltip="Explain execution plan"
                     >
                       Explain
                     </button>
+
                     <button
                       type="button"
                       disabled={!sql.trim()}
                       onClick={() => {
-                        // Lightweight pretty-print: keywords uppercase, collapse spaces.
                         const kw =
                           /\b(select|from|where|and|or|join|left|right|inner|outer|on|group by|order by|limit|offset|insert into|values|update|set|delete|create|table|alter|drop|as|in|not|null|is|like|between|union|all|distinct|having|case|when|then|else|end)\b/gi;
                         let s = sql
@@ -1483,78 +1803,87 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
                           .replace(/\bSET\b/g, "\nSET");
                         setSql(s.trim() + (s.trim().endsWith(";") ? "" : ";"));
                       }}
-                      className="rounded border border-[var(--border)] px-2 py-0.5 text-[11px] text-gray-400 hover:bg-[var(--border)] disabled:opacity-40"
-                      data-tooltip="Light SQL format (keywords + line breaks)"
+                      className="flex items-center gap-1 rounded border border-[var(--border)] px-2 py-0.5 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 disabled:opacity-40"
+                      data-tooltip="Format SQL"
                     >
-                      Format
+                      <SlidersIcon size={11} />
+                      <span>Format</span>
                     </button>
+
+                    <div className="mx-0.5 h-3 w-px bg-[var(--border)]" />
+
+                    {/* Quick Snippets */}
+                    {sel && (
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setSql(`SELECT * FROM ${sel.schema}.${sel.table} LIMIT 100;`)
+                          }
+                          className="rounded bg-[var(--border)] px-1.5 py-0.5 text-[10px] text-gray-300 hover:text-white"
+                          data-tooltip="Insert SELECT * template"
+                        >
+                          SELECT
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setSql(
+                              `SELECT COUNT(*) AS total FROM ${sel.schema}.${sel.table};`,
+                            )
+                          }
+                          className="rounded bg-[var(--border)] px-1.5 py-0.5 text-[10px] text-gray-300 hover:text-white"
+                          data-tooltip="Insert COUNT template"
+                        >
+                          COUNT
+                        </button>
+                      </div>
+                    )}
+
                     <button
                       type="button"
                       onClick={toggleFavorite}
                       disabled={!sql.trim()}
-                      className={`rounded px-1.5 py-0.5 text-[11px] disabled:opacity-30 ${
-                        sqlFavorites.includes(sql.trim())
-                          ? "text-amber-300"
-                          : "text-gray-500 hover:text-gray-300"
-                      }`}
+                      className="rounded p-1 disabled:opacity-30 text-amber-300 hover:bg-[var(--border)]"
                       data-tooltip={
                         sqlFavorites.includes(sql.trim())
                           ? "Remove from favorites"
                           : "Save query to favorites"
                       }
                     >
-                      ★
+                      {sqlFavorites.includes(sql.trim()) ? (
+                        <StarFilledIcon size={12} />
+                      ) : (
+                        <StarOutlineIcon size={12} />
+                      )}
                     </button>
-                    {sqlFavorites.length > 0 ? (
+
+                    {sqlFavorites.length > 0 && (
                       <select
-                        className="max-w-[200px] rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-[var(--text-dim)]"
+                        className="max-w-[180px] rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-gray-300 outline-none"
                         defaultValue=""
                         onChange={(e) => {
                           const v = e.target.value;
                           e.target.value = "";
                           if (!v) return;
-                          // "run:" prefix = load into editor and execute immediately.
-                          if (v.startsWith("run:")) {
-                            const q = v.slice(4);
-                            setSql(q);
-                            void (async () => {
-                              if (!sel?.sessionId) return;
-                              setBusy(true);
-                              setError(null);
-                              try {
-                                const result = await api.dbRunSql(sel.sessionId, q);
-                                setSqlResult(result);
-                              } catch (err) {
-                                setError(String(err));
-                              } finally {
-                                setBusy(false);
-                              }
-                            })();
-                          } else {
-                            setSql(v);
-                          }
+                          setSql(v);
                         }}
-                        data-tooltip="Favorite queries — pick to load, or Run ★ to execute"
+                        data-tooltip="Favorites"
                       >
                         <option value="" disabled>
                           ★ Favorites ({sqlFavorites.length})
                         </option>
                         {sqlFavorites.map((q, i) => (
                           <option key={`f-${i}`} value={q}>
-                            {q.length > 70 ? `${q.slice(0, 70)}…` : q}
-                          </option>
-                        ))}
-                        <option disabled>────────</option>
-                        {sqlFavorites.map((q, i) => (
-                          <option key={`fr-${i}`} value={`run:${q}`}>
-                            ▶ Run · {q.length > 50 ? `${q.slice(0, 50)}…` : q}
+                            {q.length > 50 ? `${q.slice(0, 50)}…` : q}
                           </option>
                         ))}
                       </select>
-                    ) : null}
-                    {sqlHistory.length > 0 ? (
+                    )}
+
+                    {sqlHistory.length > 0 && (
                       <select
-                        className="max-w-[200px] rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-[var(--text-dim)]"
+                        className="max-w-[180px] rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-gray-300 outline-none"
                         defaultValue=""
                         onChange={(e) => {
                           if (e.target.value) setSql(e.target.value);
@@ -1563,36 +1892,40 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
                         data-tooltip="Query history"
                       >
                         <option value="" disabled>
-                          History…
+                          History ({sqlHistory.length})
                         </option>
                         {sqlHistory.map((q, i) => (
                           <option key={i} value={q}>
-                            {q.length > 80 ? `${q.slice(0, 80)}…` : q}
+                            {q.length > 60 ? `${q.slice(0, 60)}…` : q}
                           </option>
                         ))}
                       </select>
-                    ) : null}
-                    <span className="truncate text-[10px] text-gray-600">
-                      {sel ? `against ${sel.schema} on ${sel.endpointId}` : "open a table first"}
-                    </span>
+                    )}
+
                     {sqlResult?.message ? (
                       <span className="truncate text-[10px] text-amber-300">
                         {sqlResult.message}
                       </span>
                     ) : null}
+
                     {sqlResult ? (
-                      <span className="ml-auto shrink-0 text-[10px] tabular-nums text-gray-500">
-                        {sqlResult.rows.length} row
-                        {sqlResult.rows.length === 1 ? "" : "s"}
+                      <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-gray-400">
+                        {sqlResult.rows.length} row{sqlResult.rows.length === 1 ? "" : "s"}
                         {sqlResult.affected != null
                           ? ` · ${sqlResult.affected} affected`
                           : ""}
                       </span>
                     ) : null}
                   </div>
+
+                  {/* SQL Results Grid */}
                   <div className="min-h-0 flex-1 overflow-hidden">
                     {sqlResult ? (
-                      <Grid set={sqlResult} />
+                      <Grid
+                        set={sqlResult}
+                        settings={settings}
+                        onInspectRow={(idx) => setInspectRowIndex(idx)}
+                      />
                     ) : (
                       <p className="p-3 text-[11px] text-gray-500">
                         Write a statement and press Run (Ctrl+Enter).
@@ -1606,13 +1939,39 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
         </div>
       </div>
 
+      {/* Settings Modal */}
+      <DbSettingsModal
+        open={settingsOpen}
+        vpsId={data.vpsId}
+        onClose={() => setSettingsOpen(false)}
+        onSavedLoginsChanged={() => void refreshSaved()}
+        onSettingsChanged={(newSettings) => setSettings(newSettings)}
+      />
+
+      {/* Row Inspector Modal */}
+      {inspectRowIndex !== null && (tab === "data" ? rows : sqlResult) ? (
+        <RowInspectorModal
+          open={inspectRowIndex !== null}
+          rowIndex={inspectRowIndex}
+          set={tab === "data" ? rows! : sqlResult!}
+          columns={tab === "data" ? columns : undefined}
+          tableName={sel ? `${sel.schema}.${sel.table}` : undefined}
+          onClose={() => setInspectRowIndex(null)}
+          onSelectRowIndex={(idx) => setInspectRowIndex(idx)}
+        />
+      ) : null}
+
+      {/* Insert Row Modal */}
       {insertOpen && sel ? (
         <InsertRowModal
           open={insertOpen}
           schema={sel.schema}
           table={sel.table}
           columns={columns}
-          isRedis={instances.find((i) => i.endpoint.id === sel.endpointId)?.endpoint.engine === "redis"}
+          isRedis={
+            instances.find((i) => i.endpoint.id === sel.endpointId)?.endpoint
+              .engine === "redis"
+          }
           onClose={() => setInsertOpen(false)}
           onSubmitSql={(q) => api.dbRunSql(sel.sessionId, q)}
           onSuccess={() => {
@@ -1621,12 +1980,14 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
         />
       ) : null}
 
+      {/* Create Table Modal */}
       {createTableOpen && sel ? (
         <CreateTableModal
           open={createTableOpen}
           schema={sel.schema}
           engine={
-            (instances.find((i) => i.endpoint.id === sel.endpointId)?.endpoint.engine as any) ?? "mysql"
+            (instances.find((i) => i.endpoint.id === sel.endpointId)?.endpoint
+              .engine as any) ?? "mysql"
           }
           onClose={() => setCreateTableOpen(false)}
           onSubmitSql={(q) => api.dbRunSql(sel.sessionId, q)}
@@ -1655,6 +2016,7 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
         />
       ) : null}
 
+      {/* Add Column Modal */}
       {addColumnOpen && sel ? (
         <AddColumnModal
           open={addColumnOpen}
@@ -1662,7 +2024,8 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
           table={sel.table}
           existingColumns={columns}
           engine={
-            (instances.find((i) => i.endpoint.id === sel.endpointId)?.endpoint.engine as any) ?? "mysql"
+            (instances.find((i) => i.endpoint.id === sel.endpointId)?.endpoint
+              .engine as any) ?? "mysql"
           }
           onClose={() => setAddColumnOpen(false)}
           onSubmitSql={(q) => api.dbRunSql(sel.sessionId, q)}
@@ -1672,6 +2035,7 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
         />
       ) : null}
 
+      {/* Redis Key Inspect Modal */}
       {redisKeyInspect && sel ? (
         <RedisKeyModal
           open={Boolean(redisKeyInspect)}
@@ -1690,4 +2054,3 @@ export const DatabaseNode = memo(function DatabaseNode({ id, data, selected }: N
     </div>
   );
 });
-

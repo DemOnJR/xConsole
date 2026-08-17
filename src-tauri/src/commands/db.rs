@@ -295,7 +295,7 @@ pub async fn db_list_tables(
     session_id: String,
     schema: String,
 ) -> Result<Vec<DbTable>, String> {
-    let target = db_sessions.get(&session_id)?;
+    let mut target = db_sessions.get(&session_id)?;
 
     // Redis has no tables. Keys are conventionally namespaced with `:` (`session:abc`,
     // `cache:user:1`), so the first segment is the closest thing to a table and is what
@@ -324,6 +324,10 @@ pub async fn db_list_tables(
             .collect());
     }
 
+    if target.engine == DbEngine::Postgres {
+        target.database = Some(schema.clone());
+    }
+
     let set = query::run_sql(&sessions, &target, &query::list_tables_sql(target.engine, &schema)?).await?;
     Ok(set
         .rows
@@ -347,7 +351,7 @@ pub async fn db_describe_table(
     schema: String,
     table: String,
 ) -> Result<Vec<DbColumn>, String> {
-    let target = db_sessions.get(&session_id)?;
+    let mut target = db_sessions.get(&session_id)?;
 
     // A Redis "table" is a key prefix, so its shape is fixed rather than discovered.
     if target.engine == DbEngine::Redis {
@@ -380,6 +384,10 @@ pub async fn db_describe_table(
         ]);
     }
 
+    if target.engine == DbEngine::Postgres {
+        target.database = Some(schema.clone());
+    }
+
     let set = query::run_sql(&sessions, &target, &query::describe_table_sql(target.engine, &schema, &table)?).await?;
     Ok(set
         .rows
@@ -407,7 +415,7 @@ pub async fn db_select_page(
     limit: u32,
     offset: u64,
 ) -> Result<ResultSet, String> {
-    let target = db_sessions.get(&session_id)?;
+    let mut target = db_sessions.get(&session_id)?;
 
     // Redis: list the keys under this prefix with their type and TTL. Done as one
     // pipeline on the server so a prefix holding thousands of keys costs one round trip
@@ -450,6 +458,10 @@ pub async fn db_select_page(
         });
     }
 
+    if target.engine == DbEngine::Postgres {
+        target.database = Some(schema.clone());
+    }
+
     let sql = query::select_page_sql(target.engine, &schema, &table, limit, offset)?;
     query::run_sql(&sessions, &target, &sql).await
 }
@@ -479,7 +491,10 @@ pub async fn db_update_cell(
     value: Option<String>,
     key: Vec<(String, Option<String>)>,
 ) -> Result<ResultSet, String> {
-    let target = db_sessions.get(&session_id)?;
+    let mut target = db_sessions.get(&session_id)?;
+    if target.engine == DbEngine::Postgres {
+        target.database = Some(schema.clone());
+    }
     let sql = query::update_cell_sql(target.engine, &schema, &table, &column, value.as_deref(), &key)?;
     query::run_sql(&sessions, &target, &sql).await
 }
@@ -494,7 +509,7 @@ pub async fn db_delete_rows(
     table: String,
     keys: Vec<Vec<(String, Option<String>)>>,
 ) -> Result<ResultSet, String> {
-    let target = db_sessions.get(&session_id)?;
+    let mut target = db_sessions.get(&session_id)?;
     if target.engine == DbEngine::Redis {
         // Redis rows are keys; DEL takes them directly and accepts many at once.
         let mut scoped = target.clone();
@@ -509,6 +524,9 @@ pub async fn db_delete_rows(
         }
         return query::run_sql(&sessions, &scoped, &format!("DEL {}", names.join(" "))).await;
     }
+    if target.engine == DbEngine::Postgres {
+        target.database = Some(schema.clone());
+    }
     let sql = query::delete_rows_sql(target.engine, &schema, &table, &keys)?;
     query::run_sql(&sessions, &target, &sql).await
 }
@@ -522,7 +540,10 @@ pub async fn db_delete_row(
     table: String,
     key: Vec<(String, Option<String>)>,
 ) -> Result<ResultSet, String> {
-    let target = db_sessions.get(&session_id)?;
+    let mut target = db_sessions.get(&session_id)?;
+    if target.engine == DbEngine::Postgres {
+        target.database = Some(schema.clone());
+    }
     let sql = query::delete_row_sql(target.engine, &schema, &table, &key)?;
     query::run_sql(&sessions, &target, &sql).await
 }

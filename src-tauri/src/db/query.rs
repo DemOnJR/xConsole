@@ -450,25 +450,24 @@ fn not_sql(engine: DbEngine) -> String {
 
 /// The databases/schemas a user can browse, minus the server's own internals.
 ///
-/// The two engines mean different things by "database". MySQL's schemas are the things a
-/// user picks between, so `information_schema.SCHEMATA` is right. In Postgres a
-/// *connection* is bound to one database and schemas live inside it, so listing schemas of
-/// the connected database is what maps onto the same tree level.
+/// In MySQL, schemas map directly onto databases. In Postgres, a cluster has multiple
+/// databases (`pg_database`), so discovering the server's databases is what lets users
+/// switch between applications/databases cleanly.
 pub fn list_databases_sql(engine: DbEngine) -> Result<String, String> {
     Ok(match engine {
         DbEngine::MySql => "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA \
              WHERE SCHEMA_NAME NOT IN ('information_schema','performance_schema','mysql','sys') \
              ORDER BY SCHEMA_NAME"
             .to_string(),
-        DbEngine::Postgres => "SELECT nspname FROM pg_catalog.pg_namespace \
-             WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema' \
-             ORDER BY nspname"
+        DbEngine::Postgres => "SELECT datname FROM pg_catalog.pg_database \
+             WHERE datistemplate = false AND datname NOT IN ('template0', 'template1') \
+             ORDER BY datname"
             .to_string(),
         DbEngine::Redis => return Err(not_sql(engine)),
     })
 }
 
-/// Tables in a schema, with row estimates and size.
+/// Tables in a schema/database, with row estimates and size.
 pub fn list_tables_sql(engine: DbEngine, schema: &str) -> Result<String, String> {
     Ok(match engine {
         DbEngine::MySql => format!(
@@ -479,8 +478,7 @@ pub fn list_tables_sql(engine: DbEngine, schema: &str) -> Result<String, String>
         ),
         // reltuples is the planner's estimate, matching MySQL's TABLE_ROWS (also an
         // estimate) rather than paying for a count(*) on every table in the tree.
-        DbEngine::Postgres => format!(
-            "SELECT c.relname, \
+        DbEngine::Postgres => "SELECT c.relname, \
                 CASE c.relkind WHEN 'r' THEN 'BASE TABLE' WHEN 'v' THEN 'VIEW' \
                      WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'p' THEN 'PARTITIONED TABLE' \
                      ELSE c.relkind::text END, \
@@ -489,10 +487,9 @@ pub fn list_tables_sql(engine: DbEngine, schema: &str) -> Result<String, String>
                 'postgres' \
              FROM pg_catalog.pg_class c \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = {} AND c.relkind IN ('r','v','m','p') \
-             ORDER BY c.relname",
-            quote_value_for(engine, Some(schema))
-        ),
+             WHERE n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','v','m','p') \
+             ORDER BY c.relname"
+            .to_string(),
         DbEngine::Redis => return Err(not_sql(engine)),
     })
 }
@@ -516,15 +513,14 @@ pub fn describe_table_sql(engine: DbEngine, schema: &str, table: &str) -> Result
                 COALESCE(c.column_default,''), '' \
              FROM information_schema.columns c \
              LEFT JOIN ( \
-               SELECT a.attname FROM pg_index i \
+               SELECT a.attname, cl.relname \
+               FROM pg_index i \
                JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
-               WHERE i.indrelid = ({}||'.'||{})::regclass AND i.indisprimary \
-             ) pk ON pk.attname = c.column_name \
-             WHERE c.table_schema = {} AND c.table_name = {} \
+               JOIN pg_class cl ON cl.oid = i.indrelid \
+               WHERE i.indisprimary \
+             ) pk ON pk.attname = c.column_name AND pk.relname = c.table_name \
+             WHERE c.table_name = {} AND c.table_schema NOT IN ('pg_catalog', 'information_schema') \
              ORDER BY c.ordinal_position",
-            quote_value_for(engine, Some(&quote_ident_for(engine, schema).unwrap_or_default())),
-            quote_value_for(engine, Some(&quote_ident_for(engine, table).unwrap_or_default())),
-            quote_value_for(engine, Some(schema)),
             quote_value_for(engine, Some(table))
         ),
         DbEngine::Redis => return Err(not_sql(engine)),
@@ -540,13 +536,22 @@ pub fn select_page_sql(
     offset: u64,
 ) -> Result<String, String> {
     // limit/offset are numbers, never interpolated text, so they can't carry SQL.
-    Ok(format!(
-        "SELECT * FROM {}.{} LIMIT {} OFFSET {}",
-        quote_ident_for(engine, schema)?,
-        quote_ident_for(engine, table)?,
-        limit.clamp(1, 5000),
-        offset
-    ))
+    Ok(match engine {
+        DbEngine::MySql => format!(
+            "SELECT * FROM {}.{} LIMIT {} OFFSET {}",
+            quote_ident_for(engine, schema)?,
+            quote_ident_for(engine, table)?,
+            limit.clamp(1, 5000),
+            offset
+        ),
+        DbEngine::Postgres => format!(
+            "SELECT * FROM {} LIMIT {} OFFSET {}",
+            quote_ident_for(engine, table)?,
+            limit.clamp(1, 5000),
+            offset
+        ),
+        DbEngine::Redis => return Err(not_sql(engine)),
+    })
 }
 
 /// Build the `WHERE` clause identifying exactly one row by primary key.
@@ -597,10 +602,14 @@ pub fn update_cell_sql(
                 .into(),
         );
     }
+    let tbl_ref = match engine {
+        DbEngine::MySql => format!("{}.{}", quote_ident_for(engine, schema)?, quote_ident_for(engine, table)?),
+        DbEngine::Postgres => quote_ident_for(engine, table)?,
+        DbEngine::Redis => return Err(not_sql(engine)),
+    };
     Ok(format!(
-        "UPDATE {}.{} SET {} = {} WHERE {}{}",
-        quote_ident_for(engine, schema)?,
-        quote_ident_for(engine, table)?,
+        "UPDATE {} SET {} = {} WHERE {}{}",
+        tbl_ref,
         quote_ident_for(engine, column)?,
         quote_value_for(engine, value),
         key_predicate(engine, key)?,
@@ -618,10 +627,14 @@ pub fn delete_row_sql(
     if key.is_empty() {
         return Err("this table has no primary key, so a single row can't be deleted safely".into());
     }
+    let tbl_ref = match engine {
+        DbEngine::MySql => format!("{}.{}", quote_ident_for(engine, schema)?, quote_ident_for(engine, table)?),
+        DbEngine::Postgres => quote_ident_for(engine, table)?,
+        DbEngine::Redis => return Err(not_sql(engine)),
+    };
     Ok(format!(
-        "DELETE FROM {}.{} WHERE {}{}",
-        quote_ident_for(engine, schema)?,
-        quote_ident_for(engine, table)?,
+        "DELETE FROM {} WHERE {}{}",
+        tbl_ref,
         key_predicate(engine, key)?,
         row_limit(engine)
     ))
@@ -668,10 +681,14 @@ pub fn delete_rows_sql(
     for key in keys {
         parts.push(format!("({})", key_predicate(engine, key)?));
     }
+    let tbl_ref = match engine {
+        DbEngine::MySql => format!("{}.{}", quote_ident_for(engine, schema)?, quote_ident_for(engine, table)?),
+        DbEngine::Postgres => quote_ident_for(engine, table)?,
+        DbEngine::Redis => return Err(not_sql(engine)),
+    };
     Ok(format!(
-        "DELETE FROM {}.{} WHERE {}",
-        quote_ident_for(engine, schema)?,
-        quote_ident_for(engine, table)?,
+        "DELETE FROM {} WHERE {}",
+        tbl_ref,
         parts.join(" OR ")
     ))
 }
@@ -799,7 +816,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             sql,
-            "UPDATE \"public\".\"orders\" SET \"status\" = 'paid' WHERE \"id\" = '42'"
+            "UPDATE \"orders\" SET \"status\" = 'paid' WHERE \"id\" = '42'"
         );
         assert!(!sql.contains("LIMIT"), "{sql}");
         // MySQL keeps it as a second guard.
@@ -955,7 +972,7 @@ mod tests {
         let sql = delete_rows_sql(DbEngine::Postgres, "public", "Item", &keys).unwrap();
         assert_eq!(
             sql,
-            "DELETE FROM \"public\".\"Item\" WHERE (\"tenant\" = 'a' AND \"id\" IS NULL)"
+            "DELETE FROM \"Item\" WHERE (\"tenant\" = 'a' AND \"id\" IS NULL)"
         );
     }
 
