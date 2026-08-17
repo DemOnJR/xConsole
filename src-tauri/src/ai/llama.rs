@@ -11,19 +11,32 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::process::{Child, Command};
 
-/// Map a build kind to the llama.cpp Windows release asset suffix.
-/// "cpu" works anywhere; "vulkan" uses any GPU (incl. AMD); "hip" is AMD ROCm.
-fn llama_asset_suffix(build: &str) -> &'static str {
+/// Check whether a release asset filename matches the requested build backend on Windows x64.
+fn matches_build(name: &str, build: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if !lower.ends_with(".zip") || !lower.contains("win") || !lower.contains("x64") {
+        return false;
+    }
+    // Filter out cudart / runtime-only archives that do not contain llama-server.exe
+    if lower.starts_with("cudart-") {
+        return false;
+    }
+
     match build {
-        "vulkan" => "bin-win-vulkan-x64.zip",
-        "hip" => "bin-win-hip-radeon-x64.zip",
-        _ => "bin-win-cpu-x64.zip",
+        "vulkan" => lower.contains("vulkan"),
+        "hip" | "rocm" => {
+            lower.contains("rocm") || lower.contains("hip") || lower.contains("radeon")
+        }
+        "cuda" => lower.contains("cuda"),
+        "sycl" => lower.contains("sycl"),
+        "cpu" => lower.contains("cpu"),
+        _ => lower.contains("cpu"),
     }
 }
 
 /// Download + install a prebuilt `llama-server` (Windows) from the official
 /// llama.cpp releases, returning the binary path. `build` selects CPU vs a GPU
-/// backend (vulkan/hip) so local models can run on the user's GPU.
+/// backend (vulkan/rocm/cuda) so local models can run on the user's GPU.
 pub async fn setup_llama(app: &AppHandle, build: &str) -> Result<String, String> {
     if !cfg!(windows) {
         return Err(
@@ -49,16 +62,15 @@ pub async fn setup_llama(app: &AppHandle, build: &str) -> Result<String, String>
         .get("assets")
         .and_then(|a| a.as_array())
         .ok_or("no assets in the latest llama.cpp release")?;
-    let suffix = llama_asset_suffix(build);
     let asset = assets
         .iter()
         .find(|a| {
             a.get("name")
                 .and_then(|n| n.as_str())
-                .map(|n| n.ends_with(suffix))
+                .map(|n| matches_build(n, build))
                 .unwrap_or(false)
         })
-        .ok_or_else(|| format!("no Windows {build} build ({suffix}) in the latest llama.cpp release"))?;
+        .ok_or_else(|| format!("no matching Windows {build} build found in the latest llama.cpp release"))?;
     let url = asset
         .get("browser_download_url")
         .and_then(|u| u.as_str())

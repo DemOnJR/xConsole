@@ -634,6 +634,7 @@ function ProviderForm({
                     <option value="cpu">CPU</option>
                     <option value="vulkan">GPU — Vulkan (AMD / Intel / NVIDIA)</option>
                     <option value="hip">GPU — ROCm (AMD)</option>
+                    <option value="cuda">GPU — CUDA (NVIDIA)</option>
                   </Select>
                   <Button onClick={installLlama} disabled={llamaBusy}>
                     {llamaBusy ? "Installing…" : "Install engine"}
