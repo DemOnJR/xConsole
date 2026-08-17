@@ -480,13 +480,24 @@ async fn read_child_output(
         } else {
             ""
         };
-        return Err(format!(
-            "{} exited with {}: {}{}",
-            bin,
-            status.code().unwrap_or(-1),
-            err.trim(),
-            hint
-        ));
+        let err_detail = err.trim();
+        let msg = if err_detail.is_empty() {
+            format!(
+                "{} exited with status code {}{}",
+                bin,
+                status.code().unwrap_or(-1),
+                hint
+            )
+        } else {
+            format!(
+                "{} exited with {}: {}{}",
+                bin,
+                status.code().unwrap_or(-1),
+                err_detail,
+                hint
+            )
+        };
+        return Err(msg);
     }
 
     out.stop_reason = "stop".into();

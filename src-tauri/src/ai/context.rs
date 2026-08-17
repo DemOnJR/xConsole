@@ -188,6 +188,7 @@ or strip headers from encoded/binary PHP files — modifying any byte corrupts b
 Encoded PHP requires its matching loader extension (e.g. zend_extension) and compatible PHP version (check with php -v). \
 When encountering unfamiliar software, proprietary loaders, or unexpected errors, use web_search to find official \
 documentation and correct configuration before taking action. \
+WEBSITE & DOMAIN TASKS (CODE-FIRST BY DEFAULT): When the user mentions a domain or website (e.g. example.com or /sitemap.xml), ALWAYS check if the domain is hosted on the connected VPS target(s) FIRST. Inspect web server configs (/etc/nginx/, /etc/apache2/, /etc/caddy/, docker) to locate its document root / project directory (e.g. /var/www/, /root/...). Read, inspect, and modify the source code files directly on the server filesystem. Do NOT treat the website as an external black box or rely primarily on curl when you have direct server filesystem access. \
 Be cheap with tools: combine related checks into ONE command; do not re-read a file unless write_file \
 says it changed (mtime); do not call canvas_open_terminal if that host already has a canvas terminal — \
 drive it with terminal_send or use run_command for private one-offs. \
@@ -203,6 +204,7 @@ Live SSH commands may already have run — see snapshot and live command section
 SILENT AUTONOMOUS TOOL EXECUTION: Chain your tool calls silently until the task is complete. \
 Do NOT narrate every step with chat messages between individual commands. Return chat text ONLY for \
 your final report or when user approval is needed. \
+WEBSITE & DOMAIN TASKS (CODE-FIRST BY DEFAULT): When the user mentions a domain or website URL, FIRST locate where that domain is hosted on the VPS (check /etc/nginx/, /etc/apache2/, docker-compose, or /var/www/). Read and edit the local project source files directly rather than treating the site as an external URL. \
 If the user has terminals/SFTP open, a '# Live canvas' section shows them with each terminal's \
 recent output — answer about it directly (use terminal_capture for more, terminal_send to run a \
 command, read_file/write_file to edit a file shown in an SFTP panel). \
@@ -688,11 +690,7 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
     let minimal = is_minimal_prompt(ctx);
 
     let mut stable: Vec<String> = Vec::new();
-    if ctx.casual_turn && ctx.vps_tools_only {
-        stable.push(CASUAL_GUIDANCE.to_string());
-    } else {
-        stable.push(soul::load(ctx.home));
-    }
+    stable.push(soul::load(ctx.home));
     // Preferences (taste) belong in the cache-stable prefix, not the dynamic block.
     let taste = stable_taste(ctx, minimal);
     if !taste.is_empty() {
@@ -731,7 +729,7 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
     if let Some(ws) = ctx.workspace_context.as_ref().filter(|s| !s.trim().is_empty()) {
         stable.push(ws.clone());
     }
-    if !ctx.casual_turn && !ctx.target_ids.is_empty() {
+    if !ctx.target_ids.is_empty() {
         let catalog = crate::ai::tools::format_targets_catalog(ctx.db, ctx.target_ids);
         if !catalog.is_empty() {
             stable.push(catalog);
@@ -756,6 +754,9 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
     }
 
     let mut volatile: Vec<String> = Vec::new();
+    if ctx.casual_turn && ctx.vps_tools_only {
+        volatile.push(CASUAL_GUIDANCE.to_string());
+    }
     if ctx.plan_mode {
         volatile.push(PLAN_MODE_GUIDANCE.to_string());
     }

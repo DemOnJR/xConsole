@@ -366,7 +366,7 @@ pub async fn run_turn(
                 &resolved.name,
                 &resolved.model,
                 tc.targets.len(),
-                &snapshot_cli,
+                "",
                 summary.as_deref(),
             );
             if xconsole_exec.is_some() {
@@ -384,8 +384,11 @@ pub async fn run_turn(
                      (skill_view) before complex infra work.",
                 );
             }
-            // CLI harnesses get one blob (their own tool loop); still keep live bits last.
             let mut dynamic = String::new();
+            if !snapshot_cli.is_empty() {
+                dynamic.push_str(&snapshot_cli);
+                dynamic.push_str("\n\n");
+            }
             if let Some(ws) = &workspace_block {
                 dynamic.push_str(ws);
                 dynamic.push_str("\n\n");
@@ -404,11 +407,8 @@ pub async fn run_turn(
                     dynamic.push_str(&host_dossiers);
                 }
             }
-            if !dynamic.is_empty() {
-                base.push_str("\n\n");
-                base.push_str(dynamic.trim());
-            }
-            return (base, String::new(), String::new());
+            let snap_copy = snapshot_cli.clone();
+            return (base, dynamic.trim().to_string(), snap_copy);
         }
 
         if ollama_mode
