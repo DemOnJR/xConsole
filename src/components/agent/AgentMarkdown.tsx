@@ -137,7 +137,7 @@ export const AgentMarkdown = memo(function AgentMarkdown({
     [executeTarget, onExecute],
   );
 
-  if (variant === "user") {
+  if (variant === "user" && !body.includes("```")) {
     return <span className="whitespace-pre-wrap">{body}</span>;
   }
 

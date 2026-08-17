@@ -78,7 +78,13 @@ export function useTerminalClipboard({
         }
       }
       const text = await pasteFromClipboard();
-      if (text) sendRef.current(text);
+      if (text) {
+        if (t) {
+          t.paste(text);
+        } else {
+          sendRef.current(text);
+        }
+      }
     };
 
     t.attachCustomKeyEventHandler((e: KeyboardEvent) => {

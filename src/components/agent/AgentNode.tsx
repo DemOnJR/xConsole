@@ -60,6 +60,8 @@ import {
 import { notify } from "../../lib/notify";
 import { catalogForProvider } from "../../lib/providerCatalog";
 import { ImageIcon } from "../icons";
+import { createChatSnippet, shouldCreateSnippet, type ChatSnippet } from "../../lib/snippetDetect";
+import { SnippetPreviewModal } from "./SnippetPreviewModal";
 import { InputBar, type ReasoningLevel } from "./InputBar";
 import { QueuedMessages } from "./QueuedMessages";
 import { useGitBranch } from "../../hooks/useGitBranch";
@@ -453,10 +455,14 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
   const [intakeSpec, setIntakeSpec] = useState<GoalSpec | null>(null);
   const [intakeStatus, setIntakeStatus] = useState<string | null>(null);
   const [pendingImages, setPendingImages] = useState<ChatImage[]>([]);
+  const [pendingSnippets, setPendingSnippets] = useState<ChatSnippet[]>([]);
+  const [previewSnippet, setPreviewSnippet] = useState<ChatSnippet | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const agentRootRef = useRef<HTMLDivElement>(null);
   const pendingImagesRef = useRef(pendingImages);
   pendingImagesRef.current = pendingImages;
+  const pendingSnippetsRef = useRef(pendingSnippets);
+  pendingSnippetsRef.current = pendingSnippets;
   const askDraftRef = useRef("");
   const selectedRef = useRef(!!selected);
   selectedRef.current = !!selected;
@@ -1261,7 +1267,15 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     void (async () => {
       const got = await attachClipboardImages(data);
       if (got) return;
-      if (text && !otherField) insertComposerText(text);
+      if (text && !otherField) {
+        if (shouldCreateSnippet(text)) {
+          const snip = createChatSnippet(text);
+          setPendingSnippets((cur) => [...cur, snip].slice(0, 10));
+          requestAnimationFrame(() => inputRef.current?.focus());
+        } else {
+          insertComposerText(text);
+        }
+      }
     })();
   };
 
@@ -1312,7 +1326,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
       void attachPaths([visionPath[1].trim()]);
       return;
     }
-    if (!trimmed && pendingImages.length === 0) return;
+    if (!trimmed && pendingImages.length === 0 && pendingSnippets.length === 0) return;
     // /rename [title] — rename current session
     const renameMatch = trimmed.match(/^\/rename(?:\s+(.+))?$/i);
     if (renameMatch) {
@@ -1402,10 +1416,28 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
       setPicker({ kind: "vision-ask" });
       return;
     }
-    enqueueOrSend(input, visionMode === "disabled" ? undefined : imgs);
+
+    let promptText = trimmed;
+    if (pendingSnippets.length > 0) {
+      const snippetBlocks = pendingSnippets
+        .map((s) => {
+          const langTag = s.language === "text" ? "" : s.language;
+          return `\`\`\`${langTag}\n${s.content}\n\`\`\``;
+        })
+        .join("\n\n");
+
+      if (promptText) {
+        promptText = `${promptText}\n\n${snippetBlocks}`;
+      } else {
+        promptText = snippetBlocks;
+      }
+    }
+
+    enqueueOrSend(promptText, visionMode === "disabled" ? undefined : imgs);
     setInput("");
     history.reset("");
     setPendingImages([]);
+    setPendingSnippets([]);
     recallIdx.current = null;
   };
 
@@ -1873,8 +1905,8 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
             </div>
           )}
 
-          {pendingImages.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 border-b border-[var(--border)]/60 px-2.5 py-1.5">
+          {(pendingImages.length > 0 || pendingSnippets.length > 0) && (
+            <div className="flex flex-wrap items-center gap-1.5 border-b border-[var(--border)]/60 bg-[var(--surface)]/40 px-2.5 py-1.5">
               {pendingImages.map((img, i) => (
                 <div key={`${img.name}-${i}`} className="group relative">
                   <img
@@ -1887,12 +1919,59 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
                   </span>
                   <button
                     type="button"
-                    className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-[var(--surface)] text-[10px] text-red-300 group-hover:flex"
+                    className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-[var(--surface)] text-[10px] text-red-300 group-hover:flex shadow"
                     onClick={() => setPendingImages((cur) => cur.filter((_, j) => j !== i))}
                     aria-label="Remove image"
                   >
                     ✕
                   </button>
+                </div>
+              ))}
+
+              {pendingSnippets.map((snip, i) => (
+                <div
+                  key={snip.id}
+                  className="group relative flex items-center gap-2 rounded-lg border border-cyan-500/30 bg-[#0a1120] px-2.5 py-1 text-xs shadow-sm transition hover:border-cyan-500/60"
+                >
+                  <span className="rounded bg-cyan-500/20 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase text-cyan-300">
+                    {snip.language}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setPreviewSnippet(snip)}
+                    className="flex flex-col text-left hover:text-cyan-200 transition"
+                    data-tooltip="Click to view code snippet"
+                  >
+                    <span className="max-w-[130px] truncate font-mono text-[11px] font-medium text-gray-200">
+                      {snip.name}
+                    </span>
+                    <span className="text-[9px] text-gray-400">
+                      {snip.lineCount} lines · {(snip.size / 1024).toFixed(1)} KB
+                    </span>
+                  </button>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        insertComposerText(snip.content);
+                        setPendingSnippets((cur) => cur.filter((_, j) => j !== i));
+                      }}
+                      className="rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.5 text-[9px] text-gray-400 hover:text-white"
+                      data-tooltip="Expand to inline textarea"
+                      aria-label="Insert snippet as text"
+                    >
+                      inline
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPendingSnippets((cur) => cur.filter((_, j) => j !== i))}
+                      className="flex h-4 w-4 items-center justify-center rounded-full text-gray-400 hover:bg-red-500/20 hover:text-red-300"
+                      aria-label="Remove snippet"
+                      data-tooltip="Remove snippet"
+                    >
+                      ✕
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -2113,6 +2192,18 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
 
       </div>
       </div>
+
+      {previewSnippet && (
+        <SnippetPreviewModal
+          snippet={previewSnippet}
+          onClose={() => setPreviewSnippet(null)}
+          onInsertInline={(code) => insertComposerText(code)}
+          onDelete={() => {
+            setPendingSnippets((cur) => cur.filter((s) => s.id !== previewSnippet.id));
+            setPreviewSnippet(null);
+          }}
+        />
+      )}
 
     </div>
 

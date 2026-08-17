@@ -128,7 +128,6 @@ export const AgentConsole = memo(function AgentConsole({
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
-  const maskHost = useMaskHost();
 
   const liveActivity = useAgentStore((s) => s.activity);
   const latestChecklist = useMemo(
@@ -201,7 +200,9 @@ export const AgentConsole = memo(function AgentConsole({
               <div key={key} className="flex gap-2 text-[var(--text)]">
                 <span className="shrink-0 font-bold text-cyan-400">~#</span>
                 <div className="min-w-0 flex-1">
-                  <div className="whitespace-pre-wrap break-words">{maskHost(plainText(message.content))}</div>
+                  <div className="break-words">
+                    <AgentMarkdown content={message.content} variant="user" />
+                  </div>
                   {message.images && message.images.length > 0 ? (
                     <div className="mt-1.5 flex flex-wrap gap-1.5">
                       {message.images.map((img, i) => (
