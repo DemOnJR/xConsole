@@ -3,7 +3,7 @@
 mod server;
 mod workspace;
 
-pub use workspace::prepare_cursor_workspace;
+pub use workspace::{prepare_agent_workspace, prepare_cursor_workspace};
 
 use server::run_stdio_server;
 

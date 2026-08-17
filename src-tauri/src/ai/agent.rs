@@ -270,7 +270,7 @@ pub async fn run_turn(
         previous_prefix = tc.session_state.last_prefix(&tc.session_id);
     }
 
-    let xconsole_exec = if resolved.kind == "cursor" && !tc.targets.is_empty() {
+    let xconsole_exec = if cli_mode && !tc.targets.is_empty() {
         Some(crate::ai::provider::XConsoleExec {
             data_dir: data_dir.clone(),
             session_id: tc.session_id.clone(),

@@ -10,7 +10,7 @@ use crate::ai::provider::{
     emit, ActivityEvent, ChatRequest, ChatResponse, DiffLine, EventSink, Provider, StreamEvent,
     XConsoleExec,
 };
-use crate::mcp::prepare_cursor_workspace;
+use crate::mcp::prepare_agent_workspace;
 
 static AGY_SESSIONS: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -288,12 +288,17 @@ async fn spawn_with_stdin(
     flags: &[String],
     prompt: &str,
     api_key: Option<&str>,
+    workspace: Option<&Path>,
 ) -> Result<tokio::process::Child, String> {
     let mut cmd = if kind == "cursor" {
         cursor_base_command(bin)
     } else {
         spawn_cli_program(bin)?
     };
+
+    if let Some(ws) = workspace {
+        cmd.current_dir(ws);
+    }
 
     cmd.args(flags)
         .stdin(std::process::Stdio::piped())
@@ -492,21 +497,64 @@ fn format_agy_tool_label(
     name: &str,
     params: Option<&serde_json::Value>,
 ) -> (String, Option<String>) {
-    match name {
+    let stripped = strip_mcp_server_prefix(name);
+    match stripped {
         "run_command" | "bash" | "shell" => {
             let cmd = params
                 .and_then(|p| {
-                    p.get("CommandLine")
-                        .or_else(|| p.get("command"))
+                    p.get("command")
+                        .or_else(|| p.get("CommandLine"))
                         .or_else(|| p.get("cmd"))
                 })
                 .and_then(|c| c.as_str())
                 .unwrap_or("…");
+            let is_mcp = params.and_then(|p| p.get("command")).is_some()
+                || name.contains("xconsole")
+                || name.contains("mcp");
+            let prefix = if is_mcp { "SSH" } else { "Shell" };
             (
-                format!("Shell › {}", truncate_str(cmd, 72)),
+                format!("{prefix} › {}", truncate_str(cmd, 72)),
                 Some(cmd.to_string()),
             )
         }
+        "read_file" => {
+            let path = params
+                .and_then(|p| {
+                    p.get("path")
+                        .or_else(|| p.get("AbsolutePath"))
+                        .or_else(|| p.get("file"))
+                })
+                .and_then(|c| c.as_str())
+                .unwrap_or("…");
+            (format!("Read file · {path}"), None)
+        }
+        "write_file" => {
+            let path = params
+                .and_then(|p| {
+                    p.get("path")
+                        .or_else(|| p.get("TargetFile"))
+                        .or_else(|| p.get("file"))
+                })
+                .and_then(|c| c.as_str())
+                .unwrap_or("…");
+            let content = params
+                .and_then(|p| p.get("content").or_else(|| p.get("CodeContent")))
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+            (
+                format!("Write file · {path}"),
+                if content.is_empty() {
+                    None
+                } else {
+                    Some(content.to_string())
+                },
+            )
+        }
+        "list_vps_targets" => ("List VPS targets".into(), None),
+        "canvas_open_terminal" => ("Open Terminal".into(), None),
+        "canvas_open_sftp" => ("Open SFTP".into(), None),
+        "canvas_tile" => ("Tile canvas".into(), None),
+        "canvas_close" => ("Close canvas".into(), None),
         "list_dir" => {
             let path = params
                 .and_then(|p| {
@@ -518,7 +566,7 @@ fn format_agy_tool_label(
                 .unwrap_or("…");
             (format!("List directory · {path}"), None)
         }
-        "view_file" | "read_file" | "read_resource" => {
+        "view_file" | "read_resource" => {
             let path = params
                 .and_then(|p| {
                     p.get("AbsolutePath")
@@ -1246,21 +1294,23 @@ impl Provider for CliProvider {
             || self.kind == "antigravity_cli";
 
         let workspace = if let Some(xc) = &req.xconsole {
-            emit(
-                sink,
-                StreamEvent::Status(
-                    "Starting Cursor with xConsole MCP (SSH to your VPS)…".into(),
-                ),
-            );
+            let label = match self.kind.as_str() {
+                "antigravity_cli" => {
+                    "Starting Antigravity CLI with xConsole MCP (SSH to your VPS)…"
+                }
+                "cursor" => "Starting Cursor with xConsole MCP (SSH to your VPS)…",
+                _ => "Starting agent with xConsole MCP (SSH to your VPS)…",
+            };
+            emit(sink, StreamEvent::Status(label.into()));
             Some(
-                prepare_cursor_workspace(
+                prepare_agent_workspace(
                     &xc.data_dir,
                     &xc.session_id,
                     &xc.targets,
                     &xc.safety,
                     &xc.workspace_id,
                 )
-                .map_err(|e| format!("failed to prepare Cursor MCP workspace: {e}"))?,
+                .map_err(|e| format!("failed to prepare MCP workspace: {e}"))?,
             )
         } else {
             None
@@ -1275,7 +1325,15 @@ impl Provider for CliProvider {
         let key = self.api_key.as_deref();
         let bin = resolve_models_bin(&self.kind, &self.bin);
 
-        let child = spawn_with_stdin(&self.kind, &bin, &flags, &prompt, key).await?;
+        let child = spawn_with_stdin(
+            &self.kind,
+            &bin,
+            &flags,
+            &prompt,
+            key,
+            workspace.as_deref(),
+        )
+        .await?;
 
         let started = std::time::Instant::now();
         let resp = read_child_output(
