@@ -239,9 +239,63 @@ pub fn reply_has_open_checklist(content: &str) -> bool {
     })
 }
 
+/// True when the model's text output ends with a simulated shell prompt (e.g. `~#`, `root@...:#`)
+/// or an unexecuted action statement (e.g. "Let me test ...:") without having issued a tool call.
+pub fn reply_has_uncalled_action(content: &str) -> bool {
+    let t = content.trim();
+    if t.is_empty() {
+        return false;
+    }
+
+    let last_line = t.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let lower_last = last_line.to_ascii_lowercase();
+
+    // Trailing shell prompt markers
+    const PROMPTS: &[&str] = &[
+        "~#", "~$", "/#", "/$", "$", "#",
+        "root@", "admin@", "user@",
+        "bash#", "sh#", "bash$", "sh$",
+        "ps1>", "c:\\", "c:>"
+    ];
+
+    if PROMPTS.iter().any(|p| lower_last == *p || lower_last.ends_with(p)) {
+        return true;
+    }
+
+    // Trailing command / test intent ending with a colon
+    if lower_last.ends_with(':') {
+        const INTRO_TRIGGERS: &[&str] = &[
+            "let me check",
+            "let me test",
+            "let me run",
+            "let me inspect",
+            "let me execute",
+            "let me see",
+            "let me query",
+            "let's check",
+            "lets check",
+            "let's test",
+            "lets test",
+            "let's run",
+            "lets run",
+            "i will now run",
+            "i will now check",
+            "i will now test",
+            "checking",
+            "testing",
+            "running",
+        ];
+        if INTRO_TRIGGERS.iter().any(|tr| lower_last.contains(tr)) {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod truncated_tests {
-    use super::{is_output_truncated, reply_has_open_checklist};
+    use super::{is_output_truncated, reply_has_open_checklist, reply_has_uncalled_action};
 
     #[test]
     fn detects_length_and_cap() {
@@ -257,6 +311,15 @@ mod truncated_tests {
     fn open_checklist_in_prose() {
         assert!(reply_has_open_checklist("[>] Inspect ufw\n[ ] Write jail"));
         assert!(!reply_has_open_checklist("[x] Inspect ufw\n[x] Write jail"));
+    }
+
+    #[test]
+    fn uncalled_action_detection() {
+        assert!(reply_has_uncalled_action("Let me check the port:\n\n~#"));
+        assert!(reply_has_uncalled_action("Let me test host-to-bridge-gw and check:\n~#"));
+        assert!(reply_has_uncalled_action("Let me check the running containers:"));
+        assert!(!reply_has_uncalled_action("The bridge interface is up and configured properly."));
+        assert!(!reply_has_uncalled_action("All tests passed successfully."));
     }
 }
 

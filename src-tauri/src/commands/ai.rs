@@ -255,7 +255,50 @@ fn apply_chat_plan_decision(tc: &ToolContext, messages: &mut [ChatMessage]) {
         }
         return;
     }
+
+    let is_continuation = is_continuation_or_retry(user);
+    let was_approved = tc.session_state.plan_approved(&tc.session_id);
+    let has_applied_plan = tc
+        .db
+        .list_agent_plans(Some(&tc.session_id), None, 1)
+        .ok()
+        .and_then(|plans| plans.into_iter().next())
+        .map(|p| p.status == "applied")
+        .unwrap_or(false);
+    let has_open_todos = tc
+        .session_state
+        .todos(&tc.session_id)
+        .iter()
+        .any(|t| t.status != "completed");
+
+    if (was_approved || has_applied_plan || has_open_todos) && is_continuation {
+        tc.session_state.mark_plan_approved(&tc.session_id);
+        if let Some(m) = messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == "user" && !crate::ai::context::is_runtime_message(m))
+        {
+            if !m.content.contains("approved plan") {
+                m.content.push_str(
+                    "\n\n[system] You are continuing execution of the approved plan. \
+                     Execute remaining steps with tools. Do not call present_plan again.",
+                );
+            }
+        }
+        return;
+    }
+
     tc.session_state.clear_plan_approved(&tc.session_id);
+}
+
+fn is_continuation_or_retry(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("continue")
+        || lower.contains("retry")
+        || lower.contains("resume")
+        || lower.contains("keep going")
+        || lower.contains("previous turn encountered an error")
+        || lower.contains("where you left off")
 }
 
 /// All file edits the agent made in a chat session (for the changes/diff panel).

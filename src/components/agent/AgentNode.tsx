@@ -1564,7 +1564,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
             type="button"
             className="shrink-0 rounded border border-red-800/50 bg-red-950/40 px-1.5 py-0.5 text-[10px] text-red-200 transition hover:bg-red-900/50"
             onClick={() => void retryLast()}
-            data-tooltip="Re-send the last message"
+            data-tooltip="Retry and continue from where it stopped"
           >
             Retry
           </button>

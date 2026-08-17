@@ -1113,21 +1113,24 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         }
       }
     } catch (e) {
-      const messages: AgentChatMessage[] = turnText
-        ? [
-            ...history,
-            ...(compactionMarker ? [compactionMarker] : []),
-            {
-              role: "assistant" as const,
-              content: turnText,
-              activity: turnActivity.length > 0 ? [...turnActivity] : undefined,
-              segments: turnSegments.length > 0 ? [...turnSegments] : undefined,
-              tokenStats: latestStats ?? undefined,
-            },
-          ]
-        : compactionMarker
-          ? [...history, compactionMarker]
-          : history;
+      const hasAssistantContent =
+        Boolean(turnText.trim()) ||
+        turnActivity.length > 0 ||
+        turnSegments.length > 0;
+      const assistantMsg: AgentChatMessage | null = hasAssistantContent
+        ? {
+            role: "assistant" as const,
+            content: turnText,
+            activity: turnActivity.length > 0 ? [...turnActivity] : undefined,
+            segments: turnSegments.length > 0 ? [...turnSegments] : undefined,
+            tokenStats: latestStats ?? undefined,
+          }
+        : null;
+      const messages: AgentChatMessage[] = [
+        ...history,
+        ...(compactionMarker ? [compactionMarker] : []),
+        ...(assistantMsg ? [assistantMsg] : []),
+      ];
       if (isCurrent()) {
         set({
           streaming: false,
@@ -1152,7 +1155,29 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   retryLast: async () => {
     if (get().streaming) return;
     const msgs = get().messages;
-    // Prefer last user message; if the last assistant failed empty, still retry that user turn.
+    if (msgs.length === 0) return;
+
+    const lastMsg = msgs[msgs.length - 1];
+    const hasAssistantWork =
+      lastMsg.role === "assistant" &&
+      (Boolean(lastMsg.content?.trim()) ||
+        Boolean(lastMsg.activity && lastMsg.activity.length > 0) ||
+        Boolean(lastMsg.segments && lastMsg.segments.length > 0));
+
+    if (hasAssistantWork) {
+      // The assistant already did research, generated a plan, or executed partial steps.
+      // Do NOT wipe the conversation! Send a continuation prompt so the agent continues
+      // using the established context, research, and plan.
+      const err = get().error;
+      set({ error: null });
+      const prompt = err
+        ? `The previous turn encountered an error: ${err}. Please continue from where you left off, using the context, research, and plan already established. Do not repeat already completed steps.`
+        : `Please continue from where you left off. Do not repeat already completed steps.`;
+      await get().send(prompt);
+      return;
+    }
+
+    // If no assistant work was produced (e.g. failed immediately before any tools or output):
     let lastUserIdx = -1;
     for (let i = msgs.length - 1; i >= 0; i--) {
       if (msgs[i].role === "user") {
@@ -1163,7 +1188,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     if (lastUserIdx < 0) return;
     const text = msgs[lastUserIdx].content;
     const images = msgs[lastUserIdx].images;
-    // Drop the failed user turn and any trailing assistant so send() re-appends cleanly.
+    // Drop the failed user turn and any trailing empty assistant so send() re-appends cleanly.
     set({ messages: msgs.slice(0, lastUserIdx), error: null });
     await get().send(text, { images });
   },

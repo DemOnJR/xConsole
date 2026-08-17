@@ -851,6 +851,12 @@ pub async fn run_turn(
         let resp = match resolved.provider.chat(&req, Some(sink)).await {
             Ok(r) => r,
             Err(e) => {
+                crate::ai::provider::close_unanswered_tool_calls(&mut messages);
+                tc.session_state.store_request_messages(
+                    &tc.session_id,
+                    crate::ai::vision::strip_all_images(messages.clone()),
+                );
+                tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
                 emit(Some(sink), StreamEvent::Error(e.clone()));
                 emit_ws("idle");
                 return Err(e);
@@ -972,24 +978,29 @@ pub async fn run_turn(
                     .iter()
                     .any(|t| t.status != "completed")
                     || crate::ai::provider::reply_has_open_checklist(&resp.content);
-                if (truncated || todos_open) && truncate_continues < 4 {
+                let pseudo_prompt = crate::ai::provider::reply_has_uncalled_action(&resp.content);
+                if (truncated || todos_open || pseudo_prompt) && truncate_continues < 4 {
                     truncate_continues += 1;
                     let why = if truncated {
                         format!(
                             "Output hit the token cap ({}) — continuing from where it stopped…",
                             resp.completion_tokens.unwrap_or(req.max_tokens)
                         )
+                    } else if pseudo_prompt {
+                        "Continuing execution — invoking tool for pending check/command…".into()
                     } else {
                         "Checklist still has open steps — continuing.".into()
                     };
                     emit(Some(sink), StreamEvent::Status(why));
-                    messages.push(ChatMessage::user(
+                    let nudge = if pseudo_prompt {
+                        "[system] You ended with a shell prompt (~#) or an intention to run a check/command, but did not call a tool. Call the required tool (e.g. run_command, read_file) NOW to perform the action. Do not output raw shell prompts in chat."
+                    } else {
                         "[system] Your previous reply stopped without finishing. \
                          Continue from exactly where you stopped. Call tools NOW to \
                          complete the remaining checklist steps. Do not restart, do not \
                          repeat finished work, and do not wait for the user."
-                            .to_string(),
-                    ));
+                    };
+                    messages.push(ChatMessage::user(nudge.to_string()));
                     iter += 1;
                     continue;
                 }
