@@ -1538,18 +1538,9 @@ export const DatabaseNode = memo(function DatabaseNode({
 
       {/* Top Title Bar */}
       <div
-        className="flex shrink-0 cursor-move items-center gap-1.5 border-b border-[var(--border)] bg-[var(--surface)] px-2 py-1 select-none"
+        className="flex shrink-0 cursor-move items-center gap-1.5 border-b border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 select-none"
         onDoubleClick={() => focus(id)}
       >
-        <button
-          type="button"
-          onClick={() => setSidebarOpenPersist(!sidebarOpen)}
-          className="rounded p-1 text-gray-400 hover:bg-[var(--border)] hover:text-white transition-colors"
-          data-tooltip={sidebarOpen ? "Hide database list (Ctrl+B)" : "Show database list (Ctrl+B)"}
-        >
-          {sidebarOpen ? <PanelLeftCloseIcon size={13} /> : <PanelLeftIcon size={13} />}
-        </button>
-
         <DatabaseIcon size={13} className="shrink-0 text-violet-400" />
         <button
           type="button"
@@ -1583,14 +1574,35 @@ export const DatabaseNode = memo(function DatabaseNode({
 
         {/* Top-Right Tools */}
         <div className="ml-auto flex items-center gap-1 shrink-0">
+          {/* Button 1: Toggle Hide / Show panel */}
+          <button
+            type="button"
+            onClick={() => setSidebarOpenPersist(!sidebarOpen)}
+            className={`rounded p-1 transition-colors ${
+              sidebarOpen
+                ? "text-gray-300 hover:bg-[var(--border)] hover:text-white"
+                : "text-violet-400 bg-violet-950/60 border border-violet-800/60 hover:bg-violet-900/60"
+            }`}
+            data-tooltip={
+              sidebarOpen
+                ? `Hide ${pos} panel (Ctrl+B)`
+                : `Show ${pos} panel (Ctrl+B)`
+            }
+          >
+            {sidebarOpen ? <PanelLeftCloseIcon size={13} /> : <PanelLeftIcon size={13} />}
+          </button>
+
+          {/* Button 2: Rotate Panel Position (Left -> Top -> Right -> Bottom) */}
           <button
             type="button"
             onClick={cycleLayout}
             className="rounded p-1 text-gray-400 hover:bg-[var(--border)] hover:text-violet-300 transition-colors"
-            data-tooltip={`Layout: ${pos.toUpperCase()} (Click to cycle Left/Top/Right/Bottom)`}
+            data-tooltip={`Rotate Position: ${pos.toUpperCase()} (Click to rotate Left → Top → Right → Bottom)`}
           >
             {renderLayoutIcon()}
           </button>
+
+          {/* Button 3: Settings */}
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
@@ -1599,6 +1611,8 @@ export const DatabaseNode = memo(function DatabaseNode({
           >
             <SettingsIcon size={13} />
           </button>
+
+          {/* Button 4: Close */}
           <button
             type="button"
             className="rounded p-1 text-gray-500 hover:bg-[var(--border)] hover:text-white"
