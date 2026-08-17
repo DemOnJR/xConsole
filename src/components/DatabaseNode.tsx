@@ -33,6 +33,7 @@ import {
   RefreshIcon,
   SlidersIcon,
   SearchIcon,
+  FilterIcon,
 } from "./icons";
 import { InsertRowModal } from "./database/InsertRowModal";
 import { CreateTableModal } from "./database/CreateTableModal";
@@ -88,6 +89,8 @@ function Grid({
   onInspectRow,
   tableLabel,
   totalRows,
+  activeFilter,
+  onClearFilter,
 }: {
   set: DbResultSet;
   columns?: DbColumn[];
@@ -100,6 +103,8 @@ function Grid({
   onInspectRow?: (rowIndex: number) => void;
   tableLabel?: string;
   totalRows?: number | null;
+  activeFilter?: string | null;
+  onClearFilter?: () => void;
 }) {
   const [editing, setEditing] = useState<{ row: number; col: number } | null>(null);
   const [draft, setDraft] = useState("");
@@ -241,7 +246,7 @@ function Grid({
                 setShowFilterBar(false);
               }
             }}
-            placeholder="Search loaded rows on this page (Esc to close)…"
+            placeholder="Quick search loaded rows on this page (Esc to close)…"
             className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 text-[11px] text-gray-200 outline-none focus:border-violet-500"
           />
           {filterText && (
@@ -422,7 +427,7 @@ function Grid({
                     type="button"
                     onClick={() => setShowFilterBar((v) => !v)}
                     className="hover:text-violet-300"
-                    data-tooltip="Filter rows on this page (Ctrl+F)"
+                    data-tooltip="Quick search rows on this page (Ctrl+F)"
                   >
                     #
                   </button>
@@ -494,11 +499,11 @@ function Grid({
 
                   {showRowNumbers && (
                     <td
-                      className={`sticky left-6 z-10 border-b border-r border-[var(--border)] px-1.5 text-right font-mono text-[10px] text-gray-600 cursor-pointer ${
+                      className={`sticky left-6 z-10 border-b border-r border-[var(--border)] px-1.5 text-right font-mono text-[10px] text-gray-600 cursor-pointer hover:text-violet-300 ${
                         isSelected ? "bg-violet-900/60" : "bg-[var(--bg)]"
                       }`}
                       onClick={() => onInspectRow?.(originalIndex)}
-                      data-tooltip="Inspect full row"
+                      data-tooltip="Click or double-click to inspect & edit row"
                     >
                       {originalIndex + 1}
                     </td>
@@ -512,7 +517,7 @@ function Grid({
                         className={`max-w-[340px] truncate border-b border-r border-[var(--border)] ${cellPadding} text-gray-300 last:border-r-0 select-text`}
                         title={cell ?? "NULL"}
                         onDoubleClick={() => {
-                          if (onInspectRow && !editable) {
+                          if (onInspectRow) {
                             onInspectRow(originalIndex);
                             return;
                           }
@@ -553,9 +558,18 @@ function Grid({
         </table>
 
         {processedRows.length === 0 ? (
-          <p className="p-3 text-[11px] text-gray-500">
-            {filterText ? "No rows match your search." : "No rows."}
-          </p>
+          <div className="p-6 text-center text-gray-500 text-[11px]">
+            <p>{filterText ? "No rows match your local page search." : "No rows found."}</p>
+            {activeFilter && (
+              <button
+                type="button"
+                onClick={onClearFilter}
+                className="mt-2 rounded bg-violet-600/30 px-2 py-1 text-violet-200 hover:bg-violet-600/50"
+              >
+                Clear Database Filter ({activeFilter})
+              </button>
+            )}
+          </div>
         ) : null}
       </div>
 
@@ -571,6 +585,11 @@ function Grid({
             <span className="text-gray-600">No PK</span>
           )}
           <span>{set.columns.length} columns</span>
+          {activeFilter && (
+            <span className="text-violet-300 bg-violet-950/60 px-1 rounded border border-violet-800/40">
+              Filter: {activeFilter}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {totalRows != null && (
@@ -638,6 +657,13 @@ export const DatabaseNode = memo(function DatabaseNode({
       /* ignore */
     }
   };
+
+  // Advanced Table Filter & Search Builder state
+  const [filterBarOpen, setFilterBarOpen] = useState(false);
+  const [filterCol, setFilterCol] = useState("");
+  const [filterOp, setFilterOp] = useState<string>("contains");
+  const [filterVal, setFilterVal] = useState("");
+  const [activeFilterWhere, setActiveFilterWhere] = useState<string | null>(null);
 
   const [sql, setSql] = useState("SELECT * FROM ");
   const [sqlResult, setSqlResult] = useState<DbResultSet | null>(null);
@@ -818,9 +844,9 @@ export const DatabaseNode = memo(function DatabaseNode({
 
   const [tableRowCount, setTableRowCount] = useState<number | null>(null);
 
-  /** Load a table without touching history */
+  /** Load a table with optional WHERE filter */
   const showTable = useCallback(
-    async (next: Selection, atPage = 0) => {
+    async (next: Selection, atPage = 0, whereClause: string | null = activeFilterWhere) => {
       setSel(next);
       setPage(atPage);
       setBusy(true);
@@ -829,21 +855,35 @@ export const DatabaseNode = memo(function DatabaseNode({
         // Ensure session database context is set
         void api.dbUseDatabase(next.sessionId, next.schema).catch(() => {});
 
-        const [cols, data] = await Promise.all([
-          api.dbDescribeTable(next.sessionId, next.schema, next.table),
-          api.dbSelectPage(next.sessionId, next.schema, next.table, pageSize, atPage * pageSize),
-        ]);
+        const inst = instances.find((i) => i.endpoint.id === next.endpointId);
+        const isPostgres = inst?.endpoint.engine === "postgres";
+
+        const cols = await api.dbDescribeTable(next.sessionId, next.schema, next.table);
         setColumns(cols);
+
+        let data: DbResultSet;
+        if (whereClause && whereClause.trim()) {
+          const offset = atPage * pageSize;
+          const tableIdent = isPostgres ? `"${next.table}"` : `${next.schema}.${next.table}`;
+          const selectSql = `SELECT * FROM ${tableIdent} WHERE ${whereClause} LIMIT ${pageSize} OFFSET ${offset};`;
+          data = await api.dbRunSql(next.sessionId, selectSql);
+        } else {
+          data = await api.dbSelectPage(
+            next.sessionId,
+            next.schema,
+            next.table,
+            pageSize,
+            atPage * pageSize,
+          );
+        }
         setRows(data);
         setTab("data");
 
-        // Best-effort exact count
+        // Best-effort count query
         if (atPage === 0) {
-          const inst = instances.find((i) => i.endpoint.id === next.endpointId);
-          const isPostgres = inst?.endpoint.engine === "postgres";
-          const countSql = isPostgres
-            ? `SELECT COUNT(*) AS c FROM "${next.table}"`
-            : `SELECT COUNT(*) AS c FROM ${next.schema}.${next.table}`;
+          const tableIdent = isPostgres ? `"${next.table}"` : `${next.schema}.${next.table}`;
+          const wherePart = whereClause && whereClause.trim() ? ` WHERE ${whereClause}` : "";
+          const countSql = `SELECT COUNT(*) AS c FROM ${tableIdent}${wherePart}`;
 
           void api
             .dbRunSql(next.sessionId, countSql)
@@ -860,7 +900,7 @@ export const DatabaseNode = memo(function DatabaseNode({
         setBusy(false);
       }
     },
-    [pageSize, instances],
+    [pageSize, instances, activeFilterWhere],
   );
 
   // Optional live refresh
@@ -892,11 +932,60 @@ export const DatabaseNode = memo(function DatabaseNode({
   /** Open a table and record it in history */
   const openTable = useCallback(
     (next: Selection) => {
+      setActiveFilterWhere(null);
+      setFilterVal("");
       history.visit(next);
-      void showTable(next);
+      void showTable(next, 0, null);
     },
     [history, showTable],
   );
+
+  // Build WHERE condition from filter inputs
+  const applyFilter = () => {
+    if (!sel) return;
+    const inst = instances.find((i) => i.endpoint.id === sel.endpointId);
+    const isPostgres = inst?.endpoint.engine === "postgres";
+    const val = filterVal.trim();
+
+    let where: string | null = null;
+    const quoteCol = (c: string) => (isPostgres ? `"${c}"` : `\`${c}\``);
+
+    if (filterOp === "null") {
+      where = filterCol ? `${quoteCol(filterCol)} IS NULL` : null;
+    } else if (filterOp === "notnull") {
+      where = filterCol ? `${quoteCol(filterCol)} IS NOT NULL` : null;
+    } else if (val) {
+      const escVal = val.replace(/'/g, "''");
+      if (filterCol) {
+        const colQ = isPostgres ? `CAST(${quoteCol(filterCol)} AS TEXT)` : quoteCol(filterCol);
+        if (filterOp === "contains") where = `${colQ} LIKE '%${escVal}%'`;
+        else if (filterOp === "equals") where = `${colQ} = '${escVal}'`;
+        else if (filterOp === "starts") where = `${colQ} LIKE '${escVal}%'`;
+        else if (filterOp === "ends") where = `${colQ} LIKE '%${escVal}'`;
+        else if (filterOp === "neq") where = `${colQ} != '${escVal}'`;
+        else if (filterOp === "gt") where = `${colQ} > '${escVal}'`;
+        else if (filterOp === "lt") where = `${colQ} < '${escVal}'`;
+        else if (filterOp === "gte") where = `${colQ} >= '${escVal}'`;
+        else if (filterOp === "lte") where = `${colQ} <= '${escVal}'`;
+      } else {
+        // Search across all columns
+        const parts = columns.map((c) => {
+          const colQ = isPostgres ? `CAST(${quoteCol(c.name)} AS TEXT)` : quoteCol(c.name);
+          return `${colQ} LIKE '%${escVal}%'`;
+        });
+        if (parts.length > 0) where = `(${parts.join(" OR ")})`;
+      }
+    }
+
+    setActiveFilterWhere(where);
+    void showTable(sel, 0, where);
+  };
+
+  const clearFilter = () => {
+    setActiveFilterWhere(null);
+    setFilterVal("");
+    if (sel) void showTable(sel, 0, null);
+  };
 
   const rowKey = (rowIndex: number): DbRowKey | null => {
     if (!rows) return null;
@@ -922,6 +1011,40 @@ export const DatabaseNode = memo(function DatabaseNode({
       await showTable(sel, page);
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  const handleSaveRowInspector = async (
+    rowIndex: number,
+    updatedValues: Record<string, string | null>,
+  ) => {
+    const key = rowKey(rowIndex);
+    if (!sel || !key || !rows) return;
+    const originalRow = rows.rows[rowIndex];
+    setBusy(true);
+    setError(null);
+    try {
+      for (let ci = 0; ci < rows.columns.length; ci += 1) {
+        const colName = rows.columns[ci];
+        const oldVal = originalRow[ci];
+        const newVal = updatedValues[colName];
+        if (newVal !== oldVal) {
+          await api.dbUpdateCell(
+            sel.sessionId,
+            sel.schema,
+            sel.table,
+            colName,
+            newVal,
+            key,
+          );
+        }
+      }
+      await showTable(sel, page);
+    } catch (e) {
+      setError(String(e));
+      throw e;
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -1394,6 +1517,10 @@ export const DatabaseNode = memo(function DatabaseNode({
           e.preventDefault();
           setSidebarOpenPersist(!sidebarOpen);
         }
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f" && tab === "data") {
+          e.preventDefault();
+          setFilterBarOpen((v) => !v);
+        }
       }}
       style={
         freeform
@@ -1563,6 +1690,24 @@ export const DatabaseNode = memo(function DatabaseNode({
               {/* Tab-specific actions */}
               {tab === "data" && sel ? (
                 <div className="ml-auto flex flex-wrap items-center gap-1 text-[10px]">
+                  <button
+                    type="button"
+                    onClick={() => setFilterBarOpen((v) => !v)}
+                    className={`flex items-center gap-1 rounded px-1.5 py-0.5 transition-colors ${
+                      activeFilterWhere
+                        ? "bg-violet-600 text-white font-medium shadow-xs"
+                        : filterBarOpen
+                          ? "bg-violet-950/60 text-violet-300 border border-violet-800"
+                          : "text-gray-300 hover:bg-[var(--surface-hover)]"
+                    }`}
+                    data-tooltip="Filter & search rows by column or value (Ctrl+F)"
+                  >
+                    <FilterIcon size={11} />
+                    <span>Filter</span>
+                  </button>
+
+                  <div className="mx-0.5 h-3 w-px bg-[var(--border)]" />
+
                   <button
                     type="button"
                     disabled={!sel || busy}
@@ -1778,6 +1923,97 @@ export const DatabaseNode = memo(function DatabaseNode({
               ) : null}
             </div>
 
+            {/* Advanced Search & Filter Builder Bar */}
+            {tab === "data" && filterBarOpen && sel && (
+              <div className="flex flex-wrap items-center gap-1.5 border-b border-[var(--border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-[11px] select-none animate-in fade-in duration-100">
+                <div className="flex items-center gap-1 text-violet-400 font-medium shrink-0">
+                  <FilterIcon size={12} />
+                  <span>Search Rows:</span>
+                </div>
+
+                {/* Column dropdown */}
+                <select
+                  value={filterCol}
+                  onChange={(e) => setFilterCol(e.target.value)}
+                  className="rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 text-[11px] text-gray-200 outline-none focus:border-violet-500"
+                >
+                  <option value="">All Columns</option>
+                  {columns.map((c) => (
+                    <option key={c.name} value={c.name}>
+                      {c.name} {c.primary ? "(PK)" : ""}
+                    </option>
+                  ))}
+                </select>
+
+                {/* Operator dropdown */}
+                <select
+                  value={filterOp}
+                  onChange={(e) => setFilterOp(e.target.value)}
+                  className="rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 text-[11px] text-gray-200 outline-none focus:border-violet-500"
+                >
+                  <option value="contains">contains</option>
+                  <option value="equals">equals (=)</option>
+                  <option value="starts">starts with</option>
+                  <option value="ends">ends with</option>
+                  <option value="neq">not equals (!=)</option>
+                  <option value="gt">&gt; greater</option>
+                  <option value="lt">&lt; less</option>
+                  <option value="gte">&gt;=</option>
+                  <option value="lte">&lt;=</option>
+                  <option value="null">IS NULL</option>
+                  <option value="notnull">IS NOT NULL</option>
+                </select>
+
+                {/* Value input */}
+                {filterOp !== "null" && filterOp !== "notnull" && (
+                  <div className="relative flex min-w-[140px] flex-1 items-center">
+                    <input
+                      type="text"
+                      autoFocus
+                      value={filterVal}
+                      onChange={(e) => setFilterVal(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") applyFilter();
+                        if (e.key === "Escape") setFilterBarOpen(false);
+                      }}
+                      placeholder="Value to search…"
+                      className="w-full rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-0.5 text-[11px] text-gray-100 outline-none focus:border-violet-500"
+                    />
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  onClick={applyFilter}
+                  disabled={busy}
+                  className="flex items-center gap-1 rounded bg-violet-600 px-2.5 py-0.5 font-medium text-white hover:bg-violet-500 disabled:opacity-40 transition-colors"
+                >
+                  <SearchIcon size={10} />
+                  <span>Search</span>
+                </button>
+
+                {activeFilterWhere && (
+                  <button
+                    type="button"
+                    onClick={clearFilter}
+                    className="flex items-center gap-1 rounded border border-[var(--border)] bg-[var(--surface)] px-2 py-0.5 text-gray-400 hover:text-white"
+                  >
+                    <CloseIcon size={10} />
+                    <span>Clear Filter</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => setFilterBarOpen(false)}
+                  className="ml-auto rounded p-0.5 text-gray-500 hover:text-white"
+                  data-tooltip="Hide search bar"
+                >
+                  <CloseIcon size={12} />
+                </button>
+              </div>
+            )}
+
             {/* Quick Horizontal Table Tabs Strip */}
             {showTableTabsBar && sel && (
               <div className="flex shrink-0 items-center gap-1 border-b border-[var(--border)] bg-[var(--bg)] px-2 py-1 overflow-x-auto select-none">
@@ -1867,6 +2103,8 @@ export const DatabaseNode = memo(function DatabaseNode({
                     settings={settings}
                     tableLabel={sel ? `${sel.schema}.${sel.table}` : undefined}
                     totalRows={tableRowCount}
+                    activeFilter={activeFilterWhere}
+                    onClearFilter={clearFilter}
                     onEdit={(r, c, v) => void editCell(r, c, v)}
                     onDeleteRows={(idx) => void deleteRows(idx)}
                     onSqlTemplate={(text) => {
@@ -2202,8 +2440,10 @@ export const DatabaseNode = memo(function DatabaseNode({
           set={tab === "data" ? rows! : sqlResult!}
           columns={tab === "data" ? columns : undefined}
           tableName={sel ? `${sel.schema}.${sel.table}` : undefined}
+          editable={tab === "data" && columns.some((c) => c.primary)}
           onClose={() => setInspectRowIndex(null)}
           onSelectRowIndex={(idx) => setInspectRowIndex(idx)}
+          onSaveRow={handleSaveRowInspector}
         />
       ) : null}
 
