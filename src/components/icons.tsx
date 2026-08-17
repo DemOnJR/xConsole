@@ -49,6 +49,17 @@ export function PanelBottomIcon(props: IconProps) {
   );
 }
 
+/** Toggle top panel. */
+export function PanelTopIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <line x1="3" y1="10" x2="21" y2="10" />
+      <rect x="3" y="4" width="18" height="6" rx="2" fill="currentColor" stroke="none" opacity="0.35" />
+    </svg>
+  );
+}
+
 export function MinimizeIcon(props: IconProps) {
   return (
     <svg {...base(props)}>

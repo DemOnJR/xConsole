@@ -268,6 +268,9 @@ export function DatabaseTree({
   vpsId,
   scanning,
   selected,
+  position = "left",
+  width = 224,
+  height = 160,
   onPatch,
   onSelectTable,
   onRescan,
@@ -279,6 +282,9 @@ export function DatabaseTree({
   vpsId: string;
   scanning: boolean;
   selected: { endpointId: string; schema: string; table: string } | null;
+  position?: "left" | "right" | "top" | "bottom";
+  width?: number;
+  height?: number;
   onPatch: (endpointId: string, patch: Partial<DbInstance>) => void;
   onSelectTable: (instance: DbInstance, schema: string, table: string) => void;
   onRescan: () => void;
@@ -288,6 +294,7 @@ export function DatabaseTree({
 }) {
   const maskHost = useMaskHost();
   const [filter, setFilter] = useState("");
+  const isHorizontal = position === "top" || position === "bottom";
   const [connectedOnly, setConnectedOnly] = useState(() => {
     return localStorage.getItem("xconsole-db-view-mode") === "connected";
   });
@@ -355,8 +362,24 @@ export function DatabaseTree({
     return count;
   }, [visibleInstances, filterQ]);
 
+  const containerStyle = isHorizontal
+    ? { height: `${height}px`, width: "100%" }
+    : { width: `${width}px`, height: "100%" };
+
+  const borderClass =
+    position === "left"
+      ? "border-r"
+      : position === "right"
+        ? "border-l"
+        : position === "top"
+          ? "border-b"
+          : "border-t";
+
   return (
-    <div className="flex h-full w-56 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface-2)] select-none">
+    <div
+      style={containerStyle}
+      className={`flex shrink-0 flex-col ${borderClass} border-[var(--border)] bg-[var(--surface-2)] select-none overflow-hidden transition-all duration-75`}
+    >
       {/* Top Header */}
       <div className="flex shrink-0 items-center justify-between gap-1 border-b border-[var(--border)] px-2 py-1.5 bg-[var(--surface)]">
         <span className="text-[10px] uppercase font-semibold tracking-wider text-gray-400">

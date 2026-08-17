@@ -19,6 +19,10 @@ export interface DbSettings {
   showRowNumbers: boolean;
   maxExportLimit: number;
   confirmDestructive: boolean;
+  sidebarPosition: "left" | "right" | "top" | "bottom";
+  tableTabsMode: "always" | "when-hidden" | "never";
+  sidebarWidth: number;
+  sidebarHeight: number;
 }
 
 export const DEFAULT_DB_SETTINGS: DbSettings = {
@@ -30,6 +34,10 @@ export const DEFAULT_DB_SETTINGS: DbSettings = {
   showRowNumbers: true,
   maxExportLimit: 50000,
   confirmDestructive: true,
+  sidebarPosition: "left",
+  tableTabsMode: "always",
+  sidebarWidth: 224,
+  sidebarHeight: 160,
 };
 
 export function loadDbSettings(): DbSettings {
@@ -67,7 +75,7 @@ export function DbSettingsModal({
   onSavedLoginsChanged,
   onSettingsChanged,
 }: DbSettingsModalProps) {
-  const [tab, setTab] = useState<"general" | "query" | "saved">("general");
+  const [tab, setTab] = useState<"general" | "layout" | "query" | "saved">("general");
   const [settings, setSettings] = useState<DbSettings>(loadDbSettings);
   const [savedLogins, setSavedLogins] = useState<DbSavedConnection[]>([]);
   const [loadingLogins, setLoadingLogins] = useState(false);
@@ -137,10 +145,10 @@ export function DbSettingsModal({
         </div>
 
         {/* Tab switcher */}
-        <div className="flex border-b border-[var(--border)] bg-[var(--bg)] px-3 pt-1 gap-1">
+        <div className="flex border-b border-[var(--border)] bg-[var(--bg)] px-3 pt-1 gap-1 overflow-x-auto">
           <button
             onClick={() => setTab("general")}
-            className={`flex items-center gap-1.5 px-3 py-1.5 border-b-2 font-medium transition-colors ${
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 border-b-2 font-medium transition-colors whitespace-nowrap ${
               tab === "general"
                 ? "border-violet-500 text-violet-300"
                 : "border-transparent text-gray-400 hover:text-gray-200"
@@ -150,8 +158,19 @@ export function DbSettingsModal({
             <span>Display & Grid</span>
           </button>
           <button
+            onClick={() => setTab("layout")}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 border-b-2 font-medium transition-colors whitespace-nowrap ${
+              tab === "layout"
+                ? "border-violet-500 text-violet-300"
+                : "border-transparent text-gray-400 hover:text-gray-200"
+            }`}
+          >
+            <SlidersIcon size={13} />
+            <span>Layout & Position</span>
+          </button>
+          <button
             onClick={() => setTab("query")}
-            className={`flex items-center gap-1.5 px-3 py-1.5 border-b-2 font-medium transition-colors ${
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 border-b-2 font-medium transition-colors whitespace-nowrap ${
               tab === "query"
                 ? "border-violet-500 text-violet-300"
                 : "border-transparent text-gray-400 hover:text-gray-200"
@@ -162,19 +181,101 @@ export function DbSettingsModal({
           </button>
           <button
             onClick={() => setTab("saved")}
-            className={`flex items-center gap-1.5 px-3 py-1.5 border-b-2 font-medium transition-colors ${
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 border-b-2 font-medium transition-colors whitespace-nowrap ${
               tab === "saved"
                 ? "border-violet-500 text-violet-300"
                 : "border-transparent text-gray-400 hover:text-gray-200"
             }`}
           >
             <KeyIcon size={13} />
-            <span>Saved Logins ({savedLogins.length})</span>
+            <span>Saved ({savedLogins.length})</span>
           </button>
         </div>
 
         {/* Content */}
         <div className="max-h-[380px] overflow-y-auto p-4 space-y-4">
+          {tab === "layout" && (
+            <div className="space-y-3.5">
+              <div>
+                <div className="text-gray-200 font-medium mb-1">Sidebar / Tree Position</div>
+                <div className="text-[10px] text-gray-500 mb-2">
+                  Choose where to display the database and tables browser relative to data
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { id: "left", label: "Left Sidebar", desc: "Classic vertical tree on left" },
+                    { id: "right", label: "Right Sidebar", desc: "Vertical tree on right side" },
+                    { id: "top", label: "Top Panel", desc: "Horizontal tables & DBs above data" },
+                    { id: "bottom", label: "Bottom Panel", desc: "Data on top, DBs on bottom" },
+                  ].map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() =>
+                        updateSetting("sidebarPosition", item.id as DbSettings["sidebarPosition"])
+                      }
+                      className={`flex flex-col items-start p-2.5 rounded-lg border text-left transition-all ${
+                        settings.sidebarPosition === item.id
+                          ? "border-violet-500 bg-violet-950/40 text-violet-200 ring-1 ring-violet-500/50"
+                          : "border-[var(--border)] bg-[var(--bg)] text-gray-300 hover:border-gray-600"
+                      }`}
+                    >
+                      <span className="font-medium text-[11px]">{item.label}</span>
+                      <span className="text-[10px] text-gray-500 mt-0.5">{item.desc}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="border-t border-[var(--border)] pt-3">
+                <div className="text-gray-200 font-medium mb-1">Quick Table Tabs Bar</div>
+                <div className="text-[10px] text-gray-500 mb-2">
+                  Display horizontal table chips/tabs above data to switch tables in 1 click
+                </div>
+                <div className="flex rounded border border-[var(--border)] bg-[var(--bg)] p-0.5">
+                  {[
+                    { id: "always", label: "Always Show" },
+                    { id: "when-hidden", label: "When Sidebar Hidden" },
+                    { id: "never", label: "Never" },
+                  ].map((mode) => (
+                    <button
+                      key={mode.id}
+                      type="button"
+                      onClick={() =>
+                        updateSetting("tableTabsMode", mode.id as DbSettings["tableTabsMode"])
+                      }
+                      className={`flex-1 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                        settings.tableTabsMode === mode.id
+                          ? "bg-violet-600 text-white"
+                          : "text-gray-400 hover:text-gray-200"
+                      }`}
+                    >
+                      {mode.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between border-t border-[var(--border)] pt-3">
+                <div>
+                  <div className="text-gray-200 font-medium">Reset Panel Dimensions</div>
+                  <div className="text-[10px] text-gray-500">
+                    Reset drag resize width and height to defaults
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    updateSetting("sidebarWidth", 224);
+                    updateSetting("sidebarHeight", 160);
+                  }}
+                  className="rounded border border-[var(--border)] bg-[var(--bg)] px-2.5 py-1 text-[11px] text-gray-300 hover:bg-[var(--border)] hover:text-white"
+                >
+                  Reset Size
+                </button>
+              </div>
+            </div>
+          )}
           {tab === "general" && (
             <div className="space-y-3.5">
               <div className="flex items-center justify-between">

@@ -11,6 +11,9 @@ import {
   SettingsIcon,
   PanelLeftIcon,
   PanelLeftCloseIcon,
+  PanelRightIcon,
+  PanelTopIcon,
+  PanelBottomIcon,
   PlusIcon,
   TrashIcon,
   EraserIcon,
@@ -38,6 +41,7 @@ import { RedisKeyModal } from "./database/RedisKeyModal";
 import {
   DbSettingsModal,
   loadDbSettings,
+  saveDbSettings,
   type DbSettings,
 } from "./database/DbSettingsModal";
 import { RowInspectorModal } from "./database/RowInspectorModal";
@@ -83,6 +87,7 @@ function Grid({
   onSqlTemplate,
   onInspectRow,
   tableLabel,
+  totalRows,
 }: {
   set: DbResultSet;
   columns?: DbColumn[];
@@ -94,6 +99,7 @@ function Grid({
   onSqlTemplate?: (sql: string) => void;
   onInspectRow?: (rowIndex: number) => void;
   tableLabel?: string;
+  totalRows?: number | null;
 }) {
   const [editing, setEditing] = useState<{ row: number; col: number } | null>(null);
   const [draft, setDraft] = useState("");
@@ -105,7 +111,8 @@ function Grid({
   const lastClicked = useRef<number | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  const hasKey = (columns ?? []).some((c) => c.primary);
+  const pkColumns = (columns ?? []).filter((c) => c.primary);
+  const hasKey = pkColumns.length > 0;
   const editable = Boolean(onEdit) && hasKey;
   const selectable = true;
   const canDelete = Boolean(onDeleteRows) && hasKey;
@@ -551,6 +558,27 @@ function Grid({
           </p>
         ) : null}
       </div>
+
+      {/* Slim Status Bar at Bottom */}
+      <div className="flex shrink-0 items-center justify-between border-t border-[var(--border)] bg-[var(--surface-2)] px-2 py-0.5 text-[10px] text-gray-500 font-mono select-none">
+        <div className="flex items-center gap-2">
+          {tableLabel && <span className="text-gray-400 font-medium">{tableLabel}</span>}
+          {pkColumns.length > 0 ? (
+            <span className="text-amber-400/80">
+              PK: {pkColumns.map((c) => c.name).join(", ")}
+            </span>
+          ) : (
+            <span className="text-gray-600">No PK</span>
+          )}
+          <span>{set.columns.length} columns</span>
+        </div>
+        <div className="flex items-center gap-2">
+          {totalRows != null && (
+            <span>{totalRows.toLocaleString()} total rows</span>
+          )}
+          <span>{processedRows.length} on page</span>
+        </div>
+      </div>
     </div>
   );
 }
@@ -664,6 +692,70 @@ export const DatabaseNode = memo(function DatabaseNode({
 
   const sessionsRef = useRef<Set<string>>(new Set());
   const panelRef = useRef<HTMLDivElement | null>(null);
+
+  // Table Tabs filtering
+  const [tableTabsFilter, setTableTabsFilter] = useState("");
+
+  const updateSetting = useCallback(
+    <K extends keyof DbSettings>(key: K, value: DbSettings[K]) => {
+      setSettings((prev) => {
+        const next = { ...prev, [key]: value };
+        saveDbSettings(next);
+        return next;
+      });
+    },
+    [],
+  );
+
+  // Layout position cycling (Left -> Top -> Right -> Bottom)
+  const cycleLayout = () => {
+    const order: DbSettings["sidebarPosition"][] = ["left", "top", "right", "bottom"];
+    const curIdx = order.indexOf(settings.sidebarPosition);
+    const nextPos = order[(curIdx + 1) % order.length];
+    updateSetting("sidebarPosition", nextPos);
+  };
+
+  // Draggable Resizing logic
+  const isDraggingRef = useRef(false);
+  const startPosRef = useRef(0);
+  const startDimRef = useRef(0);
+
+  const handleResizeStart = (e: React.MouseEvent, type: "width" | "height") => {
+    e.preventDefault();
+    e.stopPropagation();
+    isDraggingRef.current = true;
+    startPosRef.current = type === "width" ? e.clientX : e.clientY;
+    startDimRef.current =
+      type === "width" ? settings.sidebarWidth : settings.sidebarHeight;
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      if (!isDraggingRef.current) return;
+      if (type === "width") {
+        const delta =
+          settings.sidebarPosition === "right"
+            ? startPosRef.current - moveEvent.clientX
+            : moveEvent.clientX - startPosRef.current;
+        const newWidth = Math.max(140, Math.min(600, startDimRef.current + delta));
+        updateSetting("sidebarWidth", newWidth);
+      } else {
+        const delta =
+          settings.sidebarPosition === "bottom"
+            ? startPosRef.current - moveEvent.clientY
+            : moveEvent.clientY - startPosRef.current;
+        const newHeight = Math.max(90, Math.min(450, startDimRef.current + delta));
+        updateSetting("sidebarHeight", newHeight);
+      }
+    };
+
+    const onMouseUp = () => {
+      isDraggingRef.current = false;
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+  };
 
   const scan = useCallback(async () => {
     setScanning(true);
@@ -1215,6 +1307,81 @@ export const DatabaseNode = memo(function DatabaseNode({
 
   const connectedCount = instances.filter((i) => i.sessionId).length;
 
+  // Active instance & schema tables for Table Tabs Bar
+  const activeInstance = instances.find((i) => i.endpoint.id === sel?.endpointId);
+  const activeSchemaTables = useMemo(() => {
+    if (!sel || !activeInstance) return [];
+    return activeInstance.tables[sel.schema] ?? [];
+  }, [sel, activeInstance]);
+
+  const showTableTabsBar =
+    (settings.tableTabsMode === "always" && activeSchemaTables.length > 0) ||
+    (settings.tableTabsMode === "when-hidden" &&
+      !sidebarOpen &&
+      activeSchemaTables.length > 0) ||
+    (!sidebarOpen && activeSchemaTables.length > 0);
+
+  const filteredSchemaTables = useMemo(() => {
+    if (!tableTabsFilter.trim()) return activeSchemaTables;
+    const q = tableTabsFilter.trim().toLowerCase();
+    return activeSchemaTables.filter((t) => t.name.toLowerCase().includes(q));
+  }, [activeSchemaTables, tableTabsFilter]);
+
+  // Layout layout direction classes
+  const pos = settings.sidebarPosition || "left";
+  const isHorizontalLayout = pos === "top" || pos === "bottom";
+
+  const renderLayoutIcon = () => {
+    if (pos === "left") return <PanelLeftIcon size={13} />;
+    if (pos === "right") return <PanelRightIcon size={13} />;
+    if (pos === "top") return <PanelTopIcon size={13} />;
+    return <PanelBottomIcon size={13} />;
+  };
+
+  const treeComponent = (
+    <DatabaseTree
+      instances={instances}
+      vpsId={data.vpsId}
+      scanning={scanning}
+      selected={sel}
+      position={pos}
+      width={settings.sidebarWidth}
+      height={settings.sidebarHeight}
+      onPatch={patch}
+      onSelectTable={(inst, schema, table) => {
+        if (!inst.sessionId) return;
+        openTable({
+          endpointId: inst.endpoint.id,
+          sessionId: inst.sessionId,
+          schema,
+          table,
+        });
+      }}
+      onRescan={() => void scan()}
+      onSavedChanged={() => void refreshSaved()}
+      onForget={(fid) => void forgetSaved(fid)}
+      onDisconnect={handleDisconnect}
+    />
+  );
+
+  const splitterComponent = isHorizontalLayout ? (
+    <div
+      onMouseDown={(e) => handleResizeStart(e, "height")}
+      className="group h-1 hover:h-1.5 bg-[var(--border)] hover:bg-violet-500 cursor-row-resize shrink-0 transition-colors z-20 flex items-center justify-center"
+      data-tooltip="Drag to resize panel height"
+    >
+      <div className="w-8 h-0.5 rounded bg-gray-500 group-hover:bg-white transition-colors" />
+    </div>
+  ) : (
+    <div
+      onMouseDown={(e) => handleResizeStart(e, "width")}
+      className="group w-1 hover:w-1.5 bg-[var(--border)] hover:bg-violet-500 cursor-col-resize shrink-0 transition-colors z-20 flex items-center justify-center"
+      data-tooltip="Drag to resize panel width"
+    >
+      <div className="h-8 w-0.5 rounded bg-gray-500 group-hover:bg-white transition-colors" />
+    </div>
+  );
+
   return (
     <div
       ref={panelRef}
@@ -1291,6 +1458,14 @@ export const DatabaseNode = memo(function DatabaseNode({
         <div className="ml-auto flex items-center gap-1 shrink-0">
           <button
             type="button"
+            onClick={cycleLayout}
+            className="rounded p-1 text-gray-400 hover:bg-[var(--border)] hover:text-violet-300 transition-colors"
+            data-tooltip={`Layout: ${pos.toUpperCase()} (Click to cycle Left/Top/Right/Bottom)`}
+          >
+            {renderLayoutIcon()}
+          </button>
+          <button
+            type="button"
             onClick={() => setSettingsOpen(true)}
             className="rounded p-1 text-gray-400 hover:bg-[var(--border)] hover:text-violet-300 transition-colors"
             data-tooltip="Database manager settings"
@@ -1328,33 +1503,24 @@ export const DatabaseNode = memo(function DatabaseNode({
           </div>
         ) : null}
 
-        <div className="flex min-h-0 flex-1">
-          {/* Collapsible Sidebar */}
-          {sidebarOpen && (
-            <DatabaseTree
-              instances={instances}
-              vpsId={data.vpsId}
-              scanning={scanning}
-              selected={sel}
-              onPatch={patch}
-              onSelectTable={(inst, schema, table) => {
-                if (!inst.sessionId) return;
-                openTable({
-                  endpointId: inst.endpoint.id,
-                  sessionId: inst.sessionId,
-                  schema,
-                  table,
-                });
-              }}
-              onRescan={() => void scan()}
-              onSavedChanged={() => void refreshSaved()}
-              onForget={(fid) => void forgetSaved(fid)}
-              onDisconnect={handleDisconnect}
-            />
-          )}
+        {/* Responsive Flex Layout Container */}
+        <div
+          className={`flex min-h-0 flex-1 overflow-hidden ${
+            pos === "top"
+              ? "flex-col"
+              : pos === "bottom"
+                ? "flex-col-reverse"
+                : pos === "right"
+                  ? "flex-row-reverse"
+                  : "flex-row"
+          }`}
+        >
+          {/* Collapsible Tree Sidebar / Topbar */}
+          {sidebarOpen && treeComponent}
+          {sidebarOpen && splitterComponent}
 
-          {/* Right Main Pane */}
-          <div className="flex min-w-0 flex-1 flex-col">
+          {/* Main Work Area */}
+          <div className="flex min-w-0 min-h-0 flex-1 flex-col overflow-hidden">
             {/* Toolbar */}
             <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-[var(--border)] bg-[var(--surface-2)] px-2 py-1">
               <button
@@ -1612,6 +1778,85 @@ export const DatabaseNode = memo(function DatabaseNode({
               ) : null}
             </div>
 
+            {/* Quick Horizontal Table Tabs Strip */}
+            {showTableTabsBar && sel && (
+              <div className="flex shrink-0 items-center gap-1 border-b border-[var(--border)] bg-[var(--bg)] px-2 py-1 overflow-x-auto select-none">
+                <div className="flex items-center gap-1 text-[10px] font-semibold text-violet-400 shrink-0 pr-1">
+                  <DatabaseIcon size={11} />
+                  <span>{sel.schema}</span>
+                </div>
+
+                <div className="relative flex items-center shrink-0 w-28">
+                  <SearchIcon
+                    size={9}
+                    className="absolute left-1.5 text-gray-500 pointer-events-none"
+                  />
+                  <input
+                    type="text"
+                    value={tableTabsFilter}
+                    onChange={(e) => setTableTabsFilter(e.target.value)}
+                    placeholder="Filter…"
+                    className="w-full rounded border border-[var(--border)] bg-[var(--surface)] pl-4 pr-1 py-0.5 text-[9px] text-gray-200 outline-none focus:border-violet-500 placeholder:text-gray-600"
+                  />
+                </div>
+
+                <div className="flex items-center gap-1 overflow-x-auto min-w-0 flex-1 py-0.5">
+                  {filteredSchemaTables.map((t) => {
+                    const active = sel.table === t.name;
+                    return (
+                      <button
+                        key={t.name}
+                        onClick={() => {
+                          if (activeInstance) {
+                            openTable({
+                              endpointId: activeInstance.endpoint.id,
+                              sessionId: activeInstance.sessionId ?? sel.sessionId,
+                              schema: sel.schema,
+                              table: t.name,
+                            });
+                          }
+                        }}
+                        className={`flex items-center gap-1 rounded px-2 py-0.5 text-[10.5px] font-mono whitespace-nowrap transition-all ${
+                          active
+                            ? "bg-violet-600 text-white font-medium shadow-xs"
+                            : "bg-[var(--surface)] text-gray-400 hover:bg-[var(--surface-hover)] hover:text-gray-200 border border-[var(--border)]"
+                        }`}
+                        title={`${t.name} · ${t.rows.toLocaleString()} rows`}
+                      >
+                        <TableIcon size={10} className={active ? "text-white" : "text-gray-500"} />
+                        <span>{t.name}</span>
+                        {t.rows > 0 && (
+                          <span
+                            className={`rounded px-1 text-[8.5px] tabular-nums ${
+                              active
+                                ? "bg-violet-800 text-violet-200"
+                                : "bg-[var(--bg)] text-gray-500"
+                            }`}
+                          >
+                            {t.rows >= 1000 ? `${(t.rows / 1000).toFixed(0)}k` : t.rows}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                  {filteredSchemaTables.length === 0 && (
+                    <span className="text-[10px] text-gray-500 italic px-2">
+                      No matching tables
+                    </span>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setCreateTableOpen(true)}
+                  className="shrink-0 rounded p-1 text-gray-500 hover:bg-[var(--border)] hover:text-violet-300"
+                  data-tooltip="Create new table"
+                >
+                  <PlusIcon size={11} />
+                </button>
+              </div>
+            )}
+
             {/* Content Area */}
             <div className="min-h-0 flex-1 overflow-hidden">
               {tab === "data" ? (
@@ -1621,6 +1866,7 @@ export const DatabaseNode = memo(function DatabaseNode({
                     columns={columns}
                     settings={settings}
                     tableLabel={sel ? `${sel.schema}.${sel.table}` : undefined}
+                    totalRows={tableRowCount}
                     onEdit={(r, c, v) => void editCell(r, c, v)}
                     onDeleteRows={(idx) => void deleteRows(idx)}
                     onSqlTemplate={(text) => {
@@ -1634,7 +1880,7 @@ export const DatabaseNode = memo(function DatabaseNode({
                     <DatabaseIcon size={28} className="text-violet-500/40 mb-2" />
                     <p className="text-[12px] font-medium text-gray-300">No table selected</p>
                     <p className="text-[11px] text-gray-500 max-w-sm mt-1">
-                      Expand a database on the left sidebar, sign in, and click any table to browse its data.
+                      Expand a database, sign in, and click any table to browse its data.
                     </p>
                   </div>
                 )
