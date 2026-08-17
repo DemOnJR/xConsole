@@ -378,11 +378,12 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
 
   /** Execute a code-block command: open/reuse a terminal for the target vps and
    *  auto-run (full perms / allowlisted) or type-and-wait (approve). */
-  const executeCommand = (code: string) => {
+  const executeCommand = useCallback((code: string) => {
     const canvas = useCanvasStore.getState();
     const vpsList = useVpsStore.getState().vpsList;
+    const currentTargets = useAgentStore.getState().targets;
     // Resolve target: the agent's selected targets first, else the first vps.
-    const targetId = targets[0] ?? vpsList[0]?.id;
+    const targetId = currentTargets[0] ?? vpsList[0]?.id;
     const vps = vpsList.find((v) => v.id === targetId);
     if (!vps) {
       void notify("Execute", "No server selected — pick a target first (/targets).");
@@ -412,7 +413,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
         ? `Running on ${vps.name} (${mode})`
         : `Opened ${vps.name} — command typed, press Enter to run (${mode})`,
     );
-  };
+  }, []);
 
   /** VPS context passed to code blocks so Execute can show the target name. */
   const executeTarget = useMemo(() => {
@@ -472,13 +473,16 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
   }, [sessionId]);
 
   useEffect(() => {
-    try {
-      const key = `xconsole-agent-draft:${sessionId}`;
-      if (input) localStorage.setItem(key, input);
-      else localStorage.removeItem(key);
-    } catch {
-      /* ignore */
-    }
+    const timer = setTimeout(() => {
+      try {
+        const key = `xconsole-agent-draft:${sessionId}`;
+        if (input) localStorage.setItem(key, input);
+        else localStorage.removeItem(key);
+      } catch {
+        /* ignore */
+      }
+    }, 250);
+    return () => clearTimeout(timer);
   }, [input, sessionId]);
 
   const history = useInputHistory(setInput);
@@ -1429,9 +1433,9 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     [vpsList, targets, maskHost],
   );
 
-  const handlePickTargets = () => {
+  const handlePickTargets = useCallback(() => {
     setPicker((cur) => (cur?.kind === "targets" ? null : { kind: "targets" }));
-  };
+  }, []);
 
 
 

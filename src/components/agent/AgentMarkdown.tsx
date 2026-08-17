@@ -1,3 +1,4 @@
+import { memo, useMemo } from "react";
 import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -87,7 +88,7 @@ const assistantComponents: Components = {
   td: ({ children }) => <td className="px-2.5 py-1.5 text-gray-300">{children}</td>,
 };
 
-export function AgentMarkdown({
+export const AgentMarkdown = memo(function AgentMarkdown({
   content,
   variant = "assistant",
   executeTarget,
@@ -103,41 +104,46 @@ export function AgentMarkdown({
   const rawBody = normalizeAgentMarkdown(content);
   const body = maskHost(rawBody);
 
+  const components: Components = useMemo(
+    () => ({
+      ...assistantComponents,
+      code: ({ className, children }) => {
+        const text = String(children).replace(/\n$/, "");
+        const isSvgLang = className?.includes("language-svg");
+        const isSvgContent =
+          (text.trim().startsWith("<svg") && text.trim().endsWith("</svg>")) ||
+          (isSvgLang && text.includes("<svg"));
+        if (isSvgContent) {
+          return <SvgPreview svgContent={text} />;
+        }
+        const isBlock = className?.includes("language-") || text.includes("\n");
+        if (isBlock) {
+          return (
+            <MarkdownCodeBlock
+              code={text}
+              className={className}
+              executeTarget={executeTarget}
+              onExecute={onExecute}
+            />
+          );
+        }
+        return (
+          <code className="rounded bg-[#1a2230] px-1 py-0.5 font-mono text-[12px] text-emerald-200/90">
+            {children}
+          </code>
+        );
+      },
+    }),
+    [executeTarget, onExecute],
+  );
+
   if (variant === "user") {
     return <span className="whitespace-pre-wrap">{body}</span>;
   }
-
-  const components: Components = {
-    ...assistantComponents,
-    code: ({ className, children }) => {
-      const text = String(children).replace(/\n$/, "");
-      const isSvgLang = className?.includes("language-svg");
-      const isSvgContent = (text.trim().startsWith("<svg") && text.trim().endsWith("</svg>")) || (isSvgLang && text.includes("<svg"));
-      if (isSvgContent) {
-        return <SvgPreview svgContent={text} />;
-      }
-      const isBlock = className?.includes("language-") || text.includes("\n");
-      if (isBlock) {
-        return (
-          <MarkdownCodeBlock
-            code={text}
-            className={className}
-            executeTarget={executeTarget}
-            onExecute={onExecute}
-          />
-        );
-      }
-      return (
-        <code className="rounded bg-[#1a2230] px-1 py-0.5 font-mono text-[12px] text-emerald-200/90">
-          {children}
-        </code>
-      );
-    },
-  };
 
   return (
     <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
       {body}
     </ReactMarkdown>
   );
-}
+});

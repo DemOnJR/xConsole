@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import shell from "highlight.js/lib/languages/shell";
@@ -233,7 +233,7 @@ export function langFromPath(path: string): string | undefined {
 }
 
 /** Bash / shell command with syntax colors. */
-export function ShellCommand({
+export const ShellCommand = memo(function ShellCommand({
   code,
   className = "",
 }: {
@@ -251,10 +251,10 @@ export function ShellCommand({
       />
     </pre>
   );
-}
+});
 
 /** Source code block (markdown fences, file diffs, etc.). */
-export function CodeHighlight({
+export const CodeHighlight = memo(function CodeHighlight({
   code,
   language,
   className = "",
@@ -275,11 +275,11 @@ export function CodeHighlight({
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );
-}
+});
 
 /** Fenced code block for agent markdown replies. Copy + Execute (for shell blocks
  *  with a resolvable host) live in the header. */
-export function MarkdownCodeBlock({
+export const MarkdownCodeBlock = memo(function MarkdownCodeBlock({
   code,
   className,
   executeTarget,
@@ -344,7 +344,7 @@ export function MarkdownCodeBlock({
       </pre>
     </div>
   );
-}
+});
 
 const ANSI_RESET = 0;
 const ANSI_MAP: Record<number, string> = {
@@ -398,13 +398,7 @@ function parseAnsiSegments(text: string): { className: string; text: string }[] 
       if (parts.length === 0 || seq === "") {
         codes = [];
       } else {
-        for (const p of parts) {
-          const n = Number.parseInt(p, 10);
-          if (!Number.isNaN(n)) {
-            if (n === ANSI_RESET) codes = [];
-            else codes.push(n);
-          }
-        }
+        codes = parts.map((p) => Number(p)).filter((n) => Number.isFinite(n));
       }
       continue;
     }
@@ -416,20 +410,24 @@ function parseAnsiSegments(text: string): { className: string; text: string }[] 
 }
 
 function logLineClass(line: string): string {
-  if (/error|failed|fatal|denied|cannot|panic|exception|traceback/i.test(line)) {
-    return "log-error";
+  const l = line.toLowerCase();
+  if (l.includes("error") || l.includes("fatal") || l.includes("failed") || l.includes("panic")) {
+    return "text-red-300";
   }
-  if (/warn|warning|deprecated/i.test(line)) {
-    return "log-warn";
+  if (l.includes("warn") || l.includes("warning")) {
+    return "text-amber-300";
   }
-  if (/^\s*(info|notice|ok|success|done|active|running)\b/i.test(line)) {
-    return "log-info";
+  if (l.includes("success") || l.includes("connected") || l.includes("listening")) {
+    return "text-emerald-300";
   }
-  return "log-default";
+  if (l.includes("info") || l.includes("debug")) {
+    return "text-gray-400";
+  }
+  return "text-gray-300";
 }
 
 /** Terminal / SSH output — ANSI colors + log-level line tinting. */
-export function ConsoleOutput({
+export const ConsoleOutput = memo(function ConsoleOutput({
   text,
   className = "",
 }: {
@@ -468,4 +466,4 @@ export function ConsoleOutput({
       ))}
     </pre>
   );
-}
+});

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { useAgentStore, type AgentActivityItem } from "../../stores/agentStore";
 import type { DiffLine } from "../../lib/tauri";
 import { CodeHighlight, ConsoleOutput, langFromPath, ShellCommand } from "./SyntaxHighlight";
@@ -591,7 +591,7 @@ export function AgentThinking() {
  * Automatically groups and collapses tool activities into an elegant summary row,
  * with expand-to-inspect diff viewer, terminal outputs, and tool history.
  */
-export function AgentActivityFeed({
+export const AgentActivityFeed = memo(function AgentActivityFeed({
   items,
   live = false,
 }: {
@@ -719,4 +719,4 @@ export function AgentActivityFeed({
       )}
     </div>
   );
-}
+});

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useAgentStore, type AgentChatMessage, type TurnSegment } from "../../stores/agentStore";
 import { plainText } from "../../lib/plainText";
 import { AgentMarkdown } from "./AgentMarkdown";
@@ -9,7 +9,7 @@ import { useMaskHost } from "../../lib/privacy";
 import { StickyChecklist, findLatestChecklist, CompletedChecklistCard, parseChecklist } from "./StickyChecklist";
 import { isTodoItem } from "./AgentActivity";
 
-function AssistantTurn({
+const AssistantTurn = memo(function AssistantTurn({
   segments,
   live = false,
   expanded,
@@ -86,7 +86,7 @@ function AssistantTurn({
         );
       })}
 
-      {/* Execution time & token metrics footer (Claude Code / Cursor / Antigravity style) */}
+      {/* Turn metadata: duration + token speed */}
       {(durationFormatted || tokenStats) && !live && (
         <div className="flex items-center gap-2 pl-4 text-[10px] text-gray-500 font-mono select-none">
           {durationFormatted && (
@@ -105,9 +105,9 @@ function AssistantTurn({
       )}
     </div>
   );
-}
+});
 
-export function AgentConsole({
+export const AgentConsole = memo(function AgentConsole({
   messages,
   streamingSegments = [],
   streaming,
@@ -271,4 +271,4 @@ export function AgentConsole({
       )}
     </div>
   );
-}
+});
