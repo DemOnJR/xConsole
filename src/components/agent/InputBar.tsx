@@ -37,6 +37,8 @@ export const InputBar = memo(function InputBar({
   onReasoning,
   planMode,
   onTogglePlan,
+  agentMode,
+  onPickMode,
   safetyMode,
   onCycleSafety,
   onPickSafety,
@@ -62,6 +64,8 @@ export const InputBar = memo(function InputBar({
   onReasoning: (r: ReasoningLevel) => void;
   planMode: boolean;
   onTogglePlan: () => void;
+  agentMode?: import("../../stores/agentStore").AgentRuntimeMode;
+  onPickMode?: () => void;
   safetyMode: string;
   onCycleSafety?: () => void;
   onPickSafety?: () => void;
@@ -158,6 +162,34 @@ export const InputBar = memo(function InputBar({
       >
         <PlanIcon size={14} />
       </button>
+
+      {onPickMode ? (
+        <button
+          type="button"
+          className={`${iconBtn} text-[10px] font-mono font-medium px-1.5 ${
+            agentMode === "code"
+              ? "bg-amber-500/20 text-amber-300"
+              : agentMode === "plan"
+                ? "bg-indigo-500/20 text-indigo-300"
+                : agentMode === "minimal"
+                  ? "bg-purple-500/20 text-purple-300"
+                  : "text-cyan-300"
+          }`}
+          onClick={onPickMode}
+          onPointerDown={stopNode}
+          onMouseDown={stopNode}
+          aria-label={`Mode: ${agentMode || "standard"}`}
+          data-tooltip={`Runtime Mode: ${agentMode || "standard"}\nStandard 🌐 · Code ⚡ · Plan 📋 · Minimal 🛡️ (/mode)`}
+        >
+          {agentMode === "code"
+            ? "⚡ code"
+            : agentMode === "plan"
+              ? "📋 plan"
+              : agentMode === "minimal"
+                ? "🛡️ min"
+                : "🌐 std"}
+        </button>
+      ) : null}
 
       {onPickVision ? (
         <button

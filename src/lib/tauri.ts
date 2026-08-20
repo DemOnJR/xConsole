@@ -1041,6 +1041,26 @@ export const api = {
   listModels: (flavor: string, baseUrl: string, apiKey: string) =>
     invoke<string[]>("ai_list_models", { flavor, baseUrl, apiKey }),
 
+  /** Sync model pricing from live open catalog (e.g. OpenRouter). */
+  aiSyncPrices: () => invoke<number>("ai_sync_prices"),
+  /** Fetch all known model pricing tables. */
+  aiGetModelPrices: () => invoke<Record<string, { input: number; output: number; cache_read: number; cache_write: number }>>("ai_get_model_prices"),
+  /** Set custom pricing for a model. */
+  aiSetModelPrice: (args: {
+    modelId: string;
+    input: number;
+    output: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+  }) =>
+    invoke<void>("ai_set_model_price", {
+      modelId: args.modelId,
+      input: args.input,
+      output: args.output,
+      cacheRead: args.cacheRead ?? null,
+      cacheWrite: args.cacheWrite ?? null,
+    }),
+
   aiChat: (args: {
     sessionId: string;
     messages: ChatMessage[];

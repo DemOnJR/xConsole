@@ -37,6 +37,11 @@ describe("Agent Slash Commands", () => {
     expect(parseExactSlashCommand("/plan")?.actionKey).toBe("plan");
     expect(parseExactSlashCommand("/compact")?.actionKey).toBe("compact");
     expect(parseExactSlashCommand("/vision")?.actionKey).toBe("vision");
+    expect(parseExactSlashCommand("/close")?.actionKey).toBe("close");
+    expect(parseExactSlashCommand("/hide")?.actionKey).toBe("close");
+    expect(parseExactSlashCommand("/prices")?.actionKey).toBe("prices");
+    expect(parseExactSlashCommand("/mode")?.actionKey).toBe("mode");
+    expect(parseExactSlashCommand("/trajectory")?.actionKey).toBe("trajectory");
     expect(parseExactSlashCommand("/goal")?.actionKey).toBe("goal");
     expect(parseExactSlashCommand("/goal rank my site")).toBeNull();
     expect(parseExactSlashCommand("/unknown")).toBeNull();

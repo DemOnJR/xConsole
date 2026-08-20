@@ -231,7 +231,7 @@ export function StatusStrip() {
           type="button"
           className="inline-flex items-center gap-1.5 transition hover:opacity-90"
           style={{ color: agentTone }}
-          onClick={() => useCanvasStore.getState().addAgent()}
+          onClick={() => useCanvasStore.getState().toggleAgent()}
         >
           <span
             className="inline-block h-1.5 w-1.5 rounded-full"

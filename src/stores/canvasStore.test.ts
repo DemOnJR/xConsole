@@ -310,3 +310,34 @@ describe("queued terminal commands (Execute button)", () => {
     expect(s.takeTerminalCommand(nodeId)).toEqual({ command: "echo hi", send: false });
   });
 });
+
+describe("agent node toggle and single instance management", () => {
+  beforeEach(() => {
+    useCanvasStore.getState().clear();
+  });
+
+  it("addAgent opens a single instance and focuses it if called again", () => {
+    const s = useCanvasStore.getState();
+    const id1 = s.addAgent();
+    expect(useCanvasStore.getState().nodes.filter((n) => n.type === "agent")).toHaveLength(1);
+    const id2 = s.addAgent();
+    expect(id2).toBe(id1);
+    expect(useCanvasStore.getState().nodes.filter((n) => n.type === "agent")).toHaveLength(1);
+    expect(useCanvasStore.getState().focusedId).toBe(id1);
+  });
+
+  it("toggleAgent toggles the agent node open and closed", () => {
+    const s = useCanvasStore.getState();
+    expect(useCanvasStore.getState().nodes.find((n) => n.type === "agent")).toBeUndefined();
+
+    // First toggle: opens
+    const openedId = s.toggleAgent();
+    expect(openedId).toBeTruthy();
+    expect(useCanvasStore.getState().nodes.find((n) => n.type === "agent")?.id).toBe(openedId);
+
+    // Second toggle: closes (removes node)
+    const closedResult = s.toggleAgent();
+    expect(closedResult).toBeNull();
+    expect(useCanvasStore.getState().nodes.find((n) => n.type === "agent")).toBeUndefined();
+  });
+});

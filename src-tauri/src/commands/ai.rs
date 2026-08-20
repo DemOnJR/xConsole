@@ -1144,3 +1144,36 @@ pub async fn ai_list_models(
     }
     crate::ai::list_models::list_openai_compatible(&base_url, &api_key).await
 }
+
+/// Automatically sync model prices from live provider catalog (e.g. OpenRouter).
+#[tauri::command]
+pub async fn ai_sync_prices() -> Result<usize, String> {
+    crate::ai::cost::sync_online_prices().await
+}
+
+/// Return all active model prices (built-in + dynamic overrides).
+#[tauri::command]
+pub fn ai_get_model_prices() -> Result<std::collections::HashMap<String, crate::ai::cost::ModelPrice>, String> {
+    Ok(crate::ai::cost::get_all_model_prices())
+}
+
+/// Override or register a custom model price.
+#[tauri::command]
+pub fn ai_set_model_price(
+    model_id: String,
+    input: f64,
+    output: f64,
+    cache_read: Option<f64>,
+    cache_write: Option<f64>,
+) -> Result<(), String> {
+    let cr = cache_read.unwrap_or(input * 0.1);
+    let cw = cache_write.unwrap_or(input);
+    crate::ai::cost::register_dynamic_price(&model_id, crate::ai::cost::ModelPrice {
+        input,
+        output,
+        cache_read: cr,
+        cache_write: cw,
+    });
+    Ok(())
+}
+

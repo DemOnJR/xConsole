@@ -15,8 +15,11 @@
 //! `prompt * input_price + cached * cache_read_price` double-counts the cached
 //! tokens on inclusive providers and overstates DeepSeek bills by ~50×.
 
+use std::collections::HashMap;
+use std::sync::{LazyLock, RwLock};
+
 /// Price per 1M tokens in USD for one model.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelPrice {
     pub input: f64,
     pub output: f64,
@@ -24,34 +27,183 @@ pub struct ModelPrice {
     pub cache_write: f64,
 }
 
+/// Dynamic price overrides synced from live endpoints or set by user.
+static DYNAMIC_PRICES: LazyLock<RwLock<HashMap<String, ModelPrice>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
 /// Known models. `kind` matches the provider kind (anthropic, openai, ...) so a
 /// default can be picked when the exact model name is unknown.
 ///
 /// More-specific model substrings must come first: `v4-flash` before `deepseek`.
 const MODELS: &[(&str, &str, ModelPrice)] = &[
-    // (kind, model-substring, price)
+    // (kind, model-substring, price in USD per 1M tokens)
+    // --- Anthropic & Claude ---
+    ("anthropic", "claude-opus-5", ModelPrice { input: 15.0, output: 75.0, cache_read: 1.5, cache_write: 18.75 }),
+    ("anthropic", "claude-opus-4-8", ModelPrice { input: 15.0, output: 75.0, cache_read: 1.5, cache_write: 18.75 }),
+    ("anthropic", "claude-opus-4-7", ModelPrice { input: 15.0, output: 75.0, cache_read: 1.5, cache_write: 18.75 }),
     ("anthropic", "opus", ModelPrice { input: 15.0, output: 75.0, cache_read: 1.5, cache_write: 18.75 }),
+    ("anthropic", "claude-sonnet-5", ModelPrice { input: 3.0, output: 15.0, cache_read: 0.30, cache_write: 3.75 }),
+    ("anthropic", "claude-sonnet-4-6", ModelPrice { input: 3.0, output: 15.0, cache_read: 0.30, cache_write: 3.75 }),
+    ("anthropic", "claude-3-7-sonnet", ModelPrice { input: 3.0, output: 15.0, cache_read: 0.30, cache_write: 3.75 }),
+    ("anthropic", "claude-3-5-sonnet", ModelPrice { input: 3.0, output: 15.0, cache_read: 0.30, cache_write: 3.75 }),
     ("anthropic", "sonnet", ModelPrice { input: 3.0, output: 15.0, cache_read: 0.30, cache_write: 3.75 }),
+    ("anthropic", "claude-haiku-4-5", ModelPrice { input: 0.80, output: 4.0, cache_read: 0.08, cache_write: 1.0 }),
+    ("anthropic", "claude-3-5-haiku", ModelPrice { input: 0.80, output: 4.0, cache_read: 0.08, cache_write: 1.0 }),
     ("anthropic", "haiku", ModelPrice { input: 0.80, output: 4.0, cache_read: 0.08, cache_write: 1.0 }),
+
+    // --- OpenAI ---
+    ("openai", "gpt-5.6", ModelPrice { input: 1.25, output: 10.0, cache_read: 0.125, cache_write: 1.5625 }),
+    ("openai", "gpt-5.5", ModelPrice { input: 1.25, output: 10.0, cache_read: 0.125, cache_write: 1.5625 }),
+    ("openai", "gpt-5.4", ModelPrice { input: 1.25, output: 10.0, cache_read: 0.125, cache_write: 1.5625 }),
+    ("openai", "gpt-5.3", ModelPrice { input: 1.25, output: 10.0, cache_read: 0.125, cache_write: 1.5625 }),
+    ("openai", "gpt-5-mini", ModelPrice { input: 0.25, output: 1.25, cache_read: 0.025, cache_write: 0.3125 }),
     ("openai", "gpt-5", ModelPrice { input: 1.25, output: 10.0, cache_read: 0.125, cache_write: 1.5625 }),
+    ("openai", "gpt-4.5", ModelPrice { input: 75.0, output: 150.0, cache_read: 37.5, cache_write: 75.0 }),
+    ("openai", "gpt-4o-mini", ModelPrice { input: 0.15, output: 0.60, cache_read: 0.075, cache_write: 0.15 }),
+    ("openai", "gpt-4o", ModelPrice { input: 2.50, output: 10.0, cache_read: 1.25, cache_write: 2.50 }),
     ("openai", "gpt-4", ModelPrice { input: 2.50, output: 10.0, cache_read: 0.25, cache_write: 3.125 }),
+    ("openai", "o3-mini", ModelPrice { input: 1.10, output: 4.40, cache_read: 0.55, cache_write: 1.10 }),
     ("openai", "o3", ModelPrice { input: 2.0, output: 8.0, cache_read: 0.20, cache_write: 2.50 }),
-    // DeepSeek V4 Flash / Command Code Flash — official Aug 2026 list prices.
-    // No separate cache-write line: first-seen tokens bill at miss (input) price.
+    ("openai", "o1-mini", ModelPrice { input: 1.10, output: 4.40, cache_read: 0.55, cache_write: 1.10 }),
+    ("openai", "o1", ModelPrice { input: 15.0, output: 60.0, cache_read: 7.50, cache_write: 15.0 }),
+
+    // --- DeepSeek ---
     ("deepseek", "v4-flash", ModelPrice { input: 0.14, output: 0.28, cache_read: 0.0028, cache_write: 0.14 }),
-    ("deepseek", "flash", ModelPrice { input: 0.14, output: 0.28, cache_read: 0.0028, cache_write: 0.14 }),
     ("deepseek", "v4-pro", ModelPrice { input: 0.435, output: 0.87, cache_read: 0.003625, cache_write: 0.435 }),
+    ("deepseek", "deepseek-reasoner", ModelPrice { input: 0.55, output: 2.19, cache_read: 0.14, cache_write: 0.55 }),
+    ("deepseek", "deepseek-r1", ModelPrice { input: 0.55, output: 2.19, cache_read: 0.14, cache_write: 0.55 }),
+    ("deepseek", "deepseek-chat", ModelPrice { input: 0.14, output: 0.28, cache_read: 0.014, cache_write: 0.14 }),
+    ("deepseek", "deepseek-v3", ModelPrice { input: 0.14, output: 0.28, cache_read: 0.014, cache_write: 0.14 }),
+    ("deepseek", "flash", ModelPrice { input: 0.14, output: 0.28, cache_read: 0.0028, cache_write: 0.14 }),
     ("deepseek", "deepseek", ModelPrice { input: 0.14, output: 0.28, cache_read: 0.0028, cache_write: 0.14 }),
-    // Google Gemini / Antigravity CLI pricing
+
+    // --- Google Gemini & Antigravity CLI ---
+    ("gemini", "gemini-3.7-flash", ModelPrice { input: 0.15, output: 0.60, cache_read: 0.0375, cache_write: 0.15 }),
+    ("gemini", "gemini-3.6-flash", ModelPrice { input: 0.15, output: 0.60, cache_read: 0.0375, cache_write: 0.15 }),
+    ("gemini", "gemini-3.5-flash", ModelPrice { input: 0.15, output: 0.60, cache_read: 0.0375, cache_write: 0.15 }),
+    ("gemini", "gemini-3.1-pro", ModelPrice { input: 1.25, output: 5.0, cache_read: 0.3125, cache_write: 1.25 }),
+    ("gemini", "gemini-2.5-flash", ModelPrice { input: 0.15, output: 0.60, cache_read: 0.0375, cache_write: 0.15 }),
+    ("gemini", "gemini-2.5-pro", ModelPrice { input: 1.25, output: 5.0, cache_read: 0.3125, cache_write: 1.25 }),
     ("gemini", "flash", ModelPrice { input: 0.15, output: 0.60, cache_read: 0.0375, cache_write: 0.15 }),
     ("gemini", "pro", ModelPrice { input: 1.25, output: 5.0, cache_read: 0.3125, cache_write: 1.25 }),
     ("gemini", "", ModelPrice { input: 0.15, output: 0.60, cache_read: 0.0375, cache_write: 0.15 }),
     ("antigravity_cli", "flash", ModelPrice { input: 0.15, output: 0.60, cache_read: 0.0375, cache_write: 0.15 }),
     ("antigravity_cli", "pro", ModelPrice { input: 1.25, output: 5.0, cache_read: 0.3125, cache_write: 1.25 }),
     ("antigravity_cli", "", ModelPrice { input: 0.15, output: 0.60, cache_read: 0.0375, cache_write: 0.15 }),
+
+    // --- xAI Grok ---
+    ("xai", "grok-4.6", ModelPrice { input: 2.0, output: 10.0, cache_read: 0.50, cache_write: 2.0 }),
+    ("xai", "grok-4.5", ModelPrice { input: 2.0, output: 10.0, cache_read: 0.50, cache_write: 2.0 }),
+    ("xai", "grok-3", ModelPrice { input: 3.0, output: 15.0, cache_read: 0.75, cache_write: 3.0 }),
+    ("xai", "grok", ModelPrice { input: 2.0, output: 10.0, cache_read: 0.50, cache_write: 2.0 }),
+
+    // --- Qwen / Alibaba ---
+    ("qwen", "qwen3.8-max", ModelPrice { input: 0.40, output: 1.20, cache_read: 0.10, cache_write: 0.40 }),
+    ("qwen", "qwen3.7-plus", ModelPrice { input: 0.20, output: 0.60, cache_read: 0.05, cache_write: 0.20 }),
+    ("qwen", "qwen3-max", ModelPrice { input: 0.40, output: 1.20, cache_read: 0.10, cache_write: 0.40 }),
+    ("qwen", "qwen3-flash", ModelPrice { input: 0.10, output: 0.30, cache_read: 0.02, cache_write: 0.10 }),
+    ("qwen", "qwen-max", ModelPrice { input: 0.40, output: 1.20, cache_read: 0.10, cache_write: 0.40 }),
+    ("qwen", "qwen-plus", ModelPrice { input: 0.20, output: 0.60, cache_read: 0.05, cache_write: 0.20 }),
+    ("qwen", "qwen-turbo", ModelPrice { input: 0.05, output: 0.20, cache_read: 0.01, cache_write: 0.05 }),
+
+    // --- Moonshot / Kimi ---
+    ("moonshot", "kimi-k3", ModelPrice { input: 0.40, output: 1.60, cache_read: 0.10, cache_write: 0.40 }),
+    ("moonshot", "kimi-k2.7-code", ModelPrice { input: 0.30, output: 1.20, cache_read: 0.08, cache_write: 0.30 }),
+    ("moonshot", "kimi-k2", ModelPrice { input: 0.30, output: 1.20, cache_read: 0.08, cache_write: 0.30 }),
+
+    // --- GLM & MiniMax ---
+    ("glm", "glm-5.3", ModelPrice { input: 0.50, output: 1.50, cache_read: 0.10, cache_write: 0.50 }),
+    ("minimax", "minimax-m3", ModelPrice { input: 0.20, output: 0.80, cache_read: 0.05, cache_write: 0.20 }),
+    ("minimax", "minimax-m2.5", ModelPrice { input: 0.20, output: 0.80, cache_read: 0.05, cache_write: 0.20 }),
+
+    // --- Mistral ---
+    ("mistral", "mistral-large", ModelPrice { input: 2.0, output: 6.0, cache_read: 0.50, cache_write: 2.0 }),
+    ("mistral", "codestral", ModelPrice { input: 0.30, output: 0.90, cache_read: 0.075, cache_write: 0.30 }),
+    ("mistral", "mistral-small", ModelPrice { input: 0.20, output: 0.60, cache_read: 0.05, cache_write: 0.20 }),
+
     // Fallback for anything else: a conservative mid-range price.
     ("", "", ModelPrice { input: 2.0, output: 10.0, cache_read: 0.20, cache_write: 2.50 }),
 ];
+
+/// Register or override a dynamic price for a specific model id.
+pub fn register_dynamic_price(model_id: &str, price: ModelPrice) {
+    if let Ok(mut map) = DYNAMIC_PRICES.write() {
+        map.insert(model_id.to_lowercase(), price);
+    }
+}
+
+/// Retrieve all known prices (combining static and dynamic entries).
+pub fn get_all_model_prices() -> HashMap<String, ModelPrice> {
+    let mut out = HashMap::new();
+    for (_, model_sub, price) in MODELS {
+        if !model_sub.is_empty() {
+            out.insert(model_sub.to_string(), *price);
+        }
+    }
+    if let Ok(map) = DYNAMIC_PRICES.read() {
+        for (k, v) in map.iter() {
+            out.insert(k.clone(), *v);
+        }
+    }
+    out
+}
+
+/// Automatically sync model prices from OpenRouter's live public catalog.
+pub async fn sync_online_prices() -> Result<usize, String> {
+    let url = "https://openrouter.ai/api/v1/models";
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("GET {url} -> {}", resp.status()));
+    }
+
+    let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let data = val.get("data").and_then(|d| d.as_array()).ok_or_else(|| "missing data array in models response".to_string())?;
+
+    let mut count = 0;
+    for item in data {
+        if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
+            if let Some(pricing) = item.get("pricing") {
+                let parse_num = |field: &str| -> f64 {
+                    if let Some(v) = pricing.get(field) {
+                        if let Some(n) = v.as_f64() {
+                            return n * 1_000_000.0;
+                        }
+                        if let Some(s) = v.as_str() {
+                            if let Ok(n) = s.parse::<f64>() {
+                                return n * 1_000_000.0;
+                            }
+                        }
+                    }
+                    0.0
+                };
+                let input = parse_num("prompt");
+                let output = parse_num("completion");
+                let cache_read = {
+                    let r = parse_num("input_cache_read");
+                    if r > 0.0 { r } else { input * 0.1 }
+                };
+                let cache_write = input;
+
+                if input > 0.0 || output > 0.0 {
+                    register_dynamic_price(id, ModelPrice {
+                        input,
+                        output,
+                        cache_read,
+                        cache_write,
+                    });
+                    count += 1;
+                }
+            }
+        }
+    }
+
+    Ok(count)
+}
 
 /// Infer a pricing kind from the model id when the wire adapter is generic
 /// OpenAI-compat (Command Code, OpenRouter, …).
@@ -66,13 +218,44 @@ pub fn kind_for_model(kind: &str, model: &str) -> String {
     if m.contains("gemini") {
         return "gemini".into();
     }
+    if m.contains("grok") {
+        return "xai".into();
+    }
+    if m.contains("qwen") {
+        return "qwen".into();
+    }
+    if m.contains("kimi") || m.contains("moonshot") {
+        return "moonshot".into();
+    }
+    if m.contains("minimax") {
+        return "minimax".into();
+    }
+    if m.contains("glm") {
+        return "glm".into();
+    }
+    if m.contains("mistral") || m.contains("codestral") {
+        return "mistral".into();
+    }
     kind.to_lowercase()
 }
 
 /// Best-effort price for a provider kind + model name. Falls back to the last entry.
 pub fn price_for(kind: &str, model: &str) -> ModelPrice {
-    let k = kind_for_model(kind, model);
     let m = model.to_lowercase();
+
+    // Check dynamic prices first
+    if let Ok(map) = DYNAMIC_PRICES.read() {
+        if let Some(p) = map.get(&m) {
+            return *p;
+        }
+        for (dyn_k, dyn_v) in map.iter() {
+            if m.contains(dyn_k) || dyn_k.contains(&m) {
+                return *dyn_v;
+            }
+        }
+    }
+
+    let k = kind_for_model(kind, model);
     for (kind_sub, model_sub, price) in MODELS {
         if !kind_sub.is_empty() && k.contains(kind_sub) {
             if !model_sub.is_empty() && m.contains(model_sub) {
@@ -371,5 +554,19 @@ mod tests {
         let cached = turn_cost("anthropic", "claude-sonnet-4-6", None, 0, Some(1_000_000), None);
         assert!(cached.usd < fresh.usd);
         assert!(cached.usd < price.input); // reads are a fraction of input
+    }
+
+    #[test]
+    fn dynamic_pricing_overrides_and_resolves_custom_models() {
+        register_dynamic_price("custom/fast-model-v1", ModelPrice {
+            input: 0.05,
+            output: 0.15,
+            cache_read: 0.005,
+            cache_write: 0.05,
+        });
+        let p = price_for("openai", "custom/fast-model-v1");
+        assert_eq!(p.input, 0.05);
+        assert_eq!(p.output, 0.15);
+        assert_eq!(p.cache_read, 0.005);
     }
 }

@@ -21,7 +21,11 @@ export interface SlashCommandDef {
     | "vision"
     | "safety"
     | "reasoning"
-    | "rename";
+    | "rename"
+    | "close"
+    | "prices"
+    | "mode"
+    | "trajectory";
   /** When set, picking the command inserts `/name ` so the user can type the rest. */
   needsArg?: boolean;
 }
@@ -149,6 +153,36 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     syntax: "/help",
     description: "List all available slash commands and shortcuts",
     actionKey: "help",
+  },
+  {
+    name: "close",
+    syntax: "/close",
+    description: "Close or hide the agent window",
+    actionKey: "close",
+  },
+  {
+    name: "hide",
+    syntax: "/hide",
+    description: "Hide the agent window",
+    actionKey: "close",
+  },
+  {
+    name: "prices",
+    syntax: "/prices",
+    description: "View model pricing & sync live rates from online catalog",
+    actionKey: "prices",
+  },
+  {
+    name: "mode",
+    syntax: "/mode",
+    description: "Switch agent mode (standard, code, plan, minimal)",
+    actionKey: "mode",
+  },
+  {
+    name: "trajectory",
+    syntax: "/trajectory",
+    description: "Open DeepSeek Harness trajectory & event trace inspector",
+    actionKey: "trajectory",
   },
 ];
 

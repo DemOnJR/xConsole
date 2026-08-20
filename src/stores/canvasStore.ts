@@ -133,6 +133,8 @@ interface CanvasState {
   addDb: (vps: Vps, position?: { x: number; y: number }) => string;
   /** Open the agent window (single instance — focuses it if one is open). */
   addAgent: (position?: { x: number; y: number }) => string;
+  /** Toggle the agent window (opens if closed, closes/removes if open). */
+  toggleAgent: (position?: { x: number; y: number }) => string | null;
   /** Open a kanban board node for a goal session (multiple allowed). */
   addGoal: (goalId: string, position?: { x: number; y: number }) => string;
   /** Open a live HTML/design sandbox preview node on the canvas. */
@@ -518,6 +520,15 @@ export const useCanvasStore = create<CanvasState>()(
         if (get().layoutMode === "tile") get().arrangeTiles();
         get().focus(id);
         return id;
+      },
+
+      toggleAgent: (position) => {
+        const existing = get().nodes.find((n) => n.type === "agent");
+        if (existing) {
+          get().removeNode(existing.id);
+          return null;
+        }
+        return get().addAgent(position);
       },
 
       addGoal: (goalId, position) => {

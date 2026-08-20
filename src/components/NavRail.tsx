@@ -160,7 +160,7 @@ export function NavRail() {
                 ? "Hide agent (double-click fills the canvas)"
                 : "Agent (double-click fills the canvas)"
         }
-        onClick={() => useCanvasStore.getState().addAgent()}
+        onClick={() => useCanvasStore.getState().toggleAgent()}
         onDoubleClick={() => {
           const node = useCanvasStore.getState().nodes.find((n) => n.type === "agent");
           if (node) {

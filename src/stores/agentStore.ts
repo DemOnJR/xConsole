@@ -214,6 +214,8 @@ export interface AgentChatMessage extends ChatMessage {
   compactionSummary?: string;
 }
 
+export type AgentRuntimeMode = "standard" | "code" | "plan" | "minimal";
+
 interface AgentState {
   sessionId: string;
   messages: AgentChatMessage[];
@@ -248,6 +250,8 @@ interface AgentState {
   /** True ONLY when the user sent feedback asking the agent to revise the plan. */
   planRevising: boolean;
   planMode: boolean;
+  /** DeepSeek Harness-inspired runtime mode: standard, code, plan, or minimal. */
+  agentMode: AgentRuntimeMode;
   hydrated: boolean;
   /** Running estimated cost (USD) of the current conversation. */
   conversationCostUsd: number;
@@ -262,6 +266,7 @@ interface AgentState {
   setTargets: (ids: string[]) => void;
   setSpeaking: (v: boolean) => void;
   togglePlanMode: () => void;
+  setAgentMode: (mode: AgentRuntimeMode) => void;
   setActiveIntakeGoal: (id: string | null) => void;
   send: (
     text: string,
@@ -420,6 +425,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   planMode:
     typeof localStorage !== "undefined" &&
     localStorage.getItem("xconsole-agent-plan-mode") === "1",
+  agentMode:
+    (typeof localStorage !== "undefined" &&
+      (localStorage.getItem("xconsole-agent-mode") as AgentRuntimeMode)) ||
+    "standard",
   hydrated: false,
   conversationCostUsd: 0,
 
@@ -452,13 +461,25 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   togglePlanMode: () =>
     set((s) => {
       const planMode = !s.planMode;
+      const agentMode: AgentRuntimeMode = planMode ? "plan" : "standard";
       try {
         localStorage.setItem("xconsole-agent-plan-mode", planMode ? "1" : "0");
+        localStorage.setItem("xconsole-agent-mode", agentMode);
       } catch {
         /* ignore */
       }
-      return { planMode };
+      return { planMode, agentMode };
     }),
+
+  setAgentMode: (mode) => {
+    try {
+      localStorage.setItem("xconsole-agent-mode", mode);
+      localStorage.setItem("xconsole-agent-plan-mode", mode === "plan" ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+    set({ agentMode: mode, planMode: mode === "plan" });
+  },
 
   // Subscribes to all three interactive agent events (approval / question /
   // plan), each of which fires an OS notification and shows an in-chat popup.

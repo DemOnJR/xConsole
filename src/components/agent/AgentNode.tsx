@@ -62,6 +62,7 @@ import { catalogForProvider } from "../../lib/providerCatalog";
 import { ImageIcon } from "../icons";
 import { createChatSnippet, shouldCreateSnippet, type ChatSnippet } from "../../lib/snippetDetect";
 import { SnippetPreviewModal } from "./SnippetPreviewModal";
+import { TrajectoryModal } from "./TrajectoryModal";
 import { InputBar, type ReasoningLevel } from "./InputBar";
 import { QueuedMessages } from "./QueuedMessages";
 import { useGitBranch } from "../../hooks/useGitBranch";
@@ -249,6 +250,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
 
   // Node chrome: focus on click, drag by header (React Flow), tile counter-scale.
   const focus = useCanvasStore((s) => s.focus);
+  const removeNode = useCanvasStore((s) => s.removeNode);
   const layoutMode = useCanvasStore((s) => s.layoutMode);
   const freeform = layoutMode === "freeform";
   const tiled = layoutMode === "tile";
@@ -287,6 +289,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     activeIntakeGoalId,
 
     planMode,
+    agentMode,
 
     send,
     enqueueOrSend,
@@ -296,6 +299,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     retryLast, clearError, setTargets,
 
     togglePlanMode,
+    setAgentMode,
     stop,
 
     init,
@@ -625,7 +629,6 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     };
   }, []);
 
-  // In-console picker (CLI style): /model (two-level), /targets, /history, /ctx, /cost, /help.
   type PickerKind =
     | "model"
     | "model-models"
@@ -639,8 +642,13 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     | "vision"
     | "vision-provider"
     | "vision-models"
-    | "vision-ask";
+    | "vision-ask"
+    | "mode"
+    | "prices";
   const [picker, setPicker] = useState<{ kind: PickerKind } | null>(null);
+  const [showTrajectory, setShowTrajectory] = useState(false);
+  const [modelPrices, setModelPrices] = useState<Record<string, { input: number; output: number; cache_read: number; cache_write: number }>>({});
+  const [syncingPrices, setSyncingPrices] = useState(false);
   /** Provider id chosen in the first /model level — second level lists its models. */
   const [pendingProviderId, setPendingProviderId] = useState<string | null>(null);
   const pickerRef = useRef(picker);
@@ -1120,6 +1128,13 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
         enqueueOrSend(text, imgs);
         break;
       }
+      case "mode": {
+        if (opt.id === "standard" || opt.id === "code" || opt.id === "plan" || opt.id === "minimal") {
+          setAgentMode(opt.id);
+        }
+        setPicker(null);
+        break;
+      }
       default:
         setPicker(null);
     }
@@ -1181,6 +1196,15 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
       setPicker({ kind: "help" });
     } else if (cmd.actionKey === "vision") {
       setPicker({ kind: "vision" });
+    } else if (cmd.actionKey === "close") {
+      removeNode(id);
+    } else if (cmd.actionKey === "prices") {
+      void api.aiGetModelPrices().then((p) => setModelPrices(p)).catch(() => {});
+      setPicker({ kind: "prices" });
+    } else if (cmd.actionKey === "mode") {
+      setPicker({ kind: "mode" });
+    } else if (cmd.actionKey === "trajectory") {
+      setShowTrajectory(true);
     } else if (cmd.actionKey === "goal" || cmd.actionKey === "loop") {
       const prefix = `/${cmd.name} `;
       setInput(prefix);
@@ -1528,6 +1552,15 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
           <button
             type="button"
             onMouseDown={(e) => e.stopPropagation()}
+            onClick={() => setShowTrajectory(true)}
+            data-tooltip="Inspect trajectory & events (/trajectory)"
+            className="rounded px-1.5 py-0.5 text-[10px] text-cyan-400 hover:bg-[var(--border)] hover:text-cyan-200 font-mono"
+          >
+            ⚡ trace
+          </button>
+          <button
+            type="button"
+            onMouseDown={(e) => e.stopPropagation()}
             onClick={() => bumpFont(-1)}
             data-tooltip="Smaller font"
             className="rounded px-1 py-0.5 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
@@ -1542,6 +1575,15 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
             className="rounded px-1 py-0.5 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
           >
             A+
+          </button>
+          <button
+            type="button"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={() => removeNode(id)}
+            data-tooltip="Close agent window"
+            className="rounded px-1.5 py-0.5 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+          >
+            ✕
           </button>
         </span>
       </div>
@@ -1815,6 +1857,85 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
               onCancel={() => setPicker(null)}
               placeholder="Filter providers…"
             />
+          )}
+          {picker.kind === "mode" && (
+            <CLIPicker
+              title="Agent Runtime Mode (DeepSeek Harness style)"
+              options={[
+                { id: "standard", label: "🌐 standard", detail: "Full autonomous toolset (shell, files, web, db, preview, goals)" },
+                { id: "code", label: "⚡ code", detail: "Focused code editing, fast diffs, compiler checks" },
+                { id: "plan", label: "📋 plan", detail: "Interactive architectural planning before executing changes" },
+                { id: "minimal", label: "🛡️ minimal", detail: "Lightweight, minimal prompt with shell and file editing" },
+              ]}
+              onPick={onPickerPick}
+              onCancel={() => setPicker(null)}
+              placeholder="Filter runtime mode…"
+            />
+          )}
+          {picker.kind === "prices" && (
+            <div className="rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-3 py-2 font-mono text-[11px]">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-cyan-400">
+                  Model Pricing Catalog
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPicker(null)}
+                  className="flex h-4 w-4 items-center justify-center rounded text-gray-500 hover:bg-[var(--border)] hover:text-white"
+                  title="Close (Esc)"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="mb-2 text-[10.5px] text-[var(--text-dim)]">
+                Live rates in USD per 1M tokens (input / output / cache read):
+              </div>
+              <div className="max-h-44 overflow-y-auto space-y-1 pr-1 text-[10px]">
+                {Object.entries(modelPrices).length > 0 ? (
+                  Object.entries(modelPrices).slice(0, 60).map(([k, v]) => (
+                    <div key={k} className="flex items-center justify-between border-b border-[var(--border)]/40 pb-0.5">
+                      <span className="truncate max-w-[200px] text-gray-200">{k}</span>
+                      <span className="text-gray-400 font-mono">
+                        ${v.input.toFixed(2)} in · ${v.output.toFixed(2)} out · ${v.cache_read.toFixed(3)} r
+                      </span>
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-[var(--text-faint)]">
+                    DeepSeek V4 Flash / Command Code: $0.14/M in · $0.28/M out · $0.0028/M cache
+                  </div>
+                )}
+              </div>
+              <div className="mt-2.5 flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={syncingPrices}
+                  onClick={async () => {
+                    setSyncingPrices(true);
+                    try {
+                      const count = await api.aiSyncPrices();
+                      const refreshed = await api.aiGetModelPrices();
+                      setModelPrices(refreshed);
+                      void notify("Pricing Synced", `Updated ${count} model rates from online catalog.`);
+                    } catch (e) {
+                      void notify("Sync Error", String(e));
+                    } finally {
+                      setSyncingPrices(false);
+                    }
+                  }}
+                  className="flex-1 rounded border border-cyan-500/40 bg-cyan-950/40 px-2 py-1 text-[10px] text-cyan-300 hover:bg-cyan-900/50"
+                >
+                  {syncingPrices ? "Syncing live rates…" : "⚡ Sync Live Online Prices"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPicker(null)}
+                  className="rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-1 text-[10px] text-[var(--text-dim)] hover:text-[var(--text)]"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
           )}
           {picker.kind === "vision-models" && (
             <CLIPicker
@@ -2167,6 +2288,8 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
             onPickReasoning={handlePickReasoning}
             planMode={planMode}
             onTogglePlan={togglePlanMode}
+            agentMode={agentMode}
+            onPickMode={() => setPicker({ kind: "mode" })}
             safetyMode={effectiveSafetyMode}
             onCycleSafety={handleCycleSafety}
             onPickSafety={handlePickSafety}
@@ -2203,6 +2326,10 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
             setPreviewSnippet(null);
           }}
         />
+      )}
+
+      {showTrajectory && (
+        <TrajectoryModal onClose={() => setShowTrajectory(false)} />
       )}
 
     </div>

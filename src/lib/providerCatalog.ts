@@ -173,6 +173,30 @@ export function catalogGroups(): { letter: string; providers: CatalogProvider[] 
     .map(([letter, providers]) => ({ letter, providers }));
 }
 
+/** Approximate per-1M token pricing for display in model pickers and settings. */
+export function priceForModel(modelId: string): { input: number; output: number; cacheRead: number } {
+  const m = modelId.toLowerCase();
+  if (m.includes("opus")) return { input: 15.0, output: 75.0, cacheRead: 1.5 };
+  if (m.includes("sonnet") || m.includes("3-7-sonnet") || m.includes("3.7-sonnet")) return { input: 3.0, output: 15.0, cacheRead: 0.3 };
+  if (m.includes("haiku")) return { input: 0.8, output: 4.0, cacheRead: 0.08 };
+  if (m.includes("gpt-5.6") || m.includes("gpt-5")) return { input: 1.25, output: 10.0, cacheRead: 0.125 };
+  if (m.includes("gpt-4o-mini")) return { input: 0.15, output: 0.6, cacheRead: 0.075 };
+  if (m.includes("gpt-4o") || m.includes("gpt-4")) return { input: 2.5, output: 10.0, cacheRead: 1.25 };
+  if (m.includes("o3")) return { input: 2.0, output: 8.0, cacheRead: 0.2 };
+  if (m.includes("v4-flash") || m.includes("flash") || m.includes("deepseek-chat")) return { input: 0.14, output: 0.28, cacheRead: 0.0028 };
+  if (m.includes("v4-pro")) return { input: 0.435, output: 0.87, cacheRead: 0.003625 };
+  if (m.includes("reasoner") || m.includes("r1")) return { input: 0.55, output: 2.19, cacheRead: 0.14 };
+  if (m.includes("gemini") && m.includes("pro")) return { input: 1.25, output: 5.0, cacheRead: 0.3125 };
+  if (m.includes("gemini")) return { input: 0.15, output: 0.6, cacheRead: 0.0375 };
+  if (m.includes("grok")) return { input: 2.0, output: 10.0, cacheRead: 0.5 };
+  if (m.includes("qwen") && (m.includes("max") || m.includes("3.8"))) return { input: 0.4, output: 1.2, cacheRead: 0.1 };
+  if (m.includes("qwen")) return { input: 0.2, output: 0.6, cacheRead: 0.05 };
+  if (m.includes("kimi") || m.includes("moonshot")) return { input: 0.4, output: 1.6, cacheRead: 0.1 };
+  if (m.includes("minimax")) return { input: 0.2, output: 0.8, cacheRead: 0.05 };
+  if (m.includes("glm")) return { input: 0.5, output: 1.5, cacheRead: 0.1 };
+  return { input: 2.0, output: 10.0, cacheRead: 0.2 };
+}
+
 /** Fuzzy search over the catalog (name + id), simple subsequence match. */
 export function searchCatalog(query: string): CatalogProvider[] {
   const q = query.trim().toLowerCase();
@@ -189,3 +213,4 @@ export function searchCatalog(query: string): CatalogProvider[] {
     return true;
   });
 }
+
