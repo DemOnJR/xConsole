@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSettingsStore } from "../../../stores/settingsStore";
 import { dialog } from "../../../stores/dialogStore";
 import { api, onAiLoginOutput } from "../../../lib/tauri";
