@@ -411,13 +411,11 @@ pub fn continue_cached_prefix(
     }
     let last_core = strip_runtime_messages(last_sent);
     let incoming_core = strip_runtime_messages(incoming);
-    if incoming_core.len() < last_core.len() {
-        return None;
-    }
-    if last_core
-        .iter()
-        .zip(&incoming_core)
-        .all(|(before, after)| before == after)
+    if incoming_core.len() >= last_core.len()
+        && last_core
+            .iter()
+            .zip(&incoming_core)
+            .all(|(before, after)| before == after)
     {
         let mut out = last_sent.to_vec();
         out.extend(incoming_core.into_iter().skip(last_core.len()));
@@ -435,14 +433,14 @@ fn append_flattened_user_turn(
     last_core: &[ChatMessage],
     incoming_core: &[ChatMessage],
 ) -> Option<Vec<ChatMessage>> {
-    if incoming_core.len() <= last_core.len() {
-        return None;
-    }
     let prev_user = last_core.iter().rev().find(|m| m.role == "user")?;
     // Search only in the prior portion of incoming_core (matching up to last_core.len())
     // so a repeated user message (e.g. "continue", "yes", "retry") does not match the
     // newly-appended user message at the very end.
-    let search_limit = last_core.len().min(incoming_core.len().saturating_sub(1));
+    let search_limit = incoming_core.len().saturating_sub(1);
+    if search_limit == 0 {
+        return None;
+    }
     let pos = incoming_core[..search_limit]
         .iter()
         .rposition(|m| m.role == "user" && m.content == prev_user.content)?;

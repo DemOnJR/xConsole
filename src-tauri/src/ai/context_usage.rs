@@ -132,7 +132,7 @@ mod tests {
     fn deepseek_flash_uses_one_million_context() {
         assert_eq!(
             default_context_limit("openai", "deepseek/deepseek-v4-flash", None),
-            1_000_000
+            1_048_576
         );
         assert_eq!(default_context_limit("anthropic", "claude-sonnet-4-6", None), 200_000);
         assert_eq!(default_context_limit("openai", "gpt-5.6", None), 128_000);

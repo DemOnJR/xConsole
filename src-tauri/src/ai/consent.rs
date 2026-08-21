@@ -114,7 +114,7 @@ pub fn chat_rejects_plan(text: &str) -> bool {
 /// not a one-line "I'll write a plan next".
 pub fn looks_like_plan(text: &str) -> bool {
     let t = text.trim();
-    if t.len() < 80 {
+    if t.len() < 40 {
         return false;
     }
     let steps = count_numbered_steps(t);

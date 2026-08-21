@@ -38,10 +38,10 @@ pub struct PersistCtx {
     pub dirty: Arc<AtomicBool>,
     /// Set when the lock is disabled, so the daemon persister thread exits.
     pub stopped: Arc<AtomicBool>,
-    /// `PRAGMA data_version` of the last snapshot we actually encrypted. Debounced
-    /// persists compare against this and no-op when the working DB has not changed,
+    /// `PRAGMA data_version` and `total_changes` of the last snapshot we actually encrypted.
+    /// Debounced persists compare against this and no-op when the working DB has not changed,
     /// so a chatty writer cannot rewrite the 4 MB ciphertext every 700 ms.
-    pub last_data_version: Mutex<Option<i64>>,
+    pub last_data_version: Mutex<Option<(i64, i64)>>,
 }
 
 impl Drop for PersistCtx {
@@ -83,9 +83,12 @@ pub fn decrypt_to_work(enc: &Path, work: &Path, key: &[u8; crypto::KEY_LEN]) -> 
     r
 }
 
-fn data_version(conn: &Connection) -> i64 {
-    conn.query_row("PRAGMA data_version", [], |r| r.get(0))
-        .unwrap_or(0)
+fn data_version(conn: &Connection) -> (i64, i64) {
+    let dv: i64 = conn
+        .query_row("PRAGMA data_version", [], |r| r.get(0))
+        .unwrap_or(0);
+    let tc = conn.total_changes() as i64;
+    (dv, tc)
 }
 
 /// Take a consistent snapshot of the live DB (Online Backup API — safe against the concurrent
@@ -281,6 +284,7 @@ mod persist_skip_tests {
             c.execute("INSERT INTO t VALUES (?1)", [vec![1u8; 16]])
                 .unwrap();
         }
+        std::thread::sleep(Duration::from_millis(50));
         persist_debounced(&conn, &ctx).unwrap();
         let t3 = std::fs::metadata(&enc).unwrap().modified().unwrap();
         assert_ne!(t3, t1, "a real write must still refresh the ciphertext");

@@ -86,7 +86,9 @@ export const InputBar = memo(function InputBar({
   const model = activeModel || activeProvider?.model;
   const canReason = reasoningCapable(activeProvider?.kind, model ?? undefined);
   const stopNode = (e: PointerEvent | MouseEvent) => e.stopPropagation();
-  const modelTip = [activeProvider?.name ?? "no provider", model].filter(Boolean).join(" · ");
+  const rawProviderName = activeProvider?.name ?? "no provider";
+  const providerName = rawProviderName.startsWith("Command Code ·") ? "Command Code" : rawProviderName;
+  const modelTip = [providerName, model].filter(Boolean).join(" · ");
   const safety = safetyMode || "approve";
   const safetyTone =
     safety === "full"
