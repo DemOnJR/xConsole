@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useAgentStore, type AgentActivityItem } from "../../stores/agentStore";
 import { segmentsFromMessage } from "../../stores/turnSegments";
 import { isCommandItem, isFileEditItem, isSearchItem, isFileReadItem } from "./AgentActivity";
@@ -18,6 +18,61 @@ export const TrajectoryModal = memo(function TrajectoryModal({
   const [search, setSearch] = useState("");
   const [expandedIndices, setExpandedIndices] = useState<Set<number>>(() => new Set());
   const [copied, setCopied] = useState(false);
+
+  const listRef = useRef<HTMLDivElement | null>(null);
+
+  // Close on Escape
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [onClose]);
+
+  // Non-passive wheel handler: prevents ReactFlow / canvas from intercepting or swallowing wheel scroll
+  useEffect(() => {
+    const listEl = listRef.current;
+    if (!listEl) return;
+
+    const onWheel = (e: WheelEvent) => {
+      e.stopPropagation();
+
+      // Check if cursor is over an inner scrollable <pre>
+      const target = e.target as HTMLElement | null;
+      const innerPre = target?.closest<HTMLElement>("pre");
+
+      if (innerPre && innerPre !== listEl && innerPre.scrollHeight > innerPre.clientHeight) {
+        const canScrollInner =
+          (e.deltaY > 0 && innerPre.scrollTop + innerPre.clientHeight < innerPre.scrollHeight) ||
+          (e.deltaY < 0 && innerPre.scrollTop > 0);
+        if (canScrollInner) {
+          innerPre.scrollTop += e.deltaY;
+          e.preventDefault();
+          return;
+        }
+      }
+
+      // Scroll the main list
+      const canScrollList =
+        (e.deltaY > 0 && listEl.scrollTop + listEl.clientHeight < listEl.scrollHeight) ||
+        (e.deltaY < 0 && listEl.scrollTop > 0);
+
+      if (canScrollList || listEl.scrollHeight > listEl.clientHeight) {
+        listEl.scrollTop += e.deltaY;
+        e.preventDefault();
+      }
+    };
+
+    listEl.addEventListener("wheel", onWheel, { capture: true, passive: false });
+    return () => {
+      listEl.removeEventListener("wheel", onWheel, true);
+    };
+  }, [expandedIndices]);
 
   // Parse chronological trajectory events from all conversation messages
   const events = useMemo(() => {
@@ -154,12 +209,14 @@ export const TrajectoryModal = memo(function TrajectoryModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-md"
+      className="nowheel nopan nodrag fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-md"
       onClick={onClose}
+      onWheel={(e) => e.stopPropagation()}
     >
       <div
-        className="flex h-[85vh] w-[92vw] max-w-5xl flex-col overflow-hidden rounded-xl border border-[var(--border-strong)] bg-[#0b0f17] shadow-2xl"
+        className="nowheel nopan nodrag flex h-[85vh] w-[92vw] max-w-5xl flex-col overflow-hidden rounded-xl border border-[var(--border-strong)] bg-[#0b0f17] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
+        onWheel={(e) => e.stopPropagation()}
       >
         {/* Modal Header */}
         <div className="flex select-none items-center justify-between border-b border-[var(--border)] bg-[#111827]/80 px-4 py-3">
@@ -245,7 +302,11 @@ export const TrajectoryModal = memo(function TrajectoryModal({
         </div>
 
         {/* Event List */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-2.5 font-mono text-[11px]">
+        <div
+          ref={listRef}
+          className="nowheel nopan nodrag flex-1 overflow-y-auto p-4 space-y-2.5 font-mono text-[11px]"
+          onWheel={(e) => e.stopPropagation()}
+        >
           {filteredEvents.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center text-center text-gray-500">
               <p>No trajectory events found matching filters.</p>
@@ -308,7 +369,10 @@ export const TrajectoryModal = memo(function TrajectoryModal({
                   {/* Expanded Content Payload */}
                   {isExpanded && ev.content && (
                     <div className="border-t border-[var(--border)]/60 bg-[#05080e] p-3 text-[11px] leading-relaxed text-gray-300">
-                      <pre className="whitespace-pre-wrap break-words font-mono text-[10.5px] max-h-96 overflow-y-auto text-gray-200">
+                      <pre
+                        className="nowheel nopan nodrag whitespace-pre-wrap break-words font-mono text-[10.5px] max-h-96 overflow-y-auto text-gray-200"
+                        onWheel={(e) => e.stopPropagation()}
+                      >
                         {maskHost(ev.content)}
                       </pre>
                       {ev.subtitle && (

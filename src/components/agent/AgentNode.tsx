@@ -782,12 +782,20 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
   const modelOptions = useMemo<CLIPickerOption[]>(() => {
     return providers
       .filter((p) => p.enabled)
-      .map((p) => ({
-        id: p.id,
-        label: p.name || p.kind,
-        detail: p.model || p.kind,
-        selected: p.id === activeProvider?.id,
-      }));
+      .map((p) => {
+        let label = p.name || p.kind;
+        if (label.startsWith("Command Code ·")) {
+          label = "Command Code";
+        }
+        const isSelected = p.id === activeProvider?.id;
+        return {
+          id: p.id,
+          label,
+          detail: isSelected ? `${p.model || p.kind} (current)` : (p.model || p.kind),
+          selected: isSelected,
+        };
+      })
+      .sort((a, b) => (b.selected ? 1 : 0) - (a.selected ? 1 : 0));
   }, [providers, activeProvider]);
 
   const targetOptions = useMemo<CLIPickerOption[]>(
@@ -870,38 +878,42 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     ];
   }, [effectiveSafetyMode]);
 
-  const modeOptions = useMemo<CLIPickerOption[]>(() => [
-    {
-      id: "plan",
-      label: "📋 Plan",
-      detail: "Safe read-only investigation, requires plan approval before mutations",
-      selected: agentMode === "plan" || planMode,
-    },
-    {
-      id: "standard",
-      label: "🌐 Standard (Std)",
-      detail: "Full capabilities, DevOps tools & general copilot guidance",
-      selected: agentMode === "standard" && !planMode,
-    },
-    {
-      id: "code",
-      label: "⚡ Code",
-      detail: "Focused coding, test writing, refactoring & file implementation",
-      selected: agentMode === "code",
-    },
-    {
-      id: "auto",
-      label: "🤖 Auto (Smart Detection)",
-      detail: "Auto-detects plan vs code vs minimal based on user prompt",
-      selected: agentMode === "auto" && !planMode,
-    },
-    {
-      id: "minimal",
-      label: "🛡️ Minimal",
-      detail: "Compact token-efficient prompt with lightweight context",
-      selected: agentMode === "minimal",
-    },
-  ], [agentMode, planMode]);
+  const modeOptions = useMemo<CLIPickerOption[]>(() => {
+    const active = agentMode || (planMode ? "plan" : "auto");
+    const list: CLIPickerOption[] = [
+      {
+        id: "auto",
+        label: "🤖 Auto (Smart Detection)",
+        detail: "Auto-detects plan vs code vs minimal based on user prompt",
+        selected: active === "auto",
+      },
+      {
+        id: "plan",
+        label: "📋 Plan",
+        detail: "Safe read-only investigation, requires plan approval before mutations",
+        selected: active === "plan",
+      },
+      {
+        id: "code",
+        label: "⚡ Code",
+        detail: "Focused coding, test writing, refactoring & file implementation",
+        selected: active === "code",
+      },
+      {
+        id: "standard",
+        label: "🌐 Standard (Std)",
+        detail: "Full capabilities, DevOps tools & general copilot guidance",
+        selected: active === "standard",
+      },
+      {
+        id: "minimal",
+        label: "🛡️ Minimal",
+        detail: "Compact token-efficient prompt with lightweight context",
+        selected: active === "minimal",
+      },
+    ];
+    return list.sort((a, b) => (b.selected ? 1 : 0) - (a.selected ? 1 : 0));
+  }, [agentMode, planMode]);
 
   const reasoningOptions = useMemo<CLIPickerOption[]>(() => [
     {
@@ -1014,36 +1026,30 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
       setProviderDynamicModels([]);
       return;
     }
-    const cli =
-      p.kind === "opencode_cli" ||
-      p.kind === "antigravity_cli" ||
-      p.kind === "cursor" ||
-      p.kind === "codex_cli";
 
     let alive = true;
-    if (cli) {
-      api
-        .aiCliModels(p.id)
-        .then((list) => {
-          if (alive) setProviderDynamicModels(list);
-        })
-        .catch(() => {
-          if (alive) setProviderDynamicModels([]);
-        });
-    } else if (p.base_url && (p.kind === "openai" || p.kind === "anthropic")) {
-      const catalog = catalogForProvider(p);
-      const flavor = catalog?.flavor || (p.kind === "anthropic" ? "anthropic" : "openai");
-      api
-        .listModels(flavor, p.base_url, "")
-        .then((list) => {
-          if (alive && list.length > 0) setProviderDynamicModels(list);
-        })
-        .catch(() => {
-          if (alive) setProviderDynamicModels([]);
-        });
-    } else {
-      setProviderDynamicModels([]);
-    }
+    api
+      .aiProviderModels(p.id)
+      .then((list) => {
+        if (alive && list.length > 0) setProviderDynamicModels(list);
+      })
+      .catch(() => {
+        if (p.base_url && (p.kind === "openai" || p.kind === "anthropic")) {
+          const catalog = catalogForProvider(p);
+          const flavor = catalog?.flavor || (p.kind === "anthropic" ? "anthropic" : "openai");
+          api
+            .listModels(flavor, p.base_url, "")
+            .then((list) => {
+              if (alive && list.length > 0) setProviderDynamicModels(list);
+            })
+            .catch(() => {
+              if (alive) setProviderDynamicModels([]);
+            });
+        } else if (alive) {
+          setProviderDynamicModels([]);
+        }
+      });
+
     return () => {
       alive = false;
     };
@@ -1053,24 +1059,34 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
   const providerModelOptions = useMemo<CLIPickerOption[]>(() => {
     const p = providers.find((x) => x.id === pendingProviderId);
     if (!p) return [];
+    const isCurrentProvider = p.id === activeProvider?.id;
+    const currentActiveModel = isCurrentProvider ? activeModel : (p.model || "");
+
     const catalog = catalogForProvider(p);
     const ids = new Set<string>();
     const opts: CLIPickerOption[] = [];
     const add = (id: string, detail: string) => {
       if (!id || ids.has(id)) return;
       ids.add(id);
+      const isSelected = id === currentActiveModel || id === p.model;
       opts.push({
         id,
         label: id,
-        detail,
-        selected: id === activeModel || id === p.model,
+        detail: isSelected && isCurrentProvider ? `${detail} · active` : detail,
+        selected: isSelected,
       });
     };
-    add(p.model || "", "configured");
-    for (const m of providerDynamicModels) add(m, "api / live");
+
+    if (currentActiveModel) {
+      add(currentActiveModel, isCurrentProvider ? "active" : "configured");
+    }
+    if (p.model && p.model !== currentActiveModel) {
+      add(p.model, "configured");
+    }
+    for (const m of providerDynamicModels) add(m, "live");
     for (const m of catalog?.models ?? []) add(m, "catalog");
-    return opts;
-  }, [providers, pendingProviderId, activeModel, providerDynamicModels]);
+    return opts.sort((a, b) => (b.selected ? 1 : 0) - (a.selected ? 1 : 0));
+  }, [providers, pendingProviderId, activeModel, activeProvider, providerDynamicModels]);
 
   /** Handle a picker selection. */
   const onPickerPick = (opt: CLIPickerOption) => {

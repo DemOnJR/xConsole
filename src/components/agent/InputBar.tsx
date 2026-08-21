@@ -153,47 +153,25 @@ export const InputBar = memo(function InputBar({
 
       <button
         type="button"
-        className={`${iconBtn} ${planMode ? "bg-indigo-500/20 text-indigo-300" : ""}`}
-        onClick={onTogglePlan}
+        className={`${iconBtn} ${
+          (agentMode === "plan" || planMode)
+            ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30"
+            : agentMode === "code"
+              ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+              : agentMode === "standard"
+                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                : agentMode === "minimal"
+                  ? "bg-purple-500/20 text-purple-300 border border-purple-500/30"
+                  : ""
+        }`}
+        onClick={onPickMode ?? onTogglePlan}
         onPointerDown={stopNode}
         onMouseDown={stopNode}
-        aria-label="Plan mode"
-        data-tooltip={planMode ? "Plan mode on (Shift+Tab)" : "Plan mode (Shift+Tab)"}
+        aria-label={`Runtime mode: ${agentMode || (planMode ? "plan" : "auto")}`}
+        data-tooltip={`Mode: ${agentMode || (planMode ? "plan" : "auto")}\nChoose runtime mode: 🤖 Auto · 📋 Plan · ⚡ Code · 🌐 Standard · 🛡️ Minimal (/mode)`}
       >
         <PlanIcon size={14} />
       </button>
-
-      {onPickMode ? (
-        <button
-          type="button"
-          className={`${iconBtn} text-[10px] font-mono font-medium px-1.5 rounded transition ${
-            agentMode === "code"
-              ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
-              : agentMode === "plan" || planMode
-                ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30"
-                : agentMode === "minimal"
-                  ? "bg-purple-500/20 text-purple-300 border border-purple-500/30"
-                  : agentMode === "standard"
-                    ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                    : "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
-          }`}
-          onClick={onPickMode}
-          onPointerDown={stopNode}
-          onMouseDown={stopNode}
-          aria-label={`Mode: ${agentMode || (planMode ? "plan" : "auto")}`}
-          data-tooltip={`Runtime Mode: ${agentMode || (planMode ? "plan" : "auto")}\n🤖 Auto · 🌐 Standard (Std) · ⚡ Code · 📋 Plan · 🛡️ Minimal (/mode)`}
-        >
-          {agentMode === "code"
-            ? "code"
-            : agentMode === "plan" || planMode
-              ? "plan"
-              : agentMode === "minimal"
-                ? "min"
-                : agentMode === "standard"
-                  ? "std"
-                  : "auto"}
-        </button>
-      ) : null}
 
       {onPickVision ? (
         <button

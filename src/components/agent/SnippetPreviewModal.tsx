@@ -44,10 +44,15 @@ export const SnippetPreviewModal = memo(function SnippetPreviewModal({
   const lines = snippet.content.split("\n");
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-150">
+    <div
+      className="nowheel nopan nodrag fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-150"
+      onClick={onClose}
+      onWheel={(e) => e.stopPropagation()}
+    >
       <div
-        className="flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[#0b0f19] shadow-2xl"
+        className="nowheel nopan nodrag flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[#0b0f19] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
+        onWheel={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-[var(--border)] bg-[var(--surface)]/80 px-4 py-3">
@@ -101,7 +106,10 @@ export const SnippetPreviewModal = memo(function SnippetPreviewModal({
         </div>
 
         {/* Code Content with Line Numbers */}
-        <div className="flex-1 overflow-auto bg-[#070a10] p-3 font-mono text-xs leading-5">
+        <div
+          className="nowheel nopan nodrag flex-1 overflow-auto bg-[#070a10] p-3 font-mono text-xs leading-5"
+          onWheel={(e) => e.stopPropagation()}
+        >
           <div className="flex">
             {/* Line numbers */}
             <div className="select-none pr-3 text-right text-gray-600 font-mono">

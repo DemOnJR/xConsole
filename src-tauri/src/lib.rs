@@ -433,6 +433,7 @@ pub fn run() {
             commands::update::set_update_channel,
             commands::ai::ai_cli_login,
             commands::ai::ai_cli_models,
+            commands::ai::ai_provider_models,
             commands::ai::ai_list_models,
             commands::ai::ai_sync_prices,
             commands::ai::ai_get_model_prices,

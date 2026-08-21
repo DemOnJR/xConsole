@@ -81,6 +81,13 @@ export const PROVIDER_PRESETS: {
     label: "Command Code",
     kind: "openai",
     base_url: "https://api.commandcode.ai/provider/v1",
+    model: "deepseek/deepseek-v4-flash",
+  },
+  {
+    id: "commandcode-claude",
+    label: "Command Code (Claude)",
+    kind: "openai",
+    base_url: "https://api.commandcode.ai/provider/v1",
     model: "anthropic/claude-sonnet-4-5",
   },
   {
@@ -89,13 +96,6 @@ export const PROVIDER_PRESETS: {
     kind: "anthropic",
     base_url: "https://api.commandcode.ai/provider",
     model: "claude-sonnet-4-5",
-  },
-  {
-    id: "commandcode-deepseek-v4-flash",
-    label: "Command Code · DeepSeek V4 Flash",
-    kind: "openai",
-    base_url: "https://api.commandcode.ai/provider/v1",
-    model: "deepseek/deepseek-v4-flash",
   },
   { id: "openrouter", label: "OpenRouter", kind: "openai", base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4o" },
   { id: "xai", label: "xAI (Grok)", kind: "openai", base_url: "https://api.x.ai/v1", model: "grok-4" },
@@ -332,11 +332,21 @@ function ProviderForm({
 
     setDetecting(true);
     try {
-      const ids = await api.listModels(
-        flavor,
-        url,
-        apiKey ?? (form.secret?.trim() ?? ""),
-      );
+      let ids: string[] = [];
+      if (!apiKey && form.id) {
+        try {
+          ids = await api.aiProviderModels(form.id);
+        } catch {
+          ids = [];
+        }
+      }
+      if (ids.length === 0) {
+        ids = await api.listModels(
+          flavor,
+          url,
+          apiKey ?? (form.secret?.trim() ?? ""),
+        );
+      }
       if (ids.length > 0) {
         setDetectedModels(ids);
         const combined = Array.from(
@@ -908,10 +918,22 @@ function CliLoginModal({
 
 export function ProvidersSection() {
   const providers = useSettingsStore((s) => s.providers);
+  const activeProviderId = useSettingsStore((s) => s.settings["agent.active_provider"]);
+  const activeModel = useSettingsStore((s) => s.settings["agent.active_model"]);
+  const setSetting = useSettingsStore((s) => s.set);
   const removeProvider = useSettingsStore((s) => s.removeProvider);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<AiProvider | null>(null);
   const [loginFor, setLoginFor] = useState<AiProvider | null>(null);
+
+  const sortedProviders = useMemo(() => {
+    return [...providers].sort((a, b) => {
+      const aActive = a.id === activeProviderId;
+      const bActive = b.id === activeProviderId;
+      if (aActive !== bActive) return aActive ? -1 : 1;
+      return (a.name || a.kind).localeCompare(b.name || b.kind);
+    });
+  }, [providers, activeProviderId]);
 
   return (
     <div>
@@ -938,58 +960,80 @@ export function ProvidersSection() {
       )}
 
       <div className="space-y-2">
-        {providers.map((p) => (
-          <Card key={p.id} className="flex items-center gap-3">
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <span className="truncate text-sm text-gray-200">{p.name}</span>
-                <span className="rounded bg-[var(--border)] px-1.5 py-0.5 text-[10px] text-gray-400">
-                  {KIND_LABELS[p.kind]}
-                </span>
-                {!p.enabled && (
-                  <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300">
-                    disabled
+        {sortedProviders.map((p) => {
+          const isActive = p.id === activeProviderId;
+          const displayName = p.name.startsWith("Command Code ·") ? "Command Code" : p.name;
+          return (
+            <Card
+              key={p.id}
+              className={`flex items-center gap-3 ${
+                isActive ? "border-emerald-500/40 bg-emerald-500/[0.03]" : ""
+              }`}
+            >
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="truncate text-sm font-medium text-gray-200">{displayName}</span>
+                  <span className="rounded bg-[var(--border)] px-1.5 py-0.5 text-[10px] text-gray-400">
+                    {KIND_LABELS[p.kind]}
                   </span>
-                )}
+                  {isActive && (
+                    <span className="rounded border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-400">
+                      active for agent
+                    </span>
+                  )}
+                  {!p.enabled && (
+                    <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300">
+                      disabled
+                    </span>
+                  )}
+                </div>
+                <div className="mt-0.5 truncate text-xs text-gray-500">
+                  {isCli(p.kind)
+                    ? `${p.bin_path || "agent"} · ${isActive && activeModel ? `${activeModel} (active)` : p.model || "default"}${p.has_secret ? " · key set" : ""}`
+                    : `${isActive && activeModel ? `${activeModel} (active)` : p.model || "no model"}${p.has_secret ? " · key set" : " · no key"}`}
+                </div>
               </div>
-              <div className="mt-0.5 truncate text-xs text-gray-500">
-                {isCli(p.kind)
-                  ? `${p.bin_path || "agent"} · ${p.model || "default"}${p.has_secret ? " · key set" : ""}`
-                  : `${p.model || "no model"}${p.has_secret ? " · key set" : " · no key"}`}
-              </div>
-            </div>
-            {isCli(p.kind) && (
-              <Button onClick={() => setLoginFor(p)} title="Authenticate this CLI">
-                Login
+              {p.enabled && !isActive && (
+                <Button
+                  onClick={() => void setSetting("agent.active_provider", p.id)}
+                  title="Make this the active agent provider"
+                >
+                  Use as Active
+                </Button>
+              )}
+              {isCli(p.kind) && (
+                <Button onClick={() => setLoginFor(p)} title="Authenticate this CLI">
+                  Login
+                </Button>
+              )}
+              <Button
+                onClick={() => {
+                  setEditing(p);
+                  setShowForm(true);
+                }}
+              >
+                Edit
               </Button>
-            )}
-            <Button
-              onClick={() => {
-                setEditing(p);
-                setShowForm(true);
-              }}
-            >
-              Edit
-            </Button>
-            <Button
-              variant="danger"
-              onClick={async () => {
-                if (
-                  await dialog.confirm({
-                    title: "Delete provider",
-                    message: `Delete provider "${p.name}"?`,
-                    danger: true,
-                    confirmText: "Delete",
-                  })
-                )
-                  removeProvider(p.id);
-              }}
-              title="Delete"
-            >
-              <TrashIcon size={14} />
-            </Button>
-          </Card>
-        ))}
+              <Button
+                variant="danger"
+                onClick={async () => {
+                  if (
+                    await dialog.confirm({
+                      title: "Delete provider",
+                      message: `Delete provider "${p.name}"?`,
+                      danger: true,
+                      confirmText: "Delete",
+                    })
+                  )
+                    removeProvider(p.id);
+                }}
+                title="Delete"
+              >
+                <TrashIcon size={14} />
+              </Button>
+            </Card>
+          );
+        })}
       </div>
 
       {showForm && (

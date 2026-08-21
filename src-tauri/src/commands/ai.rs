@@ -1128,6 +1128,61 @@ pub async fn ai_cli_models(
     cli::list_models(&provider.kind, &bin).await
 }
 
+/// Autodetect models for any configured provider (CLI, Ollama, OpenAI-compatible, Anthropic)
+/// by securely reading its saved API key/secret from the OS keychain.
+#[tauri::command]
+pub async fn ai_provider_models(
+    db: State<'_, Db>,
+    provider_id: String,
+) -> Result<Vec<String>, String> {
+    let provider = db
+        .get_provider(&provider_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "provider not found".to_string())?;
+
+    if cli::is_cli_kind(&provider.kind) {
+        let bin = provider
+            .bin_path
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| cli::CliProvider::default_bin(&provider.kind));
+        return cli::list_models(&provider.kind, &bin).await;
+    }
+
+    if provider.kind == "ollama" {
+        let base_url = provider
+            .base_url
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "http://localhost:11434".to_string());
+        return crate::ai::list_models::list_ollama(&base_url).await;
+    }
+
+    let secret = crate::secrets::get_secret(&crate::secrets::provider_key(&provider.id))
+        .ok()
+        .flatten()
+        .map(|z| z.to_string())
+        .unwrap_or_default();
+
+    let base_url = provider
+        .base_url
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if provider.kind == "anthropic" {
+                "https://api.anthropic.com".to_string()
+            } else {
+                "https://api.openai.com/v1".to_string()
+            }
+        });
+
+    if provider.kind == "anthropic" {
+        return crate::ai::list_models::list_anthropic(&base_url, &secret).await;
+    }
+
+    crate::ai::list_models::list_openai_compatible(&base_url, &secret).await
+}
+
 /// Autodetect models for a cloud provider by probing its `/models` endpoint.
 ///
 /// `flavor` is "openai" (Bearer `GET {base}/models`) or "anthropic"

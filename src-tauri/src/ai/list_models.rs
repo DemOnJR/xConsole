@@ -67,6 +67,37 @@ pub async fn list_anthropic(base_url: &str, api_key: &str) -> Result<Vec<String>
     Ok(extract_ids(&body))
 }
 
+/// Fetch models from a local Ollama `/api/tags` endpoint.
+pub async fn list_ollama(base_url: &str) -> Result<Vec<String>, String> {
+    let url = join(base_url, "api/tags");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("GET {url} -> {}", resp.status()));
+    }
+    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    if let Some(models) = body.get("models").and_then(|m| m.as_array()) {
+        for item in models {
+            if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                out.push(name.to_string());
+            } else if let Some(name) = item.get("model").and_then(|v| v.as_str()) {
+                out.push(name.to_string());
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    Ok(out
+        .into_iter()
+        .filter(|id| !id.trim().is_empty())
+        .filter(|id| seen.insert(id.clone()))
+        .collect())
+}
+
 /// Pull model ids out of any of the common response shapes.
 fn extract_ids(body: &Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -140,5 +171,6 @@ mod tests {
         assert_eq!(join("https://api.x.ai/v1", "models"), "https://api.x.ai/v1/models");
         assert_eq!(join("https://api.x.ai/v1/", "models"), "https://api.x.ai/v1/models");
         assert_eq!(join("https://api.anthropic.com", "v1/models?limit=100"), "https://api.anthropic.com/v1/models?limit=100");
+        assert_eq!(join("http://localhost:11434/", "api/tags"), "http://localhost:11434/api/tags");
     }
 }
