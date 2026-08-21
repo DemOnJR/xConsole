@@ -867,8 +867,40 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
         detail: "Prompt for confirmation on every command",
         selected: cur === "approve",
       },
-    ];
   }, [effectiveSafetyMode]);
+
+  const modeOptions = useMemo<CLIPickerOption[]>(() => [
+    {
+      id: "auto",
+      label: "🤖 Auto (Smart Detection)",
+      detail: "Auto-detects plan vs code vs minimal based on user prompt",
+      selected: agentMode === "auto",
+    },
+    {
+      id: "standard",
+      label: "🌐 Standard",
+      detail: "Full capabilities, DevOps tools & general copilot guidance",
+      selected: agentMode === "standard",
+    },
+    {
+      id: "code",
+      label: "⚡ Code",
+      detail: "Focused coding, test writing, refactoring & file implementation",
+      selected: agentMode === "code",
+    },
+    {
+      id: "plan",
+      label: "📋 Plan",
+      detail: "Safe read-only investigation, requires plan approval before mutations",
+      selected: agentMode === "plan",
+    },
+    {
+      id: "minimal",
+      label: "🛡️ Minimal",
+      detail: "Compact token-efficient prompt with lightweight context",
+      selected: agentMode === "minimal",
+    },
+  ], [agentMode]);
 
   const reasoningOptions = useMemo<CLIPickerOption[]>(() => [
     {
@@ -1129,7 +1161,13 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
         break;
       }
       case "mode": {
-        if (opt.id === "standard" || opt.id === "code" || opt.id === "plan" || opt.id === "minimal") {
+        if (
+          opt.id === "auto" ||
+          opt.id === "standard" ||
+          opt.id === "code" ||
+          opt.id === "plan" ||
+          opt.id === "minimal"
+        ) {
           setAgentMode(opt.id);
         }
         setPicker(null);
@@ -1953,6 +1991,14 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
             <CLIPicker
               title="Send images with this message?"
               options={visionAskOptions}
+              onPick={onPickerPick}
+              onCancel={() => setPicker(null)}
+            />
+          )}
+          {picker.kind === "mode" && (
+            <CLIPicker
+              title="Agent Runtime Mode"
+              options={modeOptions}
               onPick={onPickerPick}
               onCancel={() => setPicker(null)}
             />

@@ -38,10 +38,11 @@ impl OpenAiProvider {
         }
     }
 
-    fn build_messages(req: &ChatRequest) -> Vec<Value> {
+    fn build_messages(req: &ChatRequest, use_developer_role: bool) -> Vec<Value> {
         let mut out: Vec<Value> = Vec::new();
         if !req.system.is_empty() {
-            out.push(json!({"role": "system", "content": req.system}));
+            let role = if use_developer_role { "developer" } else { "system" };
+            out.push(json!({"role": role, "content": req.system}));
         }
         for m in &req.messages {
             match m.role.as_str() {
@@ -134,6 +135,43 @@ fn usage_counts(event: &Value) -> UsageCounts {
     }
 }
 
+/// Detects reasoning models that reject standard sampling parameters (e.g. OpenAI o1/o3/o4).
+fn is_reasoning_model(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.starts_with("o1")
+        || m.contains("/o1")
+        || m.starts_with("o3")
+        || m.contains("/o3")
+        || m.starts_with("o4")
+        || m.contains("/o4")
+        || m.contains("reasoning")
+        || m.contains("deepseek-r1")
+        || m.contains("qwq")
+}
+
+/// Models/endpoints requiring `max_completion_tokens` instead of `max_tokens`.
+fn wants_max_completion_tokens(model: &str, base_url: &str) -> bool {
+    let m = model.to_lowercase();
+    let url = base_url.to_lowercase();
+    is_reasoning_model(model)
+        || url.contains("api.openai.com")
+        || m.contains("gpt-5")
+        || m.contains("gpt-4o")
+        || m.contains("gpt-4.5")
+}
+
+/// OpenAI o1/o3 reasoning models recommend `developer` role instead of `system`.
+fn wants_developer_role(model: &str, base_url: &str) -> bool {
+    let url = base_url.to_lowercase();
+    url.contains("api.openai.com") && is_reasoning_model(model)
+}
+
+/// Only send custom prompt caching keys to endpoints verified to support them.
+fn supports_prompt_cache_routing(base_url: &str) -> bool {
+    let url = base_url.to_lowercase();
+    url.contains("api.openai.com") || url.contains("deepseek.com") || url.contains("opencode")
+}
+
 /// GPT-5.x / native OpenAI accept `prompt_cache_options`.
 fn wants_openai_explicit_cache_options(model: &str, base_url: &str) -> bool {
     let m = model.to_lowercase();
@@ -168,6 +206,10 @@ impl Provider for OpenAiProvider {
         let url = join_url(&self.base_url, "chat/completions");
         let tools = Self::build_tools(req);
 
+        let is_reasoning = is_reasoning_model(&req.model);
+        let use_max_completion = wants_max_completion_tokens(&req.model, &self.base_url);
+        let dev_role = wants_developer_role(&req.model, &self.base_url);
+
         // Send the request. If the model rejects tool calling (e.g. some hosted
         // Groq models), retry once WITHOUT tools so plain chat still works — and
         // tell the user, since the agent can't run commands without tools.
@@ -175,21 +217,31 @@ impl Provider for OpenAiProvider {
         let resp = loop {
             let mut body = json!({
                 "model": req.model,
-                "max_tokens": req.max_tokens,
-                "temperature": req.temperature,
                 "stream": true,
                 "stream_options": { "include_usage": true },
-                "messages": Self::build_messages(req),
+                "messages": Self::build_messages(req, dev_role),
             });
+
+            if use_max_completion {
+                body["max_completion_tokens"] = json!(req.max_tokens);
+            } else {
+                body["max_tokens"] = json!(req.max_tokens);
+            }
+
+            // Temperature is rejected by OpenAI reasoning models (o1/o3/o4) with 400 Bad Request.
+            if !is_reasoning {
+                body["temperature"] = json!(req.temperature);
+            }
+
             // Reasoning effort → OpenAI reasoning_effort (low/medium/high), off/empty = default.
             if !req.reasoning.is_empty() && req.reasoning != "off" {
                 body["reasoning_effort"] = json!(req.reasoning);
             }
+
             // Stable cache key routes every request of a session to the same cache
-            // node (OpenAI, OpenCode Go, most OpenAI-compat proxies). DeepSeek's
-            // automatic prefix cache ignores the field; unknown-field 400s are
-            // rare and cheaper than a full miss on a routed-away prefix.
-            if !req.session_id.is_empty() {
+            // node (OpenAI, DeepSeek, OpenCode Go). Generic OpenAI proxies (Groq, LM Studio, etc.)
+            // reject unknown fields with 400.
+            if !req.session_id.is_empty() && supports_prompt_cache_routing(&self.base_url) {
                 body["prompt_cache_key"] = json!(format!("xc-{}", req.session_id));
                 if wants_openai_explicit_cache_options(&req.model, &self.base_url) {
                     body["prompt_cache_options"] = json!({ "mode": "explicit", "ttl": "30m" });
@@ -511,5 +563,28 @@ mod tests {
         let event: Value = serde_json::from_str(&payloads[0]).unwrap();
         assert_eq!(usage_counts(&event).completion_tokens, Some(1));
         assert_eq!(payloads[1], "[DONE]");
+    }
+
+    #[test]
+    fn detects_reasoning_models_and_token_parameters() {
+        assert!(is_reasoning_model("o1"));
+        assert!(is_reasoning_model("o1-mini"));
+        assert!(is_reasoning_model("o3-mini"));
+        assert!(is_reasoning_model("deepseek-r1"));
+        assert!(!is_reasoning_model("gpt-4o"));
+        assert!(!is_reasoning_model("llama-3.3-70b-versatile"));
+
+        assert!(wants_max_completion_tokens("o3-mini", "https://api.openai.com/v1"));
+        assert!(wants_max_completion_tokens("gpt-4o", "https://api.openai.com/v1"));
+        assert!(wants_max_completion_tokens("gpt-5", "https://api.openai.com/v1"));
+        assert!(!wants_max_completion_tokens("llama-3.3-70b", "https://api.groq.com/openai/v1"));
+
+        assert!(wants_developer_role("o1-mini", "https://api.openai.com/v1"));
+        assert!(!wants_developer_role("gpt-4o", "https://api.openai.com/v1"));
+
+        assert!(supports_prompt_cache_routing("https://api.openai.com/v1"));
+        assert!(supports_prompt_cache_routing("https://api.deepseek.com/v1"));
+        assert!(!supports_prompt_cache_routing("https://api.groq.com/openai/v1"));
+        assert!(!supports_prompt_cache_routing("http://localhost:11434/v1"));
     }
 }

@@ -151,45 +151,51 @@ export const InputBar = memo(function InputBar({
         <ShieldIcon size={14} />
       </button>
 
-      <button
-        type="button"
-        className={`${iconBtn} ${planMode ? "bg-indigo-500/20 text-indigo-300" : ""}`}
-        onClick={onTogglePlan}
-        onPointerDown={stopNode}
-        onMouseDown={stopNode}
-        aria-label="Plan mode"
-        data-tooltip={planMode ? "Plan mode on (Shift+Tab)" : "Plan mode (Shift+Tab)"}
-      >
-        <PlanIcon size={14} />
-      </button>
-
       {onPickMode ? (
         <button
           type="button"
-          className={`${iconBtn} text-[10px] font-mono font-medium px-1.5 ${
+          className={`${iconBtn} text-[10px] font-mono font-medium px-2 py-0.5 flex items-center gap-1 rounded transition ${
             agentMode === "code"
-              ? "bg-amber-500/20 text-amber-300"
-              : agentMode === "plan"
-                ? "bg-indigo-500/20 text-indigo-300"
+              ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+              : agentMode === "plan" || planMode
+                ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30"
                 : agentMode === "minimal"
-                  ? "bg-purple-500/20 text-purple-300"
-                  : "text-cyan-300"
+                  ? "bg-purple-500/20 text-purple-300 border border-purple-500/30"
+                  : agentMode === "auto"
+                    ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                    : "text-gray-300 hover:text-cyan-300 border border-transparent"
           }`}
           onClick={onPickMode}
           onPointerDown={stopNode}
           onMouseDown={stopNode}
-          aria-label={`Mode: ${agentMode || "standard"}`}
-          data-tooltip={`Runtime Mode: ${agentMode || "standard"}\nStandard 🌐 · Code ⚡ · Plan 📋 · Minimal 🛡️ (/mode)`}
+          aria-label={`Mode: ${agentMode || "auto"}`}
+          data-tooltip={`Runtime Mode: ${agentMode || "auto"}\n🤖 Auto (Detect) · 🌐 Standard · ⚡ Code · 📋 Plan · 🛡️ Minimal (/mode · Shift+Tab)`}
         >
-          {agentMode === "code"
-            ? "⚡ code"
-            : agentMode === "plan"
-              ? "📋 plan"
-              : agentMode === "minimal"
-                ? "🛡️ min"
-                : "🌐 std"}
+          {agentMode === "code" ? (
+            <>⚡ <span>code</span></>
+          ) : agentMode === "plan" || planMode ? (
+            <>📋 <span>plan</span></>
+          ) : agentMode === "minimal" ? (
+            <>🛡️ <span>min</span></>
+          ) : agentMode === "standard" ? (
+            <>🌐 <span>std</span></>
+          ) : (
+            <>🤖 <span>auto</span></>
+          )}
         </button>
-      ) : null}
+      ) : (
+        <button
+          type="button"
+          className={`${iconBtn} ${planMode ? "bg-indigo-500/20 text-indigo-300" : ""}`}
+          onClick={onTogglePlan}
+          onPointerDown={stopNode}
+          onMouseDown={stopNode}
+          aria-label="Plan mode"
+          data-tooltip={planMode ? "Plan mode on (Shift+Tab)" : "Plan mode (Shift+Tab)"}
+        >
+          <PlanIcon size={14} />
+        </button>
+      )}
 
       {onPickVision ? (
         <button

@@ -175,7 +175,7 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
   {
     name: "mode",
     syntax: "/mode",
-    description: "Switch agent mode (standard, code, plan, minimal)",
+    description: "Switch agent runtime mode (auto, standard, code, plan, minimal)",
     actionKey: "mode",
   },
   {

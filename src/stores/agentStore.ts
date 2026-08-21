@@ -214,7 +214,8 @@ export interface AgentChatMessage extends ChatMessage {
   compactionSummary?: string;
 }
 
-export type AgentRuntimeMode = "standard" | "code" | "plan" | "minimal";
+import { resolveEffectiveMode, type AgentRuntimeMode } from "../lib/agentMode";
+export type { AgentRuntimeMode };
 
 interface AgentState {
   sessionId: string;
@@ -428,7 +429,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   agentMode:
     (typeof localStorage !== "undefined" &&
       (localStorage.getItem("xconsole-agent-mode") as AgentRuntimeMode)) ||
-    "standard",
+    "auto",
   hydrated: false,
   conversationCostUsd: 0,
 
@@ -460,15 +461,15 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   togglePlanMode: () =>
     set((s) => {
-      const planMode = !s.planMode;
-      const agentMode: AgentRuntimeMode = planMode ? "plan" : "standard";
+      const nextPlan = !s.planMode;
+      const agentMode: AgentRuntimeMode = nextPlan ? "plan" : "auto";
       try {
-        localStorage.setItem("xconsole-agent-plan-mode", planMode ? "1" : "0");
+        localStorage.setItem("xconsole-agent-plan-mode", nextPlan ? "1" : "0");
         localStorage.setItem("xconsole-agent-mode", agentMode);
       } catch {
         /* ignore */
       }
-      return { planMode, agentMode };
+      return { planMode: nextPlan, agentMode };
     }),
 
   setAgentMode: (mode) => {
@@ -926,7 +927,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     let turnActivity: AgentActivityItem[] = [];
     let turnSegments: TurnSegment[] = [];
 
-    const { sessionId, targets, planMode } = get();
+    const { sessionId, targets, planMode, agentMode } = get();
+    const effectiveMode = resolveEffectiveMode(agentMode, trimmed);
+    const effectivePlanMode = planMode || effectiveMode === "plan";
     const mySession = sessionId;
     const isCurrent = () => get().sessionId === mySession;
 
@@ -1047,8 +1050,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         return;
       }
       if (ev.kind === "ConversationCompacted") {
-        // Dual-path history replay: preserve full transcript history in `messages`,
-        // and append a visual compaction divider marker to the timeline.
         compactionMarker = {
           role: "system",
           content: "Context compacted",
@@ -1059,7 +1060,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         };
         if (isCurrent()) {
           set((s) => ({
-            messages: [...history, compactionMarker!],
             compactFlipCount: s.compactFlipCount + 1,
           }));
         }
@@ -1080,7 +1080,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         messages: history,
         providerId: opts?.providerId || null,
         targets,
-        planMode,
+        planMode: effectivePlanMode,
         workspaceId: useWorkspaceStore.getState().activeId,
         canvas: canvasSnapshot(),
         conversation: opts?.conversation ?? false,
