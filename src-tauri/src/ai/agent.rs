@@ -966,7 +966,7 @@ pub async fn run_turn(
                     continue;
                 }
                 // Hit max_tokens mid-reply (often mid-checklist, no tool_calls
-                // parsed). Stopping here looks like a hang. Continue a few times.
+                // parsed), or returned empty after executing tools without a final summary.
                 let truncated = crate::ai::provider::is_output_truncated(
                     &resp.stop_reason,
                     resp.completion_tokens,
@@ -979,9 +979,20 @@ pub async fn run_turn(
                     .any(|t| t.status != "completed")
                     || crate::ai::provider::reply_has_open_checklist(&resp.content);
                 let pseudo_prompt = crate::ai::provider::reply_has_uncalled_action(&resp.content);
-                if (truncated || todos_open || pseudo_prompt) && truncate_continues < 4 {
+                let had_prior_tool_results =
+                    iter > 0 && messages.iter().any(|m| m.role == "tool");
+                let empty_post_tool = resp.content.trim().is_empty()
+                    && resp.tool_calls.is_empty()
+                    && had_prior_tool_results;
+
+                if (truncated || todos_open || pseudo_prompt || empty_post_tool)
+                    && truncate_continues < 4
+                {
                     truncate_continues += 1;
-                    let why = if truncated {
+                    let why = if empty_post_tool {
+                        "Model gathered data but returned an empty reply — requesting final summary…"
+                            .into()
+                    } else if truncated {
                         format!(
                             "Output hit the token cap ({}) — continuing from where it stopped…",
                             resp.completion_tokens.unwrap_or(req.max_tokens)
@@ -992,7 +1003,11 @@ pub async fn run_turn(
                         "Checklist still has open steps — continuing.".into()
                     };
                     emit(Some(sink), StreamEvent::Status(why));
-                    let nudge = if pseudo_prompt {
+                    let nudge = if empty_post_tool {
+                        "[system] You executed the tools and gathered the data above, but your reply was empty. \
+                         Provide your complete answer and summary to the user now based on what was found. \
+                         Do not return an empty response."
+                    } else if pseudo_prompt {
                         "[system] You ended with a shell prompt (~#) or an intention to run a check/command, but did not call a tool. Call the required tool (e.g. run_command, read_file) NOW to perform the action. Do not output raw shell prompts in chat."
                     } else {
                         "[system] Your previous reply stopped without finishing. \
@@ -1220,7 +1235,21 @@ pub async fn run_turn(
             last.content.trim()
         );
     } else if last.content.trim().is_empty() {
-        if ollama_mode {
+        let last_user_pos = messages.iter().rposition(|m| m.role == "user");
+        let turn_slice = match last_user_pos {
+            Some(idx) => &messages[idx..],
+            None => &messages[..],
+        };
+        let prior_turn_text = turn_slice
+            .iter()
+            .filter(|m| m.role == "assistant" && !m.content.trim().is_empty())
+            .map(|m| m.content.trim())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        if !prior_turn_text.is_empty() {
+            last.content = prior_turn_text;
+        } else if ollama_mode {
             let ctx_hint = ollama_num_ctx
                 .map(|n| format!(" (context: {n})"))
                 .unwrap_or_default();

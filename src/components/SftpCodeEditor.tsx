@@ -1,27 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, type SftpEntry } from "../lib/tauri";
 import { dialog } from "../stores/dialogStore";
 import { CodeEditArea } from "./CodeEditArea";
-
-/** Decode base64 (raw file bytes) into UTF-8 text. */
-function bytesToText(b64: string): string {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
-  return new TextDecoder().decode(bytes);
-}
-
-/** Encode UTF-8 text into base64 (chunked so large files don't blow the stack). */
-function textToB64(text: string): string {
-  const bytes = new TextEncoder().encode(text);
-  let bin = "";
-  const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-  }
-  return btoa(bin);
-}
+import {
+  base64ToBytes,
+  bytesToBase64,
+  checkEncodingLoss,
+  decodeBytes,
+  detectEncoding,
+  encodeText,
+  SUPPORTED_ENCODINGS,
+} from "../lib/encoding";
 
 interface Props {
   sessionId: string;
@@ -31,9 +21,11 @@ interface Props {
 }
 
 /**
- * Minimal in-app remote code editor: opens a file over the live SFTP session,
- * edits it in place, and writes it back via `sftp_write`. Intentionally
- * dependency-free (a Monaco-backed surface is a drop-in upgrade later).
+ * Remote code editor over live SFTP session:
+ * - Automatic character encoding detection (UTF-8, UTF-16, Windows-1250/1251/1252/1256, EUC-KR, GBK, Shift-JIS)
+ * - Interactive encoding badge & selector
+ * - Preserves original encoding on save
+ * - Data-loss safety checks and warnings when converting or saving across encodings
  */
 export function SftpCodeEditor({ sessionId, entry, onClose, onSaved }: Props) {
   const [loading, setLoading] = useState(true);
@@ -41,6 +33,9 @@ export function SftpCodeEditor({ sessionId, entry, onClose, onSaved }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [content, setContent] = useState("");
   const [original, setOriginal] = useState("");
+  const [encoding, setEncoding] = useState("utf-8");
+  const [detectedEncoding, setDetectedEncoding] = useState("utf-8");
+  const rawBytesRef = useRef<Uint8Array>(new Uint8Array(0));
   const dirty = content !== original;
 
   useEffect(() => {
@@ -49,7 +44,12 @@ export function SftpCodeEditor({ sessionId, entry, onClose, onSaved }: Props) {
       try {
         const b64 = await api.sftpDownload(sessionId, entry.path);
         if (!mounted) return;
-        const text = bytesToText(b64);
+        const bytes = base64ToBytes(b64);
+        rawBytesRef.current = bytes;
+        const detected = detectEncoding(bytes);
+        setDetectedEncoding(detected);
+        setEncoding(detected);
+        const text = decodeBytes(bytes, detected);
         setContent(text);
         setOriginal(text);
       } catch (e) {
@@ -63,11 +63,56 @@ export function SftpCodeEditor({ sessionId, entry, onClose, onSaved }: Props) {
     };
   }, [sessionId, entry.path]);
 
+  const handleEncodingChange = useCallback(
+    async (newEncoding: string) => {
+      if (newEncoding === encoding) return;
+
+      // If user has unsaved edits, warn before re-interpreting from original bytes
+      if (dirty) {
+        const ok = await dialog.confirm({
+          title: "Change File Encoding",
+          message:
+            "Re-decoding the file with a different character encoding will reset unsaved edits to the file's raw content. Do you want to continue?",
+          confirmText: "Re-decode",
+          danger: true,
+        });
+        if (!ok) return;
+      }
+
+      setEncoding(newEncoding);
+      if (rawBytesRef.current.length > 0) {
+        const text = decodeBytes(rawBytesRef.current, newEncoding);
+        setContent(text);
+        setOriginal(text);
+      }
+    },
+    [encoding, dirty],
+  );
+
   const save = useCallback(async () => {
     setSaving(true);
     setError(null);
     try {
-      await api.sftpWrite(sessionId, entry.path, textToB64(content));
+      // Check if target encoding cannot represent some characters in the file
+      const loss = checkEncodingLoss(content, encoding);
+      if (loss.hasLoss) {
+        const sampleChars = loss.lostChars.map((c) => `"${c}"`).join(", ");
+        const confirmed = await dialog.confirm({
+          title: "Character Encoding Warning",
+          message: `The selected encoding "${encoding}" cannot represent some characters in this file (e.g. ${sampleChars}). Saving in this encoding may corrupt these characters into question marks (?). Do you want to proceed?`,
+          confirmText: "Save Anyway",
+          danger: true,
+        });
+        if (!confirmed) {
+          setSaving(false);
+          return;
+        }
+      }
+
+      const encodedBytes = encodeText(content, encoding);
+      const b64 = bytesToBase64(encodedBytes);
+      await api.sftpWrite(sessionId, entry.path, b64);
+      rawBytesRef.current = encodedBytes;
       setOriginal(content);
       onSaved?.();
     } catch (e) {
@@ -75,7 +120,7 @@ export function SftpCodeEditor({ sessionId, entry, onClose, onSaved }: Props) {
     } finally {
       setSaving(false);
     }
-  }, [sessionId, entry.path, content, onSaved]);
+  }, [sessionId, entry.path, content, encoding, onSaved]);
 
   const tryClose = useCallback(async () => {
     if (
@@ -117,7 +162,26 @@ export function SftpCodeEditor({ sessionId, entry, onClose, onSaved }: Props) {
           <h3 className="text-sm font-medium text-gray-200">Edit</h3>
           <span className="truncate font-mono text-[10px] text-gray-500">{entry.path}</span>
           {dirty && <span className="text-[10px] text-amber-400">● unsaved</span>}
+
           <div className="ml-auto flex items-center gap-2">
+            {/* Encoding Selector */}
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-gray-500">Charset:</span>
+              <select
+                aria-label="Character Encoding"
+                className="rounded border border-[var(--border)] bg-[var(--card)] px-2 py-0.5 font-mono text-[11px] text-cyan-300 hover:border-cyan-500 focus:outline-none"
+                value={encoding}
+                onChange={(e) => void handleEncodingChange(e.target.value)}
+                disabled={loading || saving}
+              >
+                {SUPPORTED_ENCODINGS.map((enc) => (
+                  <option key={enc.id} value={enc.id}>
+                    {enc.name} {enc.id === detectedEncoding ? "(detected)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <button
               type="button"
               className="rounded bg-cyan-700 px-3 py-1 text-xs text-white hover:bg-cyan-600 disabled:opacity-40"
@@ -145,7 +209,7 @@ export function SftpCodeEditor({ sessionId, entry, onClose, onSaved }: Props) {
         </div>
 
         <div className="flex items-center gap-2 border-t border-[var(--border)] px-4 py-1.5 text-[10px] text-gray-600">
-          <span>Ctrl/⌘+S to save · written over SSH (SFTP)</span>
+          <span>Ctrl/⌘+S to save · encoding: <strong className="text-gray-400">{encoding}</strong></span>
           {error && <span className="ml-auto text-red-300">{error}</span>}
         </div>
       </div>

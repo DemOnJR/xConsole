@@ -9,6 +9,7 @@ use dashmap::DashMap;
 struct Stamp {
     session: String,
     mtime: String,
+    encoding: Option<String>,
 }
 
 fn map() -> &'static DashMap<String, Stamp> {
@@ -22,7 +23,19 @@ fn key(vps_id: &str, path: &str) -> String {
 
 /// Record that this session just read `path` at `mtime` (unix seconds or raw
 /// `stat` output). Empty mtime is ignored.
+#[allow(dead_code)]
 pub fn note_read(session_id: &str, vps_id: &str, path: &str, mtime: &str) {
+    note_read_with_encoding(session_id, vps_id, path, mtime, None);
+}
+
+/// Record that this session just read `path` at `mtime` with a detected charset encoding.
+pub fn note_read_with_encoding(
+    session_id: &str,
+    vps_id: &str,
+    path: &str,
+    mtime: &str,
+    encoding: Option<&str>,
+) {
     let mtime = mtime.trim();
     if mtime.is_empty() {
         return;
@@ -32,8 +45,19 @@ pub fn note_read(session_id: &str, vps_id: &str, path: &str, mtime: &str) {
         Stamp {
             session: session_id.to_string(),
             mtime: mtime.to_string(),
+            encoding: encoding.map(str::to_string),
         },
     );
+}
+
+/// Get the detected encoding from a previous read in this session.
+pub fn get_encoding(session_id: &str, vps_id: &str, path: &str) -> Option<String> {
+    let stamp = map().get(&key(vps_id, path))?;
+    if stamp.session == session_id {
+        stamp.encoding.clone()
+    } else {
+        None
+    }
 }
 
 /// If this session already read `path` and the on-disk mtime has changed,

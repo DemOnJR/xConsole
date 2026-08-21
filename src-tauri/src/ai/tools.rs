@@ -1846,9 +1846,20 @@ async fn read_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str)
     let offset = args.get("offset").and_then(|v| v.as_u64()).map(|n| n as u32);
     let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
     let numbered = crate::ai::file_ops::format_read(&file, offset, limit);
+    let detected_encoding = crate::ai::file_ops::detect_encoding(file.as_bytes());
     if let Some(m) = mtime {
-        crate::ai::file_state::note_read(&ctx.session_id, &vps_id, path, &m);
-        format!("[mtime: {m}]\n{numbered}")
+        crate::ai::file_state::note_read_with_encoding(
+            &ctx.session_id,
+            &vps_id,
+            path,
+            &m,
+            Some(detected_encoding),
+        );
+        if detected_encoding != "utf-8" {
+            format!("[mtime: {m}, encoding: {detected_encoding}]\n{numbered}")
+        } else {
+            format!("[mtime: {m}]\n{numbered}")
+        }
     } else {
         numbered
     }
@@ -1918,8 +1929,11 @@ async fn write_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str
         .await
         .map(|o| o.stdout)
         .unwrap_or_default();
+    let target_encoding = crate::ai::file_state::get_encoding(&ctx.session_id, &vps_id, &path)
+        .unwrap_or_else(|| "utf-8".to_string());
+    let encoded_bytes = crate::ai::file_ops::encode_text_with_charset(content, &target_encoding);
     // Transfer via base64 to avoid any quoting/encoding issues.
-    let b64 = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&encoded_bytes);
     let command = format!(
         "mkdir -p {} && printf %s {} | base64 -d > {}",
         shell_quote(parent),
@@ -1974,7 +1988,10 @@ async fn write_remote_contents(
         .and_then(|p| p.to_str())
         .filter(|p| !p.is_empty())
         .unwrap_or("/tmp");
-    let b64 = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
+    let target_encoding = crate::ai::file_state::get_encoding(&ctx.session_id, vps_id, path)
+        .unwrap_or_else(|| "utf-8".to_string());
+    let encoded_bytes = crate::ai::file_ops::encode_text_with_charset(content, &target_encoding);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&encoded_bytes);
     let command = format!(
         "mkdir -p {} && printf %s {} | base64 -d > {}",
         shell_quote(parent),
@@ -2766,7 +2783,9 @@ async fn local_write_file(ctx: &ToolContext, args: &Value) -> String {
         return format!("error: {e}");
     }
     let before = crate::local::read_local_file(path).ok();
-    match crate::artifacts::write_verified(std::path::Path::new(path), content.as_bytes()) {
+    let target_encoding = crate::ai::file_ops::detect_encoding(before.as_deref().unwrap_or("").as_bytes());
+    let encoded_bytes = crate::ai::file_ops::encode_text_with_charset(content, target_encoding);
+    match crate::artifacts::write_verified(std::path::Path::new(path), &encoded_bytes) {
         Ok(written) => {
             ctx.edits.record(
                 &ctx.app,

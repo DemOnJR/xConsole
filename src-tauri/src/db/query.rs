@@ -381,6 +381,10 @@ fn unescape(field: &str) -> Option<String> {
             Some('n') => out.push('\n'),
             Some('r') => out.push('\r'),
             Some('0') => out.push('\0'),
+            Some('b') => out.push('\x08'),
+            Some('Z') => out.push('\x1a'),
+            Some('\'') => out.push('\''),
+            Some('"') => out.push('"'),
             Some('\\') => out.push('\\'),
             // Unknown escape: keep it verbatim rather than silently dropping data.
             Some(other) => {
