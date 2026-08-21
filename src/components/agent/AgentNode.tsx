@@ -867,20 +867,21 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
         detail: "Prompt for confirmation on every command",
         selected: cur === "approve",
       },
+    ];
   }, [effectiveSafetyMode]);
 
   const modeOptions = useMemo<CLIPickerOption[]>(() => [
     {
-      id: "auto",
-      label: "🤖 Auto (Smart Detection)",
-      detail: "Auto-detects plan vs code vs minimal based on user prompt",
-      selected: agentMode === "auto",
+      id: "plan",
+      label: "📋 Plan",
+      detail: "Safe read-only investigation, requires plan approval before mutations",
+      selected: agentMode === "plan" || planMode,
     },
     {
       id: "standard",
-      label: "🌐 Standard",
+      label: "🌐 Standard (Std)",
       detail: "Full capabilities, DevOps tools & general copilot guidance",
-      selected: agentMode === "standard",
+      selected: agentMode === "standard" && !planMode,
     },
     {
       id: "code",
@@ -889,10 +890,10 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
       selected: agentMode === "code",
     },
     {
-      id: "plan",
-      label: "📋 Plan",
-      detail: "Safe read-only investigation, requires plan approval before mutations",
-      selected: agentMode === "plan",
+      id: "auto",
+      label: "🤖 Auto (Smart Detection)",
+      detail: "Auto-detects plan vs code vs minimal based on user prompt",
+      selected: agentMode === "auto" && !planMode,
     },
     {
       id: "minimal",
@@ -900,7 +901,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
       detail: "Compact token-efficient prompt with lightweight context",
       selected: agentMode === "minimal",
     },
-  ], [agentMode]);
+  ], [agentMode, planMode]);
 
   const reasoningOptions = useMemo<CLIPickerOption[]>(() => [
     {
@@ -1898,16 +1899,11 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
           )}
           {picker.kind === "mode" && (
             <CLIPicker
-              title="Agent Runtime Mode (DeepSeek Harness style)"
-              options={[
-                { id: "standard", label: "🌐 standard", detail: "Full autonomous toolset (shell, files, web, db, preview, goals)" },
-                { id: "code", label: "⚡ code", detail: "Focused code editing, fast diffs, compiler checks" },
-                { id: "plan", label: "📋 plan", detail: "Interactive architectural planning before executing changes" },
-                { id: "minimal", label: "🛡️ minimal", detail: "Lightweight, minimal prompt with shell and file editing" },
-              ]}
+              title="Agent Mode (Plan / Standard / Code / Auto / Minimal)"
+              options={modeOptions}
               onPick={onPickerPick}
               onCancel={() => setPicker(null)}
-              placeholder="Filter runtime mode…"
+              placeholder="Filter mode…"
             />
           )}
           {picker.kind === "prices" && (

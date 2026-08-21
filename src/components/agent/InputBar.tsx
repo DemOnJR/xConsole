@@ -151,51 +151,40 @@ export const InputBar = memo(function InputBar({
         <ShieldIcon size={14} />
       </button>
 
-      {onPickMode ? (
-        <button
-          type="button"
-          className={`${iconBtn} text-[10px] font-mono font-medium px-2 py-0.5 flex items-center gap-1 rounded transition ${
-            agentMode === "code"
-              ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
-              : agentMode === "plan" || planMode
-                ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30"
-                : agentMode === "minimal"
-                  ? "bg-purple-500/20 text-purple-300 border border-purple-500/30"
-                  : agentMode === "auto"
-                    ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
-                    : "text-gray-300 hover:text-cyan-300 border border-transparent"
-          }`}
-          onClick={onPickMode}
-          onPointerDown={stopNode}
-          onMouseDown={stopNode}
-          aria-label={`Mode: ${agentMode || "auto"}`}
-          data-tooltip={`Runtime Mode: ${agentMode || "auto"}\n🤖 Auto (Detect) · 🌐 Standard · ⚡ Code · 📋 Plan · 🛡️ Minimal (/mode · Shift+Tab)`}
-        >
+      <button
+        type="button"
+        className={`${iconBtn} text-[10px] font-mono font-medium px-2 py-0.5 flex items-center gap-1 rounded transition ${
+          agentMode === "code"
+            ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+            : agentMode === "plan" || planMode
+              ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30"
+              : agentMode === "minimal"
+                ? "bg-purple-500/20 text-purple-300 border border-purple-500/30"
+                : agentMode === "standard"
+                  ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                  : "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+        }`}
+        onClick={onPickMode ?? onTogglePlan}
+        onPointerDown={stopNode}
+        onMouseDown={stopNode}
+        aria-label={`Mode: ${agentMode || (planMode ? "plan" : "auto")}`}
+        data-tooltip={`Runtime Mode: ${agentMode || (planMode ? "plan" : "auto")}\n📋 Plan · 🌐 Standard (Std) · ⚡ Code · 🤖 Auto · 🛡️ Minimal (/mode · Shift+Tab)`}
+      >
+        <PlanIcon size={14} className="shrink-0" />
+        <span className="font-semibold">
           {agentMode === "code" ? (
-            <>⚡ <span>code</span></>
+            "code"
           ) : agentMode === "plan" || planMode ? (
-            <>📋 <span>plan</span></>
+            "plan"
           ) : agentMode === "minimal" ? (
-            <>🛡️ <span>min</span></>
+            "min"
           ) : agentMode === "standard" ? (
-            <>🌐 <span>std</span></>
+            "std"
           ) : (
-            <>🤖 <span>auto</span></>
+            "auto"
           )}
-        </button>
-      ) : (
-        <button
-          type="button"
-          className={`${iconBtn} ${planMode ? "bg-indigo-500/20 text-indigo-300" : ""}`}
-          onClick={onTogglePlan}
-          onPointerDown={stopNode}
-          onMouseDown={stopNode}
-          aria-label="Plan mode"
-          data-tooltip={planMode ? "Plan mode on (Shift+Tab)" : "Plan mode (Shift+Tab)"}
-        >
-          <PlanIcon size={14} />
-        </button>
-      )}
+        </span>
+      </button>
 
       {onPickVision ? (
         <button
