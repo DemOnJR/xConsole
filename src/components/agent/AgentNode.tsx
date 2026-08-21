@@ -1991,14 +1991,6 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
               onCancel={() => setPicker(null)}
             />
           )}
-          {picker.kind === "mode" && (
-            <CLIPicker
-              title="Agent Runtime Mode"
-              options={modeOptions}
-              onPick={onPickerPick}
-              onCancel={() => setPicker(null)}
-            />
-          )}
         </div>
       )}
 
@@ -2041,7 +2033,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
           }}
         >
           {/* Slash Commands Suggestion Menu */}
-          {slashSuggestions.length > 0 && (
+          {slashSuggestions.length > 0 && !picker && (
             <div className="absolute bottom-full left-0 right-0 z-30 mb-1.5 max-h-52 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1.5 shadow-2xl font-mono">
               <div className="flex items-center justify-between px-2 py-1 text-[10px] uppercase tracking-wider text-gray-500 font-sans">
                 <span>Commands</span>
