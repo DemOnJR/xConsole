@@ -135,7 +135,7 @@ fn usage_counts(event: &Value) -> UsageCounts {
     }
 }
 
-/// Detects reasoning models that reject standard sampling parameters (e.g. OpenAI o1/o3/o4).
+/// Detects reasoning models that reject standard sampling parameters (e.g. OpenAI o1/o3/o4, DeepSeek R1, Ox Alpha).
 fn is_reasoning_model(model: &str) -> bool {
     let m = model.to_lowercase();
     m.starts_with("o1")
@@ -146,7 +146,11 @@ fn is_reasoning_model(model: &str) -> bool {
         || m.contains("/o4")
         || m.contains("reasoning")
         || m.contains("deepseek-r1")
+        || m.contains("deepseek-reasoner")
         || m.contains("qwq")
+        || m.contains("ox-alpha")
+        || m.contains("0x-alpha")
+        || m.contains("stealth")
 }
 
 /// Models/endpoints requiring `max_completion_tokens` instead of `max_tokens`.
@@ -228,14 +232,18 @@ impl Provider for OpenAiProvider {
                 body["max_tokens"] = json!(req.max_tokens);
             }
 
-            // Temperature is rejected by OpenAI reasoning models (o1/o3/o4) with 400 Bad Request.
+            // Temperature is rejected by OpenAI and strict reasoning models (o1/o3/o4/ox-alpha) with 400 Bad Request.
             if !is_reasoning {
                 body["temperature"] = json!(req.temperature);
             }
 
-            // Reasoning effort → OpenAI reasoning_effort (low/medium/high), off/empty = default.
+            // Reasoning effort → OpenRouter accepts {"reasoning": {"effort": "..."}}, OpenAI accepts reasoning_effort
             if !req.reasoning.is_empty() && req.reasoning != "off" {
-                body["reasoning_effort"] = json!(req.reasoning);
+                if self.base_url.contains("openrouter") {
+                    body["reasoning"] = json!({ "effort": req.reasoning });
+                } else {
+                    body["reasoning_effort"] = json!(req.reasoning);
+                }
             }
 
             // Stable cache key routes every request of a session to the same cache
@@ -362,7 +370,7 @@ impl Provider for OpenAiProvider {
                         emit(sink, StreamEvent::Text(t.to_string()));
                     }
                 }
-                for key in ["reasoning", "reasoning_content"] {
+                for key in ["reasoning", "reasoning_content", "thinking", "thought"] {
                     if let Some(t) = delta.get(key).and_then(|v| v.as_str()) {
                         if !t.is_empty() {
                             reasoning.push_str(t);
@@ -571,6 +579,8 @@ mod tests {
         assert!(is_reasoning_model("o1-mini"));
         assert!(is_reasoning_model("o3-mini"));
         assert!(is_reasoning_model("deepseek-r1"));
+        assert!(is_reasoning_model("stealth/ox-alpha"));
+        assert!(is_reasoning_model("ox-alpha"));
         assert!(!is_reasoning_model("gpt-4o"));
         assert!(!is_reasoning_model("llama-3.3-70b-versatile"));
 

@@ -68,6 +68,7 @@ export const PROVIDER_CATALOG: CatalogProvider[] = [
     baseUrl: "https://api.commandcode.ai/provider/v1",
     defaultModel: "deepseek/deepseek-v4-flash",
     models: [
+      "stealth/ox-alpha",
       "deepseek/deepseek-v4-flash",
       "deepseek/deepseek-v4-pro",
       "claude-sonnet-5",
@@ -131,7 +132,7 @@ export const PROVIDER_CATALOG: CatalogProvider[] = [
   { id: "ollama", name: "Ollama (local)", kind: "ollama", flavor: "local", baseUrl: "http://localhost:11434", defaultModel: "qwen3.5:9b", models: [], needsKey: false, group: "O" },
   { id: "opencode", name: "OpenCode CLI", kind: "opencode_cli", flavor: "cli", baseUrl: "opencode", defaultModel: "", models: [], needsKey: false, binPath: "opencode", group: "O" },
   { id: "opencode-go", name: "OpenCode Go", kind: "openai", flavor: "openai", baseUrl: "https://opencode.ai/go", defaultModel: "deepseek-v4-flash", models: ["deepseek-v4-flash", "deepseek-v4-flash-free"], needsKey: true, group: "O" },
-  { id: "openrouter", name: "OpenRouter", kind: "openai", flavor: "openai", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "anthropic/claude-sonnet-4.5", models: ["anthropic/claude-sonnet-4.5", "openai/gpt-5", "deepseek/deepseek-v4", "meta-llama/llama-3.3-70b-instruct"], needsKey: true, group: "O" },
+  { id: "openrouter", name: "OpenRouter", kind: "openai", flavor: "openai", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "stealth/ox-alpha", models: ["stealth/ox-alpha", "anthropic/claude-sonnet-4.5", "openai/gpt-5", "deepseek/deepseek-v4", "meta-llama/llama-3.3-70b-instruct"], needsKey: true, group: "O" },
   { id: "openai", name: "OpenAI", kind: "openai", flavor: "openai", baseUrl: "https://api.openai.com/v1", defaultModel: "gpt-5", models: ["gpt-5", "gpt-5-mini", "gpt-4o", "gpt-4o-mini", "gpt-4.1", "o3"], needsKey: true, group: "O" },
 
   // P
@@ -176,6 +177,7 @@ export function catalogGroups(): { letter: string; providers: CatalogProvider[] 
 /** Approximate per-1M token pricing for display in model pickers and settings. */
 export function priceForModel(modelId: string): { input: number; output: number; cacheRead: number } {
   const m = modelId.toLowerCase();
+  if (m.includes("ox-alpha") || m.includes("0x-alpha") || m.includes("stealth")) return { input: 0.0, output: 0.0, cacheRead: 0.0 };
   if (m.includes("opus")) return { input: 15.0, output: 75.0, cacheRead: 1.5 };
   if (m.includes("sonnet") || m.includes("3-7-sonnet") || m.includes("3.7-sonnet")) return { input: 3.0, output: 15.0, cacheRead: 0.3 };
   if (m.includes("haiku")) return { input: 0.8, output: 4.0, cacheRead: 0.08 };

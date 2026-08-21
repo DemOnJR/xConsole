@@ -77,6 +77,11 @@ const MODELS: &[(&str, &str, ModelPrice)] = &[
     ("deepseek", "flash", ModelPrice { input: 0.14, output: 0.28, cache_read: 0.0028, cache_write: 0.14 }),
     ("deepseek", "deepseek", ModelPrice { input: 0.14, output: 0.28, cache_read: 0.0028, cache_write: 0.14 }),
 
+    // --- Ox Alpha (Stealth Reasoning) ---
+    ("openai", "ox-alpha", ModelPrice { input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0 }),
+    ("openai", "0x-alpha", ModelPrice { input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0 }),
+    ("openai", "stealth", ModelPrice { input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0 }),
+
     // --- Google Gemini & Antigravity CLI ---
     ("gemini", "gemini-3.7-flash", ModelPrice { input: 0.15, output: 0.60, cache_read: 0.0375, cache_write: 0.15 }),
     ("gemini", "gemini-3.6-flash", ModelPrice { input: 0.15, output: 0.60, cache_read: 0.0375, cache_write: 0.15 }),

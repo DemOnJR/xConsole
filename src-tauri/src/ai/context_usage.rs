@@ -65,8 +65,8 @@ pub fn default_context_limit(
     ollama_num_ctx: Option<u32>,
 ) -> u32 {
     let m = model.to_lowercase();
-    if m.contains("deepseek") {
-        return 1_000_000;
+    if m.contains("deepseek") || m.contains("ox-alpha") || m.contains("0x-alpha") || m.contains("stealth") {
+        return 1_048_576;
     }
     match provider_kind {
         "ollama" => ollama_num_ctx.unwrap_or(65_536),

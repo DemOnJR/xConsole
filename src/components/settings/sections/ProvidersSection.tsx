@@ -97,7 +97,7 @@ export const PROVIDER_PRESETS: {
     base_url: "https://api.commandcode.ai/provider",
     model: "claude-sonnet-4-5",
   },
-  { id: "openrouter", label: "OpenRouter", kind: "openai", base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4o" },
+  { id: "openrouter", label: "OpenRouter", kind: "openai", base_url: "https://openrouter.ai/api/v1", model: "stealth/ox-alpha" },
   { id: "xai", label: "xAI (Grok)", kind: "openai", base_url: "https://api.x.ai/v1", model: "grok-4" },
   { id: "groq", label: "Groq", kind: "openai", base_url: "https://api.groq.com/openai/v1", model: "llama-3.3-70b-versatile" },
   { id: "together", label: "Together AI", kind: "openai", base_url: "https://api.together.xyz/v1", model: "meta-llama/Llama-3.3-70B-Instruct-Turbo" },
