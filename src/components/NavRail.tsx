@@ -205,6 +205,14 @@ export function NavRail() {
         <TransferIcon size={18} />
       </RailBtn>
 
+      <RailBtn
+        active={useUiStore((s) => s.cloudflareOpen)}
+        title="Cloudflare (Tunnels, DNS & Security)"
+        onClick={() => useUiStore.getState().toggleCloudflare()}
+      >
+        <CloudIcon size={18} />
+      </RailBtn>
+
       <div className="mt-auto flex flex-col items-center gap-0.5">
         <RailBtn active={false} title="Settings" onClick={() => openSettings()}>
           <SettingsIcon size={18} />
@@ -222,6 +230,20 @@ function ChartIcon({ size = 18 }: { size?: number }) {
         stroke="currentColor"
         strokeWidth="1.8"
         strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function CloudIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M17.5 19H6.5C4.015 19 2 16.985 2 14.5c0-2.222 1.61-4.068 3.75-4.43C6.34 6.87 9.17 4.5 12.5 4.5c3.78 0 6.91 2.94 7.37 6.67 1.76.4 3.13 1.95 3.13 3.83 0 2.21-1.79 4-4 4z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
       />
     </svg>
   );

@@ -1087,7 +1087,8 @@ pub async fn dispatch_with_telemetry(
         name if name.starts_with("project_")
             || name.starts_with("terraform_")
             || name.starts_with("cloud_")
-            || name.starts_with("tfc_") =>
+            || name.starts_with("tfc_")
+            || name.starts_with("cloudflare_") =>
         {
             infra_tools::dispatch(ctx, call.name.as_str(), args, sink).await
         }

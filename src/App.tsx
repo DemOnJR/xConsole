@@ -15,6 +15,7 @@ import { ChangesPanel } from "./components/agent/ChangesPanel";
 import { PlanModal } from "./components/agent/PlanModal";
 import { UpdateNotice } from "./components/UpdateNotice";
 import { TransfersPanel } from "./components/TransfersPanel";
+import { CloudflareManager } from "./components/cloudflare/CloudflareManager";
 import { useUpdateStore } from "./stores/updateStore";
 import { useCanvasStore } from "./stores/canvasStore";
 import { useAgentStore } from "./stores/agentStore";
@@ -123,6 +124,8 @@ function UnlockedApp() {
   const mainView = useUiStore((s) => s.mainView);
   const rightOpen = useUiStore((s) => s.rightOpen);
   const bottomOpen = useUiStore((s) => s.bottomOpen);
+  const cloudflareOpen = useUiStore((s) => s.cloudflareOpen);
+  const closeCloudflare = useUiStore((s) => s.closeCloudflare);
   const leftWidth = useUiStore((s) => s.leftWidth);
   const rightWidth = useUiStore((s) => s.rightWidth);
   const setLeftWidth = useUiStore((s) => s.setLeftWidth);
@@ -274,6 +277,16 @@ function UnlockedApp() {
         <StatusStrip />
       </div>
       <SettingsModal />
+      {cloudflareOpen && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
+          onMouseDown={(e) => e.target === e.currentTarget && closeCloudflare()}
+        >
+          <div className="h-[85vh] w-[min(1080px,94vw)] overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl flex flex-col animate-in fade-in zoom-in-95 duration-150">
+            <CloudflareManager onClose={closeCloudflare} />
+          </div>
+        </div>
+      )}
       <PlanModal />
       <ChangesPanel />
       <TransfersPanel />

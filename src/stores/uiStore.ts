@@ -9,6 +9,7 @@ import {
 interface UiState {
   settingsOpen: boolean;
   settingsSection: string;
+  cloudflareOpen: boolean;
   leftOpen: boolean;
   /** Main view: the canvas workspace or the dedicated analytics page. */
   mainView: "canvas" | "analytics";
@@ -26,6 +27,9 @@ interface UiState {
   openSettings: (section?: string) => void;
   closeSettings: () => void;
   setSettingsSection: (section: string) => void;
+  openCloudflare: () => void;
+  closeCloudflare: () => void;
+  toggleCloudflare: () => void;
   toggleLeft: () => void;
   toggleAnalytics: () => void;
   showCanvas: () => void;
@@ -65,6 +69,7 @@ export const useUiStore = create<UiState>()(
   persist(
     (set) => ({
       settingsOpen: false,
+      cloudflareOpen: false,
       mainView: "canvas",
       ...PERSIST_DEFAULTS,
 
@@ -75,6 +80,9 @@ export const useUiStore = create<UiState>()(
         })),
       closeSettings: () => set({ settingsOpen: false }),
       setSettingsSection: (section) => set({ settingsSection: section }),
+      openCloudflare: () => set({ cloudflareOpen: true }),
+      closeCloudflare: () => set({ cloudflareOpen: false }),
+      toggleCloudflare: () => set((s) => ({ cloudflareOpen: !s.cloudflareOpen })),
       toggleLeft: () =>
         set((s) =>
           s.mainView === "analytics"

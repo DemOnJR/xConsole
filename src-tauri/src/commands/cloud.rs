@@ -69,6 +69,23 @@ pub async fn list_cloud_resources(
         "aws" => crate::infra::aws::list_resources(&account, resource).await,
         "gcp" => crate::infra::gcp::list_resources(&account, resource).await,
         "tfc" => Err("use list_tfc_workspaces for Terraform Cloud accounts".into()),
+        "cloudflare" => {
+            let token = crate::infra::cloudflare::load_cf_token(&account.id)?;
+            let cf_acc_id = account.project_id.as_deref().unwrap_or("");
+            let tunnels = if !cf_acc_id.is_empty() {
+                crate::infra::cloudflare::list_tunnels(&token, cf_acc_id)
+                    .await
+                    .map(|t| format!("Tunnels ({}):\n{}", t.len(), t.iter().map(|x| format!("- {} [{}] ({})", x.name, x.id, x.status.as_deref().unwrap_or("unknown"))).collect::<Vec<_>>().join("\n")))
+                    .unwrap_or_else(|e| format!("Tunnels error: {e}"))
+            } else {
+                "No Cloudflare Account ID set".to_string()
+            };
+            let zones = crate::infra::cloudflare::list_zones(&token, if cf_acc_id.is_empty() { None } else { Some(cf_acc_id) })
+                .await
+                .map(|z| format!("Zones/Domains ({}):\n{}", z.len(), z.iter().map(|x| format!("- {} [id: {}] (status: {})", x.name, x.id, x.status)).collect::<Vec<_>>().join("\n")))
+                .unwrap_or_else(|e| format!("Zones error: {e}"));
+            Ok(format!("=== Cloudflare Resource Summary ===\n\n{}\n\n{}", tunnels, zones))
+        }
         other => Err(format!("unsupported cloud kind '{other}'")),
     }
 }

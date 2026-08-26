@@ -2,6 +2,7 @@
 
 pub mod aws;
 pub mod cloud;
+pub mod cloudflare;
 pub mod gcp;
 pub mod projects;
 pub mod summary;

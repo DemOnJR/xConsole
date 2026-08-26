@@ -609,7 +609,7 @@ export interface InfraProjectInput {
   description?: string | null;
 }
 
-export type CloudKind = "aws" | "gcp" | "tfc";
+export type CloudKind = "aws" | "gcp" | "tfc" | "cloudflare";
 
 export interface CloudAccount {
   id: string;
@@ -630,6 +630,71 @@ export interface CloudAccountInput {
   project_id?: string | null;
   organization?: string | null;
   secret?: string | null;
+}
+
+export interface CloudflareZone {
+  id: string;
+  name: string;
+  status: string;
+  paused: boolean;
+  type?: string | null;
+}
+
+export interface CloudflareTunnelConnection {
+  id?: string | null;
+  colo_name?: string | null;
+  is_pending_reconnect?: boolean | null;
+  opened_at?: string | null;
+}
+
+export interface CloudflareTunnel {
+  id: string;
+  name: string;
+  status?: string | null;
+  created_at?: string | null;
+  conns_active_at?: string | null;
+  connections: CloudflareTunnelConnection[];
+}
+
+export interface CloudflareIngressRule {
+  hostname?: string | null;
+  path?: string | null;
+  service: string;
+}
+
+export interface CloudflareTunnelConfig {
+  ingress: CloudflareIngressRule[];
+}
+
+export interface CloudflareDnsRecord {
+  id: string;
+  zone_id: string;
+  zone_name: string;
+  name: string;
+  type: string;
+  content: string;
+  proxiable: boolean;
+  proxied: boolean;
+  ttl: number;
+  comment?: string | null;
+  created_on?: string | null;
+  modified_on?: string | null;
+}
+
+export interface CloudflareDnsRecordInput {
+  id?: string | null;
+  name: string;
+  type: string;
+  content: string;
+  proxied: boolean;
+  ttl: number;
+  comment?: string | null;
+}
+
+export interface CloudflareSecuritySettings {
+  security_level: string;
+  ssl?: string | null;
+  attack_mode: boolean;
 }
 
 export interface ToolCall {
@@ -1248,6 +1313,36 @@ export const api = {
     invoke<string[]>("list_tfc_workspaces", { accountId }),
   listCloudResources: (accountId: string, resource?: string) =>
     invoke<string>("list_cloud_resources", { accountId, resource }),
+
+  // Cloudflare
+  startCloudflareOAuthLogin: () =>
+    invoke<number>("start_cloudflare_oauth_login"),
+  saveCloudflareManualToken: (token: string) =>
+    invoke<CloudAccount>("save_cloudflare_manual_token", { token }),
+  listCloudflareZones: (accountId: string) =>
+    invoke<CloudflareZone[]>("list_cloudflare_zones", { accountId }),
+  listCloudflareTunnels: (accountId: string) =>
+    invoke<CloudflareTunnel[]>("list_cloudflare_tunnels", { accountId }),
+  createCloudflareTunnel: (accountId: string, name: string) =>
+    invoke<CloudflareTunnel>("create_cloudflare_tunnel", { accountId, name }),
+  deleteCloudflareTunnel: (accountId: string, tunnelId: string) =>
+    invoke<void>("delete_cloudflare_tunnel", { accountId, tunnelId }),
+  getCloudflareTunnelConfig: (accountId: string, tunnelId: string) =>
+    invoke<CloudflareTunnelConfig>("get_cloudflare_tunnel_config", { accountId, tunnelId }),
+  saveCloudflareTunnelConfig: (accountId: string, tunnelId: string, config: CloudflareTunnelConfig) =>
+    invoke<CloudflareTunnelConfig>("save_cloudflare_tunnel_config", { accountId, tunnelId, config }),
+  getCloudflareTunnelToken: (accountId: string, tunnelId: string) =>
+    invoke<string>("get_cloudflare_tunnel_token", { accountId, tunnelId }),
+  listCloudflareDnsRecords: (accountId: string, zoneId: string) =>
+    invoke<CloudflareDnsRecord[]>("list_cloudflare_dns_records", { accountId, zoneId }),
+  upsertCloudflareDnsRecord: (accountId: string, zoneId: string, record: CloudflareDnsRecordInput) =>
+    invoke<CloudflareDnsRecord>("upsert_cloudflare_dns_record", { accountId, zoneId, record }),
+  deleteCloudflareDnsRecord: (accountId: string, zoneId: string, recordId: string) =>
+    invoke<void>("delete_cloudflare_dns_record", { accountId, zoneId, recordId }),
+  getCloudflareSecuritySettings: (accountId: string, zoneId: string) =>
+    invoke<CloudflareSecuritySettings>("get_cloudflare_security_settings", { accountId, zoneId }),
+  setCloudflareSecurityLevel: (accountId: string, zoneId: string, level: string) =>
+    invoke<string>("set_cloudflare_security_level", { accountId, zoneId, level }),
 };
 
 /** Subscribe to streamed output from a CLI provider's login flow. */

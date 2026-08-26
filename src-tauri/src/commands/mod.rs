@@ -1,6 +1,7 @@
 pub mod artifacts;
 pub mod ai;
 pub mod cloud;
+pub mod cloudflare;
 pub mod db;
 pub mod goal;
 pub mod infra;
