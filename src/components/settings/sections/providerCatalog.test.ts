@@ -24,6 +24,7 @@ describe("provider catalog", () => {
       "xai",
       "together",
       "ollama",
+      "kilo",
       "kimi",
       "zai",
       "cerebras",
@@ -56,6 +57,17 @@ describe("provider catalog", () => {
     expect(hits.some((p) => p.id === "deepseek")).toBe(true);
     const groq = searchCatalog("grok");
     expect(groq.some((p) => p.id === "groq" || p.id === "xai")).toBe(true);
+  });
+
+  it("defines Kilo AI Gateway with OpenAI flavor and gateway base URL", () => {
+    const kilo = PROVIDER_CATALOG.find((p) => p.id === "kilo");
+    expect(kilo).toBeDefined();
+    expect(kilo?.name).toBe("Kilo AI");
+    expect(kilo?.kind).toBe("openai");
+    expect(kilo?.flavor).toBe("openai");
+    expect(kilo?.baseUrl).toBe("https://api.kilo.ai/api/gateway");
+    expect(kilo?.needsKey).toBe(true);
+    expect(kilo?.models.length).toBeGreaterThan(0);
   });
 
   it("every entry has a valid kind + flavor + base URL", () => {

@@ -115,6 +115,28 @@ export const PROVIDER_CATALOG: CatalogProvider[] = [
   { id: "huggingface", name: "Hugging Face", kind: "openai", flavor: "openai", baseUrl: "https://router.huggingface.co/v1", defaultModel: "meta-llama/Llama-3.3-70B-Instruct", models: ["meta-llama/Llama-3.3-70B-Instruct", "deepseek-ai/DeepSeek-V3"], needsKey: true, group: "H" },
 
   // K
+  {
+    id: "kilo",
+    name: "Kilo AI",
+    kind: "openai",
+    flavor: "openai",
+    baseUrl: "https://api.kilo.ai/api/gateway",
+    defaultModel: "anthropic/claude-sonnet-4.5",
+    models: [
+      "anthropic/claude-sonnet-4.5",
+      "anthropic/claude-opus-4.5",
+      "anthropic/claude-haiku-4.5",
+      "openai/gpt-5",
+      "openai/gpt-4o",
+      "deepseek/deepseek-v4",
+      "deepseek/deepseek-chat",
+      "mistralai/codestral-2508",
+      "minimax/minimax-m2.1:free",
+      "z-ai/glm-5:free",
+    ],
+    needsKey: true,
+    group: "K",
+  },
   { id: "kimi", name: "Kimi (Moonshot)", kind: "openai", flavor: "openai", baseUrl: "https://api.moonshot.cn/v1", defaultModel: "moonshot-v1-8k", models: ["moonshot-v1-8k", "moonshot-v1-32k", "kimi-k2", "kimi-k2.5"], needsKey: true, group: "K" },
 
   // L
@@ -177,6 +199,7 @@ export function catalogGroups(): { letter: string; providers: CatalogProvider[] 
 /** Approximate per-1M token pricing for display in model pickers and settings. */
 export function priceForModel(modelId: string): { input: number; output: number; cacheRead: number } {
   const m = modelId.toLowerCase();
+  if (m.includes(":free")) return { input: 0.0, output: 0.0, cacheRead: 0.0 };
   if (m.includes("ox-alpha") || m.includes("0x-alpha") || m.includes("stealth")) return { input: 0.0, output: 0.0, cacheRead: 0.0 };
   if (m.includes("opus")) return { input: 15.0, output: 75.0, cacheRead: 1.5 };
   if (m.includes("sonnet") || m.includes("3-7-sonnet") || m.includes("3.7-sonnet")) return { input: 3.0, output: 15.0, cacheRead: 0.3 };
@@ -188,6 +211,7 @@ export function priceForModel(modelId: string): { input: number; output: number;
   if (m.includes("v4-flash") || m.includes("flash") || m.includes("deepseek-chat")) return { input: 0.14, output: 0.28, cacheRead: 0.0028 };
   if (m.includes("v4-pro")) return { input: 0.435, output: 0.87, cacheRead: 0.003625 };
   if (m.includes("reasoner") || m.includes("r1")) return { input: 0.55, output: 2.19, cacheRead: 0.14 };
+  if (m.includes("codestral") || m.includes("mistral")) return { input: 0.3, output: 0.9, cacheRead: 0.03 };
   if (m.includes("gemini") && m.includes("pro")) return { input: 1.25, output: 5.0, cacheRead: 0.3125 };
   if (m.includes("gemini")) return { input: 0.15, output: 0.6, cacheRead: 0.0375 };
   if (m.includes("grok")) return { input: 2.0, output: 10.0, cacheRead: 0.5 };
