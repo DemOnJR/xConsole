@@ -2418,7 +2418,7 @@ async fn probe_commandcode_usage(req: &ChatRequest) -> Result<(Option<u32>, Opti
     let body = json!({
         "model": req.model,
         "max_tokens": req.max_tokens,
-        "temperature": req.temperature,
+        "temperature": crate::ai::provider::format_temperature(req.temperature, 0.0, 2.0),
         "stream": false,
         "prompt_cache_key": format!("xc-{}", req.session_id),
         "messages": messages,

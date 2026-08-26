@@ -117,7 +117,7 @@ impl Provider for AnthropicProvider {
         let mut body = json!({
             "model": req.model,
             "max_tokens": req.max_tokens,
-            "temperature": req.temperature,
+            "temperature": crate::ai::provider::format_temperature(req.temperature, 0.0, 1.0),
             "stream": true,
             "messages": Self::build_messages(&req.messages),
         });

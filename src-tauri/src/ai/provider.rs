@@ -487,6 +487,28 @@ pub trait Provider: Send + Sync {
     }
 }
 
+/// Formats a float temperature cleanly into a `serde_json::Value` (JSON number).
+/// - Clamps `temp` between `min_val` and `max_val`.
+/// - Rounds to at most 2 decimal places.
+/// - Avoids IEEE-754 binary floating point precision artifacts (e.g. `0.7f32` serializing
+///   to `"0.699999988079071"` which causes HTTP 400 "The temperature parameter is illegal.：限制小数点[2]位"
+///   on strict providers like Z.AI, GLM, Moonshot, etc.).
+pub fn format_temperature(temp: f32, min_val: f32, max_val: f32) -> serde_json::Value {
+    let clamped = temp.clamp(min_val, max_val);
+    let rounded = (clamped * 100.0).round() / 100.0;
+    let mut s = format!("{:.2}", rounded);
+    if s.contains('.') {
+        while s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.push('0');
+        }
+    }
+    serde_json::from_str::<serde_json::Value>(&s)
+        .unwrap_or_else(|_| serde_json::json!(rounded as f64))
+}
+
 #[cfg(test)]
 mod close_tool_tests {
     use super::*;
@@ -531,5 +553,28 @@ mod close_tool_tests {
         ];
         assert_eq!(close_unanswered_tool_calls(&mut msgs), 1);
         assert_eq!(msgs[2].tool_call_id.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn test_format_temperature_clean_serialization() {
+        // 0.7f32 binary float precision artifact (0.699999988079071) must serialize cleanly to 0.7
+        let v = format_temperature(0.7, 0.0, 2.0);
+        assert_eq!(serde_json::to_string(&v).unwrap(), "0.7");
+
+        let v2 = format_temperature(0.15, 0.0, 2.0);
+        assert_eq!(serde_json::to_string(&v2).unwrap(), "0.15");
+
+        let v3 = format_temperature(0.0, 0.0, 2.0);
+        assert_eq!(serde_json::to_string(&v3).unwrap(), "0.0");
+
+        let v4 = format_temperature(1.0, 0.0, 2.0);
+        assert_eq!(serde_json::to_string(&v4).unwrap(), "1.0");
+
+        // Clamping check for GLM (0.01 - 0.99)
+        let v_glm_zero = format_temperature(0.0, 0.01, 0.99);
+        assert_eq!(serde_json::to_string(&v_glm_zero).unwrap(), "0.01");
+
+        let v_glm_over = format_temperature(1.5, 0.01, 0.99);
+        assert_eq!(serde_json::to_string(&v_glm_over).unwrap(), "0.99");
     }
 }

@@ -135,7 +135,7 @@ fn usage_counts(event: &Value) -> UsageCounts {
     }
 }
 
-/// Detects reasoning models that reject standard sampling parameters (e.g. OpenAI o1/o3/o4, DeepSeek R1, Ox Alpha).
+/// Detects reasoning models that reject standard sampling parameters (e.g. OpenAI o1/o3/o4, DeepSeek R1, Ox Alpha, thinking models).
 fn is_reasoning_model(model: &str) -> bool {
     let m = model.to_lowercase();
     m.starts_with("o1")
@@ -145,12 +145,31 @@ fn is_reasoning_model(model: &str) -> bool {
         || m.starts_with("o4")
         || m.contains("/o4")
         || m.contains("reasoning")
+        || m.contains("reasoner")
         || m.contains("deepseek-r1")
         || m.contains("deepseek-reasoner")
         || m.contains("qwq")
+        || m.contains("qvq")
         || m.contains("ox-alpha")
         || m.contains("0x-alpha")
         || m.contains("stealth")
+        || m.contains("thinking")
+        || m.contains("thought")
+        || m.contains("kimi-k1.5")
+        || m.contains("glm-zero-preview")
+}
+
+/// Detects if the endpoint/model is Z.AI / Zhipu / GLM which requires 0.01 <= temperature <= 0.99 (or (0.0, 1.0)).
+fn is_glm_endpoint(model: &str, base_url: &str) -> bool {
+    let m = model.to_lowercase();
+    let url = base_url.to_lowercase();
+    m.contains("glm")
+        || m.contains("zhipu")
+        || m.contains("z.ai")
+        || m.contains("chatglm")
+        || url.contains("z.ai")
+        || url.contains("bigmodel.cn")
+        || url.contains("zhipu")
 }
 
 /// Models/endpoints requiring `max_completion_tokens` instead of `max_tokens`.
@@ -211,13 +230,15 @@ impl Provider for OpenAiProvider {
         let tools = Self::build_tools(req);
 
         let is_reasoning = is_reasoning_model(&req.model);
+        let is_glm = is_glm_endpoint(&req.model, &self.base_url);
         let use_max_completion = wants_max_completion_tokens(&req.model, &self.base_url);
         let dev_role = wants_developer_role(&req.model, &self.base_url);
 
         // Send the request. If the model rejects tool calling (e.g. some hosted
-        // Groq models), retry once WITHOUT tools so plain chat still works — and
-        // tell the user, since the agent can't run commands without tools.
+        // Groq models), retry once WITHOUT tools. If the model rejects temperature
+        // (strict reasoning models or custom gateway constraints), retry once without temperature.
         let mut send_tools = !tools.is_empty();
+        let mut send_temperature = !is_reasoning;
         let resp = loop {
             let mut body = json!({
                 "model": req.model,
@@ -233,8 +254,11 @@ impl Provider for OpenAiProvider {
             }
 
             // Temperature is rejected by OpenAI and strict reasoning models (o1/o3/o4/ox-alpha) with 400 Bad Request.
-            if !is_reasoning {
-                body["temperature"] = json!(req.temperature);
+            // When sending temperature, format to max 2 decimal places and clamp appropriately to prevent
+            // float precision artifacts (e.g. 0.7f32 -> "0.699999988079071") from causing HTTP 400 (Z.AI error 1210).
+            if send_temperature {
+                let (min_t, max_t) = if is_glm { (0.01, 0.99) } else { (0.0, 2.0) };
+                body["temperature"] = crate::ai::provider::format_temperature(req.temperature, min_t, max_t);
             }
 
             // Reasoning effort → OpenRouter accepts {"reasoning": {"effort": "..."}}, OpenAI accepts reasoning_effort
@@ -308,9 +332,10 @@ impl Provider for OpenAiProvider {
             }
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            let text_lower = text.to_lowercase();
             if send_tools
                 && status.as_u16() == 400
-                && text.to_lowercase().contains("tool")
+                && text_lower.contains("tool")
             {
                 emit(
                     sink,
@@ -322,6 +347,25 @@ impl Provider for OpenAiProvider {
                     ),
                 );
                 send_tools = false;
+                continue;
+            }
+
+            if send_temperature
+                && status.as_u16() == 400
+                && (text_lower.contains("temperature")
+                    || text.contains("1210")
+                    || text.contains("小数点")
+                    || text_lower.contains("sampling parameter")
+                    || text_lower.contains("invalid parameter"))
+            {
+                emit(
+                    sink,
+                    StreamEvent::Status(
+                        "This model does not accept the temperature parameter — retrying without temperature."
+                            .into(),
+                    ),
+                );
+                send_temperature = false;
                 continue;
             }
             return Err(format!("openai error {status}: {text}"));
@@ -579,10 +623,18 @@ mod tests {
         assert!(is_reasoning_model("o1-mini"));
         assert!(is_reasoning_model("o3-mini"));
         assert!(is_reasoning_model("deepseek-r1"));
+        assert!(is_reasoning_model("deepseek-reasoner"));
+        assert!(is_reasoning_model("qwq-32b-preview"));
+        assert!(is_reasoning_model("gemini-2.0-flash-thinking-exp"));
         assert!(is_reasoning_model("stealth/ox-alpha"));
         assert!(is_reasoning_model("ox-alpha"));
         assert!(!is_reasoning_model("gpt-4o"));
         assert!(!is_reasoning_model("llama-3.3-70b-versatile"));
+
+        assert!(is_glm_endpoint("glm-4-plus", "https://open.bigmodel.cn/api/paas/v4"));
+        assert!(is_glm_endpoint("z-ai/glm-4", "https://api.openai.com/v1"));
+        assert!(is_glm_endpoint("any-model", "https://api.z.ai/v1"));
+        assert!(!is_glm_endpoint("gpt-4o", "https://api.openai.com/v1"));
 
         assert!(wants_max_completion_tokens("o3-mini", "https://api.openai.com/v1"));
         assert!(wants_max_completion_tokens("gpt-4o", "https://api.openai.com/v1"));
