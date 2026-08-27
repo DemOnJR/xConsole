@@ -3,7 +3,20 @@ import { useCloudflareStore } from "./store";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { CloudflareDnsRecordInput, CloudflareIngressRule } from "./types";
-import { Button, Card, Field, Select, TextInput, PlusIcon, TrashIcon } from "./ui";
+import { Button, Field, Select, TextInput } from "./ui";
+import {
+  CloudIcon,
+  ShieldIcon,
+  GlobeIcon,
+  HistoryIcon,
+  PlusIcon,
+  TrashIcon,
+  CopyIcon,
+  CheckIcon,
+  RefreshIcon,
+  CloseIcon,
+  SearchIcon,
+} from "./icons";
 
 export function CloudflareManager({ onClose }: { onClose?: () => void }) {
   const {
@@ -50,6 +63,10 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
   const [dnsTypeFilter, setDnsTypeFilter] = useState("ALL");
 
   const [copiedToken, setCopiedToken] = useState(false);
+  const [showSetupGuide, setShowSetupGuide] = useState(false);
+  const [tokenInput, setTokenInput] = useState("");
+  const [savingToken, setSavingToken] = useState(false);
+  const [tokenError, setTokenError] = useState<string | null>(null);
 
   useEffect(() => {
     loadAccounts();
@@ -117,11 +134,6 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
     return matchesSearch && matchesType;
   });
 
-  const [showSetupGuide, setShowSetupGuide] = useState(false);
-  const [tokenInput, setTokenInput] = useState("");
-  const [savingToken, setSavingToken] = useState(false);
-  const [tokenError, setTokenError] = useState<string | null>(null);
-
   const handleSaveManualToken = async () => {
     if (!tokenInput.trim()) return;
     setSavingToken(true);
@@ -156,21 +168,27 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
   };
 
   return (
-    <div className="flex h-full flex-col bg-[var(--surface)] text-[var(--text)]">
-      {/* Header bar */}
-      <div className="flex items-center justify-between border-b border-[var(--border)] px-5 py-3.5 bg-[var(--surface-2)]">
+    <div className="flex h-full flex-col bg-[var(--surface)] text-[var(--text)] select-none">
+      {/* Top Application Header */}
+      <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-2.5 bg-[var(--surface-2)]">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <span className="text-xl">☁️</span>
-            <h2 className="text-sm font-semibold text-gray-100">Cloudflare Zero Trust &amp; Security</h2>
+            <div className="flex h-7 w-7 items-center justify-center rounded-md bg-orange-500/10 border border-orange-500/20 text-orange-400">
+              <CloudIcon size={16} />
+            </div>
+            <div>
+              <h2 className="text-xs font-semibold tracking-wide text-gray-100 uppercase">
+                Cloudflare Zero Trust
+              </h2>
+            </div>
           </div>
 
-          {accounts.length > 0 ? (
-            <div className="flex items-center gap-2">
+          {accounts.length > 0 && (
+            <div className="flex items-center gap-1.5 ml-2 pl-3 border-l border-[var(--border)]">
               <Select
                 value={selectedAccountId ?? ""}
                 onChange={(e) => selectAccount(e.target.value)}
-                className="text-xs py-1"
+                className="text-xs py-1 h-7 bg-[var(--bg)] border-[var(--border)]"
               >
                 {accounts.map((a) => (
                   <option key={a.id} value={a.id}>
@@ -179,208 +197,201 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
                 ))}
               </Select>
 
+              {zones.length > 0 && (
+                <Select
+                  value={selectedZoneId ?? ""}
+                  onChange={(e) => selectZone(e.target.value)}
+                  className="text-xs py-1 h-7 bg-[var(--bg)] border-[var(--border)]"
+                >
+                  {zones.map((z) => (
+                    <option key={z.id} value={z.id}>
+                      {z.name}
+                    </option>
+                  ))}
+                </Select>
+              )}
+
               <Button
                 variant="ghost"
-                className="text-xs text-red-400 hover:text-red-300 hover:bg-red-950/30 px-2 py-1"
-                title="Șterge contul Cloudflare selectat"
+                className="text-[11px] text-gray-400 hover:text-red-400 hover:bg-red-950/20 px-2 py-1 h-7"
+                title="Șterge contul Cloudflare selectat din xConsole"
                 onClick={async () => {
-                  if (selectedAccountId && confirm("Sigur vrei să ștergi acest cont Cloudflare din xConsole?")) {
+                  if (selectedAccountId && confirm("Sigur vrei să deconectezi acest cont Cloudflare?")) {
                     await invoke("delete_cloud_account", { id: selectedAccountId });
                     await loadAccounts();
                   }
                 }}
               >
-                🗑️ Șterge
+                <TrashIcon size={12} />
               </Button>
-
-              {zones.length > 0 && (
-                <Select
-                  value={selectedZoneId ?? ""}
-                  onChange={(e) => selectZone(e.target.value)}
-                  className="text-xs py-1"
-                >
-                  {zones.map((z) => (
-                    <option key={z.id} value={z.id}>
-                      🌐 {z.name}
-                    </option>
-                  ))}
-                </Select>
-              )}
             </div>
-          ) : null}
+          )}
         </div>
 
         <div className="flex items-center gap-2">
           {accounts.length > 0 && (
-            <Button
-              variant="ghost"
-              className="text-xs text-gray-300 hover:text-white"
+            <button
+              type="button"
+              className={`flex items-center gap-1.5 rounded border px-2.5 py-1 text-xs transition ${
+                showSetupGuide
+                  ? "border-orange-500/40 bg-orange-500/10 text-orange-300"
+                  : "border-[var(--border)] bg-[var(--surface)] text-gray-300 hover:bg-[var(--border)]/60 hover:text-white"
+              }`}
               onClick={() => setShowSetupGuide((v) => !v)}
             >
-              {showSetupGuide ? "✕ Închide Ghidul" : "📖 Ghid / Adaugă cont"}
-            </Button>
+              {showSetupGuide ? <CloseIcon size={12} /> : <PlusIcon size={12} />}
+              <span>{showSetupGuide ? "Închide Ghid" : "Adaugă / Ghid Token"}</span>
+            </button>
           )}
 
           {onClose && (
-            <Button variant="ghost" onClick={onClose} className="text-xs">
-              Închide
-            </Button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded p-1 text-gray-400 hover:bg-[var(--border)] hover:text-white"
+              title="Închide fereastra"
+            >
+              <CloseIcon size={14} />
+            </button>
           )}
         </div>
       </div>
 
       {accounts.length === 0 || showSetupGuide ? (
-        <div className="flex-1 overflow-y-auto p-6 md:p-8 flex flex-col items-center">
-          <div className="w-full max-w-2xl bg-[var(--surface-2)] border border-[var(--border)] rounded-2xl p-6 shadow-xl">
-            <div className="flex items-center gap-3 mb-4">
-              <span className="text-3xl">☁️</span>
+        <div className="flex-1 overflow-y-auto p-6 flex flex-col items-center justify-center bg-[var(--bg)]/40">
+          <div className="w-full max-w-2xl bg-[var(--surface)] border border-[var(--border)] rounded-xl p-6 shadow-xl">
+            <div className="flex items-center gap-3 pb-4 border-b border-[var(--border)]">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-orange-500/10 border border-orange-500/20 text-orange-400">
+                <CloudIcon size={22} />
+              </div>
               <div>
-                <h3 className="text-base font-bold text-white">Ghid de Conectare Cont Cloudflare</h3>
-                <p className="text-xs text-gray-400">
-                  Urmează acești 3 pași simpli pentru a oferi aplicației acces la Tunele Zero Trust, DNS și Securitate.
+                <h3 className="text-sm font-semibold text-white">Conectare Cont Cloudflare</h3>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  Generează un API Token cu permisiunile necesare pentru Tunele Zero Trust, DNS și Securitate.
                 </p>
               </div>
             </div>
 
-            {/* Step 1 */}
-            <div className="mt-5 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
-              <div className="flex items-center justify-between gap-4">
+            {/* Steps in clean minimal cards */}
+            <div className="mt-4 space-y-3">
+              <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-3.5 flex items-center justify-between gap-4">
                 <div>
-                  <div className="flex items-center gap-2">
-                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#f48120] text-xs font-bold text-white">1</span>
-                    <h4 className="text-xs font-semibold text-white">Deschide pagina Cloudflare API Tokens</h4>
+                  <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-orange-400">
+                    Pasul 1
+                  </span>
+                  <div className="text-xs font-medium text-gray-200 mt-0.5">
+                    Deschide panoul oficial Cloudflare API Tokens
                   </div>
-                  <p className="mt-1 text-[11px] text-gray-400">
-                    Apasă butonul de mai jos pentru a deschide panoul oficial Cloudflare în browser:
-                  </p>
                 </div>
-                <Button
-                  variant="primary"
-                  className="bg-[#f48120] hover:bg-[#e06d0e] text-white text-xs whitespace-nowrap"
+                <button
+                  type="button"
                   onClick={() => openUrl("https://dash.cloudflare.com/profile/api-tokens")}
+                  className="flex items-center gap-1.5 rounded-md border border-orange-500/40 bg-orange-500/10 px-3 py-1.5 text-xs font-medium text-orange-300 hover:bg-orange-500/20 transition"
                 >
-                  Deschide Cloudflare ↗
-                </Button>
-              </div>
-            </div>
-
-            {/* Step 2 */}
-            <div className="mt-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
-              <div className="flex items-center gap-2 mb-2">
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#f48120] text-xs font-bold text-white">2</span>
-                <h4 className="text-xs font-semibold text-white">Creează Token-ul cu permisiunile necesare</h4>
+                  <span>Deschide Cloudflare</span>
+                  <GlobeIcon size={12} />
+                </button>
               </div>
 
-              <div className="text-[11px] text-gray-300 space-y-2 pl-7">
-                <p>
-                  1. Apasă pe butonul albastru <strong>+ Create Token</strong> (dreapta-sus).
-                </p>
-                <p>
-                  2. La secțiunea de jos <strong>Custom token</strong>, apasă <strong>Get started</strong>.
-                </p>
-                <p>
-                  3. Numește token-ul: <code className="bg-black/40 px-1.5 py-0.5 rounded text-[#f48120]">xConsole</code>
-                </p>
-                <p>
-                  4. La <strong>Permissions</strong>, adaugă aceste 4 rânduri:
-                </p>
-                <div className="rounded-lg bg-black/40 border border-white/10 p-2.5 space-y-1.5 font-mono text-[11px]">
-                  <div className="flex items-center justify-between text-gray-200">
-                    <span>🛡️ Account &rarr; Cloudflare Tunnel</span>
-                    <span className="text-[#f48120] font-semibold">Edit</span>
+              <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-3.5">
+                <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-orange-400">
+                  Pasul 2
+                </span>
+                <div className="text-xs font-medium text-gray-200 mt-0.5 mb-2">
+                  Creează un <strong>Custom Token</strong> cu permisiunile:
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-gray-300">
+                  <div className="rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-1">
+                    Account &rarr; Cloudflare Tunnel (Read/Write)
                   </div>
-                  <div className="flex items-center justify-between text-gray-200">
-                    <span>🌐 Zone &rarr; DNS</span>
-                    <span className="text-[#f48120] font-semibold">Edit</span>
+                  <div className="rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-1">
+                    Zone &rarr; DNS (Read/Write)
                   </div>
-                  <div className="flex items-center justify-between text-gray-200">
-                    <span>🔒 Zone &rarr; Zone Settings</span>
-                    <span className="text-[#f48120] font-semibold">Edit</span>
+                  <div className="rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-1">
+                    Zone &rarr; Zone Settings (Read/Write)
                   </div>
-                  <div className="flex items-center justify-between text-gray-200">
-                    <span>👁️ Zone &rarr; Zone</span>
-                    <span className="text-blue-400 font-semibold">Read</span>
+                  <div className="rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-1">
+                    Zone &rarr; Zone (Read)
                   </div>
                 </div>
-                <p className="text-[11px] text-gray-400">
-                  5. Lasă <em>Account Resources</em> pe <strong>All accounts</strong> și <em>Zone Resources</em> pe <strong>All zones</strong>, apoi apasă <strong>Continue to summary</strong> &rarr; <strong>Create Token</strong> &rarr; <strong>Copy</strong>.
-                </p>
-              </div>
-            </div>
-
-            {/* Step 3 */}
-            <div className="mt-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
-              <div className="flex items-center gap-2 mb-2">
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#f48120] text-xs font-bold text-white">3</span>
-                <h4 className="text-xs font-semibold text-white">Lipește token-ul și finalizează conectarea</h4>
               </div>
 
-              <div className="pl-7 space-y-3">
+              <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-3.5">
+                <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-orange-400">
+                  Pasul 3
+                </span>
+                <div className="text-xs font-medium text-gray-200 mt-0.5 mb-2">
+                  Lipește token-ul generat pentru autorizare:
+                </div>
                 <div className="flex gap-2">
                   <TextInput
                     type="password"
                     value={tokenInput}
                     onChange={(e) => setTokenInput(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleSaveManualToken()}
-                    placeholder="Lipește API Token-ul sau Global API Key aici..."
-                    className="flex-1 text-xs"
-                    autoFocus
+                    placeholder="Lipește Cloudflare API Token..."
+                    className="flex-1 text-xs font-mono"
                   />
                   <Button
                     variant="primary"
-                    className="bg-[#2563eb] hover:bg-[#1d4ed8] text-white text-xs px-5 whitespace-nowrap border-none"
-                    disabled={savingToken || !tokenInput.trim()}
+                    disabled={!tokenInput.trim() || savingToken}
                     onClick={handleSaveManualToken}
+                    className="text-xs shrink-0"
                   >
-                    {savingToken ? "Se conectează…" : "Salvează și Conectează ✓"}
+                    {savingToken ? "Se conectează..." : "Conectează"}
                   </Button>
                 </div>
-
                 {tokenError && (
-                  <p className="text-xs text-red-400 bg-red-950/40 border border-red-800/50 rounded-lg p-2">
-                    ❌ {tokenError}
-                  </p>
+                  <p className="mt-2 text-xs text-red-400 font-mono">{tokenError}</p>
                 )}
               </div>
             </div>
           </div>
         </div>
       ) : (
-        <div className="flex flex-1 flex-col overflow-hidden">
-          {/* Navigation Tabs */}
-          <div className="flex border-b border-[var(--border)] px-5 bg-[var(--surface)]">
+        <div className="flex flex-1 flex-col min-h-0">
+          {/* Refined Navigation Tabs */}
+          <div className="flex border-b border-[var(--border)] px-4 bg-[var(--surface)] text-xs">
             <button
               type="button"
               onClick={() => setActiveTab("tunnels")}
-              className={`px-4 py-2.5 text-xs font-medium border-b-2 transition ${
+              className={`flex items-center gap-1.5 px-3 py-2 border-b-2 font-medium transition ${
                 activeTab === "tunnels"
-                  ? "border-[#f48120] text-[#f48120]"
+                  ? "border-orange-500 text-orange-400 font-semibold"
                   : "border-transparent text-gray-400 hover:text-gray-200"
               }`}
             >
-              🛡️ Tunele Zero Trust ({tunnels.length})
+              <ShieldIcon size={13} />
+              <span>Tunele Zero Trust</span>
+              <span className="rounded bg-[var(--border)] px-1.5 py-0.2 text-[10px] text-gray-300 font-mono">
+                {tunnels.length}
+              </span>
             </button>
             <button
               type="button"
               onClick={() => setActiveTab("dns")}
-              className={`px-4 py-2.5 text-xs font-medium border-b-2 transition ${
+              className={`flex items-center gap-1.5 px-3 py-2 border-b-2 font-medium transition ${
                 activeTab === "dns"
-                  ? "border-[#f48120] text-[#f48120]"
+                  ? "border-orange-500 text-orange-400 font-semibold"
                   : "border-transparent text-gray-400 hover:text-gray-200"
               }`}
             >
-              🌐 Înregistrări DNS ({dnsRecords.length})
+              <GlobeIcon size={13} />
+              <span>Înregistrări DNS</span>
+              <span className="rounded bg-[var(--border)] px-1.5 py-0.2 text-[10px] text-gray-300 font-mono">
+                {dnsRecords.length}
+              </span>
             </button>
             <button
               type="button"
               onClick={() => setActiveTab("security")}
-              className={`px-4 py-2.5 text-xs font-medium border-b-2 transition ${
+              className={`flex items-center gap-1.5 px-3 py-2 border-b-2 font-medium transition ${
                 activeTab === "security"
-                  ? "border-[#f48120] text-[#f48120]"
+                  ? "border-orange-500 text-orange-400 font-semibold"
                   : "border-transparent text-gray-400 hover:text-gray-200"
               }`}
             >
-              🔒 Securitate &amp; WAF
+              <ShieldIcon size={13} />
+              <span>Securitate &amp; WAF</span>
             </button>
             <button
               type="button"
@@ -388,15 +399,16 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
                 setActiveTab("history");
                 if (selectedAccountId) loadHistory(selectedAccountId);
               }}
-              className={`px-4 py-2.5 text-xs font-medium border-b-2 transition flex items-center gap-1.5 ${
+              className={`flex items-center gap-1.5 px-3 py-2 border-b-2 font-medium transition ${
                 activeTab === "history"
-                  ? "border-[#f48120] text-[#f48120]"
+                  ? "border-orange-500 text-orange-400 font-semibold"
                   : "border-transparent text-gray-400 hover:text-gray-200"
               }`}
             >
-              📜 Istoric &amp; Rollback
+              <HistoryIcon size={13} />
+              <span>Istoric &amp; Rollback</span>
               {history.length > 0 && (
-                <span className="rounded-full bg-[#f48120]/20 text-[#f48120] px-1.5 py-0.5 text-[10px] font-bold">
+                <span className="rounded bg-orange-500/20 text-orange-300 px-1.5 py-0.2 text-[10px] font-mono font-bold">
                   {history.length}
                 </span>
               )}
@@ -404,7 +416,7 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
           </div>
 
           {error && (
-            <div className="mx-5 mt-3 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300">
+            <div className="mx-4 mt-2.5 rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300 font-mono">
               {error}
             </div>
           )}
@@ -412,48 +424,47 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
           {/* TAB 1: TUNNELS */}
           {activeTab === "tunnels" && (
             <div className="flex flex-1 min-h-0 overflow-hidden">
-              <div className="w-72 border-r border-[var(--border)] p-3 overflow-y-auto space-y-2">
+              <div className="w-64 border-r border-[var(--border)] p-3 overflow-y-auto space-y-1.5 bg-[var(--surface-2)]/40">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-semibold uppercase tracking-wider text-gray-400">
-                    Tunele ({tunnels.length})
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+                    Tunele Active
                   </span>
-                  <Button
-                    variant="ghost"
-                    className="text-xs p-1 text-[#f48120]"
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 text-[11px] text-orange-400 hover:text-orange-300"
                     onClick={() => setCreatingTunnel(true)}
                   >
-                    <PlusIcon size={12} /> Tunel nou
-                  </Button>
+                    <PlusIcon size={11} /> Nou
+                  </button>
                 </div>
 
                 {tunnels.length === 0 ? (
-                  <p className="text-xs text-gray-500 p-2">Nu există tunele create în acest cont.</p>
+                  <p className="text-xs text-gray-500 p-2">Nu există tunele create.</p>
                 ) : (
                   tunnels.map((t) => {
                     const isSelected = selectedTunnel?.id === t.id;
                     const isHealthy = t.status === "healthy";
-                    const isDown = t.status === "down";
                     return (
                       <div
                         key={t.id}
                         onClick={() => selectTunnel(t)}
-                        className={`cursor-pointer rounded-lg border p-2.5 text-left transition ${
+                        className={`cursor-pointer rounded-md border px-2.5 py-2 text-left transition ${
                           isSelected
-                            ? "border-[#f48120] bg-[var(--surface-hover)]"
-                            : "border-[var(--border)] hover:bg-[var(--surface-hover)]"
+                            ? "border-orange-500/60 bg-orange-500/10 text-white"
+                            : "border-[var(--border)] bg-[var(--surface)] text-gray-300 hover:bg-[var(--border)]/50"
                         }`}
                       >
                         <div className="flex items-center justify-between">
-                          <span className="text-xs font-medium text-gray-100 truncate">{t.name}</span>
+                          <span className="text-xs font-medium truncate">{t.name}</span>
                           <span
-                            className={`inline-block h-2 w-2 rounded-full ${
-                              isHealthy ? "bg-green-500" : isDown ? "bg-red-500" : "bg-gray-400"
+                            className={`h-2 w-2 rounded-full shrink-0 ${
+                              isHealthy ? "bg-emerald-400" : "bg-zinc-500"
                             }`}
-                            title={`Status: ${t.status || "unknown"}`}
+                            title={`Status: ${t.status || "inactive"}`}
                           />
                         </div>
-                        <div className="mt-1 text-[10px] text-gray-500 truncate font-mono">
-                          ID: {t.id.slice(0, 12)}…
+                        <div className="mt-0.5 text-[10px] text-gray-500 truncate font-mono">
+                          {t.id.slice(0, 14)}...
                         </div>
                       </div>
                     );
@@ -461,46 +472,46 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
                 )}
               </div>
 
-              <div className="flex-1 p-5 overflow-y-auto">
+              <div className="flex-1 p-5 overflow-y-auto bg-[var(--bg)]/20">
                 {selectedTunnel ? (
-                  <div className="space-y-5 max-w-3xl">
-                    <div className="flex items-start justify-between">
+                  <div className="space-y-4 max-w-3xl">
+                    <div className="flex items-center justify-between pb-3 border-b border-[var(--border)]">
                       <div>
-                        <h3 className="text-base font-semibold text-gray-100 flex items-center gap-2">
-                          {selectedTunnel.name}
+                        <div className="flex items-center gap-2">
+                          <h3 className="text-sm font-semibold text-white">{selectedTunnel.name}</h3>
                           <span
-                            className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ${
+                            className={`rounded px-1.5 py-0.2 text-[9px] font-mono font-semibold uppercase ${
                               selectedTunnel.status === "healthy"
-                                ? "bg-green-500/20 text-green-400"
-                                : "bg-red-500/20 text-red-400"
+                                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                                : "bg-zinc-800 text-zinc-400 border border-zinc-700"
                             }`}
                           >
                             {selectedTunnel.status || "INACTIVE"}
                           </span>
-                        </h3>
-                        <p className="text-xs text-gray-500 font-mono mt-0.5">
-                          Tunnel ID: {selectedTunnel.id}
+                        </div>
+                        <p className="text-[11px] text-gray-500 font-mono mt-0.5">
+                          ID: {selectedTunnel.id}
                         </p>
                       </div>
 
                       <Button
                         variant="ghost"
-                        className="text-xs text-red-400 hover:bg-red-500/10"
+                        className="text-xs text-red-400 hover:bg-red-500/10 border border-transparent hover:border-red-500/20"
                         onClick={() => {
                           if (confirm(`Sigur dorești să ștergi tunelul "${selectedTunnel.name}"?`)) {
                             deleteTunnel(selectedTunnel.id);
                           }
                         }}
                       >
-                        <TrashIcon size={13} /> Șterge tunel
+                        <TrashIcon size={12} /> Șterge
                       </Button>
                     </div>
 
                     {tunnelToken && (
-                      <Card className="p-3 bg-[var(--surface-2)]">
+                      <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-3">
                         <div className="flex items-center justify-between mb-1.5">
-                          <span className="text-xs font-semibold text-gray-200">
-                            🚀 Comandă instalare &amp; rulare pe VPS:
+                          <span className="text-[11px] font-medium text-gray-300">
+                            Comandă instalare &amp; pornire 1-Click pe VPS:
                           </span>
                           <button
                             type="button"
@@ -511,26 +522,24 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
                               setCopiedToken(true);
                               setTimeout(() => setCopiedToken(false), 2000);
                             }}
-                            className="text-[11px] text-[#f48120] hover:underline"
+                            className="flex items-center gap-1 text-[11px] text-orange-400 hover:text-orange-300 font-medium"
                           >
-                            {copiedToken ? "Copiat! ✓" : "Copiază comanda 1-Click"}
+                            {copiedToken ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
+                            <span>{copiedToken ? "Copiat" : "Copiază comanda"}</span>
                           </button>
                         </div>
-                        <pre className="overflow-x-auto rounded bg-black/40 p-2 text-[11px] font-mono text-gray-300">
+                        <pre className="overflow-x-auto rounded bg-black/50 p-2 text-[11px] font-mono text-gray-300 border border-[var(--border)]">
                           sudo cloudflared service install {tunnelToken}
                         </pre>
-                      </Card>
+                      </div>
                     )}
 
                     <div>
                       <div className="flex items-center justify-between mb-2">
                         <div>
                           <h4 className="text-xs font-semibold text-gray-200">
-                            Rute Ingress (Public Hostname &rarr; Local/VPS Service)
+                            Rute Ingress (Public Hostname &rarr; Serviciu Intern)
                           </h4>
-                          <p className="text-[11px] text-gray-500">
-                            Ce domeniu public direcționează către ce port/serviciu intern.
-                          </p>
                         </div>
                         <Button
                           variant="primary"
@@ -545,32 +554,32 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
                         <table className="w-full text-left text-xs">
                           <thead className="border-b border-[var(--border)] bg-[var(--surface-2)] text-gray-400">
                             <tr>
-                              <th className="p-2.5 font-medium">Public Hostname</th>
-                              <th className="p-2.5 font-medium">Path</th>
-                              <th className="p-2.5 font-medium">Internal Service</th>
-                              <th className="p-2.5 text-right font-medium">Acțiuni</th>
+                              <th className="p-2 font-medium">Public Hostname</th>
+                              <th className="p-2 font-medium">Path</th>
+                              <th className="p-2 font-medium">Internal Service</th>
+                              <th className="p-2 text-right font-medium w-16">Acțiuni</th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-[var(--border)] text-gray-300">
+                          <tbody className="divide-y divide-[var(--border)] text-gray-300 font-mono text-[11px]">
                             {tunnelConfig?.ingress && tunnelConfig.ingress.length > 0 ? (
                               tunnelConfig.ingress.map((rule, idx) => (
                                 <tr key={idx} className="hover:bg-[var(--surface-hover)]">
-                                  <td className="p-2.5 font-medium text-gray-100">
+                                  <td className="p-2 font-medium text-gray-100 font-sans">
                                     {rule.hostname || (
                                       <span className="text-gray-500 italic">(catch-all)</span>
                                     )}
                                   </td>
-                                  <td className="p-2.5 text-gray-400">{rule.path || "/"}</td>
-                                  <td className="p-2.5 font-mono text-blue-400">{rule.service}</td>
-                                  <td className="p-2.5 text-right">
+                                  <td className="p-2 text-gray-400">{rule.path || "/"}</td>
+                                  <td className="p-2 text-cyan-400">{rule.service}</td>
+                                  <td className="p-2 text-right">
                                     {rule.hostname && (
                                       <button
                                         type="button"
                                         onClick={() => handleRemoveIngress(idx)}
-                                        className="text-red-400 hover:text-red-300 p-1"
+                                        className="text-gray-400 hover:text-red-400 p-1"
                                         title="Șterge ruta"
                                       >
-                                        <TrashIcon size={13} />
+                                        <TrashIcon size={12} />
                                       </button>
                                     )}
                                   </td>
@@ -578,7 +587,7 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
                               ))
                             ) : (
                               <tr>
-                                <td colSpan={4} className="p-4 text-center text-gray-500">
+                                <td colSpan={4} className="p-4 text-center text-gray-500 font-sans">
                                   Nicio rută configurată încă.
                                 </td>
                               </tr>
@@ -590,7 +599,7 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
                   </div>
                 ) : (
                   <div className="flex h-full items-center justify-center text-xs text-gray-500">
-                    Selectează un tunel din stânga pentru a vedea detaliile și rutele de ingress.
+                    Selectează un tunel din lista din stânga.
                   </div>
                 )}
               </div>
@@ -599,21 +608,24 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
 
           {/* TAB 2: DNS RECORDS */}
           {activeTab === "dns" && (
-            <div className="flex-1 p-5 overflow-y-auto">
-              <div className="flex items-center justify-between mb-4 gap-3">
+            <div className="flex-1 p-4 overflow-y-auto">
+              <div className="flex items-center justify-between mb-3 gap-3">
                 <div className="flex items-center gap-2 flex-1">
-                  <TextInput
-                    value={dnsSearch}
-                    onChange={(e) => setDnsSearch(e.target.value)}
-                    placeholder="Caută înregistrări DNS (nume, IP, valoare)…"
-                    className="max-w-xs text-xs"
-                  />
+                  <div className="relative flex items-center flex-1 max-w-xs">
+                    <SearchIcon size={12} className="absolute left-2 text-gray-500 pointer-events-none" />
+                    <TextInput
+                      value={dnsSearch}
+                      onChange={(e) => setDnsSearch(e.target.value)}
+                      placeholder="Caută înregistrări DNS..."
+                      className="pl-6 text-xs"
+                    />
+                  </div>
                   <Select
                     value={dnsTypeFilter}
                     onChange={(e) => setDnsTypeFilter(e.target.value)}
                     className="text-xs w-28"
                   >
-                    <option value="ALL">Toate tipurile</option>
+                    <option value="ALL">Toate</option>
                     <option value="A">A</option>
                     <option value="AAAA">AAAA</option>
                     <option value="CNAME">CNAME</option>
@@ -635,7 +647,7 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
                     })
                   }
                 >
-                  <PlusIcon size={12} /> Adaugă înregistrare DNS
+                  <PlusIcon size={12} /> Adaugă DNS
                 </Button>
               </div>
 
@@ -643,38 +655,44 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
                 <table className="w-full text-left text-xs">
                   <thead className="border-b border-[var(--border)] bg-[var(--surface-2)] text-gray-400">
                     <tr>
-                      <th className="p-2.5 font-medium w-16">Tip</th>
-                      <th className="p-2.5 font-medium">Nume</th>
-                      <th className="p-2.5 font-medium">Conținut / Țintă</th>
-                      <th className="p-2.5 font-medium w-24">Proxy Status</th>
-                      <th className="p-2.5 font-medium w-16">TTL</th>
-                      <th className="p-2.5 text-right font-medium w-24">Acțiuni</th>
+                      <th className="p-2 font-medium w-16">Tip</th>
+                      <th className="p-2 font-medium">Nume</th>
+                      <th className="p-2 font-medium">Conținut / Țintă</th>
+                      <th className="p-2 font-medium w-24">Proxy</th>
+                      <th className="p-2 font-medium w-16">TTL</th>
+                      <th className="p-2 text-right font-medium w-20">Acțiuni</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--border)] text-gray-300">
                     {filteredDns.length > 0 ? (
                       filteredDns.map((rec) => (
                         <tr key={rec.id} className="hover:bg-[var(--surface-hover)]">
-                          <td className="p-2.5 font-bold text-gray-200">{rec.type}</td>
-                          <td className="p-2.5 font-medium text-gray-100">{rec.name}</td>
-                          <td className="p-2.5 font-mono text-gray-300">{rec.content}</td>
-                          <td className="p-2.5">
+                          <td className="p-2">
+                            <span className="rounded bg-zinc-800 border border-zinc-700 px-1.5 py-0.2 text-[10px] font-mono font-bold text-gray-200">
+                              {rec.type}
+                            </span>
+                          </td>
+                          <td className="p-2 font-medium text-gray-100">{rec.name}</td>
+                          <td className="p-2 font-mono text-gray-300 text-[11px]">{rec.content}</td>
+                          <td className="p-2">
                             {rec.proxied ? (
-                              <span className="inline-flex items-center gap-1 rounded bg-orange-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-orange-400">
-                                ☁️ Proxied
+                              <span className="inline-flex items-center gap-1 rounded bg-orange-500/10 border border-orange-500/30 px-1.5 py-0.2 text-[10px] font-mono font-semibold text-orange-300">
+                                Proxied
                               </span>
                             ) : (
-                              <span className="inline-flex items-center gap-1 rounded bg-gray-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-gray-400">
-                                DNS only
+                              <span className="inline-flex items-center gap-1 rounded bg-zinc-800 border border-zinc-700 px-1.5 py-0.2 text-[10px] font-mono text-zinc-400">
+                                DNS Only
                               </span>
                             )}
                           </td>
-                          <td className="p-2.5 text-gray-400">{rec.ttl === 1 ? "Auto" : `${rec.ttl}s`}</td>
-                          <td className="p-2.5 text-right">
+                          <td className="p-2 text-gray-400 text-[11px] font-mono">
+                            {rec.ttl === 1 ? "Auto" : `${rec.ttl}s`}
+                          </td>
+                          <td className="p-2 text-right">
                             <div className="flex justify-end gap-1">
-                              <Button
-                                variant="ghost"
-                                className="text-xs p-1"
+                              <button
+                                type="button"
+                                className="text-gray-400 hover:text-white px-1.5 py-0.5 text-[11px]"
                                 onClick={() =>
                                   setEditingDns({
                                     id: rec.id,
@@ -687,10 +705,10 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
                                 }
                               >
                                 Edit
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                className="text-xs text-red-400 p-1"
+                              </button>
+                              <button
+                                type="button"
+                                className="text-gray-400 hover:text-red-400 p-1"
                                 onClick={() => {
                                   if (confirm(`Ștergi înregistrarea ${rec.type} ${rec.name}?`)) {
                                     deleteDnsRecord(rec.id);
@@ -698,7 +716,7 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
                                 }}
                               >
                                 <TrashIcon size={12} />
-                              </Button>
+                              </button>
                             </div>
                           </td>
                         </tr>
@@ -718,82 +736,79 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
 
           {/* TAB 3: SECURITY & WAF */}
           {activeTab === "security" && (
-            <div className="flex-1 p-5 overflow-y-auto max-w-3xl space-y-5">
-              <Card className="p-4 border border-[var(--border)]">
+            <div className="flex-1 p-5 overflow-y-auto max-w-2xl space-y-4">
+              <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h4 className="text-sm font-semibold text-gray-100 flex items-center gap-2">
-                      🚨 "I'm Under Attack" Mode
+                    <h4 className="text-xs font-semibold text-gray-100 uppercase tracking-wide">
+                      "I'm Under Attack" Mode
                     </h4>
-                    <p className="text-xs text-gray-400 mt-1 max-w-lg">
+                    <p className="text-xs text-gray-400 mt-1 max-w-md">
                       Activează o verificare JavaScript avansată pentru fiecare vizitator pentru a mitiga atacurile DDoS.
                     </p>
                   </div>
 
                   <Button
                     variant="primary"
-                    className="bg-gray-700 hover:bg-gray-600 text-gray-200"
                     onClick={() => toggleUnderAttackMode()}
+                    className="text-xs"
                   >
                     Comută Mod
                   </Button>
                 </div>
-              </Card>
+              </div>
             </div>
           )}
 
           {/* TAB 4: HISTORY & ROLLBACK */}
           {activeTab === "history" && (
-            <div className="flex-1 overflow-y-auto p-5 space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-sm font-semibold text-gray-100 flex items-center gap-2">
-                    <span>📜</span> Istoric Modificări &amp; Rollback Instant
-                  </h3>
-                </div>
+            <div className="flex-1 overflow-y-auto p-5 space-y-3">
+              <div className="flex items-center justify-between pb-2 border-b border-[var(--border)]">
+                <h3 className="text-xs font-semibold text-gray-200 uppercase tracking-wider">
+                  Audit Log &amp; Rollback
+                </h3>
 
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="ghost"
-                    className="text-xs"
-                    onClick={() => selectedAccountId && loadHistory(selectedAccountId)}
-                  >
-                    🔄 Reîmprospătează
-                  </Button>
-                </div>
+                <button
+                  type="button"
+                  className="flex items-center gap-1 text-xs text-gray-400 hover:text-white"
+                  onClick={() => selectedAccountId && loadHistory(selectedAccountId)}
+                >
+                  <RefreshIcon size={12} /> Reîmprospătează
+                </button>
               </div>
 
               {revertToast && (
-                <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/40 p-3 text-xs text-emerald-300 flex items-center justify-between">
-                  <span>✓ {revertToast}</span>
-                  <button type="button" onClick={() => setRevertToast(null)} className="text-emerald-400 hover:text-white">✕</button>
+                <div className="rounded border border-emerald-500/30 bg-emerald-950/40 p-2.5 text-xs text-emerald-300 flex items-center justify-between">
+                  <span>{revertToast}</span>
+                  <button type="button" onClick={() => setRevertToast(null)} className="text-emerald-400 hover:text-white">
+                    <CloseIcon size={12} />
+                  </button>
                 </div>
               )}
 
               {history.length === 0 ? (
-                <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-[var(--border)] p-12 text-center">
-                  <div className="text-3xl mb-2">📜</div>
-                  <h4 className="text-sm font-semibold text-gray-200 mb-1">Nicio modificare înregistrată încă</h4>
+                <div className="rounded-lg border border-dashed border-[var(--border)] p-8 text-center text-xs text-gray-500">
+                  Nicio modificare înregistrată în istoric.
                 </div>
               ) : (
-                <div className="space-y-3">
+                <div className="space-y-2">
                   {history.map((log) => (
-                    <Card key={log.id} className="p-4 border border-[var(--border)]">
+                    <div key={log.id} className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-3">
                       <div className="flex items-start justify-between gap-4">
                         <div>
                           <div className="text-xs font-medium text-gray-200">{log.summary}</div>
-                          <div className="text-[10px] text-gray-400 font-mono mt-1">{log.created_at}</div>
+                          <div className="text-[10px] text-gray-500 font-mono mt-0.5">{log.created_at}</div>
                         </div>
                         <Button
                           variant="ghost"
-                          className="bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/30 text-xs"
+                          className="bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/30 text-xs py-1"
                           disabled={revertingId === log.id}
                           onClick={() => handleRevert(log.id)}
                         >
-                          {revertingId === log.id ? "Se anulează…" : "↩️ Revert"}
+                          {revertingId === log.id ? "Se anulează..." : "Revert"}
                         </Button>
                       </div>
-                    </Card>
+                    </div>
                   ))}
                 </div>
               )}
@@ -808,7 +823,7 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
           className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-6"
           onMouseDown={(e) => e.target === e.currentTarget && setCreatingTunnel(false)}
         >
-          <div className="w-[min(460px,90vw)] rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-5 shadow-2xl">
+          <div className="w-[min(440px,90vw)] rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-5 shadow-2xl">
             <h3 className="text-sm font-semibold text-gray-100 mb-3">Creare tunel Zero Trust nou</h3>
             <Field label="Nume tunel" hint="Exemplu: production-vps, api-gateway">
               <TextInput
@@ -827,7 +842,7 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
                 onClick={handleCreateTunnel}
                 disabled={!newTunnelName.trim()}
               >
-                Creează tunel &rarr;
+                Creează tunel
               </Button>
             </div>
           </div>
@@ -866,7 +881,7 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
                 onClick={handleAddIngress}
                 disabled={!ingressForm.service.trim()}
               >
-                Salvează ruta ✓
+                Salvează ruta
               </Button>
             </div>
           </div>
@@ -879,9 +894,9 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
           className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-6"
           onMouseDown={(e) => e.target === e.currentTarget && setEditingDns(null)}
         >
-          <div className="w-[min(500px,90vw)] rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-5 shadow-2xl space-y-3">
+          <div className="w-[min(480px,90vw)] rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-5 shadow-2xl space-y-3">
             <h3 className="text-sm font-semibold text-gray-100">
-              {editingDns.id ? "Editare înregistrare DNS" : "Adăugare înregistrare DNS nouă"}
+              {editingDns.id ? "Editare înregistrare DNS" : "Adăugare înregistrare DNS"}
             </h3>
 
             <div className="grid grid-cols-3 gap-2">
@@ -927,7 +942,7 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
                 onClick={handleSaveDns}
                 disabled={!editingDns.name.trim() || !editingDns.content.trim()}
               >
-                Salvează înregistrarea ✓
+                Salvează DNS
               </Button>
             </div>
           </div>

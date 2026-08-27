@@ -84,13 +84,18 @@ pub struct CfTunnelConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CfDnsRecord {
     pub id: String,
+    #[serde(default)]
     pub zone_id: String,
+    #[serde(default)]
     pub zone_name: String,
     pub name: String,
     pub r#type: String,
     pub content: String,
+    #[serde(default)]
     pub proxiable: bool,
+    #[serde(default)]
     pub proxied: bool,
+    #[serde(default)]
     pub ttl: u32,
     #[serde(default)]
     pub comment: Option<String>,
@@ -529,8 +534,13 @@ pub async fn list_dns_records(token: &str, zone_id: &str) -> Result<Vec<CfDnsRec
     }
 
     let result = json.get("result").cloned().unwrap_or(Value::Array(vec![]));
-    let records: Vec<CfDnsRecord> = serde_json::from_value(result)
+    let mut records: Vec<CfDnsRecord> = serde_json::from_value(result)
         .map_err(|e| format!("Failed to parse DNS records: {e}"))?;
+    for r in &mut records {
+        if r.zone_id.is_empty() {
+            r.zone_id = zone_id.to_string();
+        }
+    }
     Ok(records)
 }
 
