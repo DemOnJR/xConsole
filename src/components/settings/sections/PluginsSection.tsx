@@ -40,7 +40,7 @@ export function PluginsSection() {
               Pluginuri &amp; Extensii Modulare (Harness)
             </h3>
             <span className="rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 px-1.5 py-0.2 text-[10px] font-mono">
-              Cordis Microkernel
+              xConsole Engine
             </span>
           </div>
           <p className="text-xs text-gray-400 mt-0.5">

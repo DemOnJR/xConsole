@@ -77,7 +77,7 @@ export function PluginMarketplaceModal() {
                   xConsole Plugin Harness
                 </h2>
                 <span className="rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 px-2 py-0.5 text-[10px] font-mono">
-                  Cordis Spatiotemporal
+                  Microkernel Architecture
                 </span>
               </div>
               <p className="text-xs text-gray-400">
@@ -400,15 +400,8 @@ export function PluginMarketplaceModal() {
               xconsole plugin install &lt;repo_url_or_name&gt;
             </code>
           </div>
-          <div>
-            <a
-              href="https://github.com/cordiverse/paper/blob/main/paper.pdf"
-              target="_blank"
-              rel="noreferrer"
-              className="text-indigo-400 hover:underline"
-            >
-              Cordis Microkernel Specs ↗
-            </a>
+          <div className="flex items-center gap-2 text-gray-400">
+            <span className="text-[10px] font-mono text-indigo-300/80">xConsole Harness Spec v1.0</span>
           </div>
         </div>
       </div>
