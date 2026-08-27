@@ -2,24 +2,24 @@ import { useEffect } from "react";
 import { useSettingsStore } from "../../../stores/settingsStore";
 import { useVpsStore } from "../../../stores/vpsStore";
 import { defaultVisionModel, isGeminiProvider, parseVisionMode } from "../../../lib/vision";
-import { Card, Field, SectionHeader, Select } from "../ui";
+import { Field, SectionHeader, Select, TextInput, SettingsGroup } from "../ui";
 import { SK } from "./GeneralSection";
 
 const SAFETY_OPTIONS: { value: string; label: string; hint: string }[] = [
   {
-    value: "full",
-    label: "Full autonomy",
-    hint: "Runs any command on any server with no confirmation.",
+    value: "approve",
+    label: "Approve each action (Default / Recommended)",
+    hint: "Every command, file edit, and critical tool execution must be approved before running.",
   },
   {
     value: "allowlist",
-    label: "Allowlist",
-    hint: "Auto-runs read-only/safe commands; asks approval for the rest.",
+    label: "Allowlist safe commands",
+    hint: "Auto-runs read-only and inspection commands; prompts for destructive or write operations.",
   },
   {
-    value: "approve",
-    label: "Approve each",
-    hint: "Every command must be approved before it runs.",
+    value: "full",
+    label: "Full autonomy",
+    hint: "Executes all commands directly without manual confirmation.",
   },
 ];
 
@@ -38,14 +38,14 @@ export function AgentSection() {
   const currentHint = SAFETY_OPTIONS.find((o) => o.value === global)?.hint;
 
   return (
-    <div>
+    <div className="space-y-6">
       <SectionHeader
-        title="Agent & Safety"
-        description="Control how much autonomy the agent has when it runs commands on your servers. You can override the default per server."
+        title="Agent Engine & Safety Gates"
+        description="Control agent autonomy level, vision analysis, prompt token cache TTL, and per-server security policies."
       />
 
-      <Card className="mb-3">
-        <Field label="Default safety mode" hint={currentHint}>
+      <SettingsGroup title="Autonomy & Safety Policy">
+        <Field label="Global Safety Mode" hint={currentHint}>
           <Select
             value={global}
             onChange={(e) => set(SK.safetyMode, e.target.value)}
@@ -57,122 +57,121 @@ export function AgentSection() {
             ))}
           </Select>
         </Field>
-      </Card>
 
-      <Card className="mb-3">
-        <Field
-          label="Tool output limit (chars)"
-          hint="Applied once when the tool result is stored (append-only, cache-friendly). Default 4000. 0 = unlimited."
-        >
-          <input
-            type="number"
-            min={0}
-            step={500}
-            value={settings[SK.toolResultMaxChars] ?? "4000"}
-            onChange={(e) => set(SK.toolResultMaxChars, e.target.value)}
-            className="w-40 rounded border border-[var(--border-strong)] bg-[var(--bg)] px-2 py-1 text-sm text-gray-200 outline-none focus:border-[var(--accent)]"
-          />
-        </Field>
-        <Field
-          label="Cache retention"
-          hint="Anthropic only. Long = 1h TTL at 2× cache-write price. Leave at 5 minutes unless sessions sit idle. DeepSeek / Command Code ignore this — they auto-cache the prefix."
-        >
-          <Select
-            value={settings[SK.cacheRetention] ?? ""}
-            onChange={(e) => set(SK.cacheRetention, e.target.value)}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+          <Field
+            label="Tool Output Limit (Characters)"
+            hint="Maximum character window stored per tool result. Default: 4000. Set 0 for unlimited."
           >
-            <option value="">5 minutes (default)</option>
-            <option value="long">1 hour (2× write price)</option>
-          </Select>
-        </Field>
-      </Card>
+            <TextInput
+              type="number"
+              min={0}
+              step={500}
+              value={settings[SK.toolResultMaxChars] ?? "4000"}
+              onChange={(e) => set(SK.toolResultMaxChars, e.target.value)}
+            />
+          </Field>
 
-      <Card className="mb-3">
-        <Field
-          label="Image vision"
-          hint="Ask = confirm before sending pixels. Enabled = always send. Disabled = keep [Image #n] text only. The session model never switches."
-        >
-          <Select
-            value={parseVisionMode(settings[SK.visionMode])}
-            onChange={(e) => set(SK.visionMode, e.target.value)}
+          <Field
+            label="Prompt Cache Retention"
+            hint="Prompt prefix caching TTL (Anthropic). Default: 5 minutes."
           >
-            <option value="ask">Ask before sending images</option>
-            <option value="enabled">Always send images</option>
-            <option value="disabled">Don't send images</option>
-          </Select>
-        </Field>
-        <Field
-          label="Vision provider"
-          hint="Used when the session model cannot see, or when you pick a different vision model. Gemini is recommended."
-        >
-          <Select
-            value={settings[SK.visionProvider] ?? ""}
-            onChange={(e) => {
-              const id = e.target.value;
-              void set(SK.visionProvider, id);
-              const p = providers.find((x) => x.id === id);
-              if (p) void set(SK.visionModel, defaultVisionModel(p));
-            }}
-          >
-            <option value="">Auto (Gemini if configured)</option>
-            {providers
-              .filter((p) => p.enabled)
-              .map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                  {isGeminiProvider(p) ? " — recommended" : ""}
-                </option>
-              ))}
-          </Select>
-        </Field>
-        <Field
-          label="Vision model"
-          hint="Override the model on the vision provider. Empty uses Gemini Flash when the provider is Gemini."
-        >
-          <input
-            value={settings[SK.visionModel] ?? ""}
-            onChange={(e) => set(SK.visionModel, e.target.value)}
-            placeholder="gemini-2.5-flash"
-            className="w-full max-w-md rounded border border-[var(--border-strong)] bg-[var(--bg)] px-2 py-1 text-sm text-gray-200 outline-none focus:border-[var(--accent)]"
-          />
-        </Field>
-      </Card>
-
-      <Card>
-        <div className="mb-2 text-sm text-gray-200">Per-server overrides</div>
-        <div className="mb-3 text-xs text-gray-500">
-          Leave on "Use default" unless a specific server needs a different policy
-          (e.g. full autonomy on a sandbox, approve-each on production).
+            <Select
+              value={settings[SK.cacheRetention] ?? ""}
+              onChange={(e) => set(SK.cacheRetention, e.target.value)}
+            >
+              <option value="">5 minutes (Standard)</option>
+              <option value="long">1 hour (Extended)</option>
+            </Select>
+          </Field>
         </div>
-        {vpsList.length === 0 && (
-          <div className="text-xs text-gray-600">No servers yet.</div>
-        )}
-        <div className="space-y-2">
-          {vpsList.map((v) => {
-            const key = `${SK.safetyMode}.${v.id}`;
-            const value = settings[key] ?? "";
-            return (
-              <div key={v.id} className="flex items-center gap-2">
-                <span className="min-w-0 flex-1 truncate text-sm text-gray-300">
-                  {v.name}
-                </span>
-                <Select
-                  value={value}
-                  onChange={(e) => set(key, e.target.value)}
-                  className="w-44"
+      </SettingsGroup>
+
+      <SettingsGroup
+        title="Vision & Multimodal Analysis"
+        description="Image recognition and screenshot analysis capabilities."
+        className="pt-4 border-t border-[var(--border)]"
+      >
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <Field
+            label="Vision Mode"
+            hint="Ask = confirm before sending images. Enabled = auto send."
+          >
+            <Select
+              value={parseVisionMode(settings[SK.visionMode])}
+              onChange={(e) => set(SK.visionMode, e.target.value)}
+            >
+              <option value="ask">Ask before sending images</option>
+              <option value="enabled">Always send images</option>
+              <option value="disabled">Disable image analysis</option>
+            </Select>
+          </Field>
+
+          <Field
+            label="Dedicated Vision Provider"
+            hint="Used if the primary model is text-only. Gemini Flash is recommended."
+          >
+            <Select
+              value={settings[SK.visionProvider] ?? ""}
+              onChange={(e) => {
+                const id = e.target.value;
+                void set(SK.visionProvider, id);
+                const p = providers.find((x) => x.id === id);
+                if (p) void set(SK.visionModel, defaultVisionModel(p));
+              }}
+            >
+              <option value="">Auto (Gemini Flash if configured)</option>
+              {providers
+                .filter((p) => p.enabled)
+                .map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                    {isGeminiProvider(p) ? " (Recommended for Vision)" : ""}
+                  </option>
+                ))}
+            </Select>
+          </Field>
+        </div>
+      </SettingsGroup>
+
+      <SettingsGroup
+        title="Per-Host Security Overrides"
+        description="Override the default safety gate on specific environments (e.g. Full autonomy on local sandboxes, Approve each on production)."
+        className="pt-4 border-t border-[var(--border)]"
+      >
+        {vpsList.length === 0 ? (
+          <p className="text-xs text-gray-500 italic">No remote servers configured yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {vpsList.map((v) => {
+              const key = `${SK.safetyMode}.${v.id}`;
+              const value = settings[key] ?? "";
+              return (
+                <div
+                  key={v.id}
+                  className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[var(--surface)] p-2.5"
                 >
-                  <option value="">Use default</option>
-                  {SAFETY_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </Select>
-              </div>
-            );
-          })}
-        </div>
-      </Card>
+                  <span className="truncate text-xs font-mono text-gray-200">
+                    {v.name} ({v.host})
+                  </span>
+                  <Select
+                    value={value}
+                    onChange={(e) => set(key, e.target.value)}
+                    className="w-48"
+                  >
+                    <option value="">Use Global Default</option>
+                    {SAFETY_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </SettingsGroup>
     </div>
   );
 }

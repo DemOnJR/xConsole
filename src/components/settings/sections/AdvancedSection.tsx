@@ -1,4 +1,4 @@
-import { useState, type ComponentType, type ReactNode } from "react";
+import { useState, type ComponentType } from "react";
 import { SectionHeader } from "../ui";
 import { VoiceSection } from "./VoiceSection";
 import { HooksSection } from "./HooksSection";
@@ -6,118 +6,78 @@ import { CronSection } from "./CronSection";
 import { CloudSection } from "./CloudSection";
 import { ProjectsSection } from "./ProjectsSection";
 
-interface AdvancedBlock {
+interface AdvancedTab {
   id: string;
   label: string;
-  hint: string;
+  description: string;
   Component: ComponentType;
 }
 
-const BLOCKS: AdvancedBlock[] = [
+const TABS: AdvancedTab[] = [
   {
     id: "voice",
-    label: "Voice",
-    hint: "Speech-to-text and text-to-speech engines for hands-free agent turns.",
+    label: "Voice (STT/TTS)",
+    description: "Hands-free speech-to-text recognition and text-to-speech voice engines.",
     Component: VoiceSection,
   },
   {
-    id: "hooks",
-    label: "Hooks",
-    hint: "Run scripts on agent lifecycle events (prompt submit, tool use, stop).",
-    Component: HooksSection,
-  },
-  {
     id: "cron",
-    label: "Cron",
-    hint: "Schedule recurring agent jobs or remote commands.",
+    label: "Scheduled Cron",
+    description: "Automate recurring maintenance tasks, heartbeats, and scheduled agent jobs.",
     Component: CronSection,
   },
   {
+    id: "hooks",
+    label: "Lifecycle Hooks",
+    description: "Execute shell scripts or triggers on agent events (prompt submit, tool use, completion).",
+    Component: HooksSection,
+  },
+  {
     id: "cloud",
-    label: "Cloud accounts",
-    hint: "AWS / GCP credentials for infrastructure tools.",
+    label: "Cloud Credentials",
+    description: "Cloudflare, AWS, GCP, and Terraform Cloud accounts for infrastructure tools.",
     Component: CloudSection,
   },
   {
     id: "projects",
-    label: "Terraform projects",
-    hint: "IaC project roots the agent can load and apply skills against.",
+    label: "IaC Projects",
+    description: "Terraform roots and local infrastructure project definitions.",
     Component: ProjectsSection,
   },
 ];
 
-function Fold({
-  label,
-  hint,
-  open,
-  onToggle,
-  children,
-}: {
-  label: string;
-  hint: string;
-  open: boolean;
-  onToggle: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <div className="mb-2 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg)]">
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-start gap-3 px-3 py-2.5 text-left transition hover:bg-[var(--surface-hover)]"
-      >
-        <span
-          className="mt-0.5 text-[var(--text-faint)] transition-transform"
-          style={{ transform: open ? "rotate(90deg)" : "none" }}
-          aria-hidden
-        >
-          ▸
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block text-sm text-[var(--text)]">{label}</span>
-          <span className="mt-0.5 block text-[11px] leading-relaxed text-[var(--text-faint)]">
-            {hint}
-          </span>
-        </span>
-      </button>
-      {open ? (
-        <div className="border-t border-[var(--border)] px-3 py-3">{children}</div>
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * Power-user features kept out of the top-level settings nav so the
- * primary surface stays compact (Voice, Hooks, Cron, Cloud, Terraform).
- */
 export function AdvancedSection() {
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [activeTabId, setActiveTabId] = useState<string>("voice");
+  const activeTab = TABS.find((t) => t.id === activeTabId) ?? TABS[0];
+  const ActiveComponent = activeTab.Component;
 
   return (
-    <div>
+    <div className="space-y-5">
       <SectionHeader
-        title="Advanced"
-        description="Optional power features. Everything here works; most daily DevOps workflows never need these open."
+        title="Advanced Tools & Automation"
+        description="Power-user utilities: Voice STT/TTS, recurring cron jobs, lifecycle hooks, and cloud infrastructure credentials."
       />
-      {BLOCKS.map((b) => {
-        const Comp = b.Component;
-        const open = openId === b.id;
-        return (
-          <Fold
-            key={b.id}
-            label={b.label}
-            hint={b.hint}
-            open={open}
-            onToggle={() => setOpenId(open ? null : b.id)}
+
+      <div className="flex flex-wrap gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-1">
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setActiveTabId(t.id)}
+            className={`flex-1 min-w-[120px] rounded-md px-2.5 py-1.5 text-xs font-medium transition ${
+              t.id === activeTab.id
+                ? "bg-cyan-500/20 text-cyan-300 shadow-xs border border-cyan-500/30"
+                : "text-gray-400 hover:text-gray-200 border border-transparent"
+            }`}
           >
-            {/* Nested sections already render their own headers — keep content only. */}
-            <div className="[&>div>div:first-child]:mb-3">
-              <Comp />
-            </div>
-          </Fold>
-        );
-      })}
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="pt-1">
+        <ActiveComponent />
+      </div>
     </div>
   );
 }

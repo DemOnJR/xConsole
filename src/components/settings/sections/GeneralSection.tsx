@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { useSettingsStore } from "../../../stores/settingsStore";
 import { useUpdateStore, type UpdateChannel } from "../../../stores/updateStore";
-import { Card, Field, SectionHeader, Select, TextInput, Toggle } from "../ui";
+import { Field, SectionHeader, Select, TextInput, Toggle, SettingsGroup, SettingsRow, Button } from "../ui";
 
 export const SK = {
   agentEnabled: "agent.enabled",
@@ -41,37 +41,32 @@ export function GeneralSection() {
   const checking = updateStatus === "checking" || updateStatus === "updating";
 
   return (
-    <div>
+    <div className="space-y-6">
       <SectionHeader
-        title="General"
-        description="App-wide defaults: agent on/off, active provider, remote editor, and updates."
+        title="General Preferences"
+        description="System defaults, AI assistant state, remote editor bindings, and release channels."
       />
 
-      <Card className="mb-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="text-sm text-gray-200">AI agent</div>
-            <div className="text-xs text-gray-500">
-              Enable the assistant across the app.
-            </div>
-          </div>
+      <SettingsGroup title="AI Assistant">
+        <SettingsRow
+          label="Autonomous AI Agent"
+          description="Enable or disable the AI pairing engine across the workspace canvas."
+        >
           <Toggle
             checked={agentEnabled}
             onChange={(v) => set(SK.agentEnabled, v ? "true" : "false")}
           />
-        </div>
-      </Card>
+        </SettingsRow>
 
-      <Card>
         <Field
-          label="Active provider"
-          hint="The default model/provider new agent sessions use. Configure providers in the Providers tab."
+          label="Default AI Provider"
+          hint="The default provider new agent sessions use. Configure API keys in the AI Providers tab."
         >
           <Select
             value={activeProvider}
             onChange={(e) => set(SK.activeProvider, e.target.value)}
           >
-            <option value="">(none selected)</option>
+            <option value="">(None selected - prompt when opening agent)</option>
             {providers.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name} ({p.kind})
@@ -79,12 +74,15 @@ export function GeneralSection() {
             ))}
           </Select>
         </Field>
-      </Card>
+      </SettingsGroup>
 
-      <Card className="mt-3">
+      <SettingsGroup
+        title="Editor & Tooling"
+        className="pt-4 border-t border-[var(--border)]"
+      >
         <Field
-          label="External editor for remote files"
-          hint="Leave empty to use the built-in editor. Set to `code` for VS Code (or a full path, plus any flags). Choosing “Open in …” on a file in an SFTP panel downloads it, opens it there, and uploads every save back — verifying the byte count first, and refusing to replace a non-empty file with an empty one."
+          label="External Editor for Remote Files"
+          hint="Leave empty to use built-in editor. Set to 'code' for VS Code (or custom editor binary path). Remote files open externally and automatically sync changes back over SFTP."
         >
           <TextInput
             value={settings[SK.externalEditor] ?? ""}
@@ -93,63 +91,60 @@ export function GeneralSection() {
             spellCheck={false}
           />
         </Field>
-      </Card>
+      </SettingsGroup>
 
-      <Card className="mt-3">
-        <Field
-          label="Release channel"
-          hint="Stable tracks the main branch (production). Dev tracks the dev branch for pre-release builds. Switching channels checks for an update; install it to rebuild from that branch. Your data is never touched."
-        >
-          <Select
-            value={channel}
-            disabled={checking}
-            onChange={(e) => void setChannel(e.target.value as UpdateChannel)}
+      <SettingsGroup
+        title="Software Updates & Channel"
+        className="pt-4 border-t border-[var(--border)]"
+      >
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <Field
+            label="Release Channel"
+            hint="Stable tracks verified releases. Dev tracks latest pre-release builds."
           >
-            <option value="main">Stable (main)</option>
-            <option value="dev">Dev (dev)</option>
-          </Select>
-        </Field>
-      </Card>
+            <Select
+              value={channel}
+              disabled={checking}
+              onChange={(e) => void setChannel(e.target.value as UpdateChannel)}
+            >
+              <option value="main">Stable (main branch)</option>
+              <option value="dev">Dev (dev branch)</option>
+            </Select>
+          </Field>
 
-      <Card className="mt-3">
-        <Field
-          label="App version & updates"
-          hint="xConsole checks GitHub for newer code on your selected channel and prompts you to update. An update re-clones + rebuilds from source — chats, workspaces, memory, settings, and keys are backed up first and never touched."
-        >
-          <div className="flex flex-col gap-2">
-            <div className="flex flex-wrap items-center gap-2 text-sm text-gray-300">
-              <span>v{appVersion || "…"}</span>
-              <span className="rounded bg-[var(--accent-muted)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--accent)]">
-                {channel === "dev" ? "dev" : "stable"}
-              </span>
-              {current ? (
-                <span className="font-mono text-xs text-gray-500" title="Built from commit">
-                  {current}
+          <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-3 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-gray-200">v{appVersion || "0.1.0"}</span>
+                <span className="rounded bg-cyan-500/20 border border-cyan-500/30 px-1.5 py-0.2 text-[9px] font-mono font-semibold uppercase text-cyan-300">
+                  {channel === "dev" ? "dev" : "stable"}
                 </span>
-              ) : null}
-              {localBranch && localBranch !== channel ? (
-                <span className="text-xs text-amber-300">
-                  install on {localBranch} · channel {channel}
-                </span>
-              ) : null}
+                {current && (
+                  <span className="text-[10px] font-mono text-gray-500" title="Git commit SHA">
+                    {current.slice(0, 7)}
+                  </span>
+                )}
+              </div>
+              {note && <p className="mt-1 text-[11px] text-amber-300">{note}</p>}
+              {localBranch && localBranch !== channel && (
+                <p className="mt-1 text-[10px] text-amber-400 font-mono">
+                  Branch mismatch: on {localBranch}, channel {channel}
+                </p>
+              )}
             </div>
-            {note ? <p className="text-[11px] text-amber-300/90">{note}</p> : null}
-            <p className="font-mono text-[10px] text-gray-600" title="Install location">
-              %LOCALAPPDATA%\\xConsole
-              {localBranch ? ` · checkout ${localBranch}` : ""}
-            </p>
-            <div className="flex items-center justify-end">
-              <button
+
+            <div className="mt-3 flex justify-end">
+              <Button
+                variant="ghost"
                 onClick={() => void checkUpdate(true)}
                 disabled={checking}
-                className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs text-gray-200 transition hover:bg-[var(--border)] disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {updateStatus === "checking" ? "Checking…" : "Check for updates"}
-              </button>
+                {updateStatus === "checking" ? "Checking…" : "Check for Updates"}
+              </Button>
             </div>
           </div>
-        </Field>
-      </Card>
+        </div>
+      </SettingsGroup>
     </div>
   );
 }

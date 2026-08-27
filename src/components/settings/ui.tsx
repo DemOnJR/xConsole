@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
-import type { ReactNode, SelectHTMLAttributes, InputHTMLAttributes, TextareaHTMLAttributes, ButtonHTMLAttributes } from "react";
+import type {
+  ReactNode,
+  SelectHTMLAttributes,
+  InputHTMLAttributes,
+  TextareaHTMLAttributes,
+  ButtonHTMLAttributes,
+} from "react";
 
-/** Shared form primitives for every settings section. Defined once, reused everywhere. */
+/** Shared form primitives for settings. Clean, enterprise-grade, zero visual clutter. */
 
 export function SectionHeader({
   title,
@@ -13,16 +19,74 @@ export function SectionHeader({
   action?: ReactNode;
 }) {
   return (
-    <div className="mb-4 flex items-start gap-3">
+    <div className="mb-6 flex items-start justify-between gap-4 pb-3 border-b border-[var(--border)]">
       <div className="min-w-0 flex-1">
-        <h2 className="text-base font-semibold text-gray-100">{title}</h2>
+        <h2 className="text-sm font-semibold tracking-wide text-gray-100 uppercase">
+          {title}
+        </h2>
         {description && (
-          <p className="mt-0.5 text-xs leading-relaxed text-gray-500">
+          <p className="mt-1 text-xs leading-relaxed text-gray-400">
             {description}
           </p>
         )}
       </div>
-      {action}
+      {action && <div className="shrink-0">{action}</div>}
+    </div>
+  );
+}
+
+export function SettingsGroup({
+  title,
+  description,
+  children,
+  className = "",
+}: {
+  title?: string;
+  description?: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={`space-y-4 ${className}`}>
+      {title && (
+        <div className="mb-2">
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-300">
+            {title}
+          </h3>
+          {description && (
+            <p className="mt-0.5 text-[11px] text-gray-400">{description}</p>
+          )}
+        </div>
+      )}
+      <div className="space-y-3">{children}</div>
+    </div>
+  );
+}
+
+export function SettingsRow({
+  label,
+  description,
+  children,
+  className = "",
+}: {
+  label: string;
+  description?: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={`flex items-center justify-between gap-4 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3.5 transition hover:border-[var(--border-strong)] ${className}`}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="text-xs font-medium text-gray-200">{label}</div>
+        {description && (
+          <div className="mt-0.5 text-[11px] leading-normal text-gray-400">
+            {description}
+          </div>
+        )}
+      </div>
+      <div className="shrink-0">{children}</div>
     </div>
   );
 }
@@ -37,16 +101,16 @@ export function Field({
   children: ReactNode;
 }) {
   return (
-    <label className="mb-3 block">
-      <span className="mb-1 block text-xs font-medium text-gray-300">{label}</span>
+    <label className="block space-y-1.5">
+      <span className="block text-xs font-medium text-gray-300">{label}</span>
       {children}
-      {hint && <span className="mt-1 block text-[11px] text-gray-500">{hint}</span>}
+      {hint && <span className="block text-[11px] leading-relaxed text-gray-400">{hint}</span>}
     </label>
   );
 }
 
 const inputClass =
-  "w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-2.5 py-1.5 text-sm text-gray-200 outline-none focus:border-blue-500 disabled:opacity-50";
+  "w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-1.5 text-xs text-gray-200 placeholder-gray-500 outline-none transition focus:border-cyan-500/60 focus:ring-1 focus:ring-cyan-500/30 disabled:opacity-50";
 
 export function TextInput(props: InputHTMLAttributes<HTMLInputElement>) {
   return <input {...props} className={`${inputClass} ${props.className ?? ""}`} />;
@@ -62,7 +126,12 @@ export function TextArea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
 }
 
 export function Select(props: SelectHTMLAttributes<HTMLSelectElement>) {
-  return <select {...props} className={`${inputClass} ${props.className ?? ""}`} />;
+  return (
+    <select
+      {...props}
+      className={`${inputClass} cursor-pointer py-1.5 ${props.className ?? ""}`}
+    />
+  );
 }
 
 export function Toggle({
@@ -77,21 +146,23 @@ export function Toggle({
   return (
     <button
       type="button"
+      role="switch"
+      aria-checked={checked}
       onClick={() => onChange(!checked)}
-      className="flex items-center gap-2 text-xs text-gray-300"
+      className="inline-flex items-center gap-2 text-xs text-gray-300 transition select-none"
     >
       <span
-        className={`relative inline-flex h-5 w-9 items-center rounded-full transition ${
-          checked ? "bg-blue-600" : "bg-[var(--border)]"
+        className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+          checked ? "bg-cyan-500" : "bg-zinc-700"
         }`}
       >
         <span
-          className={`inline-block h-4 w-4 transform rounded-full bg-white transition ${
-            checked ? "translate-x-4" : "translate-x-0.5"
+          className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${
+            checked ? "translate-x-4" : "translate-x-1"
           }`}
         />
       </span>
-      {label}
+      {label && <span>{label}</span>}
     </button>
   );
 }
@@ -104,26 +175,46 @@ export function Button({
   ...props
 }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }) {
   const variants: Record<ButtonVariant, string> = {
-    primary: "bg-blue-600 text-white hover:bg-blue-500",
+    primary:
+      "bg-cyan-600 text-white hover:bg-cyan-500 border border-cyan-500/40 shadow-xs",
     ghost:
-      "border border-[var(--border)] text-gray-300 hover:bg-[var(--border)] hover:text-gray-100",
+      "border border-[var(--border)] bg-[var(--surface)] text-gray-300 hover:bg-[var(--border)] hover:text-white",
     danger:
-      "border border-[var(--border)] text-gray-400 hover:bg-red-500/10 hover:text-red-300 hover:border-red-500/40",
+      "border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:text-red-300",
   };
   return (
     <button
       {...props}
-      className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${variants[variant]} ${className}`}
+      className={`inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${variants[variant]} ${className}`}
     />
   );
 }
 
-/** Editable markdown document with dirty-tracking and a save button. Reused by
- * the Soul, Memory, and Preferences editors. */
+/** Card container with minimal 1px border and refined background */
+export function Card({
+  children,
+  className = "",
+  onClick,
+}: {
+  children: ReactNode;
+  className?: string;
+  onClick?: (e: React.MouseEvent<HTMLDivElement>) => void;
+}) {
+  return (
+    <div
+      onClick={onClick}
+      className={`rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4 transition ${className}`}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** Editable document with dirty-tracking and save button */
 export function DocEditor({
   value,
   onSave,
-  rows = 16,
+  rows = 14,
   placeholder,
   footer,
 }: {
@@ -154,43 +245,24 @@ export function DocEditor({
   };
 
   return (
-    <div>
+    <div className="space-y-3">
       <TextArea
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         rows={rows}
         placeholder={placeholder}
       />
-      <div className="mt-2 flex items-center gap-2">
+      <div className="flex items-center gap-2">
         <Button variant="primary" onClick={save} disabled={!dirty || saving}>
           {saving ? "Saving..." : "Save"}
         </Button>
         {dirty ? (
-          <span className="text-[11px] text-amber-300">Unsaved changes</span>
+          <span className="text-[11px] text-amber-400 font-mono">Unsaved changes</span>
         ) : savedAt ? (
-          <span className="text-[11px] text-gray-500">Saved</span>
+          <span className="text-[11px] text-emerald-400 font-mono">Saved ✓</span>
         ) : null}
         <div className="ml-auto">{footer}</div>
       </div>
-    </div>
-  );
-}
-
-export function Card({
-  children,
-  className = "",
-  onClick,
-}: {
-  children: ReactNode;
-  className?: string;
-  onClick?: (e: React.MouseEvent<HTMLDivElement>) => void;
-}) {
-  return (
-    <div
-      onClick={onClick}
-      className={`rounded-xl border border-[var(--border)] bg-[var(--surface-2)] ${className}`}
-    >
-      {children}
     </div>
   );
 }
