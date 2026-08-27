@@ -1,5 +1,6 @@
 import {
   BotIcon,
+  DatabaseIcon,
   FolderIcon,
   PanelBottomIcon,
   SettingsIcon,
@@ -8,8 +9,8 @@ import {
 import { useUiStore } from "../stores/uiStore";
 import { useAgentStore } from "../stores/agentStore";
 import { useCanvasStore } from "../stores/canvasStore";
+import { useVpsStore } from "../stores/vpsStore";
 import { useTransferStore } from "../stores/transferStore";
-import { useEditsStore } from "../stores/editsStore";
 import { usePluginStore } from "../stores/pluginStore";
 import { toggleAgentFillPane } from "./agent/AgentNode";
 
@@ -59,32 +60,6 @@ function HostsIcon({ size = 18 }: { size?: number }) {
   );
 }
 
-/** File transfer / queue icon. */
-function TransferIcon({ size = 18 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
-      <path
-        d="M7 17V7M7 7l-3 3M7 7l3 3M17 7v10M17 17l-3-3M17 17l3-3"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-/** Agent file-changes / diff icon. */
-function DiffIcon({ size = 18 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden>
-      <rect x="3" y="1.6" width="10" height="12.8" rx="1.4" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M5.4 5.4h2.2M6.5 4.3v2.2" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
-      <path d="M5.4 10.5h5.2" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
-    </svg>
-  );
-}
-
 /**
  * Compact left icon rail.
  * Toggles drawers without crowding the title bar.
@@ -105,22 +80,23 @@ export function NavRail() {
   );
   const agentOpen = agentNodeId !== null;
 
+  const sftpNodeId = useCanvasStore((s) =>
+    s.nodes.find((n) => n.type === "sftp")?.id ?? null,
+  );
+  const dbNodeId = useCanvasStore((s) =>
+    s.nodes.find((n) => n.type === "db")?.id ?? null,
+  );
+
   const pendingApprovals = useAgentStore((s) => s.pendingApprovals.length);
   const pendingQuestions = useAgentStore((s) => s.pendingQuestions.length);
   const hasPlan = useAgentStore((s) => s.pendingPlan !== null);
   const agentBusy = useAgentStore((s) => s.streaming);
   const agentNeedsYou = pendingApprovals + pendingQuestions + (hasPlan ? 1 : 0);
 
-  const transfersOpen = useTransferStore((s) => s.open);
-  const setTransfersOpen = useTransferStore((s) => s.setOpen);
   const activeTransfers = useTransferStore((s) =>
     Object.values(s.jobs).filter((t) => t.state === "running" || t.state === "scanning")
       .length,
   );
-
-  const changesOpen = useEditsStore((s) => s.open);
-  const toggleChanges = useEditsStore((s) => s.toggle);
-  const changeCount = useEditsStore((s) => s.changes.length);
 
   const activeNavItems = usePluginStore((s) => s.activeNavItems);
   const marketplaceOpen = usePluginStore((s) => s.marketplaceOpen);
@@ -152,38 +128,6 @@ export function NavRail() {
         <HostsIcon size={18} />
       </RailBtn>
 
-      <div className="my-1 h-px w-6 bg-[var(--border)]" />
-
-      <RailBtn
-        active={agentOpen}
-        title={
-          agentNeedsYou > 0
-            ? `Agent needs you (${agentNeedsYou})`
-            : agentBusy
-              ? "Agent working…"
-              : agentOpen
-                ? "Hide agent (double-click fills the canvas)"
-                : "Agent (double-click fills the canvas)"
-        }
-        onClick={() => useCanvasStore.getState().toggleAgent()}
-        onDoubleClick={() => {
-          const node = useCanvasStore.getState().nodes.find((n) => n.type === "agent");
-          if (node) {
-            useCanvasStore.getState().focus(node.id);
-            toggleAgentFillPane(node.id);
-          }
-        }}
-        badge={agentNeedsYou > 0 ? agentNeedsYou : undefined}
-      >
-        <BotIcon size={18} />
-        {agentBusy && agentNeedsYou === 0 ? (
-          <span
-            className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--accent)]"
-            aria-hidden
-          />
-        ) : null}
-      </RailBtn>
-
       <RailBtn
         active={bottomOpen}
         title={bottomOpen ? "Hide console" : "Console"}
@@ -192,35 +136,109 @@ export function NavRail() {
         <PanelBottomIcon size={18} />
       </RailBtn>
 
-      <RailBtn
-        active={changesOpen}
-        title={changeCount > 0 ? `Changes (${changeCount})` : "Agent changes"}
-        onClick={toggleChanges}
-        badge={changeCount}
-      >
-        <DiffIcon size={18} />
-      </RailBtn>
+      <div className="my-1 h-px w-6 bg-[var(--border)]" />
 
-      <RailBtn
-        active={transfersOpen}
-        title={activeTransfers > 0 ? `Transfers (${activeTransfers})` : "Transfers"}
-        onClick={() => setTransfersOpen(!transfersOpen)}
-        badge={activeTransfers}
-      >
-        <TransferIcon size={18} />
-      </RailBtn>
-
-      {/* Dynamic Plugin Navigation Items (Harness Extension Point) */}
+      {/* Dynamic Plugin Slots (Cordis Microkernel Extension Points) */}
       {activeNavItems.map((navItem) => {
-        const isViewOpen = Boolean(openViews[navItem.id]);
-        const iconElement = navItem.icon === "CloudIcon" ? (
-          <CloudIcon size={18} />
-        ) : (
-          <span className="text-base leading-none">
-            {navItem.icon.length <= 4 ? navItem.icon : "🧩"}
-          </span>
-        );
+        const isAgent = navItem.id === "xconsole-plugin-agent" || navItem.id === "agent";
+        const isSftp = navItem.id === "xconsole-plugin-sftp" || navItem.id === "sftp";
+        const isDb = navItem.id === "xconsole-plugin-database" || navItem.id === "database";
+        const isCloudflare = navItem.id === "xconsole-plugin-cloudflare" || navItem.id === "cloudflare";
 
+        if (isAgent) {
+          return (
+            <RailBtn
+              key={navItem.id}
+              active={agentOpen}
+              title={
+                agentNeedsYou > 0
+                  ? `Agent needs you (${agentNeedsYou})`
+                  : agentBusy
+                    ? "Agent working…"
+                    : agentOpen
+                      ? "Hide agent (double-click fills the canvas)"
+                      : "Agent (double-click fills the canvas)"
+              }
+              onClick={() => useCanvasStore.getState().toggleAgent()}
+              onDoubleClick={() => {
+                const node = useCanvasStore.getState().nodes.find((n) => n.type === "agent");
+                if (node) {
+                  useCanvasStore.getState().focus(node.id);
+                  toggleAgentFillPane(node.id);
+                }
+              }}
+              badge={agentNeedsYou > 0 ? agentNeedsYou : undefined}
+            >
+              <BotIcon size={18} />
+              {agentBusy && agentNeedsYou === 0 ? (
+                <span
+                  className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--accent)]"
+                  aria-hidden
+                />
+              ) : null}
+            </RailBtn>
+          );
+        }
+
+        if (isSftp) {
+          const sftpActive = Boolean(sftpNodeId);
+          return (
+            <RailBtn
+              key={navItem.id}
+              active={sftpActive}
+              title={activeTransfers > 0 ? `SFTP (${activeTransfers} active transfers)` : "SFTP & Remote Files"}
+              onClick={() => {
+                if (sftpNodeId) {
+                  useCanvasStore.getState().removeNode(sftpNodeId);
+                } else {
+                  const srv = useVpsStore.getState().vpsList[0];
+                  if (srv) useCanvasStore.getState().addSftp(srv);
+                }
+              }}
+              badge={activeTransfers > 0 ? activeTransfers : undefined}
+            >
+              <FolderIcon size={18} />
+            </RailBtn>
+          );
+        }
+
+        if (isDb) {
+          const dbActive = Boolean(dbNodeId);
+          return (
+            <RailBtn
+              key={navItem.id}
+              active={dbActive}
+              title="Database & MySQL Explorer"
+              onClick={() => {
+                if (dbNodeId) {
+                  useCanvasStore.getState().removeNode(dbNodeId);
+                } else {
+                  const srv = useVpsStore.getState().vpsList[0];
+                  if (srv) useCanvasStore.getState().addDb(srv);
+                }
+              }}
+            >
+              <DatabaseIcon size={18} />
+            </RailBtn>
+          );
+        }
+
+        if (isCloudflare) {
+          const isViewOpen = Boolean(openViews[navItem.id] || openViews["xconsole-plugin-cloudflare"]);
+          return (
+            <RailBtn
+              key={navItem.id}
+              active={isViewOpen}
+              title="Cloudflare (Zero Trust, Tunnels & DNS)"
+              onClick={() => usePluginStore.getState().togglePluginView("xconsole-plugin-cloudflare")}
+            >
+              <CloudIcon size={18} />
+            </RailBtn>
+          );
+        }
+
+        // Generic community plugin slot
+        const isViewOpen = Boolean(openViews[navItem.id]);
         return (
           <RailBtn
             key={navItem.id}
@@ -228,7 +246,7 @@ export function NavRail() {
             title={navItem.label}
             onClick={() => usePluginStore.getState().togglePluginView(navItem.id)}
           >
-            {iconElement}
+            <span className="text-base leading-none">{navItem.icon || "🧩"}</span>
           </RailBtn>
         );
       })}
