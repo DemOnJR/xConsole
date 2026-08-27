@@ -44,6 +44,30 @@ pub async fn list_cloudflare_zones(
     cloudflare::list_zones(&token, account.project_id.as_deref()).await
 }
 
+async fn resolve_cf_account_id(
+    account: &crate::storage::models::CloudAccount,
+    token: &str,
+) -> Result<String, String> {
+    if let Some(pid) = &account.project_id {
+        if !pid.trim().is_empty() {
+            return Ok(pid.trim().to_string());
+        }
+    }
+    if let Ok(accs) = cloudflare::list_accounts(token).await {
+        if let Some(first) = accs.first() {
+            return Ok(first.id.clone());
+        }
+    }
+    if let Ok(zones) = cloudflare::list_zones(token, None).await {
+        for z in zones {
+            if let Some(acc) = z.account {
+                return Ok(acc.id);
+            }
+        }
+    }
+    Err("Nu a putut fi determinat Cloudflare Account ID din token. Asigură-te că token-ul are permisiune pentru Cloudflare Tunnel sau cel puțin o Zonă DNS asociată.".to_string())
+}
+
 #[tauri::command]
 pub async fn list_cloudflare_tunnels(
     db: State<'_, Db>,
@@ -54,9 +78,7 @@ pub async fn list_cloudflare_tunnels(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Cloudflare account not found".to_string())?;
     let token = cloudflare::load_cf_token(&account.id)?;
-    let cf_acc_id = account
-        .project_id
-        .ok_or_else(|| "Account is missing Cloudflare Account ID".to_string())?;
+    let cf_acc_id = resolve_cf_account_id(&account, &token).await?;
     cloudflare::list_tunnels(&token, &cf_acc_id).await
 }
 
@@ -71,9 +93,7 @@ pub async fn create_cloudflare_tunnel(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Cloudflare account not found".to_string())?;
     let token = cloudflare::load_cf_token(&account.id)?;
-    let cf_acc_id = account
-        .project_id
-        .ok_or_else(|| "Account is missing Cloudflare Account ID".to_string())?;
+    let cf_acc_id = resolve_cf_account_id(&account, &token).await?;
     cloudflare::create_tunnel(&token, &cf_acc_id, &name).await
 }
 
@@ -88,9 +108,7 @@ pub async fn delete_cloudflare_tunnel(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Cloudflare account not found".to_string())?;
     let token = cloudflare::load_cf_token(&account.id)?;
-    let cf_acc_id = account
-        .project_id
-        .ok_or_else(|| "Account is missing Cloudflare Account ID".to_string())?;
+    let cf_acc_id = resolve_cf_account_id(&account, &token).await?;
     cloudflare::delete_tunnel(&token, &cf_acc_id, &tunnel_id).await
 }
 
@@ -105,9 +123,7 @@ pub async fn get_cloudflare_tunnel_config(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Cloudflare account not found".to_string())?;
     let token = cloudflare::load_cf_token(&account.id)?;
-    let cf_acc_id = account
-        .project_id
-        .ok_or_else(|| "Account is missing Cloudflare Account ID".to_string())?;
+    let cf_acc_id = resolve_cf_account_id(&account, &token).await?;
     cloudflare::get_tunnel_config(&token, &cf_acc_id, &tunnel_id).await
 }
 
@@ -123,9 +139,7 @@ pub async fn save_cloudflare_tunnel_config(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Cloudflare account not found".to_string())?;
     let token = cloudflare::load_cf_token(&account.id)?;
-    let cf_acc_id = account
-        .project_id
-        .ok_or_else(|| "Account is missing Cloudflare Account ID".to_string())?;
+    let cf_acc_id = resolve_cf_account_id(&account, &token).await?;
     cloudflare::save_tunnel_config(&token, &cf_acc_id, &tunnel_id, &config).await
 }
 
@@ -140,9 +154,7 @@ pub async fn get_cloudflare_tunnel_token(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Cloudflare account not found".to_string())?;
     let token = cloudflare::load_cf_token(&account.id)?;
-    let cf_acc_id = account
-        .project_id
-        .ok_or_else(|| "Account is missing Cloudflare Account ID".to_string())?;
+    let cf_acc_id = resolve_cf_account_id(&account, &token).await?;
     cloudflare::get_tunnel_token(&token, &cf_acc_id, &tunnel_id).await
 }
 

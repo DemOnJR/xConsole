@@ -36,6 +36,8 @@ pub struct CfZone {
     pub paused: bool,
     #[serde(default)]
     pub r#type: Option<String>,
+    #[serde(default)]
+    pub account: Option<CfAccount>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -995,22 +997,69 @@ fn urlencoding_decode(s: &str) -> String {
 }
 
 pub async fn handle_token_login(db: &Db, token: &str) -> Result<String, String> {
-    let accounts = list_accounts(token).await?;
+    let token = token.trim();
 
-    let account = accounts
-        .first()
-        .ok_or_else(|| "Nu a fost găsit niciun cont asociat cu acest token Cloudflare".to_string())?;
+    // 1. Try listing accounts directly
+    let accounts_res = list_accounts(token).await;
+    let mut account_id: Option<String> = None;
+    let mut account_name: Option<String> = None;
 
-    let zones = list_zones(token, Some(&account.id)).await.unwrap_or_default();
+    if let Ok(accounts) = accounts_res {
+        if let Some(acc) = accounts.first() {
+            account_id = Some(acc.id.clone());
+            account_name = Some(acc.name.clone());
+        }
+    }
+
+    // 2. Try listing zones (which contains zone.account and works with zone-level tokens)
+    let zones = list_zones(token, account_id.as_deref()).await.unwrap_or_default();
+
+    if account_id.is_none() {
+        for z in &zones {
+            if let Some(acc) = &z.account {
+                account_id = Some(acc.id.clone());
+                account_name = Some(acc.name.clone());
+                break;
+            }
+        }
+    }
+
+    // 3. If still no name, try getting user email from /user
+    if account_name.is_none() {
+        let client = make_client();
+        let user_req = client.get(format!("{CF_API}/user"));
+        if let Ok(resp) = apply_auth(user_req, token).send().await {
+            if let Ok(json) = resp.json::<Value>().await {
+                if let Some(email) = json.get("result").and_then(|r| r.get("email")).and_then(|e| e.as_str()) {
+                    account_name = Some(email.to_string());
+                }
+            }
+        }
+    }
+
+    // 4. If still no name, verify token to check if it's active
+    if account_name.is_none() {
+        let client = make_client();
+        let verify_req = client.get(format!("{CF_API}/user/tokens/verify"));
+        if let Ok(resp) = apply_auth(verify_req, token).send().await {
+            if let Ok(json) = resp.json::<Value>().await {
+                if json.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    account_name = Some("Custom Token".to_string());
+                }
+            }
+        }
+    }
+
+    let final_acc_name = account_name.unwrap_or_else(|| "Cloudflare".to_string());
     let default_zone = zones.first().map(|z| z.id.clone());
 
     let input = CloudAccountInput {
         id: None,
-        name: format!("Cloudflare ({})", account.name),
+        name: format!("Cloudflare ({final_acc_name})"),
         kind: "cloudflare".to_string(),
         region: default_zone,
-        project_id: Some(account.id.clone()),
-        organization: Some(account.name.clone()),
+        project_id: account_id.clone(),
+        organization: Some(final_acc_name.clone()),
         secret: Some(token.to_string()),
     };
 
@@ -1018,5 +1067,5 @@ pub async fn handle_token_login(db: &Db, token: &str) -> Result<String, String> 
     let key = secrets::cloud_account_key(&saved.id);
     secrets::set_secret(&key, token).map_err(|e| e.to_string())?;
 
-    Ok(account.name.clone())
+    Ok(final_acc_name)
 }
