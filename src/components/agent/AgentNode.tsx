@@ -68,7 +68,13 @@ import { QueuedMessages } from "./QueuedMessages";
 import { useGitBranch } from "../../hooks/useGitBranch";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useGoalStore } from "../../stores/goalStore";
+import { useHarnessStore } from "../../stores/harnessStore";
 import { effectiveMode, shouldAutoRun } from "../../lib/safety";
+import { HarnessModuleBar } from "./harness/HarnessModuleBar";
+import { GoalModule } from "./harness/GoalModule";
+import { ToolCallsModule } from "./harness/ToolCallsModule";
+import { ContextMemoryModule } from "./harness/ContextMemoryModule";
+import { TerminalLogsModule } from "./harness/TerminalLogsModule";
 
 import type { AgentApproval, AgentQuestion } from "../../lib/tauri";
 
@@ -1443,6 +1449,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
       setInput("");
       history.reset("");
       recallIdx.current = null;
+      useHarnessStore.getState().setActiveGoal(objective);
       void useGoalStore
         .getState()
         .start(objective)
@@ -1642,6 +1649,13 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
           </button>
         </span>
       </div>
+
+      {/* DeepSeek Harness Modular Components (Claude Code Aesthetic) */}
+      <HarnessModuleBar />
+      <GoalModule />
+      <ToolCallsModule />
+      <ContextMemoryModule />
+      <TerminalLogsModule />
 
       {/* Body: nodrag so only the header starts a node drag (like TerminalNode) —
           text selection inside the console/composer works normally. */}
