@@ -56,8 +56,8 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
   const handle1ClickLogin = async () => {
     setLoggingIn(true);
     try {
-      const port = await api.startCloudflareOAuthLogin();
-      await openUrl(`http://127.0.0.1:${port}`);
+      const authUrl = await api.startCloudflareOAuthLogin();
+      await openUrl(authUrl);
       // Poll accounts
       let count = 0;
       const interval = setInterval(async () => {

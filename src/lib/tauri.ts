@@ -1316,7 +1316,7 @@ export const api = {
 
   // Cloudflare
   startCloudflareOAuthLogin: () =>
-    invoke<number>("start_cloudflare_oauth_login"),
+    invoke<string>("start_cloudflare_oauth_login"),
   saveCloudflareManualToken: (token: string) =>
     invoke<CloudAccount>("save_cloudflare_manual_token", { token }),
   listCloudflareZones: (accountId: string) =>

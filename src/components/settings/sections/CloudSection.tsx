@@ -191,8 +191,8 @@ export function CloudSection() {
   const handle1ClickCloudflareLogin = async () => {
     setLoggingInCf(true);
     try {
-      const port = await api.startCloudflareOAuthLogin();
-      await openUrl(`http://127.0.0.1:${port}`);
+      const authUrl = await api.startCloudflareOAuthLogin();
+      await openUrl(authUrl);
       // Poll accounts in background for 60 seconds
       let attempts = 0;
       const interval = setInterval(async () => {

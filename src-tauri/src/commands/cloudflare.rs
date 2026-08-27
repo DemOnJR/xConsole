@@ -10,7 +10,7 @@ use crate::storage::models::CloudAccount;
 use crate::storage::Db;
 
 #[tauri::command]
-pub async fn start_cloudflare_oauth_login(db: State<'_, Db>) -> Result<u16, String> {
+pub async fn start_cloudflare_oauth_login(db: State<'_, Db>) -> Result<String, String> {
     cloudflare::start_oauth_listener((*db).clone()).await
 }
 

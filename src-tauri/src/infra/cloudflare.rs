@@ -13,6 +13,7 @@ use crate::storage::Db;
 
 const CF_API: &str = "https://api.cloudflare.com/client/v4";
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CfVerifyResponse {
     pub id: Option<String>,
@@ -142,6 +143,7 @@ fn make_client() -> Client {
 // -----------------------------------------------------------------------------
 
 /// Verify that a Cloudflare API token is valid and active.
+#[allow(dead_code)]
 pub async fn verify_token(token: &str) -> Result<CfVerifyResponse, String> {
     let client = make_client();
     let res = client
@@ -705,12 +707,38 @@ pub async fn set_security_level(
 }
 
 // -----------------------------------------------------------------------------
-// 1-Click Browser Login Server
+// 1-Click Cloudflare OAuth 2.0 PKCE Browser Login
 // -----------------------------------------------------------------------------
 
-/// Start a lightweight local loopback HTTP server to handle the 1-Click Cloudflare Login.
-/// Listens on `127.0.0.1:<random_port>` and returns the allocated port.
-pub async fn start_oauth_listener(db: Db) -> Result<u16, String> {
+const CF_OAUTH_CLIENT_ID: &str = "54d11594-84e4-4136-a4f9-a6383914e654";
+const CF_OAUTH_AUTH_URL: &str = "https://dash.cloudflare.com/oauth2/auth";
+const CF_OAUTH_TOKEN_URL: &str = "https://dash.cloudflare.com/oauth2/token";
+
+/// Start a lightweight local loopback HTTP server to handle the 1-Click Cloudflare OAuth 2.0 Login.
+/// Listens on `127.0.0.1:<random_port>` and returns the complete authorization URL to open in browser.
+pub async fn start_oauth_listener(db: Db) -> Result<String, String> {
+    use ring::digest::{digest, SHA256};
+    use ring::rand::{SecureRandom, SystemRandom};
+
+    let rng = SystemRandom::new();
+
+    // 1. Generate PKCE code_verifier (32 random bytes -> URL-safe base64 without padding)
+    let mut verifier_bytes = [0u8; 32];
+    rng.fill(&mut verifier_bytes)
+        .map_err(|_| "Failed to generate random bytes for PKCE".to_string())?;
+    let code_verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifier_bytes);
+
+    // 2. Compute PKCE code_challenge = Base64URL-Encode(SHA256(code_verifier))
+    let challenge_hash = digest(&SHA256, code_verifier.as_bytes());
+    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge_hash.as_ref());
+
+    // 3. Generate random state for CSRF protection
+    let mut state_bytes = [0u8; 16];
+    rng.fill(&mut state_bytes)
+        .map_err(|_| "Failed to generate state bytes".to_string())?;
+    let state = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(state_bytes);
+
+    // 4. Bind local listener on ephemeral port
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| format!("Failed to bind local loopback listener: {e}"))?;
@@ -720,8 +748,21 @@ pub async fn start_oauth_listener(db: Db) -> Result<u16, String> {
         .map_err(|e| format!("Failed to get local port: {e}"))?
         .port();
 
+    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+    let encoded_redirect = urlencoding_encode(&redirect_uri);
+    let scopes = "account:read user:read workers:write workers_kv:write workers_routes:write workers_scripts:write zone:read offline_access";
+    let encoded_scopes = urlencoding_encode(scopes);
+
+    let auth_url = format!(
+        "{CF_OAUTH_AUTH_URL}?response_type=code&client_id={CF_OAUTH_CLIENT_ID}&redirect_uri={encoded_redirect}&scope={encoded_scopes}&state={state}&code_challenge={code_challenge}&code_challenge_method=S256"
+    );
+
+    let redirect_uri_clone = redirect_uri.clone();
+    let code_verifier_clone = code_verifier.clone();
+    let expected_state = state.clone();
+
     tokio::spawn(async move {
-        // Wait for connection with a 5-minute timeout
+        // Wait for OAuth redirect callback with a 5-minute timeout
         let timeout = tokio::time::sleep(Duration::from_secs(300));
         tokio::pin!(timeout);
 
@@ -732,14 +773,51 @@ pub async fn start_oauth_listener(db: Db) -> Result<u16, String> {
                     if let Ok(n) = stream.read(&mut buffer).await {
                         let req = String::from_utf8_lossy(&buffer[..n]);
 
-                        // Handle token extraction from either GET query or POST JSON/form
-                        let token_opt = extract_token_from_request(&req);
+                        let code_opt = extract_query_param(&req, "code");
+                        let state_opt = extract_query_param(&req, "state");
 
-                        if let Some(token) = token_opt {
-                            match handle_token_login(&db, &token).await {
-                                Ok(account_name) => {
-                                    let html = format!(
-                                        r#"<!DOCTYPE html>
+                        if let (Some(code), Some(ret_state)) = (code_opt, state_opt) {
+                            if ret_state != expected_state {
+                                let html = "<!DOCTYPE html><html><body style='background:#090d16;color:#f87171;font-family:sans-serif;padding:40px;'><h2>Eroare de securitate: state-ul nu se potrivește.</h2></body></html>";
+                                let response = format!(
+                                    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                    html.len(),
+                                    html
+                                );
+                                let _ = stream.write_all(response.as_bytes()).await;
+                                return;
+                            }
+
+                            // Exchange code for access_token with Cloudflare OAuth token endpoint
+                            let client = make_client();
+                            let token_params = [
+                                ("grant_type", "authorization_code"),
+                                ("client_id", CF_OAUTH_CLIENT_ID),
+                                ("code", code.as_str()),
+                                ("redirect_uri", redirect_uri_clone.as_str()),
+                                ("code_verifier", code_verifier_clone.as_str()),
+                            ];
+
+                            let token_res = client
+                                .post(CF_OAUTH_TOKEN_URL)
+                                .form(&token_params)
+                                .send()
+                                .await;
+
+                            match token_res {
+                                Ok(resp) => {
+                                    if let Ok(json) = resp.json::<Value>().await {
+                                        let access_token = json
+                                            .get("access_token")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+
+                                        if !access_token.is_empty() {
+                                            match handle_token_login(&db, &access_token).await {
+                                                Ok(account_name) => {
+                                                    let html = format!(
+                                                        r#"<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -785,27 +863,59 @@ pub async fn start_oauth_listener(db: Db) -> Result<u16, String> {
     <div class="card">
         <div class="badge">Cloudflare</div>
         <h1>Conectat cu succes!</h1>
-        <p>Contul <strong>{}</strong> a fost asociat cu xConsole.</p>
+        <p>Contul <strong>{}</strong> a fost asociat automat cu xConsole.</p>
         <div class="done">&check; Po&#539;i &icirc;nchide aceast&#259; fil&#259; &#537;i reveni &icirc;n aplica&#539;ie.</div>
     </div>
 </body>
 </html>"#,
-                                        account_name
-                                    );
-                                    let response = format!(
-                                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                        html.len(),
-                                        html
-                                    );
-                                    let _ = stream.write_all(response.as_bytes()).await;
+                                                        account_name
+                                                    );
+                                                    let response = format!(
+                                                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                                        html.len(),
+                                                        html
+                                                    );
+                                                    let _ = stream.write_all(response.as_bytes()).await;
+                                                }
+                                                Err(e) => {
+                                                    let html = format!(
+                                                        "<!DOCTYPE html><html><body style='background:#090d16;color:#f87171;font-family:sans-serif;padding:40px;'><h2>Eroare salvare cont Cloudflare: {}</h2></body></html>",
+                                                        e
+                                                    );
+                                                    let response = format!(
+                                                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                                        html.len(),
+                                                        html
+                                                    );
+                                                    let _ = stream.write_all(response.as_bytes()).await;
+                                                }
+                                            }
+                                        } else {
+                                            let err_msg = json
+                                                .get("error_description")
+                                                .or_else(|| json.get("error"))
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("Eroare necunoscută la generarea token-ului");
+                                            let html = format!(
+                                                "<!DOCTYPE html><html><body style='background:#090d16;color:#f87171;font-family:sans-serif;padding:40px;'><h2>Eroare OAuth Cloudflare</h2><p>{}</p></body></html>",
+                                                err_msg
+                                            );
+                                            let response = format!(
+                                                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                                html.len(),
+                                                html
+                                            );
+                                            let _ = stream.write_all(response.as_bytes()).await;
+                                        }
+                                    }
                                 }
                                 Err(err) => {
                                     let html = format!(
-                                        "<!DOCTYPE html><html><body style='background:#090d16;color:#f87171;font-family:sans-serif;padding:40px;'><h2>Eroare autentificare Cloudflare</h2><p>{}</p></body></html>",
+                                        "<!DOCTYPE html><html><body style='background:#090d16;color:#f87171;font-family:sans-serif;padding:40px;'><h2>Eroare conexiune Cloudflare Token endpoint: {}</h2></body></html>",
                                         err
                                     );
                                     let response = format!(
-                                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                        "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                                         html.len(),
                                         html
                                     );
@@ -813,102 +923,9 @@ pub async fn start_oauth_listener(db: Db) -> Result<u16, String> {
                                 }
                             }
                         } else {
-                            // Serve landing page with helper token generation script
-                            let html = format!(
-                                r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>xConsole &bull; Autentificare Cloudflare</title>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: #090d16;
-            color: #e2e8f0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 100vh;
-            margin: 0;
-            padding: 20px;
-        }}
-        .card {{
-            background: #131b2e;
-            border: 1px solid #23304a;
-            border-radius: 12px;
-            padding: 32px;
-            max-width: 480px;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.5);
-        }}
-        .badge {{
-            display: inline-block;
-            background: #f48120;
-            color: white;
-            font-size: 11px;
-            font-weight: 700;
-            padding: 4px 10px;
-            border-radius: 9999px;
-            margin-bottom: 16px;
-            text-transform: uppercase;
-        }}
-        h1 {{ font-size: 20px; margin: 0 0 12px 0; color: #fff; }}
-        p {{ font-size: 13px; color: #94a3b8; line-height: 1.5; margin: 0 0 20px 0; }}
-        .btn {{
-            display: inline-block;
-            background: #f48120;
-            color: white;
-            text-decoration: none;
-            padding: 10px 18px;
-            border-radius: 6px;
-            font-weight: 500;
-            font-size: 13px;
-            cursor: pointer;
-            border: none;
-            width: 100%;
-            box-sizing: border-box;
-            text-align: center;
-        }}
-        .btn:hover {{ background: #e06d0e; }}
-        .input-box {{
-            margin-top: 16px;
-            text-align: left;
-        }}
-        input {{
-            width: 100%;
-            background: #090d16;
-            border: 1px solid #23304a;
-            color: #fff;
-            padding: 10px;
-            border-radius: 6px;
-            font-size: 13px;
-            box-sizing: border-box;
-            outline: none;
-            margin-bottom: 10px;
-        }}
-        input:focus {{ border-color: #f48120; }}
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="badge">Cloudflare 1-Click Connect</div>
-        <h1>Conectare Cloudflare la xConsole</h1>
-        <p>1. Apas&#259; butonul de mai jos pentru a deschide pagina Cloudflare cu permisiuni preconfigurate (Tunnels, DNS, WAF &#537;i Securitate).<br>2. D&#259; click pe <strong>Continue to summary &rarr; Create Token</strong> &#537;i lipe&#537;te token-ul mai jos:</p>
-        
-        <a href="https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=[%22dns%22,%22zone_settings%22,%22zone%22,%22waf%22,%22argo_tunnel%22]&name=xConsole" target="_blank" class="btn">
-            Deschide Cloudflare Token Generator &rarr;
-        </a>
-
-        <form action="/callback" method="GET" class="input-box">
-            <label style="font-size: 11px; color: #94a3b8; display: block; margin-bottom: 4px;">Lipe&#537;te API Token-ul aici:</label>
-            <input type="password" name="token" placeholder="v4.0-..." required autofocus />
-            <button type="submit" class="btn" style="background:#2563eb;">Finalizeaz&#259; conectarea &check;</button>
-        </form>
-    </div>
-</body>
-</html>"#
-                            );
+                            let html = "<!DOCTYPE html><html><body style='background:#090d16;color:#f87171;font-family:sans-serif;padding:40px;'><h2>Nu a fost primit niciun cod de autorizare.</h2></body></html>";
                             let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                                 html.len(),
                                 html
                             );
@@ -923,19 +940,35 @@ pub async fn start_oauth_listener(db: Db) -> Result<u16, String> {
         }
     });
 
-    Ok(port)
+    Ok(auth_url)
 }
 
-fn extract_token_from_request(req: &str) -> Option<String> {
-    if let Some(pos) = req.find("token=") {
-        let after = &req[pos + 6..];
-        let token_raw = after.split(|c| c == '&' || c == ' ' || c == '\r' || c == '\n').next().unwrap_or("");
-        let decoded = urlencoding_decode(token_raw);
+fn extract_query_param(req: &str, param_name: &str) -> Option<String> {
+    let search = format!("{param_name}=");
+    if let Some(pos) = req.find(&search) {
+        let after = &req[pos + search.len()..];
+        let raw = after.split(|c| c == '&' || c == ' ' || c == '\r' || c == '\n').next().unwrap_or("");
+        let decoded = urlencoding_decode(raw);
         if !decoded.trim().is_empty() {
             return Some(decoded.trim().to_string());
         }
     }
     None
+}
+
+fn urlencoding_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
 }
 
 fn urlencoding_decode(s: &str) -> String {
@@ -959,7 +992,6 @@ fn urlencoding_decode(s: &str) -> String {
 }
 
 pub async fn handle_token_login(db: &Db, token: &str) -> Result<String, String> {
-    let _verify = verify_token(token).await?;
     let accounts = list_accounts(token).await?;
 
     let account = accounts
