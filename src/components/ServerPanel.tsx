@@ -5,16 +5,15 @@ import { useCanvasStore } from "../stores/canvasStore";
 import type { Vps } from "../lib/tauri";
 import { VpsForm } from "./VpsForm";
 import { dialog } from "../stores/dialogStore";
-import { PlusIcon, TrashIcon, FolderIcon, DatabaseIcon } from "./icons";
+import { PlusIcon, TrashIcon } from "./icons";
 import { DrawerHeader } from "./DrawerHeader";
 import { useMaskHost } from "../lib/privacy";
+import { useQuickOpenStore } from "../stores/quickOpenStore";
 
 export function ServerPanel({ width }: { width?: number }) {
   const { vpsList, load, remove, reorder } = useVpsStore();
   const maskHost = useMaskHost();
   const addVps = useCanvasStore((s) => s.addVps);
-  const addSftp = useCanvasStore((s) => s.addSftp);
-  const addDb = useCanvasStore((s) => s.addDb);
   const isDraggingRef = useRef(false);
   // Highlight comes from the shared drag state now that the drag is pointer-based.
   const dragOver = useDragStore((s) => s.over);
@@ -196,24 +195,15 @@ export function ServerPanel({ width }: { width?: number }) {
                   @
                 </button>
                 <button
-                  className="rounded p-1 text-cyan-400/80 hover:bg-[var(--border)] hover:text-cyan-300"
-                  data-tooltip="Open SFTP on canvas"
+                  className="flex items-center gap-1 rounded bg-[var(--surface-2)] px-1.5 py-0.5 text-xs text-[var(--accent)] hover:bg-[var(--accent)] hover:text-white border border-[var(--border)] transition shadow-sm"
+                  data-tooltip="Fast Plugins & Actions (Ctrl+K)"
                   onClick={(e) => {
                     e.stopPropagation();
-                    addSftp(v);
+                    useQuickOpenStore.getState().open({ targetServer: v });
                   }}
                 >
-                  <FolderIcon size={14} />
-                </button>
-                <button
-                  className="rounded p-1 text-violet-400/80 hover:bg-[var(--border)] hover:text-violet-300"
-                  data-tooltip="Open databases on canvas"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    addDb(v);
-                  }}
-                >
-                  <DatabaseIcon size={14} />
+                  <span className="text-xs">⚡</span>
+                  <span className="text-[11px] font-medium">Actions</span>
                 </button>
                 <button
                   className="rounded px-1 text-xs text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"

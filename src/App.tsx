@@ -17,6 +17,7 @@ import { UpdateNotice } from "./components/UpdateNotice";
 import { TransfersPanel } from "./components/TransfersPanel";
 import { CloudflareManager } from "./components/cloudflare/CloudflareManager";
 import { PluginMarketplaceModal } from "./components/plugins/PluginMarketplaceModal";
+import { QuickOpenPalette } from "./components/QuickOpenPalette";
 import { usePluginStore } from "./stores/pluginStore";
 import { useUpdateStore } from "./stores/updateStore";
 import { useCanvasStore } from "./stores/canvasStore";
@@ -287,6 +288,7 @@ function UnlockedApp() {
       </div>
       <SettingsModal />
       <PluginMarketplaceModal />
+      <QuickOpenPalette />
 
       {/* Dynamic Plugin Views / Modals (Harness Extension Point) */}
       {Object.entries(openViews).map(([pluginId, isOpen]) => {

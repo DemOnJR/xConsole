@@ -4,6 +4,7 @@ import { api } from "../lib/tauri";
 import { SettingsIcon } from "./icons";
 import { useUiStore } from "../stores/uiStore";
 import { Toolbar } from "./Toolbar";
+import { useQuickOpenStore } from "../stores/quickOpenStore";
 
 const appWindow = getCurrentWindow();
 
@@ -90,6 +91,19 @@ export function AppToolbar() {
           onClick={() => openSettings()}
         >
           <SettingsIcon size={15} />
+        </button>
+        <button
+          type="button"
+          className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2 py-0.5 text-xs text-[var(--text-dim)] hover:border-[var(--accent)] hover:text-[var(--text)] transition shadow-sm ml-1"
+          data-tooltip="Quick Open & Actions (Ctrl+K)"
+          data-tooltip-side="bottom"
+          onClick={() => useQuickOpenStore.getState().toggle()}
+        >
+          <span className="text-xs text-[var(--accent)]">⚡</span>
+          <span className="hidden sm:inline font-medium">Actions</span>
+          <kbd className="rounded border border-[var(--border)] bg-[var(--surface-2)] px-1 py-0.2 text-[9px] font-mono text-[var(--text-dim)] ml-0.5">
+            Ctrl+K
+          </kbd>
         </button>
       </div>
 
