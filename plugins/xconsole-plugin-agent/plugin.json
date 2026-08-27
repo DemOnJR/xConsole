@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "description": "Multi-provider AI pairing assistant with tool execution, file editing, shell execution, safety gates, and self-composition.",
   "author": "xConsole Team",
+  "repository": "https://github.com/DemOnJR/xconsole-plugin-agent",
   "icon": "🤖",
   "category": "ai",
   "enabled": true,

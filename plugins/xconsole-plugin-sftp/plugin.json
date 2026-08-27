@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "description": "Dual-pane remote file manager, inline code editor, drag-and-drop transfers, and file permissions manager over SSH.",
   "author": "xConsole Team",
+  "repository": "https://github.com/DemOnJR/xconsole-plugin-sftp",
   "icon": "📁",
   "category": "networking",
   "enabled": true,

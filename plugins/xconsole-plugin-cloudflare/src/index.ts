@@ -5,11 +5,11 @@ import manifest from "../plugin.json";
 export const cloudflarePlugin: PluginDefinition = definePlugin({
   manifest: manifest as any,
   renderView: CloudflareManager,
-  onMount: async ({ pluginId }) => {
-    console.log(`[Plugin Harness] Mounted plugin: ${pluginId}`);
-  },
-  onUnmount: async ({ pluginId }) => {
-    console.log(`[Plugin Harness] Unmounted plugin: ${pluginId}`);
+  apply: () => {
+    console.log(`[Plugin Harness] Cloudflare plugin mounted`);
+    return () => {
+      console.log(`[Plugin Harness] Cloudflare plugin unmounted`);
+    };
   },
 });
 

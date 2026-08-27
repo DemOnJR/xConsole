@@ -122,6 +122,10 @@ export function NavRail() {
   const toggleChanges = useEditsStore((s) => s.toggle);
   const changeCount = useEditsStore((s) => s.changes.length);
 
+  const activeNavItems = usePluginStore((s) => s.activeNavItems);
+  const marketplaceOpen = usePluginStore((s) => s.marketplaceOpen);
+  const openViews = usePluginStore((s) => s.openViews);
+
   return (
     <nav className="xc-rail" aria-label="Main navigation">
       <RailBtn
@@ -207,8 +211,8 @@ export function NavRail() {
       </RailBtn>
 
       {/* Dynamic Plugin Navigation Items (Harness Extension Point) */}
-      {usePluginStore((s) => s.getActiveNavItems()).map((navItem) => {
-        const isViewOpen = usePluginStore.getState().isPluginViewOpen(navItem.id);
+      {activeNavItems.map((navItem) => {
+        const isViewOpen = Boolean(openViews[navItem.id]);
         const iconElement = navItem.icon === "CloudIcon" ? (
           <CloudIcon size={18} />
         ) : (
@@ -231,7 +235,7 @@ export function NavRail() {
 
       <div className="mt-auto flex flex-col items-center gap-0.5">
         <RailBtn
-          active={usePluginStore((s) => s.marketplaceOpen)}
+          active={marketplaceOpen}
           title="Plugin Marketplace & Harness"
           onClick={() => usePluginStore.getState().toggleMarketplace()}
         >

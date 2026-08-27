@@ -140,6 +140,9 @@ function UnlockedApp() {
   const pendingQuestionsCount = useAgentStore((s) => s.pendingQuestions.length);
   const hasPendingPlan = useAgentStore((s) => s.pendingPlan !== null);
 
+  const openViews = usePluginStore((s) => s.openViews);
+  const definitions = usePluginStore((s) => s.definitions);
+
   // Alt+arrows / Alt+F / Alt+R reshape the tile grid (see the hook for the full map).
   useTileShortcuts();
 
@@ -286,9 +289,9 @@ function UnlockedApp() {
       <PluginMarketplaceModal />
 
       {/* Dynamic Plugin Views / Modals (Harness Extension Point) */}
-      {Object.entries(usePluginStore((s) => s.openViews)).map(([pluginId, isOpen]) => {
+      {Object.entries(openViews).map(([pluginId, isOpen]) => {
         if (!isOpen) return null;
-        const def = usePluginStore.getState().definitions[pluginId];
+        const def = definitions[pluginId];
         if (!def?.renderView) return null;
         const ViewComp = def.renderView;
         return (

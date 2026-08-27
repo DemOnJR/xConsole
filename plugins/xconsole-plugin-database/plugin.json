@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "description": "Multi-engine database management, visual table editor, schema inspection, and SQL workspace for MySQL, PostgreSQL, and SQLite.",
   "author": "xConsole Team",
+  "repository": "https://github.com/DemOnJR/xconsole-plugin-database",
   "icon": "🗄️",
   "category": "database",
   "enabled": true,

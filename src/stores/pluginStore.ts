@@ -39,7 +39,7 @@ export const FEATURED_COMMUNITY_PLUGINS: FeaturedCommunityPlugin[] = [
     version: "1.0.0",
     description: "Zero Trust Tunnels, Ingress routing, DNS records & WAF protection with instant rollback.",
     author: "xConsole Team",
-    repository: "https://github.com/xconsole-plugins/xconsole-plugin-cloudflare",
+    repository: "https://github.com/DemOnJR/xconsole-plugin-cloudflare",
     icon: "☁️",
     category: "infrastructure",
     stars: 142,
@@ -51,7 +51,7 @@ export const FEATURED_COMMUNITY_PLUGINS: FeaturedCommunityPlugin[] = [
     version: "1.0.0",
     description: "Multi-engine database client with visual table grid, schema viewer, and SQL query runner.",
     author: "xConsole Team",
-    repository: "https://github.com/xconsole-plugins/xconsole-plugin-database",
+    repository: "https://github.com/DemOnJR/xconsole-plugin-database",
     icon: "🗄️",
     category: "database",
     stars: 98,
@@ -63,11 +63,23 @@ export const FEATURED_COMMUNITY_PLUGINS: FeaturedCommunityPlugin[] = [
     version: "1.0.0",
     description: "Dual-pane remote filesystem explorer, inline code editor, and file permissions over SSH.",
     author: "xConsole Team",
-    repository: "https://github.com/xconsole-plugins/xconsole-plugin-sftp",
+    repository: "https://github.com/DemOnJR/xconsole-plugin-sftp",
     icon: "📁",
     category: "networking",
     stars: 84,
     tags: ["sftp", "ssh", "files", "transfers"],
+  },
+  {
+    id: "xconsole-plugin-agent",
+    name: "Autonomous AI Agent Engine",
+    version: "1.0.0",
+    description: "Multi-provider AI pairing assistant with tool execution, file editing, safety gates, and self-composition.",
+    author: "xConsole Team",
+    repository: "https://github.com/DemOnJR/xconsole-plugin-agent",
+    icon: "🤖",
+    category: "ai",
+    stars: 180,
+    tags: ["agent", "ai", "llm", "tools", "deepseek"],
   },
   {
     id: "xconsole-plugin-redis",
@@ -111,14 +123,14 @@ interface PluginState {
   plugins: PluginManifest[];
   definitions: Record<string, PluginDefinition>;
   openViews: Record<string, boolean>;
+  activeNavItems: PluginNavItemCapability[];
+  activeAgentTools: PluginAgentToolCapability[];
   marketplaceOpen: boolean;
   loading: boolean;
   installing: boolean;
   error: string | null;
 
-  // Computed / Accessors
-  getActiveNavItems: () => PluginNavItemCapability[];
-  getActiveAgentTools: () => PluginAgentToolCapability[];
+  // Accessors
   isPluginViewOpen: (pluginId: string) => boolean;
 
   // Actions
@@ -144,32 +156,12 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     "xconsole-plugin-agent": agentPlugin,
   },
   openViews: {},
+  activeNavItems: [],
+  activeAgentTools: [],
   marketplaceOpen: false,
   loading: false,
   installing: false,
   error: null,
-
-  getActiveNavItems: () => {
-    const { plugins } = get();
-    return plugins
-      .filter((p) => p.enabled !== false && p.capabilities?.navItem)
-      .map((p) => ({
-        ...p.capabilities.navItem!,
-        id: p.id,
-      }))
-      .sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
-  },
-
-  getActiveAgentTools: () => {
-    const { plugins } = get();
-    const tools: PluginAgentToolCapability[] = [];
-    for (const p of plugins) {
-      if (p.enabled !== false && p.capabilities?.agentTools) {
-        tools.push(...p.capabilities.agentTools);
-      }
-    }
-    return tools;
-  },
 
   isPluginViewOpen: (pluginId: string) => {
     return Boolean(get().openViews[pluginId]);
@@ -199,6 +191,22 @@ export const usePluginStore = create<PluginState>((set, get) => ({
 
       const allPlugins = Array.from(mergedMap.values());
 
+      // Compute active extension slots once
+      const activeNavItems = allPlugins
+        .filter((p) => p.enabled !== false && p.capabilities?.navItem)
+        .map((p) => ({
+          ...p.capabilities.navItem!,
+          id: p.id,
+        }))
+        .sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
+
+      const activeAgentTools: PluginAgentToolCapability[] = [];
+      for (const p of allPlugins) {
+        if (p.enabled !== false && p.capabilities?.agentTools) {
+          activeAgentTools.push(...p.capabilities.agentTools);
+        }
+      }
+
       // Spatiotemporal Cordis Reconciliation
       for (const p of allPlugins) {
         const isEnabled = p.enabled !== false;
@@ -224,7 +232,12 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         }
       }
 
-      set({ plugins: allPlugins, loading: false });
+      set({
+        plugins: allPlugins,
+        activeNavItems,
+        activeAgentTools,
+        loading: false,
+      });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
