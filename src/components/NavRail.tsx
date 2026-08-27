@@ -2,7 +2,6 @@ import {
   BotIcon,
   DatabaseIcon,
   FolderIcon,
-  PanelBottomIcon,
   SettingsIcon,
   TerminalIcon,
 } from "./icons";
@@ -68,10 +67,8 @@ export function NavRail() {
   const mainView = useUiStore((s) => s.mainView);
   const toggleAnalytics = useUiStore((s) => s.toggleAnalytics);
   const rightOpen = useUiStore((s) => s.rightOpen);
-  const bottomOpen = useUiStore((s) => s.bottomOpen);
   const toggleLeft = useUiStore((s) => s.toggleLeft);
   const toggleRight = useUiStore((s) => s.toggleRight);
-  const toggleBottom = useUiStore((s) => s.toggleBottom);
   const openSettings = useUiStore((s) => s.openSettings);
 
   const agentNodeId = useCanvasStore((s) =>
@@ -125,14 +122,6 @@ export function NavRail() {
         onClick={toggleRight}
       >
         <HostsIcon size={18} />
-      </RailBtn>
-
-      <RailBtn
-        active={bottomOpen}
-        title={bottomOpen ? "Hide console" : "Console"}
-        onClick={toggleBottom}
-      >
-        <PanelBottomIcon size={18} />
       </RailBtn>
 
       <div className="my-1 h-px w-6 bg-[var(--border)]" />

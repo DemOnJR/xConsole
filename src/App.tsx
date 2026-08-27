@@ -4,7 +4,6 @@ import { WorkspacePanel } from "./components/WorkspacePanel";
 import { AnalyticsPage } from "../plugins/xconsole-plugin-agent/src/AnalyticsPage";
 import { ServerPanel } from "./components/ServerPanel";
 import { CanvasFlow } from "./components/CanvasFlow";
-import { BottomBar } from "./components/BottomBar";
 import { SettingsModal } from "./components/settings/SettingsModal";
 import { DialogHost } from "./components/Dialog";
 import { TooltipHost } from "./components/Tooltip";
@@ -125,7 +124,6 @@ function UnlockedApp() {
   const leftOpen = useUiStore((s) => s.leftOpen);
   const mainView = useUiStore((s) => s.mainView);
   const rightOpen = useUiStore((s) => s.rightOpen);
-  const bottomOpen = useUiStore((s) => s.bottomOpen);
   const leftWidth = useUiStore((s) => s.leftWidth);
   const rightWidth = useUiStore((s) => s.rightWidth);
   const setLeftWidth = useUiStore((s) => s.setLeftWidth);
@@ -280,7 +278,6 @@ function UnlockedApp() {
           )}
         </div>
 
-        {mainView === "canvas" && bottomOpen ? <BottomBar /> : null}
         <StatusStrip />
       </div>
       <SettingsModal />

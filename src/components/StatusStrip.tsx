@@ -27,7 +27,6 @@ export function StatusStrip() {
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const leftOpen = useUiStore((s) => s.leftOpen);
   const toggleLeft = useUiStore((s) => s.toggleLeft);
-  const toggleBottom = useUiStore((s) => s.toggleBottom);
   const rightOpen = useUiStore((s) => s.rightOpen);
   const toggleRight = useUiStore((s) => s.toggleRight);
   const setTransfersOpen = useTransferStore((s) => s.setOpen);
@@ -149,11 +148,9 @@ export function StatusStrip() {
       {conn.total > 0 ? (
         <>
           <span className="text-[var(--border-strong)]">·</span>
-          <button
-            type="button"
-            className="inline-flex items-center gap-1.5 transition hover:text-[var(--text)]"
-            title="Toggle console drawer"
-            onClick={() => toggleBottom()}
+          <span
+            className="inline-flex items-center gap-1.5"
+            title={`${conn.connected} live SSH connections`}
           >
             <span
               className="inline-block h-1.5 w-1.5 rounded-full"
@@ -169,7 +166,7 @@ export function StatusStrip() {
             {conn.connected} live
             {conn.connecting > 0 ? ` · ${conn.connecting} …` : ""}
             {conn.error > 0 ? ` · ${conn.error} err` : ""}
-          </button>
+          </span>
         </>
       ) : null}
 

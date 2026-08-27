@@ -13,15 +13,10 @@ interface UiState {
   /** Main view: the canvas workspace or the dedicated analytics page. */
   mainView: "canvas" | "analytics";
   rightOpen: boolean;
-  bottomOpen: boolean;
   /** Persisted width of the expanded workspace drawer. */
   leftWidth: number;
   /** Persisted width of the server drawer. */
   rightWidth: number;
-  /** Console drawer expanded height (vs collapsed header only). */
-  consoleExpanded: boolean;
-  /** Broadcast keystrokes to all open console panes. */
-  consoleBroadcast: boolean;
 
   openSettings: (section?: string) => void;
   closeSettings: () => void;
@@ -30,34 +25,24 @@ interface UiState {
   toggleAnalytics: () => void;
   showCanvas: () => void;
   toggleRight: () => void;
-  toggleBottom: () => void;
   setLeftWidth: (width: number) => void;
   setRightWidth: (width: number) => void;
-  toggleConsoleExpanded: () => void;
-  setConsoleBroadcast: (on: boolean) => void;
-  toggleConsoleBroadcast: () => void;
 }
 
 type PersistedUi = Pick<
   UiState,
   | "leftOpen"
   | "rightOpen"
-  | "bottomOpen"
   | "leftWidth"
   | "rightWidth"
-  | "consoleExpanded"
-  | "consoleBroadcast"
   | "settingsSection"
 >;
 
 const PERSIST_DEFAULTS: PersistedUi = {
   leftOpen: true,
   rightOpen: true,
-  bottomOpen: false,
   leftWidth: DRAWER_WIDTH_DEFAULT,
   rightWidth: DRAWER_WIDTH_DEFAULT,
-  consoleExpanded: true,
-  consoleBroadcast: true,
   settingsSection: "general",
 };
 
@@ -87,14 +72,8 @@ export const useUiStore = create<UiState>()(
         })),
       showCanvas: () => set({ mainView: "canvas" }),
       toggleRight: () => set((s) => ({ rightOpen: !s.rightOpen })),
-      toggleBottom: () => set((s) => ({ bottomOpen: !s.bottomOpen })),
       setLeftWidth: (width) => set({ leftWidth: clampDrawerWidth(width) }),
       setRightWidth: (width) => set({ rightWidth: clampDrawerWidth(width) }),
-      toggleConsoleExpanded: () =>
-        set((s) => ({ consoleExpanded: !s.consoleExpanded })),
-      setConsoleBroadcast: (on) => set({ consoleBroadcast: on }),
-      toggleConsoleBroadcast: () =>
-        set((s) => ({ consoleBroadcast: !s.consoleBroadcast })),
     }),
     {
       name: "xconsole-ui",
@@ -102,11 +81,8 @@ export const useUiStore = create<UiState>()(
       partialize: (state): PersistedUi => ({
         leftOpen: state.leftOpen,
         rightOpen: state.rightOpen,
-        bottomOpen: state.bottomOpen,
         leftWidth: state.leftWidth,
         rightWidth: state.rightWidth,
-        consoleExpanded: state.consoleExpanded,
-        consoleBroadcast: state.consoleBroadcast,
         settingsSection: state.settingsSection,
       }),
     },

@@ -253,18 +253,6 @@ export function QuickOpenPalette() {
       },
     });
 
-    items.push({
-      id: "app-console",
-      category: "System",
-      title: "Bottom Console",
-      subtitle: "Toggle debug output, logs, and command transcripts",
-      icon: "💻",
-      keywords: ["console", "logs", "bottom", "terminal", "output"],
-      action: () => {
-        useUiStore.getState().toggleBottom();
-        close();
-      },
-    });
 
     items.push({
       id: "app-workspaces",
