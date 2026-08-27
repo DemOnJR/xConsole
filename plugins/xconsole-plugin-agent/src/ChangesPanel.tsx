@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { useEditsStore } from "../../stores/editsStore";
-import { useWorkspaceStore } from "../../stores/workspaceStore";
-import { lineDiff, type DiffResult } from "../../lib/diff";
-import type { FileChange } from "../../lib/tauri";
+import { useEditsStore } from "../../../src/stores/editsStore";
+import { useWorkspaceStore } from "../../../src/stores/workspaceStore";
+import { lineDiff, type DiffResult } from "../../../src/lib/diff";
+import type { FileChange } from "../../../src/lib/tauri";
 
 function baseName(path: string): string {
   const parts = path.split(/[\\/]/);

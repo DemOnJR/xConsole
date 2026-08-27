@@ -1,6 +1,6 @@
-import type { SessionCacheTotals, TokenStats } from "../../lib/streamStats";
-import { cacheBreakdown, formatCacheTooltip } from "../../lib/streamStats";
-import { CacheIcon } from "../icons";
+import type { SessionCacheTotals, TokenStats } from "../../../src/lib/streamStats";
+import { cacheBreakdown, formatCacheTooltip } from "../../../src/lib/streamStats";
+import { CacheIcon } from "../../../src/components/icons";
 
 /** Compact cache affordance for the composer. Full numbers live in the hover tooltip. */
 export function CacheMeter({

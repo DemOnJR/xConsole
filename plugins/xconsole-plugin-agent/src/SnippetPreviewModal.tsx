@@ -1,5 +1,5 @@
 import { memo, useEffect, useState } from "react";
-import type { ChatSnippet } from "../../lib/snippetDetect";
+import type { ChatSnippet } from "../../../src/lib/snippetDetect";
 import { CodeHighlight } from "./SyntaxHighlight";
 
 interface SnippetPreviewModalProps {

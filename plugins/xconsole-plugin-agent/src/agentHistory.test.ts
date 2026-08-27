@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AgentConversationMeta } from "../../lib/tauri";
+import type { AgentConversationMeta } from "../../../src/lib/tauri";
 import { filterAgentConversations, shouldShowHistoryFilter } from "./historyFilter";
 
 function conversation(

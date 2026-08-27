@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { useHarnessStore } from "../../../stores/harnessStore";
-import { useAgentStore } from "../../../stores/agentStore";
+import { useHarnessStore } from "../../../../src/stores/harnessStore";
+import { useAgentStore } from "../../../../src/stores/agentStore";
 
 export function ToolCallsModule() {
   const showTools = useHarnessStore((s) => s.showTools);

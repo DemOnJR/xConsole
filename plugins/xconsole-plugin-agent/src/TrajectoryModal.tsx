@@ -1,80 +1,149 @@
-import { useState, useMemo, useRef, useEffect } from "react";
-import type { AgentChatMessage } from "./types";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { useAgentStore, type AgentActivityItem } from "../../../src/stores/agentStore";
+import { segmentsFromMessage } from "../../../src/stores/turnSegments";
+import { isCommandItem, isFileEditItem, isSearchItem, isFileReadItem } from "./AgentActivity";
+import { useMaskHost } from "../../../src/lib/privacy";
 
-export interface TrajectoryEvent {
-  id: string;
-  index: number;
-  role: "user" | "assistant" | "system";
-  kind: "user_message" | "tool_call" | "reasoning" | "status";
-  title: string;
-  subtitle?: string;
-  content?: string;
-  duration?: string;
-}
-
-export function TrajectoryModal({
-  messages,
+export const TrajectoryModal = memo(function TrajectoryModal({
   onClose,
 }: {
-  messages: AgentChatMessage[];
   onClose: () => void;
 }) {
-  const [filter, setFilter] = useState<"all" | "tools" | "messages">("all");
+  const messages = useAgentStore((s) => s.messages);
+  const streamStats = useAgentStore((s) => s.streamStats);
+  const conversationCostUsd = useAgentStore((s) => s.conversationCostUsd);
+  const maskHost = useMaskHost();
+
+  const [filter, setFilter] = useState<"all" | "tools" | "think" | "messages">("all");
   const [search, setSearch] = useState("");
   const [expandedIndices, setExpandedIndices] = useState<Set<number>>(() => new Set());
   const [copied, setCopied] = useState(false);
+
   const listRef = useRef<HTMLDivElement | null>(null);
 
-  // Keyboard escape
+  // Close on Escape
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
         onClose();
       }
     };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
   }, [onClose]);
 
-  // Build events timeline
-  const events: TrajectoryEvent[] = useMemo(() => {
-    const list: TrajectoryEvent[] = [];
-    let idx = 1;
+  // Non-passive wheel handler: prevents ReactFlow / canvas from intercepting or swallowing wheel scroll
+  useEffect(() => {
+    const listEl = listRef.current;
+    if (!listEl) return;
 
-    messages.forEach((msg) => {
+    const onWheel = (e: WheelEvent) => {
+      e.stopPropagation();
+
+      // Check if cursor is over an inner scrollable <pre>
+      const target = e.target as HTMLElement | null;
+      const innerPre = target?.closest<HTMLElement>("pre");
+
+      if (innerPre && innerPre !== listEl && innerPre.scrollHeight > innerPre.clientHeight) {
+        const canScrollInner =
+          (e.deltaY > 0 && innerPre.scrollTop + innerPre.clientHeight < innerPre.scrollHeight) ||
+          (e.deltaY < 0 && innerPre.scrollTop > 0);
+        if (canScrollInner) {
+          innerPre.scrollTop += e.deltaY;
+          e.preventDefault();
+          return;
+        }
+      }
+
+      // Scroll the main list
+      const canScrollList =
+        (e.deltaY > 0 && listEl.scrollTop + listEl.clientHeight < listEl.scrollHeight) ||
+        (e.deltaY < 0 && listEl.scrollTop > 0);
+
+      if (canScrollList || listEl.scrollHeight > listEl.clientHeight) {
+        listEl.scrollTop += e.deltaY;
+        e.preventDefault();
+      }
+    };
+
+    listEl.addEventListener("wheel", onWheel, { capture: true, passive: false });
+    return () => {
+      listEl.removeEventListener("wheel", onWheel, true);
+    };
+  }, [expandedIndices]);
+
+  // Parse chronological trajectory events from all conversation messages
+  const events = useMemo(() => {
+    const list: Array<{
+      id: string;
+      index: number;
+      turnIndex: number;
+      role: "user" | "assistant" | "system";
+      kind: "user_message" | "assistant_message" | "tool_call" | "reasoning" | "status";
+      title: string;
+      subtitle?: string;
+      content?: string;
+      durationFormatted?: string;
+      tokenStats?: import("../../../src/stores/agentStore").TokenStats;
+      activityItem?: AgentActivityItem;
+    }> = [];
+
+    let eventIdx = 0;
+    messages.forEach((msg, turnIdx) => {
       if (msg.role === "user") {
         list.push({
-          id: msg.id,
-          index: idx++,
+          id: `msg-${turnIdx}`,
+          index: eventIdx++,
+          turnIndex: turnIdx,
           role: "user",
           kind: "user_message",
           title: "User Prompt",
-          subtitle: msg.content.slice(0, 80),
           content: msg.content,
         });
-      } else {
-        // Mock / real tool calls extraction
-        list.push({
-          id: `${msg.id}-tool-1`,
-          index: idx++,
-          role: "assistant",
-          kind: "tool_call",
-          title: "Command: Execute Task Diagnostics",
-          subtitle: "execute_bash · /var/www/project",
-          content: "$ cargo test --workspace\n   Compiling target v0.1.0\n   Finished test [unoptimized + debuginfo] in 1.42s\n   Running unittests\ntest result: ok. 35 passed; 0 failed;",
-          duration: "1.42s",
-        });
+      } else if (msg.role === "assistant") {
+        const segments = segmentsFromMessage(msg);
+        for (const seg of segments) {
+          if (seg.type === "activity") {
+            for (const item of seg.items) {
+              const isCmd = isCommandItem(item);
+              const isEdit = isFileEditItem(item);
+              const isSearch = isSearchItem(item);
+              const isRead = isFileReadItem(item);
 
-        list.push({
-          id: `${msg.id}-reply`,
-          index: idx++,
-          role: "assistant",
-          kind: "status",
-          title: "Assistant Response",
-          subtitle: msg.content.slice(0, 80),
-          content: msg.content,
-          duration: "280ms",
-        });
+              let title = item.label;
+              if (isCmd) title = `Command: ${item.label}`;
+              else if (isEdit) title = `File Edit: ${item.path || item.label}`;
+              else if (isSearch) title = `Grep / Search: ${item.label}`;
+              else if (isRead) title = `File Read: ${item.label}`;
+
+              list.push({
+                id: `act-${item.id}-${eventIdx}`,
+                index: eventIdx++,
+                turnIndex: turnIdx,
+                role: "assistant",
+                kind: "tool_call",
+                title,
+                subtitle: item.tool ? `tool: ${item.tool}` : undefined,
+                content: item.output || item.detail,
+                activityItem: item,
+              });
+            }
+          } else if (seg.type === "text") {
+            list.push({
+              id: `text-${turnIdx}-${eventIdx}`,
+              index: eventIdx++,
+              turnIndex: turnIdx,
+              role: "assistant",
+              kind: "assistant_message",
+              title: "Assistant Response",
+              content: seg.content,
+              durationFormatted: msg.durationFormatted,
+              tokenStats: msg.tokenStats,
+            });
+          }
+        }
       }
     });
 
@@ -84,55 +153,85 @@ export function TrajectoryModal({
   const filteredEvents = useMemo(() => {
     return events.filter((ev) => {
       if (filter === "tools" && ev.kind !== "tool_call") return false;
-      if (filter === "messages" && ev.kind !== "user_message" && ev.kind !== "status") return false;
+      if (filter === "messages" && ev.kind !== "user_message" && ev.kind !== "assistant_message") return false;
+      if (filter === "think" && ev.kind !== "reasoning") return false;
+
       if (search.trim()) {
         const q = search.toLowerCase();
-        const matchTitle = ev.title.toLowerCase().includes(q);
-        const matchContent = (ev.content || "").toLowerCase().includes(q);
-        const matchSub = (ev.subtitle || "").toLowerCase().includes(q);
-        if (!matchTitle && !matchContent && !matchSub) return false;
+        const text = `${ev.title} ${ev.subtitle || ""} ${ev.content || ""}`.toLowerCase();
+        return text.includes(q);
       }
       return true;
     });
   }, [events, filter, search]);
 
-  const toggleExpand = (i: number) => {
+  const toggleExpand = (idx: number) => {
     setExpandedIndices((prev) => {
       const next = new Set(prev);
-      if (next.has(i)) next.delete(i);
-      else next.add(i);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
       return next;
     });
   };
 
-  const handleCopyJson = () => {
-    navigator.clipboard.writeText(JSON.stringify(events, null, 2));
+  const expandAll = () => {
+    setExpandedIndices(new Set(filteredEvents.map((e) => e.index)));
+  };
+
+  const collapseAll = () => {
+    setExpandedIndices(new Set());
+  };
+
+  const copyFullTrace = () => {
+    const traceJson = JSON.stringify(
+      {
+        totalEvents: events.length,
+        conversationCostUsd,
+        streamStats,
+        events: events.map((e) => ({
+          turn: e.turnIndex,
+          role: e.role,
+          kind: e.kind,
+          title: e.title,
+          content: e.content,
+          duration: e.durationFormatted,
+          tokens: e.tokenStats,
+          activity: e.activityItem,
+        })),
+      },
+      null,
+      2,
+    );
+    void navigator.clipboard.writeText(traceJson);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 md:p-6 select-none font-mono text-xs"
-      onMouseDown={(e) => e.target === e.currentTarget && onClose()}
+      className="nowheel nopan nodrag fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-md"
+      onClick={onClose}
+      onWheel={(e) => e.stopPropagation()}
     >
-      <div className="flex h-[88vh] w-[min(900px,95vw)] flex-col rounded-xl border border-[var(--border-strong)] bg-[var(--surface)] text-[var(--text)] shadow-2xl overflow-hidden">
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-[var(--border)] px-5 py-3.5 bg-[var(--surface-2)] shrink-0">
+      <div
+        className="nowheel nopan nodrag flex h-[85vh] w-[92vw] max-w-5xl flex-col overflow-hidden rounded-xl border border-[var(--border-strong)] bg-[#0b0f17] shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+        onWheel={(e) => e.stopPropagation()}
+      >
+        {/* Modal Header */}
+        <div className="flex select-none items-center justify-between border-b border-[var(--border)] bg-[#111827]/80 px-4 py-3">
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[var(--surface-hover)] border border-[var(--border)] text-cyan-400 text-base">
+            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-cyan-950/80 border border-cyan-500/30 text-cyan-400 font-mono text-xs">
               ⚡
-            </div>
+            </span>
             <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-sm font-semibold text-gray-100 font-sans tracking-tight">
-                  Agent Trajectory &amp; Event Inspector
-                </h2>
-                <span className="rounded-full bg-cyan-950/60 text-cyan-400 border border-cyan-800/40 px-2 py-0.5 text-[10px] font-mono">
+              <h2 className="text-sm font-semibold text-gray-100 flex items-center gap-2 font-mono">
+                Agent Trajectory &amp; Event Inspector
+                <span className="rounded bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-300 font-mono border border-cyan-500/20">
                   {events.length} events
                 </span>
-              </div>
-              <p className="text-[11px] text-[var(--text-faint)]">
+              </h2>
+              <p className="text-[11px] text-gray-400 font-mono">
                 Chronological execution tree, tool invocations, and token metrics (DeepSeek Harness runtime trace)
               </p>
             </div>
@@ -140,138 +239,147 @@ export function TrajectoryModal({
 
           <div className="flex items-center gap-2">
             <button
-              onClick={handleCopyJson}
-              className="rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 px-2.5 py-1 text-[11px] font-medium flex items-center gap-1.5 transition"
+              type="button"
+              onClick={copyFullTrace}
+              className="flex items-center gap-1.5 rounded-md border border-[var(--border)] bg-[#162032] px-2.5 py-1 text-[11px] font-mono text-cyan-300 hover:bg-[#1e2d47]"
             >
-              <span>{copied ? "✓ Copied" : "Copy Trace JSON"}</span>
+              {copied ? "✓ Copied JSON" : "Copy Trace JSON"}
             </button>
             <button
+              type="button"
               onClick={onClose}
-              className="p-1 text-zinc-400 hover:text-white rounded ml-1"
+              className="flex h-7 w-7 items-center justify-center rounded-md text-gray-400 hover:bg-[var(--border)] hover:text-white"
+              title="Close (Esc)"
             >
               ✕
             </button>
           </div>
         </div>
 
-        {/* Filter bar */}
-        <div className="flex flex-wrap items-center justify-between border-b border-[var(--border)] px-5 py-2.5 bg-[var(--surface)] gap-2 shrink-0">
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => setFilter("all")}
-              className={`rounded px-2.5 py-1 text-[11px] transition ${
-                filter === "all"
-                  ? "bg-zinc-200 text-zinc-950 font-bold"
-                  : "bg-zinc-800/60 text-zinc-400 hover:text-zinc-200"
-              }`}
-            >
-              All Events
-            </button>
-            <button
-              onClick={() => setFilter("tools")}
-              className={`rounded px-2.5 py-1 text-[11px] transition ${
-                filter === "tools"
-                  ? "bg-zinc-200 text-zinc-950 font-bold"
-                  : "bg-zinc-800/60 text-zinc-400 hover:text-zinc-200"
-              }`}
-            >
-              Tool Invocations
-            </button>
-            <button
-              onClick={() => setFilter("messages")}
-              className={`rounded px-2.5 py-1 text-[11px] transition ${
-                filter === "messages"
-                  ? "bg-zinc-200 text-zinc-950 font-bold"
-                  : "bg-zinc-800/60 text-zinc-400 hover:text-zinc-200"
-              }`}
-            >
-              Messages
-            </button>
+        {/* Toolbar & Filters */}
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] bg-[#0e1420] px-4 py-2 text-[11px] font-mono">
+          <div className="flex items-center gap-1.5">
+            {(["all", "tools", "messages"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setFilter(mode)}
+                className={`rounded px-2.5 py-1 transition ${
+                  filter === mode
+                    ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
+                    : "text-gray-400 hover:bg-[#162032] hover:text-gray-200"
+                }`}
+              >
+                {mode === "all" ? "All Events" : mode === "tools" ? "Tool Invocations" : "Messages"}
+              </button>
+            ))}
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search trajectory..."
-              className="rounded bg-[var(--surface-2)] border border-[var(--border)] px-2.5 py-1 text-[11px] text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-zinc-400 w-48"
+              placeholder="Search trajectory…"
+              className="w-48 rounded border border-[var(--border)] bg-[#070a10] px-2.5 py-1 text-[11px] text-gray-200 placeholder-gray-500 focus:border-cyan-500 focus:outline-none"
             />
             <button
-              onClick={() => setExpandedIndices(new Set(events.map((_, i) => i)))}
-              className="text-[10px] text-zinc-400 hover:text-white"
+              type="button"
+              onClick={expandAll}
+              className="text-[10px] text-gray-400 hover:text-gray-200 px-1"
             >
               Expand All
             </button>
-            <span className="text-zinc-600">&bull;</span>
+            <span className="text-gray-600">·</span>
             <button
-              onClick={() => setExpandedIndices(new Set())}
-              className="text-[10px] text-zinc-400 hover:text-white"
+              type="button"
+              onClick={collapseAll}
+              className="text-[10px] text-gray-400 hover:text-gray-200 px-1"
             >
               Collapse All
             </button>
           </div>
         </div>
 
-        {/* Timeline Events List */}
-        <div ref={listRef} className="flex-1 overflow-y-auto p-5 space-y-2">
+        {/* Event List */}
+        <div
+          ref={listRef}
+          className="nowheel nopan nodrag flex-1 overflow-y-auto p-4 space-y-2.5 font-mono text-[11px]"
+          onWheel={(e) => e.stopPropagation()}
+        >
           {filteredEvents.length === 0 ? (
-            <div className="p-8 text-center text-zinc-500">
-              No events found matching the filter.
+            <div className="flex h-full flex-col items-center justify-center text-center text-gray-500">
+              <p>No trajectory events found matching filters.</p>
             </div>
           ) : (
-            filteredEvents.map((ev, i) => {
-              const isExpanded = expandedIndices.has(i);
+            filteredEvents.map((ev) => {
+              const isExpanded = expandedIndices.has(ev.index);
+              const isUser = ev.role === "user";
+              const isTool = ev.kind === "tool_call";
 
               return (
                 <div
                   key={ev.id}
-                  className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] overflow-hidden transition"
+                  className={`rounded-lg border transition-all ${
+                    isUser
+                      ? "border-blue-900/40 bg-blue-950/20"
+                      : isTool
+                        ? "border-cyan-900/40 bg-[#0c121e]"
+                        : "border-[var(--border)] bg-[#090d15]"
+                  }`}
                 >
+                  {/* Event Header */}
                   <div
-                    onClick={() => toggleExpand(i)}
-                    className="flex items-center justify-between px-3.5 py-2.5 cursor-pointer hover:bg-[var(--surface-hover)] select-none"
+                    onClick={() => toggleExpand(ev.index)}
+                    className="flex cursor-pointer select-none items-center justify-between gap-3 px-3 py-2 hover:bg-white/5"
                   >
-                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                      <span className="text-[10px] font-bold text-zinc-500 w-6 shrink-0">
-                        #{ev.index}
+                    <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                      <span className="shrink-0 text-[10px] text-gray-500">
+                        #{ev.index + 1}
                       </span>
                       <span
-                        className={`rounded px-1.5 py-0.2 text-[9px] font-bold tracking-wider uppercase shrink-0 ${
-                          ev.kind === "user_message"
-                            ? "bg-blue-950/60 text-blue-400 border border-blue-800/40"
-                            : ev.kind === "tool_call"
-                              ? "bg-cyan-950/60 text-cyan-400 border border-cyan-800/40"
-                              : "bg-emerald-950/60 text-emerald-400 border border-emerald-800/40"
+                        className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
+                          isUser
+                            ? "bg-blue-500/20 text-blue-300 border border-blue-500/30"
+                            : isTool
+                              ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                              : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
                         }`}
                       >
                         {ev.kind.replace("_", " ")}
                       </span>
-                      <span className="font-semibold text-gray-200 truncate text-[11px]">
+                      <span className="truncate font-medium text-gray-200">
                         {ev.title}
                       </span>
-                      {ev.subtitle && (
-                        <span className="text-zinc-500 truncate text-[11px] hidden sm:inline">
-                          &bull; {ev.subtitle}
-                        </span>
-                      )}
                     </div>
 
-                    <div className="flex items-center gap-2 shrink-0">
-                      {ev.duration && (
-                        <span className="text-[10px] text-zinc-500">{ev.duration}</span>
+                    <div className="flex shrink-0 items-center gap-2 text-[10px] text-gray-400">
+                      {ev.durationFormatted && (
+                        <span className="text-cyan-400">⏱ {ev.durationFormatted}</span>
                       )}
-                      <span className="text-zinc-400 text-[10px] font-mono">
-                        {isExpanded ? "▲" : "▼"}
-                      </span>
+                      {ev.tokenStats?.completionTokens ? (
+                        <span className="text-gray-400">
+                          {ev.tokenStats.completionTokens} tok
+                        </span>
+                      ) : null}
+                      <span className="text-gray-500">{isExpanded ? "▾" : "›"}</span>
                     </div>
                   </div>
 
+                  {/* Expanded Content Payload */}
                   {isExpanded && ev.content && (
-                    <div className="border-t border-[var(--border)] bg-black/40 p-3 text-[11px] text-zinc-300">
-                      <pre className="whitespace-pre-wrap overflow-x-auto leading-relaxed max-h-60">
-                        {ev.content}
+                    <div className="border-t border-[var(--border)]/60 bg-[#05080e] p-3 text-[11px] leading-relaxed text-gray-300">
+                      <pre
+                        className="nowheel nopan nodrag whitespace-pre-wrap break-words font-mono text-[10.5px] max-h-96 overflow-y-auto text-gray-200"
+                        onWheel={(e) => e.stopPropagation()}
+                      >
+                        {maskHost(ev.content)}
                       </pre>
+                      {ev.subtitle && (
+                        <div className="mt-2 pt-2 border-t border-[var(--border)]/40 text-[10px] text-gray-500">
+                          {ev.subtitle}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -280,16 +388,20 @@ export function TrajectoryModal({
           )}
         </div>
 
-        {/* Footer */}
-        <div className="flex items-center justify-between border-t border-[var(--border)] px-5 py-2.5 bg-[var(--surface-2)] text-[11px] text-zinc-400 font-mono">
+        {/* Modal Footer / Running Cost */}
+        <div className="flex items-center justify-between border-t border-[var(--border)] bg-[#0d131f] px-4 py-2 text-[11px] font-mono text-gray-400">
           <div className="flex items-center gap-3">
-            <span>Session: <strong className="text-zinc-200">{messages.length} messages</strong></span>
-            <span>&bull;</span>
-            <span>Cost: <strong className="text-emerald-400 font-bold">$0.0242</strong></span>
+            <span>Session: {messages.length} messages</span>
+            <span>·</span>
+            <span className="text-emerald-400 font-semibold">
+              Cost: ${conversationCostUsd.toFixed(4)}
+            </span>
           </div>
-          <span className="text-zinc-500 text-[10px]">Press Esc to close inspector</span>
+          <div className="text-[10px] text-gray-500">
+            Press Esc to close inspector
+          </div>
         </div>
       </div>
     </div>
   );
-}
+});

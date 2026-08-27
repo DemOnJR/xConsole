@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import hljs from "highlight.js/lib/core";
-import { langFromPath } from "./agent/SyntaxHighlight";
+import { langFromPath } from "../../plugins/xconsole-plugin-agent/src/SyntaxHighlight";
 
 /**
  * An editable, syntax-highlighted code surface.

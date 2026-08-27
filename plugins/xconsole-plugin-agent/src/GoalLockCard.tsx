@@ -1,4 +1,4 @@
-import type { GoalSpec } from "../../lib/tauri";
+import type { GoalSpec } from "../../../src/lib/tauri";
 
 /** Lock CTA shown in chat and on the goal board during intake. */
 export function GoalLockCard({

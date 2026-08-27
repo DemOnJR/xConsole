@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import type { ContextUsage } from "../../lib/streamStats";
-import { formatTokenCount } from "../../lib/streamStats";
+import type { ContextUsage } from "../../../src/lib/streamStats";
+import { formatTokenCount } from "../../../src/lib/streamStats";
 import { ContextHourglass } from "./ContextHourglass";
 
 const SEGMENT_COLORS: Record<string, string> = {

@@ -5,7 +5,7 @@ import remarkGfm from "remark-gfm";
 import { MarkdownCodeBlock } from "./SyntaxHighlight";
 import { SvgPreview } from "./SvgPreview";
 import { ImagePreview } from "./ImagePreview";
-import { useMaskHost } from "../../lib/privacy";
+import { useMaskHost } from "../../../src/lib/privacy";
 
 /** Strip accidental whole-message code fences some models wrap replies in. */
 export function normalizeAgentMarkdown(content: string): string {

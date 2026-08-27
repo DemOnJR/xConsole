@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { AgentChatMessage } from "../../stores/agentStore";
-import { exportConversationMarkdown } from "../../lib/agentExport";
+import type { AgentChatMessage } from "../../../src/stores/agentStore";
+import { exportConversationMarkdown } from "../../../src/lib/agentExport";
 import { consoleRows } from "./agentConsoleRows";
 
 describe("Agent Compaction Transcript Preservation", () => {

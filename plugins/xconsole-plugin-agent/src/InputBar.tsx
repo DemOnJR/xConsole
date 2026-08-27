@@ -1,10 +1,10 @@
 import { memo, useMemo, type MouseEvent, type PointerEvent } from "react";
-import type { AiProvider } from "../../lib/tauri";
-import type { ContextUsage, SessionCacheTotals, TokenStats } from "../../lib/streamStats";
-import { BrainIcon, EyeIcon, PlanIcon, ServerIcon, ShieldIcon, SparkIcon } from "../icons";
+import type { AiProvider } from "../../../src/lib/tauri";
+import type { ContextUsage, SessionCacheTotals, TokenStats } from "../../../src/lib/streamStats";
+import { BrainIcon, EyeIcon, PlanIcon, ServerIcon, ShieldIcon, SparkIcon } from "../../../src/components/icons";
 import { ContextGauge } from "./ContextGauge";
 import { CacheMeter } from "./AgentTokenStats";
-import { useMaskHost } from "../../lib/privacy";
+import { useMaskHost } from "../../../src/lib/privacy";
 
 export interface TargetServerInfo {
   id: string;
@@ -64,7 +64,7 @@ export const InputBar = memo(function InputBar({
   onReasoning: (r: ReasoningLevel) => void;
   planMode: boolean;
   onTogglePlan: () => void;
-  agentMode?: import("../../stores/agentStore").AgentRuntimeMode;
+  agentMode?: import("../../../src/stores/agentStore").AgentRuntimeMode;
   onPickMode?: () => void;
   safetyMode: string;
   onCycleSafety?: () => void;

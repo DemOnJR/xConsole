@@ -1,11 +1,11 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { useAgentStore, type AgentChatMessage, type TurnSegment } from "../../stores/agentStore";
-import { plainText } from "../../lib/plainText";
+import { useAgentStore, type AgentChatMessage, type TurnSegment } from "../../../src/stores/agentStore";
+import { plainText } from "../../../src/lib/plainText";
 import { AgentMarkdown } from "./AgentMarkdown";
 import { AgentActivityFeed, AgentThinking } from "./AgentActivity";
-import { segmentsFromMessage } from "../../stores/turnSegments";
-import { previewSrc } from "../../lib/vision";
-import { useMaskHost } from "../../lib/privacy";
+import { segmentsFromMessage } from "../../../src/stores/turnSegments";
+import { previewSrc } from "../../../src/lib/vision";
+import { useMaskHost } from "../../../src/lib/privacy";
 import { StickyChecklist, findLatestChecklist, CompletedChecklistCard, parseChecklist } from "./StickyChecklist";
 import { isTodoItem } from "./AgentActivity";
 
@@ -24,7 +24,7 @@ const AssistantTurn = memo(function AssistantTurn({
   executeTarget?: { name: string; host: string } | null;
   onExecute?: (code: string) => void;
   durationFormatted?: string;
-  tokenStats?: import("../../stores/agentStore").TokenStats;
+  tokenStats?: import("../../../src/stores/agentStore").TokenStats;
 }) {
   const maskHost = useMaskHost();
 

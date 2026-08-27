@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useAgentStore } from "../../stores/agentStore";
+import { useAgentStore } from "../../../src/stores/agentStore";
 import { invoke } from "@tauri-apps/api/core";
 
 interface ImagePreviewProps {

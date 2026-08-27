@@ -6,7 +6,7 @@ import { useCanvasStore, type GoalNode as GoalNodeType } from "../stores/canvasS
 import { useGoalStore } from "../stores/goalStore";
 import { useAgentStore } from "../stores/agentStore";
 import { NodeErrorBoundary } from "./NodeErrorBoundary";
-import { GoalLockCard } from "./agent/GoalLockCard";
+import { GoalLockCard } from "../../plugins/xconsole-plugin-agent/src/GoalLockCard";
 import { GoalTaskModal } from "./GoalTaskModal";
 
 const COLUMNS = ["backlog", "in_progress", "waiting", "testing", "blocked", "done"];

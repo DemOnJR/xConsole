@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, type AgentAnalytics, type ResourceSnapshot } from "../../lib/tauri";
-import { useUiStore } from "../../stores/uiStore";
+import { api, type AgentAnalytics, type ResourceSnapshot } from "../../../src/lib/tauri";
+import { useUiStore } from "../../../src/stores/uiStore";
 
 function Spark({
   values,

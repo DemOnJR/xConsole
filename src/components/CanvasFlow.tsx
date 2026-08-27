@@ -17,7 +17,6 @@ import { NODE_W, useCanvasStore } from "../stores/canvasStore";
 import { useVpsStore } from "../stores/vpsStore";
 import { onCanvasCommand, onCanvasPreview } from "../lib/tauri";
 import { TerminalNode } from "./TerminalNode";
-import { AgentNodeView } from "./agent/AgentNode";
 import { DynamicPluginNode } from "./plugins/DynamicPluginNode";
 import { GoalNode } from "./GoalNode";
 import { PreviewNode } from "./PreviewNode";
@@ -29,7 +28,7 @@ import { SnapPreview } from "./SnapPreview";
 
 const nodeTypes: NodeTypes = {
   terminal: TerminalNode,
-  agent: AgentNodeView,
+  agent: DynamicPluginNode as any,
   sftp: DynamicPluginNode as any,
   db: DynamicPluginNode as any,
   goal: GoalNode,

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { useAgentStore } from "../../stores/agentStore";
-import { api, type AgentPlanFull } from "../../lib/tauri";
-import { computePlanDiff } from "../../lib/planDiff";
-import { StopIcon } from "../icons";
+import { useAgentStore } from "../../../src/stores/agentStore";
+import { api, type AgentPlanFull } from "../../../src/lib/tauri";
+import { computePlanDiff } from "../../../src/lib/planDiff";
+import { StopIcon } from "../../../src/components/icons";
 
 const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
   presented: { label: "Awaiting review", cls: "text-amber-300 border-amber-500/40 bg-amber-500/10" },

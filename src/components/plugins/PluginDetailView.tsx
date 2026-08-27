@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { usePluginStore } from "../../stores/pluginStore";
 import { Button, Card } from "../settings/ui";
-import { AgentMarkdown } from "../agent/AgentMarkdown";
+import { AgentMarkdown } from "../../../plugins/xconsole-plugin-agent/src/AgentMarkdown";
 
 export function PluginDetailView({
   pluginId,

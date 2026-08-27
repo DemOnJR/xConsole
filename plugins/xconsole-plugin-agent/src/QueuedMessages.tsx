@@ -1,5 +1,5 @@
-import type { QueuedMessage } from "../../stores/agentStore";
-import { previewSrc } from "../../lib/vision";
+import type { QueuedMessage } from "../../../src/stores/agentStore";
+import { previewSrc } from "../../../src/lib/vision";
 
 export function QueuedMessages({
   items,

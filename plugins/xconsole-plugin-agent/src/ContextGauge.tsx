@@ -1,5 +1,5 @@
 import { useState, type PointerEvent } from "react";
-import type { ContextUsage } from "../../lib/streamStats";
+import type { ContextUsage } from "../../../src/lib/streamStats";
 
 /** Circular context-window gauge: donut of % used, hover popover with
  *  used/max + segment breakdown. Clicking opens the /ctx breakdown (handled by the

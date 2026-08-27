@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { activitySummary, isCommandItem, liveGerund, visibleActivityItems } from "./AgentActivity";
-import type { AgentActivityItem } from "../../stores/agentStore";
+import type { AgentActivityItem } from "../../../src/stores/agentStore";
 
 const item = (partial: Partial<AgentActivityItem> & Pick<AgentActivityItem, "id" | "kind" | "label">): AgentActivityItem => ({
   state: "done",

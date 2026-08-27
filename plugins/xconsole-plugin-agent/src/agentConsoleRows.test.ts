@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AgentChatMessage } from "../../stores/agentStore";
+import type { AgentChatMessage } from "../../../src/stores/agentStore";
 import { consoleRows } from "./agentConsoleRows";
 
 function assistant(activity: AgentChatMessage["activity"]): AgentChatMessage {

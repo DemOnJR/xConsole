@@ -1,12 +1,12 @@
 import { memo, useEffect, useMemo, useState } from "react";
-import { useAgentStore, type AgentActivityItem } from "../../stores/agentStore";
-import type { DiffLine } from "../../lib/tauri";
+import { useAgentStore, type AgentActivityItem } from "../../../src/stores/agentStore";
+import type { DiffLine } from "../../../src/lib/tauri";
 import { CodeHighlight, ConsoleOutput, langFromPath, ShellCommand } from "./SyntaxHighlight";
-import { useVpsStore } from "../../stores/vpsStore";
-import { useCanvasStore } from "../../stores/canvasStore";
-import { redactExportText } from "../../lib/agentExport";
+import { useVpsStore } from "../../../src/stores/vpsStore";
+import { useCanvasStore } from "../../../src/stores/canvasStore";
+import { redactExportText } from "../../../src/lib/agentExport";
 import { HashSpinner } from "./HashSpinner";
-import { useMaskHost } from "../../lib/privacy";
+import { useMaskHost } from "../../../src/lib/privacy";
 
 function truncate(s: string, max: number): string {
   const flat = s.replace(/\s+/g, " ").trim();

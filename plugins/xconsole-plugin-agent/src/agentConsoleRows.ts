@@ -1,5 +1,5 @@
-import type { AgentActivityItem, AgentChatMessage } from "../../stores/agentStore";
-import { segmentsFromMessage } from "../../stores/turnSegments";
+import type { AgentActivityItem, AgentChatMessage } from "../../../src/stores/agentStore";
+import { segmentsFromMessage } from "../../../src/stores/turnSegments";
 
 export type AgentConsoleRow =
   | { kind: "user"; content: string }

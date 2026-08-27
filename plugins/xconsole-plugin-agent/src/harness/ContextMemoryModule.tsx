@@ -1,7 +1,7 @@
-import { useHarnessStore } from "../../../stores/harnessStore";
-import { useAgentStore } from "../../../stores/agentStore";
-import { useSettingsStore } from "../../../stores/settingsStore";
-import { formatSessionCache, sessionCacheFromMessages } from "../../../lib/streamStats";
+import { useHarnessStore } from "../../../../src/stores/harnessStore";
+import { useAgentStore } from "../../../../src/stores/agentStore";
+import { useSettingsStore } from "../../../../src/stores/settingsStore";
+import { formatSessionCache, sessionCacheFromMessages } from "../../../../src/lib/streamStats";
 
 export function ContextMemoryModule() {
   const showContext = useHarnessStore((s) => s.showContext);

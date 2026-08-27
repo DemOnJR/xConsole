@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseChecklist, findLatestChecklist } from "./StickyChecklist";
-import { formatWorkingDuration, type AgentChatMessage } from "../../stores/agentStore";
+import { formatWorkingDuration, type AgentChatMessage } from "../../../src/stores/agentStore";
 
 describe("StickyChecklist", () => {
   it("parses todo checklist items properly", () => {

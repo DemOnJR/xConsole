@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { AgentActivityItem, AgentChatMessage, TurnSegment } from "../../stores/agentStore";
+import type { AgentActivityItem, AgentChatMessage, TurnSegment } from "../../../src/stores/agentStore";
 import { isTodoItem } from "./AgentActivity";
 
 export interface ChecklistItem {
