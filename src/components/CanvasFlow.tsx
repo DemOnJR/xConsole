@@ -18,7 +18,8 @@ import { useVpsStore } from "../stores/vpsStore";
 import { onCanvasCommand, onCanvasPreview } from "../lib/tauri";
 import { TerminalNode } from "./TerminalNode";
 import { AgentNodeView } from "./agent/AgentNode";
-import { DynamicPluginNode } from "./plugins/DynamicPluginNode";
+import { SftpNode } from "./SftpNode";
+import { DatabaseNode } from "./DatabaseNode";
 import { GoalNode } from "./GoalNode";
 import { PreviewNode } from "./PreviewNode";
 import { FloatingEdge } from "./FloatingEdge";
@@ -30,8 +31,8 @@ import { SnapPreview } from "./SnapPreview";
 const nodeTypes: NodeTypes = {
   terminal: TerminalNode,
   agent: AgentNodeView,
-  sftp: DynamicPluginNode as any,
-  db: DynamicPluginNode as any,
+  sftp: SftpNode,
+  db: DatabaseNode,
   goal: GoalNode,
   preview: PreviewNode,
 };
