@@ -4,7 +4,9 @@ import {
   FolderIcon,
   SettingsIcon,
   TerminalIcon,
+  PuzzleIcon,
 } from "./icons";
+import { PluginIcon } from "./plugins/PluginIcon";
 import { useUiStore } from "../stores/uiStore";
 import { useAgentStore } from "../stores/agentStore";
 import { useCanvasStore } from "../stores/canvasStore";
@@ -239,7 +241,7 @@ export function NavRail() {
             title={navItem.label}
             onClick={() => usePluginStore.getState().togglePluginView(navItem.id)}
           >
-            <span className="text-base leading-none">{navItem.icon || "🧩"}</span>
+            <PluginIcon icon={navItem.icon} pluginId={navItem.id} size={18} />
           </RailBtn>
         );
       })}
@@ -250,7 +252,7 @@ export function NavRail() {
           title="Plugin Marketplace & Harness"
           onClick={() => usePluginStore.getState().toggleMarketplace()}
         >
-          <span className="text-base leading-none">🧩</span>
+          <PuzzleIcon size={18} />
         </RailBtn>
 
         <RailBtn active={false} title="Settings" onClick={() => openSettings()}>

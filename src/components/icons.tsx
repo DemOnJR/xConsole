@@ -779,3 +779,73 @@ export function ChartIcon(props: IconProps) {
   );
 }
 
+export function PuzzleIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M19.439 7.85c0-1.57.802-2.54 2.14-2.85v-2H16.5v2.14c-.31 1.338-1.28 2.14-2.85 2.14s-2.54-.802-2.85-2.14H5.72v5.08c1.338.31 2.14 1.28 2.14 2.85s-.802 2.54-2.14 2.85v5.08h5.08c.31-1.338 1.28-2.14 2.85-2.14s2.54.802 2.85 2.14H21.579v-5.08c-1.338-.31-2.14-1.28-2.14-2.85s.802-2.54 2.14-2.85V7.85h-2.14z" />
+    </svg>
+  );
+}
+
+export function CpuIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+      <rect x="9" y="9" width="6" height="6" />
+      <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3" />
+    </svg>
+  );
+}
+
+export function ContainerIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+      <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+      <line x1="12" y1="22.08" x2="12" y2="12" />
+    </svg>
+  );
+}
+
+export function ZapIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+    </svg>
+  );
+}
+
+export function SpinnerIcon(props: IconProps) {
+  return (
+    <svg {...base(props)} className={`animate-spin ${props.className ?? ""}`}>
+      <circle
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="3"
+        fill="none"
+        opacity="0.25"
+      />
+      <path
+        d="M12 2a10 10 0 0 1 10 10"
+        stroke="currentColor"
+        strokeWidth="3"
+        strokeLinecap="round"
+        fill="none"
+      />
+    </svg>
+  );
+}
+
+export function XIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+
+
+

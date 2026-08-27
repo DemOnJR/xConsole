@@ -1382,6 +1382,16 @@ export const api = {
     invoke<boolean>("toggle_plugin_cmd", { pluginId, enabled }),
   reloadPlugins: () =>
     invoke<PluginManifest[]>("reload_plugins_cmd"),
+  checkPluginUpdates: () =>
+    invoke<PluginUpdateInfo[]>("check_plugin_updates_cmd"),
+  checkSinglePluginUpdate: (pluginId: string) =>
+    invoke<PluginUpdateInfo>("check_single_plugin_update_cmd", { pluginId }),
+  updatePlugin: (pluginId: string) =>
+    invoke<PluginManifest>("update_plugin_cmd", { pluginId }),
+  updateAllPlugins: () =>
+    invoke<PluginManifest[]>("update_all_plugins_cmd"),
+  setPluginRemote: (pluginId: string, remoteUrl: string) =>
+    invoke<string>("set_plugin_remote_cmd", { pluginId, remoteUrl }),
 };
 
 /** Subscribe to streamed output from a CLI provider's login flow. */
@@ -1598,6 +1608,36 @@ export function onModelDownload(
   cb: (p: DownloadProgress) => void,
 ): Promise<UnlistenFn> {
   return listen<DownloadProgress>("models://download", (e) => cb(e.payload));
+}
+
+export interface PluginUpdateInfo {
+  plugin_id: string;
+  plugin_name: string;
+  current_version: string;
+  new_version?: string | null;
+  current_commit: string;
+  latest_commit: string;
+  repository_url: string;
+  has_update: boolean;
+  is_git_repo: boolean;
+  commit_message?: string | null;
+}
+
+export interface PluginInstallProgress {
+  step: string;
+  step_index: number;
+  total_steps: number;
+  percent: number;
+  log_line?: string | null;
+  is_error: boolean;
+  is_done: boolean;
+}
+
+/** Subscribe to real-time plugin installation progress and logs. */
+export function onPluginInstallProgress(
+  cb: (p: PluginInstallProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<PluginInstallProgress>("plugins://install-progress", (e) => cb(e.payload));
 }
 
 /** Subscribe to a session's terminal output (base64-encoded chunks). */

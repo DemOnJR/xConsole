@@ -6,7 +6,7 @@
   "author": "xConsole Team",
   "homepage": "https://cloudflare.com",
   "repository": "https://github.com/DemOnJR/xconsole-plugin-cloudflare",
-  "icon": "☁️",
+  "icon": "CloudIcon",
   "category": "infrastructure",
   "enabled": true,
   "isBuiltin": true,

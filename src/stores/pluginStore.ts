@@ -55,6 +55,8 @@ function getBuiltinPluginDefinitions(): Record<string, PluginDefinition> {
   return defs;
 }
 
+import { onPluginInstallProgress, type PluginInstallProgress, type PluginUpdateInfo } from "../lib/tauri";
+
 const COMMUNITY_CATALOG: FeaturedCommunityPlugin[] = [
   {
     id: "xconsole-plugin-redis",
@@ -63,7 +65,7 @@ const COMMUNITY_CATALOG: FeaturedCommunityPlugin[] = [
     description: "Inspect Redis keys, real-time memory usage, pub/sub channels, and TTL cache management.",
     author: "Community Devs",
     repository: "https://github.com/xconsole-plugins/xconsole-plugin-redis",
-    icon: "⚡",
+    icon: "ZapIcon",
     category: "database",
     stars: 67,
     tags: ["redis", "cache", "memory", "pubsub"],
@@ -75,7 +77,7 @@ const COMMUNITY_CATALOG: FeaturedCommunityPlugin[] = [
     description: "Inspect remote container logs, restart services, monitor CPU/RAM limits, and compose stacks.",
     author: "DevOps Collective",
     repository: "https://github.com/xconsole-plugins/xconsole-plugin-docker",
-    icon: "🐳",
+    icon: "ContainerIcon",
     category: "infrastructure",
     stars: 115,
     tags: ["docker", "containers", "logs", "compose"],
@@ -87,7 +89,7 @@ const COMMUNITY_CATALOG: FeaturedCommunityPlugin[] = [
     description: "Visual reverse proxy builder, certbot Let's Encrypt renewal, and config syntax tester.",
     author: "WebOps Pro",
     repository: "https://github.com/xconsole-plugins/xconsole-plugin-nginx",
-    icon: "🌐",
+    icon: "GlobeIcon",
     category: "networking",
     stars: 53,
     tags: ["nginx", "ssl", "certbot", "reverse-proxy"],
@@ -103,7 +105,7 @@ export function getFeaturedCommunityPlugins(): FeaturedCommunityPlugin[] {
     description: d.manifest.description || "",
     author: d.manifest.author || "xConsole Team",
     repository: (d.manifest as any).repository || `https://github.com/DemOnJR/${d.manifest.id}`,
-    icon: (d.manifest as any).icon || "🧩",
+    icon: (d.manifest as any).icon || "PuzzleIcon",
     category: (d.manifest as any).category || "extension",
     stars: 120,
     tags: (d.manifest as any).tags || [d.manifest.id],
@@ -113,6 +115,17 @@ export function getFeaturedCommunityPlugins(): FeaturedCommunityPlugin[] {
 }
 
 export const FEATURED_COMMUNITY_PLUGINS = getFeaturedCommunityPlugins();
+
+export interface InstallProgressState {
+  status: "idle" | "installing" | "success" | "error";
+  step: string;
+  stepIndex: number;
+  totalSteps: number;
+  percent: number;
+  logs: string[];
+  error?: string | null;
+  pluginName?: string | null;
+}
 
 interface PluginState {
   plugins: PluginManifest[];
@@ -125,6 +138,14 @@ interface PluginState {
   loading: boolean;
   installing: boolean;
   error: string | null;
+  installProgress: InstallProgressState | null;
+
+  // Updates & Fork Management
+  availableUpdates: Record<string, PluginUpdateInfo>;
+  checkingUpdates: boolean;
+  updatingPluginIds: Record<string, boolean>;
+  autoCheckUpdates: boolean;
+  autoUpdateEnabled: boolean;
 
   // Accessors
   isPluginViewOpen: (pluginId: string) => boolean;
@@ -144,6 +165,16 @@ interface PluginState {
   openMarketplace: () => void;
   closeMarketplace: () => void;
   toggleMarketplace: () => void;
+  clearInstallProgress: () => void;
+
+  // Update actions
+  checkForUpdates: () => Promise<PluginUpdateInfo[]>;
+  checkSinglePluginUpdate: (pluginId: string) => Promise<PluginUpdateInfo>;
+  updateSinglePlugin: (pluginId: string) => Promise<PluginManifest>;
+  updateAllAvailablePlugins: () => Promise<PluginManifest[]>;
+  changePluginRemote: (pluginId: string, newUrl: string) => Promise<string>;
+  setAutoCheckUpdates: (enabled: boolean) => void;
+  setAutoUpdateEnabled: (enabled: boolean) => void;
 }
 
 export const usePluginStore = create<PluginState>((set, get) => ({
@@ -157,6 +188,12 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   loading: false,
   installing: false,
   error: null,
+  installProgress: null,
+  availableUpdates: {},
+  checkingUpdates: false,
+  updatingPluginIds: {},
+  autoCheckUpdates: localStorage.getItem("xconsole_plugin_auto_check") !== "false",
+  autoUpdateEnabled: localStorage.getItem("xconsole_plugin_auto_update") === "true",
 
   isPluginViewOpen: (pluginId: string) => {
     return Boolean(get().openViews[pluginId]);
@@ -268,6 +305,11 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         activeAgentTools,
         loading: false,
       });
+
+      // Optionally auto-check updates if enabled
+      if (get().autoCheckUpdates) {
+        get().checkForUpdates().catch(() => {});
+      }
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -283,17 +325,78 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   },
 
   installPlugin: async (source: string) => {
-    set({ installing: true, error: null });
+    set({
+      installing: true,
+      error: null,
+      installProgress: {
+        status: "installing",
+        step: "Inițializare...",
+        stepIndex: 1,
+        totalSteps: 5,
+        percent: 10,
+        logs: [`Pornire instalare plugin din '${source}'...`],
+        error: null,
+        pluginName: null,
+      },
+    });
+
+    let unlisten: (() => void) | null = null;
     try {
+      unlisten = await onPluginInstallProgress((p: PluginInstallProgress) => {
+        set((s) => {
+          const prevLogs = s.installProgress?.logs || [];
+          const newLogs = p.log_line ? [...prevLogs, p.log_line] : prevLogs;
+          return {
+            installProgress: {
+              status: p.is_error ? "error" : p.is_done ? "success" : "installing",
+              step: p.step,
+              stepIndex: p.step_index,
+              totalSteps: p.total_steps,
+              percent: p.percent,
+              logs: newLogs,
+              error: p.is_error ? (p.log_line || "Instalare eșuată") : null,
+              pluginName: s.installProgress?.pluginName || null,
+            },
+          };
+        });
+      });
+
       const manifest = await api.installPlugin(source);
       await get().loadPlugins();
-      set({ installing: false });
+      set((s) => ({
+        installing: false,
+        installProgress: s.installProgress
+          ? {
+              ...s.installProgress,
+              status: "success",
+              step: "Finalizat cu succes!",
+              percent: 100,
+              pluginName: manifest.name,
+            }
+          : null,
+      }));
       return manifest;
     } catch (e) {
-      set({ installing: false, error: String(e) });
+      set((s) => ({
+        installing: false,
+        error: String(e),
+        installProgress: s.installProgress
+          ? {
+              ...s.installProgress,
+              status: "error",
+              error: String(e),
+            }
+          : null,
+      }));
       throw e;
+    } finally {
+      if (unlisten) {
+        unlisten();
+      }
     }
   },
+
+  clearInstallProgress: () => set({ installProgress: null, error: null }),
 
   linkPlugin: async (path: string) => {
     set({ installing: true, error: null });
@@ -324,7 +427,9 @@ export const usePluginStore = create<PluginState>((set, get) => ({
       set((s) => {
         const nextDefs = { ...s.definitions };
         delete nextDefs[pluginId];
-        return { definitions: nextDefs };
+        const nextUpdates = { ...s.availableUpdates };
+        delete nextUpdates[pluginId];
+        return { definitions: nextDefs, availableUpdates: nextUpdates };
       });
 
       // 4. Reload plugins list
@@ -368,4 +473,166 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   openMarketplace: () => set({ marketplaceOpen: true }),
   closeMarketplace: () => set({ marketplaceOpen: false }),
   toggleMarketplace: () => set((s) => ({ marketplaceOpen: !s.marketplaceOpen })),
+
+  // Update & Fork methods
+  checkForUpdates: async () => {
+    set({ checkingUpdates: true });
+    try {
+      const updates = await api.checkPluginUpdates();
+      const updatesMap: Record<string, PluginUpdateInfo> = {};
+      for (const u of updates) {
+        updatesMap[u.plugin_id] = u;
+      }
+      set({ availableUpdates: updatesMap, checkingUpdates: false });
+
+      // If auto-update is enabled, silently update pending plugins
+      if (get().autoUpdateEnabled) {
+        const pending = updates.filter((u) => u.has_update);
+        if (pending.length > 0) {
+          void get().updateAllAvailablePlugins();
+        }
+      }
+
+      return updates;
+    } catch {
+      set({ checkingUpdates: false });
+      return [];
+    }
+  },
+
+  checkSinglePluginUpdate: async (pluginId: string) => {
+    try {
+      const updateInfo = await api.checkSinglePluginUpdate(pluginId);
+      set((s) => ({
+        availableUpdates: {
+          ...s.availableUpdates,
+          [pluginId]: updateInfo,
+        },
+      }));
+      return updateInfo;
+    } catch (e) {
+      throw e;
+    }
+  },
+
+  updateSinglePlugin: async (pluginId: string) => {
+    set((s) => ({
+      updatingPluginIds: { ...s.updatingPluginIds, [pluginId]: true },
+      installing: true,
+      error: null,
+      installProgress: {
+        status: "installing",
+        step: "Inițializare actualizare...",
+        stepIndex: 1,
+        totalSteps: 5,
+        percent: 10,
+        logs: [`Pornire actualizare pentru '${pluginId}'...`],
+        error: null,
+        pluginName: pluginId,
+      },
+    }));
+
+    let unlisten: (() => void) | null = null;
+    try {
+      unlisten = await onPluginInstallProgress((p: PluginInstallProgress) => {
+        set((s) => {
+          const prevLogs = s.installProgress?.logs || [];
+          const newLogs = p.log_line ? [...prevLogs, p.log_line] : prevLogs;
+          return {
+            installProgress: {
+              status: p.is_error ? "error" : p.is_done ? "success" : "installing",
+              step: p.step,
+              stepIndex: p.step_index,
+              totalSteps: p.total_steps,
+              percent: p.percent,
+              logs: newLogs,
+              error: p.is_error ? (p.log_line || "Actualizare eșuată") : null,
+              pluginName: s.installProgress?.pluginName || pluginId,
+            },
+          };
+        });
+      });
+
+      const manifest = await api.updatePlugin(pluginId);
+      await get().loadPlugins();
+
+      // Clear update badge for this plugin
+      set((s) => {
+        const nextUpdates = { ...s.availableUpdates };
+        delete nextUpdates[pluginId];
+        const nextUpdating = { ...s.updatingPluginIds };
+        delete nextUpdating[pluginId];
+        return {
+          availableUpdates: nextUpdates,
+          updatingPluginIds: nextUpdating,
+          installing: false,
+          installProgress: s.installProgress
+            ? {
+                ...s.installProgress,
+                status: "success",
+                step: "Actualizat cu succes!",
+                percent: 100,
+                pluginName: manifest.name,
+              }
+            : null,
+        };
+      });
+
+      return manifest;
+    } catch (e) {
+      set((s) => {
+        const nextUpdating = { ...s.updatingPluginIds };
+        delete nextUpdating[pluginId];
+        return {
+          updatingPluginIds: nextUpdating,
+          installing: false,
+          error: String(e),
+          installProgress: s.installProgress
+            ? {
+                ...s.installProgress,
+                status: "error",
+                error: String(e),
+              }
+            : null,
+        };
+      });
+      throw e;
+    } finally {
+      if (unlisten) {
+        unlisten();
+      }
+    }
+  },
+
+  updateAllAvailablePlugins: async () => {
+    const pendingUpdates = Object.values(get().availableUpdates).filter((u) => u.has_update);
+    const updated: PluginManifest[] = [];
+
+    for (const update of pendingUpdates) {
+      try {
+        const manifest = await get().updateSinglePlugin(update.plugin_id);
+        updated.push(manifest);
+      } catch (err) {
+        console.error(`Eșec la actualizarea pluginului ${update.plugin_id}:`, err);
+      }
+    }
+
+    return updated;
+  },
+
+  changePluginRemote: async (pluginId: string, newUrl: string) => {
+    const res = await api.setPluginRemote(pluginId, newUrl);
+    await get().checkSinglePluginUpdate(pluginId);
+    return res;
+  },
+
+  setAutoCheckUpdates: (enabled: boolean) => {
+    localStorage.setItem("xconsole_plugin_auto_check", String(enabled));
+    set({ autoCheckUpdates: enabled });
+  },
+
+  setAutoUpdateEnabled: (enabled: boolean) => {
+    localStorage.setItem("xconsole_plugin_auto_update", String(enabled));
+    set({ autoUpdateEnabled: enabled });
+  },
 }));

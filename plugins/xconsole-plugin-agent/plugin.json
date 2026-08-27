@@ -5,7 +5,7 @@
   "description": "Full-featured autonomous agent console with tool streaming, file editing, terminal execution, vision analysis, safety gates, and goal loops.",
   "author": "xConsole Team",
   "repository": "https://github.com/DemOnJR/xconsole-plugin-agent",
-  "icon": "🤖",
+  "icon": "BotIcon",
   "category": "ai",
   "enabled": true,
   "isBuiltin": true,
