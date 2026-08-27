@@ -83,6 +83,7 @@ export interface PluginDefinition {
   renderView?: React.ComponentType<{ onClose?: () => void }>;
   renderSettings?: React.ComponentType;
   renderCanvasNode?: React.ComponentType<any>;
+  renderNode?: React.ComponentType<any>;
   apply?: (ctx: Context, pluginCtx: PluginContext) => Disposable | void | Promise<Disposable | void>;
   onMount?: (ctx: PluginContext) => Promise<void> | void;
   onUnmount?: (ctx: PluginContext) => Promise<void> | void;

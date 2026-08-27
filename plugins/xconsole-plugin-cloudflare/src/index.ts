@@ -1,5 +1,5 @@
 import { definePlugin, type PluginDefinition } from "../../../src/sdk/plugin";
-import { CloudflareManager } from "../../../src/components/cloudflare/CloudflareManager";
+import { CloudflareManager } from "./CloudflareManager";
 import manifest from "../plugin.json";
 
 export const cloudflarePlugin: PluginDefinition = definePlugin({
