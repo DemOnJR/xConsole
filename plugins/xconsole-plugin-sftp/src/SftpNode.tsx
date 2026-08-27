@@ -3,14 +3,21 @@ import { FolderIcon, FileIcon, RefreshIcon } from "./icons";
 import type { SftpFileEntry } from "./types";
 
 export function SftpNode({
-  vpsId = "vps-local",
-  initialPath = "/var/www",
+  id: _id,
+  data,
+  vpsId: directVpsId,
+  initialPath: directPath,
   onClose,
 }: {
+  id?: string;
+  data?: { vpsId?: string; path?: string; name?: string };
   vpsId?: string;
   initialPath?: string;
+  selected?: boolean;
   onClose?: () => void;
 }) {
+  const vpsId = data?.vpsId || directVpsId || "vps-local";
+  const initialPath = data?.path || directPath || "/var/www";
   const [currentPath, setCurrentPath] = useState(initialPath);
   const [pathInput, setPathInput] = useState(initialPath);
   const [isEditingPath, setIsEditingPath] = useState(false);

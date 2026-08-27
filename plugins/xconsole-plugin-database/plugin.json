@@ -36,10 +36,10 @@
       }
     ],
     "canvasNode": {
-      "type": "databaseNode",
-      "title": "Database Client",
-      "defaultWidth": 550,
-      "defaultHeight": 480
+      "type": "db",
+      "title": "Database Inspector",
+      "defaultWidth": 580,
+      "defaultHeight": 520
     }
   }
 }

@@ -1,3 +1,44 @@
+// xConsole Plugin SDK & Microkernel Interface
 export * from "./cordis";
 export * from "./plugin";
 export * from "./loader";
+
+// Core Tauri API & Types
+export { api } from "../lib/tauri";
+export type * from "../lib/tauri";
+
+// Core State Stores
+export { useCanvasStore, NODE_W, NODE_H } from "../stores/canvasStore";
+export type { CanvasNode, SftpNode as SftpNodeType, DbNode as DbNodeType, AgentNode as AgentNodeType } from "../stores/canvasStore";
+export { useVpsStore } from "../stores/vpsStore";
+export { useSettingsStore } from "../stores/settingsStore";
+export { useUiStore } from "../stores/uiStore";
+export { dialog } from "../stores/dialogStore";
+export { useSessionStore } from "../stores/sessionStore";
+export { useTransferStore } from "../stores/transferStore";
+export { useDragStore, startInternalDrag, onInternalDrop } from "../stores/dragStore";
+export { useAgentStore } from "../stores/agentStore";
+
+// Hooks
+export { useNavHistory, useMouseNavButtons } from "../hooks/useNavHistory";
+export { useOsFileDrop, onOsFilesDropped, onOsDropHover } from "../hooks/useOsFileDrop";
+export { useGitBranch, GitBranchBadge } from "../hooks/useGitBranch";
+export { useMaskHost } from "../lib/privacy";
+export { useInputHistory } from "../hooks/useInputHistory";
+
+// Utilities
+export * as encoding from "../lib/encoding";
+export * as filePermissions from "../lib/filePermissions";
+export * as selection from "../lib/selection";
+export * as sessionHealth from "../lib/sessionHealth";
+export * as terminalClipboard from "../lib/terminalClipboard";
+export * as streamStats from "../lib/streamStats";
+export * as safety from "../lib/safety";
+export * as vision from "../lib/vision";
+export * as voice from "../lib/voice";
+export * as goalParse from "../lib/goalParse";
+
+// Shared UI & Icons
+export * as icons from "../components/icons";
+export * as fileIcons from "../components/fileIcons";
+export { CodeEditArea } from "../components/CodeEditArea";

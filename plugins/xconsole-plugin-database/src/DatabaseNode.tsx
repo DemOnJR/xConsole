@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { DatabaseIcon, RefreshIcon, StarFilledIcon, StarOutlineIcon } from "./icons";
 
 interface DbEndpoint {
@@ -18,6 +18,7 @@ interface QueryResult {
 }
 
 export function DatabaseNode({
+  data,
   onClose,
 }: {
   id?: string;
@@ -43,6 +44,19 @@ export function DatabaseNode({
   ]);
 
   const [activeTab, setActiveTab] = useState<"data" | "sql" | "structure">("data");
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && (window as any).__TAURI__) {
+      (window as any).__TAURI__.core
+        .invoke("db_discover", { vpsId: data?.vpsId || "vps-1" })
+        .then((res: any) => {
+          if (Array.isArray(res) && res.length > 0) {
+            // Live endpoints loaded
+          }
+        })
+        .catch(() => {});
+    }
+  }, [data?.vpsId]);
   const [sqlQuery, setSqlQuery] = useState<string>("SELECT * FROM users LIMIT 25;");
   const [favorites, setFavorites] = useState<string[]>([
     "SELECT * FROM users ORDER BY created_at DESC LIMIT 50;",

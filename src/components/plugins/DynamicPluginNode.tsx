@@ -12,13 +12,19 @@ export const DynamicPluginNode = memo(function DynamicPluginNode({
 
   const matchedPlugin = plugins.find(
     (p) =>
-      (p.capabilities?.canvasNode as any)?.type === type ||
       p.id === type ||
-      p.id.endsWith(`-${type}`),
+      p.id === `xconsole-plugin-${type}` ||
+      (p.id === "xconsole-plugin-database" && (type === "db" || type === "database")) ||
+      (p.id === "xconsole-plugin-sftp" && (type === "sftp" || type === "ftp")) ||
+      (p.id === "xconsole-plugin-agent" && (type === "agent" || type === "ai")) ||
+      (p.capabilities?.canvasNode as any)?.type === type ||
+      p.id.endsWith(`-${type}`) ||
+      p.id.includes(type)
   );
 
-  const def = matchedPlugin ? definitions[matchedPlugin.id] : definitions[type || ""];
-  const Component = def?.renderNode || def?.renderCanvasNode;
+  const pluginId = matchedPlugin?.id || type;
+  const def = definitions[pluginId] || (matchedPlugin ? definitions[matchedPlugin.id] : undefined);
+  const Component = def?.renderCanvasNode || def?.renderNode;
 
   if (Component) {
     return <Component id={id} data={data} selected={selected} />;
