@@ -16,6 +16,8 @@ import { PlanModal } from "./components/agent/PlanModal";
 import { UpdateNotice } from "./components/UpdateNotice";
 import { TransfersPanel } from "./components/TransfersPanel";
 import { CloudflareManager } from "./components/cloudflare/CloudflareManager";
+import { PluginMarketplaceModal } from "./components/plugins/PluginMarketplaceModal";
+import { usePluginStore } from "./stores/pluginStore";
 import { useUpdateStore } from "./stores/updateStore";
 import { useCanvasStore } from "./stores/canvasStore";
 import { useAgentStore } from "./stores/agentStore";
@@ -198,6 +200,10 @@ function UnlockedApp() {
   }, []);
 
   useEffect(() => {
+    void usePluginStore.getState().loadPlugins();
+  }, []);
+
+  useEffect(() => {
     // Surface the agent window whenever it needs the user (approval/question/plan).
     if (pendingApprovalsCount > 0 || pendingQuestionsCount > 0 || hasPendingPlan) {
       useCanvasStore.getState().addAgent();
@@ -277,6 +283,27 @@ function UnlockedApp() {
         <StatusStrip />
       </div>
       <SettingsModal />
+      <PluginMarketplaceModal />
+
+      {/* Dynamic Plugin Views / Modals (Harness Extension Point) */}
+      {Object.entries(usePluginStore((s) => s.openViews)).map(([pluginId, isOpen]) => {
+        if (!isOpen) return null;
+        const def = usePluginStore.getState().definitions[pluginId];
+        if (!def?.renderView) return null;
+        const ViewComp = def.renderView;
+        return (
+          <div
+            key={pluginId}
+            className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
+            onMouseDown={(e) => e.target === e.currentTarget && usePluginStore.getState().closePluginView(pluginId)}
+          >
+            <div className="h-[85vh] w-[min(1080px,94vw)] overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl flex flex-col animate-in fade-in zoom-in-95 duration-150">
+              <ViewComp onClose={() => usePluginStore.getState().closePluginView(pluginId)} />
+            </div>
+          </div>
+        );
+      })}
+
       {cloudflareOpen && (
         <div
           className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"

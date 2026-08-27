@@ -1,0 +1,27 @@
+{
+  "name": "xconsole-plugin-cloudflare",
+  "version": "1.0.0",
+  "description": "Official Cloudflare Zero Trust, DNS, and WAF Security plugin for xConsole",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "xconsole-plugin",
+    "cloudflare",
+    "zero-trust",
+    "dns",
+    "waf",
+    "devops",
+    "cloud"
+  ],
+  "author": "xConsole Community",
+  "license": "MIT",
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "zustand": ">=4.0.0"
+  }
+}

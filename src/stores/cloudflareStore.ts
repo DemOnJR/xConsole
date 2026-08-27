@@ -2,6 +2,7 @@ import { create } from "zustand";
 import {
   api,
   type CloudAccount,
+  type CloudflareAuditLog,
   type CloudflareDnsRecord,
   type CloudflareDnsRecordInput,
   type CloudflareSecuritySettings,
@@ -21,6 +22,7 @@ interface CloudflareState {
   tunnelToken: string | null;
   dnsRecords: CloudflareDnsRecord[];
   securitySettings: CloudflareSecuritySettings | null;
+  history: CloudflareAuditLog[];
   loading: boolean;
   error: string | null;
 
@@ -40,6 +42,8 @@ interface CloudflareState {
   loadSecuritySettings: (zoneId?: string) => Promise<void>;
   setSecurityLevel: (level: string) => Promise<void>;
   toggleUnderAttackMode: () => Promise<void>;
+  loadHistory: (accountId?: string) => Promise<void>;
+  revertAction: (logId: string) => Promise<string>;
 }
 
 export const useCloudflareStore = create<CloudflareState>((set, get) => ({
@@ -53,6 +57,7 @@ export const useCloudflareStore = create<CloudflareState>((set, get) => ({
   tunnelToken: null,
   dnsRecords: [],
   securitySettings: null,
+  history: [],
   loading: false,
   error: null,
 
@@ -71,7 +76,11 @@ export const useCloudflareStore = create<CloudflareState>((set, get) => ({
 
   selectAccount: async (accountId: string) => {
     set({ selectedAccountId: accountId, selectedTunnel: null, tunnelConfig: null });
-    await Promise.all([get().loadZones(accountId), get().loadTunnels(accountId)]);
+    await Promise.all([
+      get().loadZones(accountId),
+      get().loadTunnels(accountId),
+      get().loadHistory(accountId),
+    ]);
   },
 
   selectZone: async (zoneId: string) => {
@@ -129,6 +138,7 @@ export const useCloudflareStore = create<CloudflareState>((set, get) => ({
       const created = await api.createCloudflareTunnel(accId, name);
       await get().loadTunnels(accId);
       await get().selectTunnel(created);
+      await get().loadHistory(accId);
       set({ loading: false });
       return created;
     } catch (e) {
@@ -146,6 +156,7 @@ export const useCloudflareStore = create<CloudflareState>((set, get) => ({
         set({ selectedTunnel: null, tunnelConfig: null, tunnelToken: null });
       }
       await get().loadTunnels(accId);
+      await get().loadHistory(accId);
     } catch (e) {
       set({ error: String(e) });
     }
@@ -158,6 +169,7 @@ export const useCloudflareStore = create<CloudflareState>((set, get) => ({
     try {
       const saved = await api.saveCloudflareTunnelConfig(accId, tunnel.id, config);
       set({ tunnelConfig: saved });
+      await get().loadHistory(accId);
     } catch (e) {
       set({ error: String(e) });
       throw e;
@@ -183,6 +195,7 @@ export const useCloudflareStore = create<CloudflareState>((set, get) => ({
     try {
       await api.upsertCloudflareDnsRecord(accId, zId, record);
       await get().loadDnsRecords(zId);
+      await get().loadHistory(accId);
     } catch (e) {
       set({ error: String(e) });
       throw e;
@@ -196,6 +209,7 @@ export const useCloudflareStore = create<CloudflareState>((set, get) => ({
     try {
       await api.deleteCloudflareDnsRecord(accId, zId, recordId);
       await get().loadDnsRecords(zId);
+      await get().loadHistory(accId);
     } catch (e) {
       set({ error: String(e) });
     }
@@ -220,6 +234,7 @@ export const useCloudflareStore = create<CloudflareState>((set, get) => ({
     try {
       await api.setCloudflareSecurityLevel(accId, zId, level);
       await get().loadSecuritySettings(zId);
+      await get().loadHistory(accId);
     } catch (e) {
       set({ error: String(e) });
     }
@@ -229,5 +244,36 @@ export const useCloudflareStore = create<CloudflareState>((set, get) => ({
     const current = get().securitySettings;
     const nextLevel = current?.attack_mode ? "medium" : "under_attack";
     await get().setSecurityLevel(nextLevel);
+  },
+
+  loadHistory: async (accountId?: string) => {
+    const accId = accountId || get().selectedAccountId;
+    if (!accId) return;
+    try {
+      const history = await api.listCloudflareHistory(accId);
+      set({ history });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  revertAction: async (logId: string) => {
+    const accId = get().selectedAccountId;
+    if (!accId) throw new Error("No active Cloudflare account");
+    try {
+      const msg = await api.revertCloudflareAction(accId, logId);
+      const zId = get().selectedZoneId;
+      await Promise.all([
+        get().loadHistory(accId),
+        get().loadZones(accId),
+        get().loadTunnels(accId),
+        zId ? get().loadDnsRecords(zId) : Promise.resolve(),
+        zId ? get().loadSecuritySettings(zId) : Promise.resolve(),
+      ]);
+      return msg;
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    }
   },
 }));

@@ -1,0 +1,112 @@
+{
+  "id": "xconsole-plugin-cloudflare",
+  "name": "Cloudflare Zero Trust & Security",
+  "version": "1.0.0",
+  "description": "Zero Trust Tunnels, DNS management, and WAF security controls with instant audit rollback for xConsole.",
+  "author": "xConsole Team",
+  "homepage": "https://cloudflare.com",
+  "repository": "https://github.com/xconsole-plugins/xconsole-plugin-cloudflare",
+  "icon": "☁️",
+  "category": "infrastructure",
+  "enabled": true,
+  "isBuiltin": true,
+  "capabilities": {
+    "navItem": {
+      "id": "cloudflare",
+      "label": "Cloudflare",
+      "icon": "CloudIcon",
+      "order": 50
+    },
+    "agentTools": [
+      {
+        "name": "cloudflare_list_tunnels",
+        "description": "List all Cloudflare Zero Trust / Argo tunnels for a Cloudflare cloud account.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "cloud_account_id": {
+              "type": "string",
+              "description": "Cloudflare account ID in xConsole"
+            }
+          },
+          "required": ["cloud_account_id"]
+        }
+      },
+      {
+        "name": "cloudflare_list_dns",
+        "description": "List DNS records for a given Cloudflare zone (domain).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "cloud_account_id": { "type": "string" },
+            "zone_id": { "type": "string" }
+          },
+          "required": ["cloud_account_id", "zone_id"]
+        }
+      },
+      {
+        "name": "cloudflare_upsert_dns",
+        "description": "Create or update a DNS record in Cloudflare.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "cloud_account_id": { "type": "string" },
+            "zone_id": { "type": "string" },
+            "record_id": { "type": "string", "description": "Optional: specify to update existing record" },
+            "type": { "type": "string", "enum": ["A", "AAAA", "CNAME", "TXT", "MX"] },
+            "name": { "type": "string", "description": "Subdomain or domain (e.g. app.example.com)" },
+            "content": { "type": "string", "description": "Target IP or hostname" },
+            "proxied": { "type": "boolean", "description": "Enable Cloudflare proxy (orange cloud)" }
+          },
+          "required": ["cloud_account_id", "zone_id", "type", "name", "content"]
+        }
+      },
+      {
+        "name": "cloudflare_set_security_level",
+        "description": "Set Cloudflare security level for a zone ('essentially_off', 'low', 'medium', 'high', 'under_attack').",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "cloud_account_id": { "type": "string" },
+            "zone_id": { "type": "string" },
+            "level": { "type": "string", "enum": ["essentially_off", "low", "medium", "high", "under_attack"] }
+          },
+          "required": ["cloud_account_id", "zone_id", "level"]
+        }
+      },
+      {
+        "name": "cloudflare_get_history",
+        "description": "Get recent Cloudflare configuration edits and actions made to DNS, tunnels, or security levels.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "cloud_account_id": { "type": "string", "description": "Cloudflare cloud account ID" }
+          },
+          "required": ["cloud_account_id"]
+        }
+      },
+      {
+        "name": "cloudflare_revert_action",
+        "description": "Automatically revert / roll back a previous Cloudflare modification using its history action ID.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "cloud_account_id": { "type": "string" },
+            "action_id": { "type": "string", "description": "ID of the audit log action to revert" }
+          },
+          "required": ["cloud_account_id", "action_id"]
+        }
+      }
+    ],
+    "settingsSection": {
+      "id": "cloudflare",
+      "title": "Cloudflare Zero Trust"
+    },
+    "canvasNode": {
+      "type": "cloudflareNode",
+      "title": "Cloudflare Tunnel & DNS",
+      "defaultWidth": 380,
+      "defaultHeight": 450
+    }
+  }
+}

@@ -529,3 +529,44 @@ pub struct KnownHost {
     #[serde(default)]
     pub added_at: Option<String>,
 }
+
+/// Audit log entry for Cloudflare edits with before/after state for instant rollback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloudflareAuditLog {
+    pub id: String,
+    pub account_id: String,
+    pub action_type: String,
+    #[serde(default)]
+    pub target_id: Option<String>,
+    #[serde(default)]
+    pub target_name: Option<String>,
+    pub summary: String,
+    pub actor: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub before_state: Option<String>,
+    #[serde(default)]
+    pub after_state: Option<String>,
+    pub reverted: bool,
+    pub created_at: String,
+    pub ts: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloudflareAuditLogInput {
+    pub account_id: String,
+    pub action_type: String,
+    #[serde(default)]
+    pub target_id: Option<String>,
+    #[serde(default)]
+    pub target_name: Option<String>,
+    pub summary: String,
+    pub actor: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub before_state: Option<String>,
+    #[serde(default)]
+    pub after_state: Option<String>,
+}

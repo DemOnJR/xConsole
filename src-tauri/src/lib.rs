@@ -12,6 +12,7 @@ mod infra;
 mod artifacts;
 mod local;
 pub mod mcp;
+pub mod plugins;
 mod proc;
 mod secrets;
 mod ssh;
@@ -528,6 +529,13 @@ pub fn run() {
             commands::cloudflare::delete_cloudflare_dns_record,
             commands::cloudflare::get_cloudflare_security_settings,
             commands::cloudflare::set_cloudflare_security_level,
+            commands::cloudflare::list_cloudflare_history,
+            commands::cloudflare::revert_cloudflare_action,
+            commands::plugin::list_installed_plugins,
+            commands::plugin::install_plugin_cmd,
+            commands::plugin::uninstall_plugin_cmd,
+            commands::plugin::toggle_plugin_cmd,
+            commands::plugin::reload_plugins_cmd,
             commands::db::db_discover,
             commands::db::db_connect,
             commands::db::db_disconnect,

@@ -19,6 +19,7 @@ import { AgentSection } from "./sections/AgentSection";
 import { KnowledgeSection } from "./sections/KnowledgeSection";
 import { ArtifactsSection } from "./sections/ArtifactsSection";
 import { SecuritySection } from "./sections/SecuritySection";
+import { PluginsSection } from "./sections/PluginsSection";
 import { AdvancedSection } from "./sections/AdvancedSection";
 
 interface Category {
@@ -36,6 +37,7 @@ interface Category {
 const CATEGORIES: Category[] = [
   { id: "general", label: "General", icon: SettingsIcon, Component: GeneralSection, group: "core" },
   { id: "theme", label: "Appearance", icon: PaletteIcon, Component: ThemeSection, group: "core" },
+  { id: "plugins", label: "Plugins & Harness", icon: PlugIcon, Component: PluginsSection, group: "core" },
   { id: "providers", label: "Providers", icon: PlugIcon, Component: ProvidersSection, group: "ai" },
   { id: "models", label: "Models", icon: BrainIcon, Component: ModelsSection, group: "ai" },
   { id: "agent", label: "Agent & Safety", icon: BotIcon, Component: AgentSection, group: "ai" },

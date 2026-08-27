@@ -133,6 +133,29 @@ pub fn definitions() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "cloudflare_get_history".into(),
+            description: "Get recent Cloudflare configuration edits and actions made to DNS, tunnels, or security levels.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "cloud_account_id": {"type": "string", "description": "Cloudflare cloud account ID"}
+                },
+                "required": ["cloud_account_id"]
+            }),
+        },
+        ToolDef {
+            name: "cloudflare_revert_action".into(),
+            description: "Automatically revert / roll back a previous Cloudflare modification using its history action ID.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "cloud_account_id": {"type": "string"},
+                    "action_id": {"type": "string", "description": "ID of the audit log action to revert"}
+                },
+                "required": ["cloud_account_id", "action_id"]
+            }),
+        },
+        ToolDef {
             name: "project_list".into(),
             description: "List all Terraform projects.".into(),
             parameters: json!({"type": "object", "properties": {}}),
@@ -177,6 +200,34 @@ pub fn definitions() -> Vec<ToolDef> {
             description: "Run terraform apply. backend=tfc projects queue a TFC apply run. Requires approval unless safety=full.".into(),
             parameters: terraform_params(true),
         },
+        ToolDef {
+            name: "plugin_list".into(),
+            description: "List all installed and active xConsole plugins, their status, and available agent tools.".into(),
+            parameters: json!({"type": "object", "properties": {}}),
+        },
+        ToolDef {
+            name: "plugin_install".into(),
+            description: "Install an xConsole plugin from GitHub (e.g. 'xconsole-plugins/xconsole-plugin-cloudflare' or URL) or local path.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string", "description": "GitHub repository 'owner/repo', URL, or local directory path" }
+                },
+                "required": ["source"]
+            }),
+        },
+        ToolDef {
+            name: "plugin_toggle".into(),
+            description: "Enable or disable an installed plugin dynamically at runtime.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "plugin_id": { "type": "string" },
+                    "enabled": { "type": "boolean" }
+                },
+                "required": ["plugin_id", "enabled"]
+            }),
+        },
     ]
 }
 
@@ -200,6 +251,9 @@ fn terraform_params(apply: bool) -> Value {
 
 pub async fn dispatch(ctx: &ToolContext, name: &str, args: &Value, sink: &EventSink) -> String {
     match name {
+        "plugin_list" => agent_plugin_list().await,
+        "plugin_install" => agent_plugin_install(args).await,
+        "plugin_toggle" => agent_plugin_toggle(args).await,
         "project_create" => project_create(ctx, args).await,
         "project_list" => project_list(ctx).await,
         "cloud_account_list" => cloud_account_list(ctx).await,
@@ -210,6 +264,8 @@ pub async fn dispatch(ctx: &ToolContext, name: &str, args: &Value, sink: &EventS
         "cloudflare_list_dns" => cloudflare_list_dns(ctx, args).await,
         "cloudflare_upsert_dns" => cloudflare_upsert_dns(ctx, args).await,
         "cloudflare_set_security_level" => cloudflare_set_security_level(ctx, args).await,
+        "cloudflare_get_history" => cloudflare_get_history(ctx, args).await,
+        "cloudflare_revert_action" => cloudflare_revert_action(ctx, args).await,
         "project_read" => project_read(ctx, args).await,
         "project_write" => project_write(ctx, args).await,
         "terraform_init" => terraform_run(ctx, args, sink, "init", "").await,
@@ -532,6 +588,27 @@ async fn cloudflare_upsert_dns(ctx: &ToolContext, args: &Value) -> String {
         Err(e) => return format!("error: {e}"),
     };
 
+    // Snapshot existing record for rollback
+    let mut before_state: Option<String> = None;
+    if let Some(rec_id) = &record_id {
+        if !rec_id.is_empty() {
+            if let Ok(records) = crate::infra::cloudflare::list_dns_records(&token, zone_id).await {
+                if let Some(existing) = records.into_iter().find(|r| r.id == *rec_id) {
+                    let input_snap = crate::infra::cloudflare::CfDnsRecordInput {
+                        id: Some(existing.id),
+                        name: existing.name,
+                        r#type: existing.r#type,
+                        content: existing.content,
+                        proxied: existing.proxied,
+                        ttl: existing.ttl,
+                        comment: existing.comment,
+                    };
+                    before_state = serde_json::to_string(&input_snap).ok();
+                }
+            }
+        }
+    }
+
     let input = crate::infra::cloudflare::CfDnsRecordInput {
         id: record_id,
         name: name.to_string(),
@@ -543,7 +620,28 @@ async fn cloudflare_upsert_dns(ctx: &ToolContext, args: &Value) -> String {
     };
 
     match crate::infra::cloudflare::upsert_dns_record(&token, zone_id, &input).await {
-        Ok(rec) => format!("Saved DNS record {} {} -> {} (id: {})", rec.r#type, rec.name, rec.content, rec.id),
+        Ok(rec) => {
+            let is_update = before_state.is_some();
+            let summary = if is_update {
+                format!("Agent a actualizat DNS {} {} -> {}", rec.r#type, rec.name, rec.content)
+            } else {
+                format!("Agent a creat DNS nou {} {} ({})", rec.r#type, rec.name, rec.content)
+            };
+
+            let _ = ctx.db.create_cloudflare_audit_log(&crate::storage::models::CloudflareAuditLogInput {
+                account_id: account.id.clone(),
+                action_type: if is_update { "update_dns".to_string() } else { "create_dns".to_string() },
+                target_id: Some(rec.id.clone()),
+                target_name: Some(rec.name.clone()),
+                summary,
+                actor: "agent".to_string(),
+                session_id: Some(ctx.session_id.clone()),
+                before_state,
+                after_state: serde_json::to_string(&rec).ok(),
+            });
+
+            format!("Saved DNS record {} {} -> {} (id: {})", rec.r#type, rec.name, rec.content, rec.id)
+        }
         Err(e) => format!("error saving DNS record: {e}"),
     }
 }
@@ -573,10 +671,150 @@ async fn cloudflare_set_security_level(ctx: &ToolContext, args: &Value) -> Strin
         Err(e) => return format!("error: {e}"),
     };
 
+    let old_settings = crate::infra::cloudflare::get_security_settings(&token, zone_id).await.ok();
+    let old_level = old_settings.map(|s| s.security_level);
+
     match crate::infra::cloudflare::set_security_level(&token, zone_id, level).await {
-        Ok(lvl) => format!("Updated security level to '{lvl}' for zone {zone_id}"),
+        Ok(lvl) => {
+            let _ = ctx.db.create_cloudflare_audit_log(&crate::storage::models::CloudflareAuditLogInput {
+                account_id: account.id.clone(),
+                action_type: "set_security_level".to_string(),
+                target_id: Some(zone_id.to_string()),
+                target_name: Some("WAF Security Level".to_string()),
+                summary: format!("Agent a modificat nivelul de securitate la '{}'", lvl),
+                actor: "agent".to_string(),
+                session_id: Some(ctx.session_id.clone()),
+                before_state: old_level,
+                after_state: Some(lvl.clone()),
+            });
+            format!("Updated security level to '{lvl}' for zone {zone_id}")
+        }
         Err(e) => format!("error setting security level: {e}"),
     }
+}
+
+async fn cloudflare_get_history(ctx: &ToolContext, args: &Value) -> String {
+    let account_id = match args.get("cloud_account_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return "error: missing 'cloud_account_id'".into(),
+    };
+    match ctx.db.list_cloudflare_audit_logs(account_id, 20) {
+        Ok(logs) => {
+            if logs.is_empty() {
+                "No Cloudflare edit history found for this account.".to_string()
+            } else {
+                let lines: Vec<String> = logs
+                    .iter()
+                    .map(|l| {
+                        let rev = if l.reverted { " [REVERTED]" } else { "" };
+                        format!(
+                            "- ID: {}\n  Action: {} (by {})\n  Summary: {}{}\n  Time: {}",
+                            l.id, l.action_type, l.actor, l.summary, rev, l.created_at
+                        )
+                    })
+                    .collect();
+                lines.join("\n\n")
+            }
+        }
+        Err(e) => format!("error retrieving history: {e}"),
+    }
+}
+
+async fn cloudflare_revert_action(ctx: &ToolContext, args: &Value) -> String {
+    let account_id = match args.get("cloud_account_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return "error: missing 'cloud_account_id'".into(),
+    };
+    let action_id = match args.get("action_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return "error: missing 'action_id'".into(),
+    };
+
+    let log = match ctx.db.get_cloudflare_audit_log(action_id) {
+        Ok(Some(l)) => l,
+        Ok(None) => return format!("error: history action ID '{action_id}' not found"),
+        Err(e) => return format!("error: {e}"),
+    };
+
+    if log.reverted {
+        return "error: this action was already reverted".into();
+    }
+
+    let account = match ctx.db.get_cloud_account(account_id) {
+        Ok(Some(a)) if a.kind == "cloudflare" => a,
+        Ok(Some(_)) => return "error: account is not kind 'cloudflare'".into(),
+        Ok(None) => return format!("error: cloud account '{account_id}' not found"),
+        Err(e) => return format!("error: {e}"),
+    };
+    let token = match crate::infra::cloudflare::load_cf_token(&account.id) {
+        Ok(t) => t,
+        Err(e) => return format!("error: {e}"),
+    };
+
+    match log.action_type.as_str() {
+        "create_dns" => {
+            if let Some(target_id) = &log.target_id {
+                let zone_id = account.region.clone().unwrap_or_default();
+                if !zone_id.is_empty() {
+                    let _ = crate::infra::cloudflare::delete_dns_record(&token, &zone_id, target_id).await;
+                } else if let Ok(zones) = crate::infra::cloudflare::list_zones(&token, account.project_id.as_deref()).await {
+                    for z in zones {
+                        if crate::infra::cloudflare::delete_dns_record(&token, &z.id, target_id).await.is_ok() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        "update_dns" | "delete_dns" => {
+            if let Some(before_json) = &log.before_state {
+                let snap: crate::infra::cloudflare::CfDnsRecordInput = match serde_json::from_str(before_json) {
+                    Ok(s) => s,
+                    Err(e) => return format!("error parsing previous DNS state: {e}"),
+                };
+                let zone_id = account.region.clone().unwrap_or_default();
+                let actual_zone = if !zone_id.is_empty() {
+                    zone_id
+                } else {
+                    let zones = match crate::infra::cloudflare::list_zones(&token, account.project_id.as_deref()).await {
+                        Ok(z) => z,
+                        Err(e) => return format!("error listing zones: {e}"),
+                    };
+                    zones.first().map(|z| z.id.clone()).unwrap_or_default()
+                };
+                if !actual_zone.is_empty() {
+                    if let Err(e) = crate::infra::cloudflare::upsert_dns_record(&token, &actual_zone, &snap).await {
+                        return format!("error restoring DNS record: {e}");
+                    }
+                }
+            }
+        }
+        "set_security_level" => {
+            if let Some(prev_level) = &log.before_state {
+                if let Some(zone_id) = &log.target_id {
+                    if let Err(e) = crate::infra::cloudflare::set_security_level(&token, zone_id, prev_level).await {
+                        return format!("error restoring security level: {e}");
+                    }
+                }
+            }
+        }
+        other => return format!("error: action type '{other}' does not support automatic revert"),
+    }
+
+    let _ = ctx.db.mark_cloudflare_audit_log_reverted(action_id);
+    let _ = ctx.db.create_cloudflare_audit_log(&crate::storage::models::CloudflareAuditLogInput {
+        account_id: account.id.clone(),
+        action_type: "revert_action".to_string(),
+        target_id: Some(action_id.to_string()),
+        target_name: log.target_name.clone(),
+        summary: format!("↩️ Agent a anulat: {}", log.summary),
+        actor: "agent".to_string(),
+        session_id: Some(ctx.session_id.clone()),
+        before_state: None,
+        after_state: None,
+    });
+
+    format!("Successfully reverted action '{}' ({})", log.summary, action_id)
 }
 
 async fn project_env_map(ctx: &ToolContext, slug: &str) -> Result<HashMap<String, String>, String> {
@@ -804,3 +1042,57 @@ async fn terraform_run_tfc(
         Err(e) => format!("error: {e}"),
     }
 }
+
+async fn agent_plugin_list() -> String {
+    let plugins = crate::plugins::list_plugins();
+    if plugins.is_empty() {
+        return "No plugins currently installed in xConsole.".into();
+    }
+
+    let mut out = format!("Installed xConsole Plugins ({}):\n", plugins.len());
+    for p in plugins {
+        let status = if p.enabled { "ENABLED" } else { "DISABLED" };
+        let kind = if p.is_builtin { "builtin" } else { "community" };
+        let tools_count = p.capabilities.agent_tools.as_ref().map(|t| t.len()).unwrap_or(0);
+        out.push_str(&format!(
+            "- {} (v{}) [{status} | {kind} | {tools_count} tools]: {}\n",
+            p.name, p.version, p.description
+        ));
+    }
+    out
+}
+
+async fn agent_plugin_install(args: &Value) -> String {
+    let source = match args.get("source").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.trim(),
+        _ => return "error: missing required argument 'source'".into(),
+    };
+
+    match crate::plugins::install_plugin(source) {
+        Ok(p) => format!(
+            "Successfully installed and activated plugin '{}' (v{}) by {}!\nCapabilities: {} agent tools available.",
+            p.name,
+            p.version,
+            p.author,
+            p.capabilities.agent_tools.as_ref().map(|t| t.len()).unwrap_or(0)
+        ),
+        Err(e) => format!("Error installing plugin from '{source}': {e}"),
+    }
+}
+
+async fn agent_plugin_toggle(args: &Value) -> String {
+    let plugin_id = match args.get("plugin_id").and_then(|v| v.as_str()) {
+        Some(id) if !id.trim().is_empty() => id.trim(),
+        _ => return "error: missing required argument 'plugin_id'".into(),
+    };
+    let enabled = args.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    match crate::plugins::toggle_plugin(plugin_id, enabled) {
+        Ok(_) => {
+            let state = if enabled { "enabled" } else { "disabled" };
+            format!("Plugin '{plugin_id}' is now {state}.")
+        }
+        Err(e) => format!("Error toggling plugin '{plugin_id}': {e}"),
+    }
+}
+

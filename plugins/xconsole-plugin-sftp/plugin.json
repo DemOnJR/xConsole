@@ -1,0 +1,39 @@
+{
+  "id": "xconsole-plugin-sftp",
+  "name": "SFTP & Remote File Manager",
+  "version": "1.0.0",
+  "description": "Dual-pane remote file manager, inline code editor, drag-and-drop transfers, and file permissions manager over SSH.",
+  "author": "xConsole Team",
+  "icon": "📁",
+  "category": "networking",
+  "enabled": true,
+  "isBuiltin": true,
+  "capabilities": {
+    "navItem": {
+      "id": "sftp",
+      "label": "SFTP Browser",
+      "icon": "FolderIcon",
+      "order": 20
+    },
+    "agentTools": [
+      {
+        "name": "sftp_list",
+        "description": "List files and directories on remote VPS.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "vps_id": { "type": "string" },
+            "path": { "type": "string" }
+          },
+          "required": ["vps_id"]
+        }
+      }
+    ],
+    "canvasNode": {
+      "type": "sftpNode",
+      "title": "SFTP Filesystem",
+      "defaultWidth": 580,
+      "defaultHeight": 520
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "id": "xconsole-plugin-agent",
+  "name": "Autonomous AI Agent Engine",
+  "version": "1.0.0",
+  "description": "Multi-provider AI pairing assistant with tool execution, file editing, shell execution, safety gates, and self-composition.",
+  "author": "xConsole Team",
+  "icon": "🤖",
+  "category": "ai",
+  "enabled": true,
+  "isBuiltin": true,
+  "capabilities": {
+    "navItem": {
+      "id": "agent",
+      "label": "AI Agent",
+      "icon": "BotIcon",
+      "order": 10
+    },
+    "canvasNode": {
+      "type": "agentNode",
+      "title": "AI Agent Assistant",
+      "defaultWidth": 520,
+      "defaultHeight": 650
+    },
+    "settingsSection": {
+      "id": "agent",
+      "title": "Agent & Safety"
+    }
+  }
+}

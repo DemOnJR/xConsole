@@ -1,0 +1,44 @@
+{
+  "id": "xconsole-plugin-database",
+  "name": "Database & MySQL Explorer",
+  "version": "1.0.0",
+  "description": "Multi-engine database management, visual table editor, schema inspection, and SQL workspace for MySQL, PostgreSQL, and SQLite.",
+  "author": "xConsole Team",
+  "icon": "🗄️",
+  "category": "database",
+  "enabled": true,
+  "isBuiltin": true,
+  "capabilities": {
+    "navItem": {
+      "id": "database",
+      "label": "Database",
+      "icon": "DatabaseIcon",
+      "order": 30
+    },
+    "agentTools": [
+      {
+        "name": "db_list_connections",
+        "description": "List all saved database connections.",
+        "parameters": { "type": "object", "properties": {} }
+      },
+      {
+        "name": "db_run_sql",
+        "description": "Execute a SQL query on a database connection.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "conn_id": { "type": "string" },
+            "sql": { "type": "string" }
+          },
+          "required": ["conn_id", "sql"]
+        }
+      }
+    ],
+    "canvasNode": {
+      "type": "databaseNode",
+      "title": "Database Client",
+      "defaultWidth": 550,
+      "defaultHeight": 480
+    }
+  }
+}

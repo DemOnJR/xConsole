@@ -7,8 +7,9 @@ use uuid::Uuid;
 use super::models::{
     AgentApproval, AgentConversation, AgentConversationInput, AgentConversationMeta,
     AgentPlan, AgentPlanMeta, AiProvider, AiProviderInput, AuthType, CloudAccount,
-    CloudAccountInput, CronJob, CronJobInput, GoalSession, InfraProject, InfraProjectInput,
-    KnownHost, Vps, VpsInput, VpsLoginPatch, Workspace, WorkspaceInput,
+    CloudAccountInput, CloudflareAuditLog, CloudflareAuditLogInput, CronJob, CronJobInput,
+    GoalSession, InfraProject, InfraProjectInput, KnownHost, Vps, VpsInput, VpsLoginPatch,
+    Workspace, WorkspaceInput,
 };
 use crate::artifacts::Artifact;
 use crate::ai::conversations;
@@ -561,6 +562,23 @@ impl Db {
                 session_id  TEXT,
                 vps_id      TEXT,
                 created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Audit log of changes made to Cloudflare with before/after state for instant rollback.
+            CREATE TABLE IF NOT EXISTS cloudflare_audit_log (
+                id            TEXT PRIMARY KEY,
+                account_id    TEXT NOT NULL,
+                action_type   TEXT NOT NULL,
+                target_id     TEXT,
+                target_name   TEXT,
+                summary       TEXT NOT NULL,
+                actor         TEXT NOT NULL,
+                session_id    TEXT,
+                before_state  TEXT,
+                after_state   TEXT,
+                reverted      INTEGER NOT NULL DEFAULT 0,
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                ts            INTEGER NOT NULL
             );
             "#,
         )?;
@@ -1614,6 +1632,106 @@ impl Db {
     pub fn delete_cloud_account(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM cloud_account WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    // ----- Cloudflare Audit & Rollback Logs -----
+
+    pub fn create_cloudflare_audit_log(&self, input: &CloudflareAuditLogInput) -> Result<CloudflareAuditLog> {
+        let id = Uuid::new_v4().to_string();
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO cloudflare_audit_log (id, account_id, action_type, target_id, target_name, summary, actor, session_id, before_state, after_state, reverted, ts)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11)",
+                params![
+                    id,
+                    input.account_id,
+                    input.action_type,
+                    input.target_id,
+                    input.target_name,
+                    input.summary,
+                    input.actor,
+                    input.session_id,
+                    input.before_state,
+                    input.after_state,
+                    now_ts
+                ],
+            )?;
+        }
+        self.get_cloudflare_audit_log(&id)?
+            .ok_or_else(|| anyhow::anyhow!("Cloudflare audit log not found immediately after insert"))
+    }
+
+    pub fn list_cloudflare_audit_logs(&self, account_id: &str, limit: u32) -> Result<Vec<CloudflareAuditLog>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, action_type, target_id, target_name, summary, actor, session_id, before_state, after_state, reverted, created_at, ts
+             FROM cloudflare_audit_log
+             WHERE account_id = ?1
+             ORDER BY ts DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![account_id, limit], |r| {
+            Ok(CloudflareAuditLog {
+                id: r.get(0)?,
+                account_id: r.get(1)?,
+                action_type: r.get(2)?,
+                target_id: r.get(3)?,
+                target_name: r.get(4)?,
+                summary: r.get(5)?,
+                actor: r.get(6)?,
+                session_id: r.get(7)?,
+                before_state: r.get(8)?,
+                after_state: r.get(9)?,
+                reverted: r.get::<_, i64>(10)? != 0,
+                created_at: r.get(11)?,
+                ts: r.get(12)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_cloudflare_audit_log(&self, id: &str) -> Result<Option<CloudflareAuditLog>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, action_type, target_id, target_name, summary, actor, session_id, before_state, after_state, reverted, created_at, ts
+             FROM cloudflare_audit_log
+             WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map([id], |r| {
+            Ok(CloudflareAuditLog {
+                id: r.get(0)?,
+                account_id: r.get(1)?,
+                action_type: r.get(2)?,
+                target_id: r.get(3)?,
+                target_name: r.get(4)?,
+                summary: r.get(5)?,
+                actor: r.get(6)?,
+                session_id: r.get(7)?,
+                before_state: r.get(8)?,
+                after_state: r.get(9)?,
+                reverted: r.get::<_, i64>(10)? != 0,
+                created_at: r.get(11)?,
+                ts: r.get(12)?,
+            })
+        })?;
+        match rows.next() {
+            Some(v) => Ok(Some(v?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn mark_cloudflare_audit_log_reverted(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE cloudflare_audit_log SET reverted = 1 WHERE id = ?1",
+            [id],
+        )?;
         Ok(())
     }
 

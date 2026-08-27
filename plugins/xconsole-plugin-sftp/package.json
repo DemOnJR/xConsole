@@ -1,0 +1,26 @@
+{
+  "name": "xconsole-plugin-sftp",
+  "version": "1.0.0",
+  "description": "Official SFTP & Remote File Manager plugin for xConsole",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "xconsole-plugin",
+    "sftp",
+    "ssh",
+    "files",
+    "ftp",
+    "remote"
+  ],
+  "author": "xConsole Team",
+  "license": "MIT",
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "zustand": ">=4.0.0"
+  }
+}

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { PluginManifest } from "../sdk/plugin";
 
 export type AuthType = "agent" | "key" | "password";
 
@@ -697,6 +698,22 @@ export interface CloudflareSecuritySettings {
   attack_mode: boolean;
 }
 
+export interface CloudflareAuditLog {
+  id: string;
+  account_id: string;
+  action_type: string;
+  target_id?: string | null;
+  target_name?: string | null;
+  summary: string;
+  actor: string;
+  session_id?: string | null;
+  before_state?: string | null;
+  after_state?: string | null;
+  reverted: boolean;
+  created_at: string;
+  ts: number;
+}
+
 export interface ToolCall {
   id: string;
   name: string;
@@ -1343,6 +1360,22 @@ export const api = {
     invoke<CloudflareSecuritySettings>("get_cloudflare_security_settings", { accountId, zoneId }),
   setCloudflareSecurityLevel: (accountId: string, zoneId: string, level: string) =>
     invoke<string>("set_cloudflare_security_level", { accountId, zoneId, level }),
+  listCloudflareHistory: (accountId: string) =>
+    invoke<CloudflareAuditLog[]>("list_cloudflare_history", { accountId }),
+  revertCloudflareAction: (accountId: string, logId: string) =>
+    invoke<string>("revert_cloudflare_action", { accountId, logId }),
+
+  // Plugin Harness (DeepSeek Harness / Cordis paradigm)
+  listInstalledPlugins: () =>
+    invoke<PluginManifest[]>("list_installed_plugins"),
+  installPlugin: (source: string) =>
+    invoke<PluginManifest>("install_plugin_cmd", { source }),
+  uninstallPlugin: (pluginId: string) =>
+    invoke<void>("uninstall_plugin_cmd", { pluginId }),
+  togglePlugin: (pluginId: string, enabled: boolean) =>
+    invoke<boolean>("toggle_plugin_cmd", { pluginId, enabled }),
+  reloadPlugins: () =>
+    invoke<PluginManifest[]>("reload_plugins_cmd"),
 };
 
 /** Subscribe to streamed output from a CLI provider's login flow. */

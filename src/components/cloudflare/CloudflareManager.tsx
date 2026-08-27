@@ -18,6 +18,7 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
     dnsRecords,
     securitySettings,
     error,
+    history,
     loadAccounts,
     selectAccount,
     selectZone,
@@ -29,9 +30,14 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
     deleteDnsRecord,
     setSecurityLevel,
     toggleUnderAttackMode,
+    loadHistory,
+    revertAction,
   } = useCloudflareStore();
 
-  const [activeTab, setActiveTab] = useState<"tunnels" | "dns" | "security">("tunnels");
+  const [activeTab, setActiveTab] = useState<"tunnels" | "dns" | "security" | "history">("tunnels");
+  const [historyFilter, setHistoryFilter] = useState<"all" | "agent" | "user">("all");
+  const [revertingId, setRevertingId] = useState<string | null>(null);
+  const [revertToast, setRevertToast] = useState<string | null>(null);
   const [creatingTunnel, setCreatingTunnel] = useState(false);
   const [newTunnelName, setNewTunnelName] = useState("");
   const [addingIngress, setAddingIngress] = useState(false);
@@ -135,6 +141,23 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
     }
   };
 
+  const handleRevert = async (logId: string) => {
+    if (!confirm("Sigur vrei să anulezi această modificare și să restaurezi starea anterioară în Cloudflare?")) {
+      return;
+    }
+    setRevertingId(logId);
+    setRevertToast(null);
+    try {
+      const msg = await revertAction(logId);
+      setRevertToast(msg);
+      setTimeout(() => setRevertToast(null), 5000);
+    } catch (e) {
+      alert(`Eroare la rollback: ${e}`);
+    } finally {
+      setRevertingId(null);
+    }
+  };
+
   return (
     <div className="flex h-full flex-col bg-[var(--surface)] text-[var(--text)]">
       {/* Header bar */}
@@ -158,6 +181,20 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
                   </option>
                 ))}
               </Select>
+
+              <Button
+                variant="ghost"
+                className="text-xs text-red-400 hover:text-red-300 hover:bg-red-950/30 px-2 py-1"
+                title="Șterge contul Cloudflare selectat"
+                onClick={async () => {
+                  if (selectedAccountId && confirm("Sigur vrei să ștergi acest cont Cloudflare din xConsole?")) {
+                    await api.deleteCloudAccount(selectedAccountId);
+                    await loadAccounts();
+                  }
+                }}
+              >
+                🗑️ Șterge
+              </Button>
 
               {zones.length > 0 && (
                 <Select
@@ -351,6 +388,25 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
               }`}
             >
               🔒 Securitate &amp; WAF {securitySettings?.attack_mode && "🚨 Under Attack"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("history");
+                if (selectedAccountId) loadHistory(selectedAccountId);
+              }}
+              className={`px-4 py-2.5 text-xs font-medium border-b-2 transition flex items-center gap-1.5 ${
+                activeTab === "history"
+                  ? "border-[#f48120] text-[#f48120]"
+                  : "border-transparent text-gray-400 hover:text-gray-200"
+              }`}
+            >
+              📜 Istoric &amp; Rollback
+              {history.length > 0 && (
+                <span className="rounded-full bg-[#f48120]/20 text-[#f48120] px-1.5 py-0.5 text-[10px] font-bold">
+                  {history.length}
+                </span>
+              )}
             </button>
           </div>
 
@@ -760,6 +816,173 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
                   </span>
                 </div>
               </Card>
+            </div>
+          )}
+
+          {/* TAB 4: HISTORY & ROLLBACK */}
+          {activeTab === "history" && (
+            <div className="flex-1 overflow-y-auto p-5 space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-100 flex items-center gap-2">
+                    <span>📜</span> Istoric Modificări &amp; Rollback Instant
+                  </h3>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    Toate modificările realizate de AI Agent sau utilizator pe DNS, Tunele și Securitate sunt înregistrate aici cu snapshot-ul stării anterioare pentru anulare rapidă (1-click Revert).
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <div className="flex rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-0.5 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setHistoryFilter("all")}
+                      className={`px-2.5 py-1 rounded-md transition ${historyFilter === "all" ? "bg-[#f48120] text-white font-medium" : "text-gray-400 hover:text-white"}`}
+                    >
+                      Toate ({history.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setHistoryFilter("agent")}
+                      className={`px-2.5 py-1 rounded-md transition ${historyFilter === "agent" ? "bg-purple-600 text-white font-medium" : "text-gray-400 hover:text-white"}`}
+                    >
+                      🤖 Agent ({history.filter((h) => h.actor === "agent").length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setHistoryFilter("user")}
+                      className={`px-2.5 py-1 rounded-md transition ${historyFilter === "user" ? "bg-blue-600 text-white font-medium" : "text-gray-400 hover:text-white"}`}
+                    >
+                      👤 Utilizator ({history.filter((h) => h.actor === "user").length})
+                    </button>
+                  </div>
+
+                  <Button
+                    variant="ghost"
+                    className="text-xs"
+                    onClick={() => selectedAccountId && loadHistory(selectedAccountId)}
+                  >
+                    🔄 Reîmprospătează
+                  </Button>
+                </div>
+              </div>
+
+              {revertToast && (
+                <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/40 p-3 text-xs text-emerald-300 flex items-center justify-between">
+                  <span>✓ {revertToast}</span>
+                  <button type="button" onClick={() => setRevertToast(null)} className="text-emerald-400 hover:text-white">✕</button>
+                </div>
+              )}
+
+              {history.length === 0 ? (
+                <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-[var(--border)] p-12 text-center">
+                  <div className="text-3xl mb-2">📜</div>
+                  <h4 className="text-sm font-semibold text-gray-200 mb-1">Nicio modificare înregistrată încă</h4>
+                  <p className="text-xs text-gray-400 max-w-sm">
+                    Modificările viitoare efectuate pe domeniile sau tunelele acestui cont Cloudflare (atât de tine, cât și de agentul AI) vor apărea aici și vor putea fi anulate oricând.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {history
+                    .filter((h) => {
+                      if (historyFilter === "agent") return h.actor === "agent";
+                      if (historyFilter === "user") return h.actor === "user";
+                      return true;
+                    })
+                    .map((log) => {
+                      const isAgent = log.actor === "agent";
+                      const isRollback = log.action_type === "revert_action";
+                      const dateFormatted = new Date(log.ts || log.created_at).toLocaleString();
+
+                      return (
+                        <Card
+                          key={log.id}
+                          className={`p-4 transition border ${
+                            log.reverted
+                              ? "opacity-60 border-white/5 bg-white/[0.02]"
+                              : isAgent
+                              ? "border-purple-500/30 bg-purple-950/10 hover:border-purple-500/50"
+                              : "border-[var(--border)] hover:border-white/20"
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="space-y-1.5 flex-1">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span
+                                  className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ${
+                                    isAgent
+                                      ? "bg-purple-500/20 text-purple-300 border border-purple-500/40"
+                                      : "bg-blue-500/20 text-blue-300 border border-blue-500/40"
+                                  }`}
+                                >
+                                  {isAgent ? "🤖 AI Agent" : "👤 Utilizator"}
+                                </span>
+
+                                <span className="rounded bg-white/10 px-2 py-0.5 text-[10px] font-mono text-gray-300">
+                                  {log.action_type}
+                                </span>
+
+                                {log.reverted && (
+                                  <span className="rounded-full bg-red-500/20 text-red-300 border border-red-500/30 px-2 py-0.5 text-[10px] font-semibold">
+                                    ✓ Reverted / Anulat
+                                  </span>
+                                )}
+
+                                <span className="text-[11px] text-gray-500 ml-auto font-mono">
+                                  {dateFormatted}
+                                </span>
+                              </div>
+
+                              <div className={`text-xs font-medium text-gray-200 ${log.reverted ? "line-through text-gray-400" : ""}`}>
+                                {log.summary}
+                              </div>
+
+                              {/* Diff Preview if available */}
+                              {(log.before_state || log.after_state) && (
+                                <div className="mt-2 rounded-lg bg-black/40 border border-white/5 p-2.5 text-[11px] font-mono space-y-1">
+                                  {log.before_state && (
+                                    <div className="text-red-300 flex items-start gap-1.5">
+                                      <span className="shrink-0 text-red-400 font-bold">- Înainte:</span>
+                                      <span className="break-all opacity-90">{log.before_state}</span>
+                                    </div>
+                                  )}
+                                  {log.after_state && (
+                                    <div className="text-emerald-300 flex items-start gap-1.5">
+                                      <span className="shrink-0 text-emerald-400 font-bold">+ După:</span>
+                                      <span className="break-all opacity-90">{log.after_state}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Rollback Button */}
+                            {!isRollback && (
+                              <div className="shrink-0 pt-1">
+                                {log.reverted ? (
+                                  <span className="text-[11px] text-gray-500 italic">
+                                    Stare restaurată
+                                  </span>
+                                ) : (
+                                  <Button
+                                    variant="ghost"
+                                    className="bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/30 text-xs px-3 py-1.5"
+                                    disabled={revertingId === log.id}
+                                    onClick={() => handleRevert(log.id)}
+                                    title="Restaurează starea anterioară a acestei setări"
+                                  >
+                                    {revertingId === log.id ? "Se anulează…" : "↩️ Revert / Anulează"}
+                                  </Button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </Card>
+                      );
+                    })}
+                </div>
+              )}
             </div>
           )}
         </div>

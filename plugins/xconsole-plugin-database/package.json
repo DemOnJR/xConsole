@@ -1,0 +1,27 @@
+{
+  "name": "xconsole-plugin-database",
+  "version": "1.0.0",
+  "description": "Official Multi-Engine Database (MySQL, Postgres, SQLite) plugin for xConsole",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "xconsole-plugin",
+    "mysql",
+    "mariadb",
+    "postgres",
+    "sqlite",
+    "sql",
+    "database"
+  ],
+  "author": "xConsole Team",
+  "license": "MIT",
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "zustand": ">=4.0.0"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "xconsole-plugin-agent",
+  "version": "1.0.0",
+  "description": "Official Autonomous AI Agent Engine plugin for xConsole",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "xconsole-plugin",
+    "ai",
+    "agent",
+    "llm",
+    "deepseek",
+    "claude",
+    "openai"
+  ],
+  "author": "xConsole Team",
+  "license": "MIT",
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "zustand": ">=4.0.0"
+  }
+}

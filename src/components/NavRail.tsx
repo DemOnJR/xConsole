@@ -10,6 +10,7 @@ import { useAgentStore } from "../stores/agentStore";
 import { useCanvasStore } from "../stores/canvasStore";
 import { useTransferStore } from "../stores/transferStore";
 import { useEditsStore } from "../stores/editsStore";
+import { usePluginStore } from "../stores/pluginStore";
 import { toggleAgentFillPane } from "./agent/AgentNode";
 
 function RailBtn({
@@ -205,15 +206,38 @@ export function NavRail() {
         <TransferIcon size={18} />
       </RailBtn>
 
-      <RailBtn
-        active={useUiStore((s) => s.cloudflareOpen)}
-        title="Cloudflare (Tunnels, DNS & Security)"
-        onClick={() => useUiStore.getState().toggleCloudflare()}
-      >
-        <CloudIcon size={18} />
-      </RailBtn>
+      {/* Dynamic Plugin Navigation Items (Harness Extension Point) */}
+      {usePluginStore((s) => s.getActiveNavItems()).map((navItem) => {
+        const isViewOpen = usePluginStore.getState().isPluginViewOpen(navItem.id);
+        const iconElement = navItem.icon === "CloudIcon" ? (
+          <CloudIcon size={18} />
+        ) : (
+          <span className="text-base leading-none">
+            {navItem.icon.length <= 4 ? navItem.icon : "🧩"}
+          </span>
+        );
+
+        return (
+          <RailBtn
+            key={navItem.id}
+            active={isViewOpen}
+            title={navItem.label}
+            onClick={() => usePluginStore.getState().togglePluginView(navItem.id)}
+          >
+            {iconElement}
+          </RailBtn>
+        );
+      })}
 
       <div className="mt-auto flex flex-col items-center gap-0.5">
+        <RailBtn
+          active={usePluginStore((s) => s.marketplaceOpen)}
+          title="Plugin Marketplace & Harness"
+          onClick={() => usePluginStore.getState().toggleMarketplace()}
+        >
+          <span className="text-base leading-none">🧩</span>
+        </RailBtn>
+
         <RailBtn active={false} title="Settings" onClick={() => openSettings()}>
           <SettingsIcon size={18} />
         </RailBtn>
