@@ -1,16 +1,30 @@
 export function HarnessModuleBar({
+  activeModule,
+  onToggleModule,
   showGoal,
   showTools,
   showContext,
   showLogs,
   onToggle,
 }: {
-  showGoal: boolean;
-  showTools: boolean;
-  showContext: boolean;
-  showLogs: boolean;
-  onToggle: (module: "goal" | "tools" | "context" | "logs") => void;
+  activeModule?: "goal" | "tools" | "context" | "logs" | null;
+  onToggleModule?: (module: "goal" | "tools" | "context" | "logs") => void;
+  showGoal?: boolean;
+  showTools?: boolean;
+  showContext?: boolean;
+  showLogs?: boolean;
+  onToggle?: (module: "goal" | "tools" | "context" | "logs") => void;
 }) {
+  const isGoal = activeModule ? activeModule === "goal" : Boolean(showGoal);
+  const isTools = activeModule ? activeModule === "tools" : Boolean(showTools);
+  const isContext = activeModule ? activeModule === "context" : Boolean(showContext);
+  const isLogs = activeModule ? activeModule === "logs" : Boolean(showLogs);
+
+  const handleToggle = (mod: "goal" | "tools" | "context" | "logs") => {
+    if (onToggleModule) onToggleModule(mod);
+    if (onToggle) onToggle(mod);
+  };
+
   return (
     <div className="flex items-center justify-between border-b border-[var(--border)] bg-[var(--surface-2)]/60 px-3 py-1 text-xs font-mono select-none">
       <div className="flex items-center gap-1.5 overflow-x-auto">
@@ -19,11 +33,11 @@ export function HarnessModuleBar({
         <button
           type="button"
           className={`flex items-center gap-1 rounded px-2 py-0.5 text-[11px] border transition ${
-            showGoal
+            isGoal
               ? "bg-[var(--surface)] text-amber-300 border-amber-400/30 shadow-xs"
               : "bg-transparent text-[var(--text-dim)] border-transparent hover:border-[var(--border)] hover:text-[var(--text)]"
           }`}
-          onClick={() => onToggle("goal")}
+          onClick={() => handleToggle("goal")}
         >
           <span>🎯</span>
           <span>goal</span>
@@ -32,11 +46,11 @@ export function HarnessModuleBar({
         <button
           type="button"
           className={`flex items-center gap-1 rounded px-2 py-0.5 text-[11px] border transition ${
-            showTools
+            isTools
               ? "bg-[var(--surface)] text-cyan-300 border-cyan-400/30 shadow-xs"
               : "bg-transparent text-[var(--text-dim)] border-transparent hover:border-[var(--border)] hover:text-[var(--text)]"
           }`}
-          onClick={() => onToggle("tools")}
+          onClick={() => handleToggle("tools")}
         >
           <span>⚡</span>
           <span>tools</span>
@@ -45,11 +59,11 @@ export function HarnessModuleBar({
         <button
           type="button"
           className={`flex items-center gap-1 rounded px-2 py-0.5 text-[11px] border transition ${
-            showContext
+            isContext
               ? "bg-[var(--surface)] text-violet-300 border-violet-400/30 shadow-xs"
               : "bg-transparent text-[var(--text-dim)] border-transparent hover:border-[var(--border)] hover:text-[var(--text)]"
           }`}
-          onClick={() => onToggle("context")}
+          onClick={() => handleToggle("context")}
         >
           <span>🧠</span>
           <span>context</span>
@@ -58,11 +72,11 @@ export function HarnessModuleBar({
         <button
           type="button"
           className={`flex items-center gap-1 rounded px-2 py-0.5 text-[11px] border transition ${
-            showLogs
+            isLogs
               ? "bg-[var(--surface)] text-emerald-300 border-emerald-400/30 shadow-xs"
               : "bg-transparent text-[var(--text-dim)] border-transparent hover:border-[var(--border)] hover:text-[var(--text)]"
           }`}
-          onClick={() => onToggle("logs")}
+          onClick={() => handleToggle("logs")}
         >
           <span>📜</span>
           <span>logs</span>
