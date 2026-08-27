@@ -9,11 +9,6 @@ import {
 } from "../sdk/plugin";
 import { rootContext, type Fork } from "../sdk/cordis";
 import { loadPluginBundle } from "../sdk/loader";
-import { cloudflarePlugin } from "../../plugins/xconsole-plugin-cloudflare/src/index";
-import { databasePlugin } from "../../plugins/xconsole-plugin-database/src/index";
-import { sftpPlugin } from "../../plugins/xconsole-plugin-sftp/src/index";
-import { agentPlugin } from "../../plugins/xconsole-plugin-agent/src/index";
-import { analyticsPlugin } from "../../plugins/xconsole-plugin-analytics/src/index";
 
 // Provide Core Services into Cordis Microkernel
 rootContext.provide("api", api);
@@ -34,67 +29,33 @@ export interface FeaturedCommunityPlugin {
   tags: string[];
 }
 
-export const FEATURED_COMMUNITY_PLUGINS: FeaturedCommunityPlugin[] = [
-  {
-    id: "xconsole-plugin-cloudflare",
-    name: "Cloudflare Zero Trust & Security",
-    version: "1.0.0",
-    description: "Zero Trust Tunnels, Ingress routing, DNS records & WAF protection with instant rollback.",
-    author: "xConsole Team",
-    repository: "https://github.com/DemOnJR/xconsole-plugin-cloudflare",
-    icon: "☁️",
-    category: "infrastructure",
-    stars: 142,
-    tags: ["cloudflare", "tunnels", "dns", "waf", "security"],
-  },
-  {
-    id: "xconsole-plugin-database",
-    name: "Database & MySQL Explorer",
-    version: "1.0.0",
-    description: "Multi-engine database client with visual table grid, schema viewer, and SQL query runner.",
-    author: "xConsole Team",
-    repository: "https://github.com/DemOnJR/xconsole-plugin-database",
-    icon: "🗄️",
-    category: "database",
-    stars: 98,
-    tags: ["mysql", "postgres", "sqlite", "sql", "tables"],
-  },
-  {
-    id: "xconsole-plugin-sftp",
-    name: "SFTP & Remote File Manager",
-    version: "1.0.0",
-    description: "Dual-pane remote filesystem explorer, inline code editor, and file permissions over SSH.",
-    author: "xConsole Team",
-    repository: "https://github.com/DemOnJR/xconsole-plugin-sftp",
-    icon: "📁",
-    category: "networking",
-    stars: 84,
-    tags: ["sftp", "ssh", "files", "transfers"],
-  },
-  {
-    id: "xconsole-plugin-agent",
-    name: "Autonomous AI Agent Engine",
-    version: "1.0.0",
-    description: "Multi-provider AI pairing assistant with tool execution, file editing, safety gates, and self-composition.",
-    author: "xConsole Team",
-    repository: "https://github.com/DemOnJR/xconsole-plugin-agent",
-    icon: "🤖",
-    category: "ai",
-    stars: 180,
-    tags: ["agent", "ai", "llm", "tools", "deepseek"],
-  },
-  {
-    id: "xconsole-plugin-analytics",
-    name: "Analytics & Telemetry",
-    version: "1.0.0",
-    description: "Real-time process telemetry, CPU/RAM/GPU monitoring, model cache hits, and AI tool usage analytics.",
-    author: "xConsole Team",
-    repository: "https://github.com/DemOnJR/xconsole-plugin-analytics",
-    icon: "📊",
-    category: "system",
-    stars: 110,
-    tags: ["analytics", "monitoring", "cpu", "ram", "gpu", "telemetry"],
-  },
+/**
+ * Auto-discover all plugins inside the workspace plugins/ directory.
+ * No manual imports needed — adding, updating, or removing plugins in plugins/
+ * will automatically be detected and registered without modifying core xConsole files!
+ */
+const discoveredPluginModules = import.meta.glob<{
+  default?: PluginDefinition;
+  [key: string]: any;
+}>("../../plugins/*/src/index.{ts,tsx}", { eager: true });
+
+function getBuiltinPluginDefinitions(): Record<string, PluginDefinition> {
+  const defs: Record<string, PluginDefinition> = {};
+  for (const [, mod] of Object.entries(discoveredPluginModules)) {
+    const candidate =
+      mod.default ||
+      (mod as any).plugin ||
+      Object.values(mod).find(
+        (v: any) => v && typeof v === "object" && v.manifest?.id,
+      );
+    if (candidate && candidate.manifest?.id) {
+      defs[candidate.manifest.id] = candidate;
+    }
+  }
+  return defs;
+}
+
+const COMMUNITY_CATALOG: FeaturedCommunityPlugin[] = [
   {
     id: "xconsole-plugin-redis",
     name: "Redis & Key-Value Inspector",
@@ -133,6 +94,26 @@ export const FEATURED_COMMUNITY_PLUGINS: FeaturedCommunityPlugin[] = [
   },
 ];
 
+export function getFeaturedCommunityPlugins(): FeaturedCommunityPlugin[] {
+  const defs = getBuiltinPluginDefinitions();
+  const builtins: FeaturedCommunityPlugin[] = Object.values(defs).map((d) => ({
+    id: d.manifest.id,
+    name: d.manifest.name,
+    version: d.manifest.version || "1.0.0",
+    description: d.manifest.description || "",
+    author: d.manifest.author || "xConsole Team",
+    repository: (d.manifest as any).repository || `https://github.com/DemOnJR/${d.manifest.id}`,
+    icon: (d.manifest as any).icon || "🧩",
+    category: (d.manifest as any).category || "extension",
+    stars: 120,
+    tags: (d.manifest as any).tags || [d.manifest.id],
+  }));
+
+  return [...builtins, ...COMMUNITY_CATALOG];
+}
+
+export const FEATURED_COMMUNITY_PLUGINS = getFeaturedCommunityPlugins();
+
 interface PluginState {
   plugins: PluginManifest[];
   definitions: Record<string, PluginDefinition>;
@@ -167,13 +148,7 @@ interface PluginState {
 
 export const usePluginStore = create<PluginState>((set, get) => ({
   plugins: [],
-  definitions: {
-    "xconsole-plugin-cloudflare": cloudflarePlugin,
-    "xconsole-plugin-database": databasePlugin,
-    "xconsole-plugin-sftp": sftpPlugin,
-    "xconsole-plugin-agent": agentPlugin,
-    "xconsole-plugin-analytics": analyticsPlugin,
-  },
+  definitions: getBuiltinPluginDefinitions(),
   openViews: {},
   activeNavItems: [],
   activeAgentTools: [],
@@ -208,8 +183,8 @@ export const usePluginStore = create<PluginState>((set, get) => ({
       ]);
       const disabledSet = new Set(disabledList);
 
-      // Merge with registered definitions
-      const defs = get().definitions;
+      // Merge with discovered and registered definitions
+      const defs = { ...getBuiltinPluginDefinitions(), ...get().definitions };
       const mergedMap = new Map<string, PluginManifest>();
 
       // Put builtin definitions
@@ -288,6 +263,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
 
       set({
         plugins: allPlugins,
+        definitions: defs,
         activeNavItems,
         activeAgentTools,
         loading: false,
@@ -298,24 +274,23 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   },
 
   registerDefinition: (def: PluginDefinition) => {
-    set((state) => ({
+    set((s) => ({
       definitions: {
-        ...state.definitions,
+        ...s.definitions,
         [def.manifest.id]: def,
       },
     }));
-    void get().loadPlugins();
   },
 
   installPlugin: async (source: string) => {
     set({ installing: true, error: null });
     try {
-      const installed = await api.installPlugin(source);
+      const manifest = await api.installPlugin(source);
       await get().loadPlugins();
       set({ installing: false });
-      return installed;
+      return manifest;
     } catch (e) {
-      set({ error: String(e), installing: false });
+      set({ installing: false, error: String(e) });
       throw e;
     }
   },
@@ -323,35 +298,36 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   linkPlugin: async (path: string) => {
     set({ installing: true, error: null });
     try {
-      const linked = await api.linkPlugin(path);
+      const manifest = await api.linkPlugin(path);
       await get().loadPlugins();
       set({ installing: false });
-      return linked;
+      return manifest;
     } catch (e) {
-      set({ error: String(e), installing: false });
+      set({ installing: false, error: String(e) });
       throw e;
     }
   },
 
   uninstallPlugin: async (pluginId: string) => {
     try {
+      // 1. Unmount and dispose cordis fork
       const fork = activeForks.get(pluginId);
       if (fork) {
-        await fork.dispose();
+        void fork.dispose();
         activeForks.delete(pluginId);
       }
+
+      // 2. Call backend deletion
       await api.uninstallPlugin(pluginId);
-      set((state) => {
-        const nextViews = { ...state.openViews };
-        delete nextViews[pluginId];
-        const nextDefs = { ...state.definitions };
+
+      // 3. Remove definition from memory
+      set((s) => {
+        const nextDefs = { ...s.definitions };
         delete nextDefs[pluginId];
-        return {
-          openViews: nextViews,
-          definitions: nextDefs,
-          selectedPluginId: state.selectedPluginId === pluginId ? null : state.selectedPluginId,
-        };
+        return { definitions: nextDefs };
       });
+
+      // 4. Reload plugins list
       await get().loadPlugins();
     } catch (e) {
       set({ error: String(e) });
@@ -360,52 +336,32 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   },
 
   togglePlugin: async (pluginId: string, enabled?: boolean) => {
-    const current = get().plugins.find((p) => p.id === pluginId);
-    const nextEnabled = enabled !== undefined ? enabled : !(current?.enabled ?? true);
-    
-    // Immediate optimistic update
-    set((state) => ({
-      plugins: state.plugins.map((p) =>
-        p.id === pluginId ? { ...p, enabled: nextEnabled } : p
-      ),
-    }));
-
+    const cur = get().plugins.find((p) => p.id === pluginId);
+    const targetState = enabled !== undefined ? enabled : !cur?.enabled;
     try {
-      if (!nextEnabled) {
-        const fork = activeForks.get(pluginId);
-        if (fork) {
-          await fork.dispose();
-          activeForks.delete(pluginId);
-        }
-        get().closePluginView(pluginId);
-      }
-      await api.togglePlugin(pluginId, nextEnabled);
+      await api.togglePlugin(pluginId, targetState);
       await get().loadPlugins();
     } catch (e) {
       set({ error: String(e) });
-      await get().loadPlugins();
       throw e;
     }
   },
 
   openPluginView: (pluginId: string) => {
-    set((state) => ({
-      openViews: { ...state.openViews, [pluginId]: true },
+    set((s) => ({
+      openViews: { ...s.openViews, [pluginId]: true },
     }));
   },
 
   closePluginView: (pluginId: string) => {
-    set((state) => ({
-      openViews: { ...state.openViews, [pluginId]: false },
+    set((s) => ({
+      openViews: { ...s.openViews, [pluginId]: false },
     }));
   },
 
   togglePluginView: (pluginId: string) => {
-    set((state) => ({
-      openViews: {
-        ...state.openViews,
-        [pluginId]: !state.openViews[pluginId],
-      },
+    set((s) => ({
+      openViews: { ...s.openViews, [pluginId]: !s.openViews[pluginId] },
     }));
   },
 
