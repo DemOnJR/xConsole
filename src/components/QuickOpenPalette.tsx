@@ -1,16 +1,28 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuickOpenStore } from "../stores/quickOpenStore";
 import { useVpsStore } from "../stores/vpsStore";
 import { useCanvasStore } from "../stores/canvasStore";
 import { usePluginStore } from "../stores/pluginStore";
 import { useUiStore } from "../stores/uiStore";
+import {
+  TerminalIcon,
+  FolderIcon,
+  DatabaseIcon,
+  BotIcon,
+  CloudIcon,
+  PuzzleIcon,
+  SettingsIcon,
+  ChartIcon,
+  GridIcon,
+  SearchIcon,
+} from "./icons";
 
 interface PaletteItem {
   id: string;
   category: string;
   title: string;
   subtitle?: string;
-  icon: string;
+  icon: ReactNode;
   keywords: string[];
   action: () => void;
 }
@@ -79,7 +91,7 @@ export function QuickOpenPalette() {
         category: "Server Action",
         title: `SSH Terminal → ${targetServer.name}`,
         subtitle: `${targetServer.username}@${targetServer.host}:${targetServer.port}`,
-        icon: "⚡",
+        icon: <TerminalIcon size={18} />,
         keywords: ["ssh", "terminal", "connect", targetServer.name, targetServer.host, "bash"],
         action: () => {
           useCanvasStore.getState().addVps(targetServer);
@@ -93,7 +105,7 @@ export function QuickOpenPalette() {
           category: "Server Action",
           title: `SFTP Remote Files → ${targetServer.name}`,
           subtitle: `Explore filesystem over SSH (${targetServer.host})`,
-          icon: "📁",
+          icon: <FolderIcon size={18} />,
           keywords: ["sftp", "ftp", "files", "explorer", "upload", "download", targetServer.name],
           action: () => {
             useCanvasStore.getState().addSftp(targetServer);
@@ -108,7 +120,7 @@ export function QuickOpenPalette() {
           category: "Server Action",
           title: `Database & MySQL Client → ${targetServer.name}`,
           subtitle: `Inspect tables and run SQL on ${targetServer.name}`,
-          icon: "🗄️",
+          icon: <DatabaseIcon size={18} />,
           keywords: ["database", "mysql", "sql", "postgres", "sqlite", "tables", targetServer.name],
           action: () => {
             useCanvasStore.getState().addDb(targetServer);
@@ -122,7 +134,7 @@ export function QuickOpenPalette() {
         category: "Server Action",
         title: `Copy Connection Info → ${targetServer.name}`,
         subtitle: `${targetServer.username}@${targetServer.host}`,
-        icon: "@",
+        icon: <TerminalIcon size={18} />,
         keywords: ["copy", "ip", "host", targetServer.name, targetServer.host],
         action: () => {
           void navigator.clipboard.writeText(`${targetServer.username}@${targetServer.host}`);
@@ -141,7 +153,7 @@ export function QuickOpenPalette() {
         category: "Servers",
         title: `SSH Terminal → ${srv.name}`,
         subtitle: `${srv.username}@${srv.host}:${srv.port}`,
-        icon: "⚡",
+        icon: <TerminalIcon size={18} />,
         keywords: ["ssh", "terminal", "connect", srv.name, srv.host, "shell", "bash"],
         action: () => {
           useCanvasStore.getState().addVps(srv);
@@ -156,7 +168,7 @@ export function QuickOpenPalette() {
           category: "SFTP Files",
           title: `SFTP Explorer → ${srv.name}`,
           subtitle: `Remote filesystem & editor (${srv.host})`,
-          icon: "📁",
+          icon: <FolderIcon size={18} />,
           keywords: ["sftp", "ftp", "files", "remote", "editor", srv.name, srv.host],
           action: () => {
             useCanvasStore.getState().addSftp(srv);
@@ -172,7 +184,7 @@ export function QuickOpenPalette() {
           category: "Databases",
           title: `Database Client → ${srv.name}`,
           subtitle: `MySQL, PostgreSQL, SQLite workspace`,
-          icon: "🗄️",
+          icon: <DatabaseIcon size={18} />,
           keywords: ["database", "mysql", "sql", "db", "tables", "postgres", srv.name],
           action: () => {
             useCanvasStore.getState().addDb(srv);
@@ -189,7 +201,7 @@ export function QuickOpenPalette() {
         category: "Plugins",
         title: "Autonomous AI Agent",
         subtitle: "Open AI pairing assistant window with tool execution",
-        icon: "🤖",
+        icon: <BotIcon size={18} />,
         keywords: ["agent", "ai", "chat", "llm", "assistant", "deepseek", "tools"],
         action: () => {
           useCanvasStore.getState().toggleAgent();
@@ -204,7 +216,7 @@ export function QuickOpenPalette() {
         category: "Plugins",
         title: "Cloudflare Zero Trust & Tunnels",
         subtitle: "Manage tunnels, ingress DNS records, and WAF rules",
-        icon: "☁️",
+        icon: <CloudIcon size={18} />,
         keywords: ["cloudflare", "cf", "tunnels", "dns", "waf", "security"],
         action: () => {
           usePluginStore.getState().openPluginView("xconsole-plugin-cloudflare");
@@ -219,7 +231,7 @@ export function QuickOpenPalette() {
       category: "System",
       title: "Plugin Marketplace & Harness",
       subtitle: "Browse, install, and hot-toggle community plugins",
-      icon: "🧩",
+      icon: <PuzzleIcon size={18} />,
       keywords: ["plugins", "marketplace", "store", "harness", "install", "cordis", "extensions"],
       action: () => {
         usePluginStore.getState().openMarketplace();
@@ -232,7 +244,7 @@ export function QuickOpenPalette() {
       category: "System",
       title: "Settings & AI Providers",
       subtitle: "Configure API keys, models, themes, and preferences",
-      icon: "⚙️",
+      icon: <SettingsIcon size={18} />,
       keywords: ["settings", "preferences", "config", "api", "keys", "providers"],
       action: () => {
         useUiStore.getState().openSettings();
@@ -243,23 +255,22 @@ export function QuickOpenPalette() {
     items.push({
       id: "app-analytics",
       category: "Plugins",
-      title: "Analytics & Telemetry",
-      subtitle: "View process telemetry, prompt cache hit rates, CPU, and RAM metrics",
-      icon: "📊",
-      keywords: ["analytics", "metrics", "monitoring", "cpu", "ram", "charts", "cache"],
+      title: "Analytics & Telemetry Suite",
+      subtitle: "Dashboard, prompt cache rates, tool execution intelligence, CPU/RAM/GPU telemetry",
+      icon: <ChartIcon size={18} />,
+      keywords: ["analytics", "telemetry", "metrics", "monitoring", "cpu", "ram", "gpu", "charts", "cache", "dashboard"],
       action: () => {
         usePluginStore.getState().togglePluginView("xconsole-plugin-analytics");
         close();
       },
     });
 
-
     items.push({
       id: "app-workspaces",
       category: "System",
       title: "Workspaces Panel",
       subtitle: "Browse and switch saved canvas workspaces",
-      icon: "🗂️",
+      icon: <GridIcon size={18} />,
       keywords: ["workspace", "drawer", "canvas", "sessions"],
       action: () => {
         useUiStore.getState().toggleLeft();
@@ -322,7 +333,9 @@ export function QuickOpenPalette() {
       <div className="w-[min(680px,92vw)] overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface-2)] shadow-[0_25px_60px_-15px_rgba(0,0,0,0.7)] flex flex-col animate-in zoom-in-95 duration-150">
         {/* Search Header */}
         <div className="relative flex items-center border-b border-[var(--border)] px-4 py-3.5 bg-[var(--surface)]">
-          <span className="text-xl mr-3 select-none text-[var(--accent)] font-semibold">⚡</span>
+          <div className="flex h-6 w-6 items-center justify-center mr-3 select-none text-[var(--accent)]">
+            <SearchIcon size={18} />
+          </div>
           <input
             ref={inputRef}
             type="text"

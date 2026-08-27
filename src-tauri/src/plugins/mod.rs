@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginNavItem {
     pub id: String,
     pub label: String,
@@ -15,6 +16,7 @@ pub struct PluginNavItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginAgentTool {
     pub name: String,
     pub description: String,
@@ -22,6 +24,7 @@ pub struct PluginAgentTool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginSettingsSection {
     pub id: String,
     pub title: String,
@@ -30,16 +33,18 @@ pub struct PluginSettingsSection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginCanvasNode {
     pub r#type: String,
     pub title: String,
-    #[serde(default)]
+    #[serde(default, alias = "default_width")]
     pub default_width: Option<u32>,
-    #[serde(default)]
+    #[serde(default, alias = "default_height")]
     pub default_height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginCommand {
     pub id: String,
     pub title: String,
@@ -48,20 +53,22 @@ pub struct PluginCommand {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginCapabilities {
-    #[serde(default)]
+    #[serde(default, alias = "nav_item")]
     pub nav_item: Option<PluginNavItem>,
-    #[serde(default)]
+    #[serde(default, alias = "agent_tools")]
     pub agent_tools: Option<Vec<PluginAgentTool>>,
-    #[serde(default)]
+    #[serde(default, alias = "settings_section")]
     pub settings_section: Option<PluginSettingsSection>,
-    #[serde(default)]
+    #[serde(default, alias = "canvas_node")]
     pub canvas_node: Option<PluginCanvasNode>,
     #[serde(default)]
     pub commands: Option<Vec<PluginCommand>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginManifest {
     pub id: String,
     pub name: String,
@@ -76,9 +83,9 @@ pub struct PluginManifest {
     pub category: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default)]
+    #[serde(default, alias = "is_builtin")]
     pub is_builtin: bool,
-    #[serde(default)]
+    #[serde(default, alias = "installed_path")]
     pub installed_path: Option<String>,
     #[serde(default)]
     pub capabilities: PluginCapabilities,

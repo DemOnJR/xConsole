@@ -473,3 +473,18 @@ pub async fn revert_cloudflare_action(
 
     Ok(format!("Modificarea '{}' a fost anulată cu succes!", log.summary))
 }
+
+#[tauri::command]
+pub async fn get_cloudflare_zone_analytics(
+    db: State<'_, Db>,
+    account_id: String,
+    zone_id: String,
+    since_minutes: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    let account = db
+        .get_cloud_account(&account_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Cloudflare account not found".to_string())?;
+    let token = cloudflare::load_cf_token(&account.id)?;
+    cloudflare::get_zone_analytics(&token, &zone_id, since_minutes).await
+}

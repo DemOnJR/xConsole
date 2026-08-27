@@ -277,23 +277,37 @@ function UnlockedApp() {
       <QuickOpenPalette />
 
       {/* Dynamic Plugin Views / Modals (Harness Extension Point) */}
-      {Object.entries(openViews).map(([pluginId, isOpen]) => {
-        if (!isOpen) return null;
-        const def = definitions[pluginId];
-        if (!def?.renderView) return null;
-        const ViewComp = def.renderView;
-        return (
-          <div
-            key={pluginId}
-            className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
-            onMouseDown={(e) => e.target === e.currentTarget && usePluginStore.getState().closePluginView(pluginId)}
-          >
-            <div className="h-[85vh] w-[min(1080px,94vw)] overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl flex flex-col animate-in fade-in zoom-in-95 duration-150">
-              <ViewComp onClose={() => usePluginStore.getState().closePluginView(pluginId)} />
+      {(() => {
+        const renderedIds = new Set<string>();
+        return Object.entries(openViews).map(([pluginId, isOpen]) => {
+          if (!isOpen) return null;
+          const normId =
+            pluginId === "analytics"
+              ? "xconsole-plugin-analytics"
+              : pluginId === "cloudflare"
+                ? "xconsole-plugin-cloudflare"
+                : pluginId;
+          if (renderedIds.has(normId)) return null;
+          renderedIds.add(normId);
+
+          const def = definitions[normId] || definitions[pluginId];
+          if (!def?.renderView) return null;
+          const ViewComp = def.renderView;
+          return (
+            <div
+              key={normId}
+              className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-3 sm:p-5 backdrop-blur-sm"
+              onMouseDown={(e) =>
+                e.target === e.currentTarget && usePluginStore.getState().closePluginView(normId)
+              }
+            >
+              <div className="h-[90vh] w-[min(1340px,96vw)] overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl flex flex-col animate-in fade-in zoom-in-95 duration-150">
+                <ViewComp onClose={() => usePluginStore.getState().closePluginView(normId)} />
+              </div>
             </div>
-          </div>
-        );
-      })}
+          );
+        });
+      })()}
 
       <PlanModal />
       <ChangesPanel />

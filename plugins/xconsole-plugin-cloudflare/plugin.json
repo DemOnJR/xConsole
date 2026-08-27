@@ -19,6 +19,32 @@
     },
     "agentTools": [
       {
+        "name": "cloudflare_list_zones",
+        "description": "List all DNS zones / domains in the connected Cloudflare account.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "cloud_account_id": {
+              "type": "string",
+              "description": "Optional: Cloudflare account ID"
+            }
+          }
+        }
+      },
+      {
+        "name": "cloudflare_get_zone_analytics",
+        "description": "Get real-time web traffic analytics, HTTP requests, bandwidth, cache hits, and security threats for a Cloudflare domain/zone.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "zone_id": { "type": "string", "description": "Zone ID or domain name" },
+            "cloud_account_id": { "type": "string", "description": "Optional: Cloudflare account ID" },
+            "since_minutes": { "type": "integer", "description": "Optional: time window in minutes (-1440 for 24h, -60 for 1h)" }
+          },
+          "required": ["zone_id"]
+        }
+      },
+      {
         "name": "cloudflare_list_tunnels",
         "description": "List all Cloudflare Zero Trust / Argo tunnels for a Cloudflare cloud account.",
         "parameters": {

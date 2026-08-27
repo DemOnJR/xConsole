@@ -723,6 +723,39 @@ pub async fn set_security_level(
     Ok(updated_level)
 }
 
+/// Get web traffic, bandwidth, and HTTP request analytics for a zone.
+pub async fn get_zone_analytics(
+    token: &str,
+    zone_id: &str,
+    since_minutes: Option<i64>,
+) -> Result<Value, String> {
+    let client = make_client();
+    let since = since_minutes.unwrap_or(-1440); // default last 24 hours
+    let url = format!("{CF_API}/zones/{zone_id}/analytics/dashboard?since={since}&continuous=true");
+
+    let req = client.get(&url);
+    let res = apply_auth(req, token)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {e}"))?;
+
+    let json: Value = res
+        .json()
+        .await
+        .map_err(|e| format!("Invalid JSON response: {e}"))?;
+
+    if !json.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let errs = json
+            .get("errors")
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "Unknown error".into());
+        return Err(format!("Failed to fetch zone analytics: {errs}"));
+    }
+
+    let result = json.get("result").cloned().unwrap_or(Value::Null);
+    Ok(result)
+}
+
 // -----------------------------------------------------------------------------
 // 1-Click Cloudflare OAuth 2.0 PKCE Browser Login
 // -----------------------------------------------------------------------------

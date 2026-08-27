@@ -80,14 +80,36 @@ pub fn definitions() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "cloudflare_list_zones".into(),
+            description: "List all domains / DNS zones in the connected Cloudflare account (Zone IDs, names, status).".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "cloud_account_id": {"type": "string", "description": "Optional: Cloudflare account ID in xConsole. If omitted, uses active connected account."}
+                }
+            }),
+        },
+        ToolDef {
+            name: "cloudflare_get_zone_analytics".into(),
+            description: "Get real-time web traffic analytics, HTTP requests, bandwidth, cache ratios, and security threats for a Cloudflare zone/domain.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "zone_id": {"type": "string", "description": "Zone ID or domain name (e.g. example.com)"},
+                    "cloud_account_id": {"type": "string", "description": "Optional: Cloudflare account ID"},
+                    "since_minutes": {"type": "integer", "description": "Optional: time window in minutes (e.g. -1440 for last 24h, -60 for last 1h, -10080 for 7d). Default -1440."}
+                },
+                "required": ["zone_id"]
+            }),
+        },
+        ToolDef {
             name: "cloudflare_list_tunnels".into(),
             description: "List all Cloudflare Zero Trust / Argo tunnels for a Cloudflare cloud account.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "cloud_account_id": {"type": "string", "description": "Cloudflare account ID in xConsole"}
-                },
-                "required": ["cloud_account_id"]
+                    "cloud_account_id": {"type": "string", "description": "Optional: Cloudflare account ID in xConsole"}
+                }
             }),
         },
         ToolDef {
@@ -96,10 +118,10 @@ pub fn definitions() -> Vec<ToolDef> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "cloud_account_id": {"type": "string"},
-                    "zone_id": {"type": "string"}
+                    "zone_id": {"type": "string", "description": "Zone ID or domain name"},
+                    "cloud_account_id": {"type": "string", "description": "Optional: Cloudflare account ID"}
                 },
-                "required": ["cloud_account_id", "zone_id"]
+                "required": ["zone_id"]
             }),
         },
         ToolDef {
@@ -108,15 +130,15 @@ pub fn definitions() -> Vec<ToolDef> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "cloud_account_id": {"type": "string"},
                     "zone_id": {"type": "string"},
+                    "cloud_account_id": {"type": "string", "description": "Optional: Cloudflare account ID"},
                     "record_id": {"type": "string", "description": "Optional: specify to update existing record"},
                     "type": {"type": "string", "enum": ["A", "AAAA", "CNAME", "TXT", "MX"]},
                     "name": {"type": "string", "description": "Subdomain or domain (e.g. app.example.com)"},
                     "content": {"type": "string", "description": "Target IP or hostname"},
                     "proxied": {"type": "boolean", "description": "Enable Cloudflare proxy (orange cloud)"}
                 },
-                "required": ["cloud_account_id", "zone_id", "type", "name", "content"]
+                "required": ["zone_id", "type", "name", "content"]
             }),
         },
         ToolDef {
@@ -125,11 +147,11 @@ pub fn definitions() -> Vec<ToolDef> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "cloud_account_id": {"type": "string"},
                     "zone_id": {"type": "string"},
+                    "cloud_account_id": {"type": "string", "description": "Optional: Cloudflare account ID"},
                     "level": {"type": "string", "enum": ["essentially_off", "low", "medium", "high", "under_attack"]}
                 },
-                "required": ["cloud_account_id", "zone_id", "level"]
+                "required": ["zone_id", "level"]
             }),
         },
         ToolDef {
@@ -138,9 +160,8 @@ pub fn definitions() -> Vec<ToolDef> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "cloud_account_id": {"type": "string", "description": "Cloudflare cloud account ID"}
-                },
-                "required": ["cloud_account_id"]
+                    "cloud_account_id": {"type": "string", "description": "Optional: Cloudflare cloud account ID"}
+                }
             }),
         },
         ToolDef {
@@ -149,10 +170,10 @@ pub fn definitions() -> Vec<ToolDef> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "cloud_account_id": {"type": "string"},
-                    "action_id": {"type": "string", "description": "ID of the audit log action to revert"}
+                    "action_id": {"type": "string", "description": "ID of the audit log action to revert"},
+                    "cloud_account_id": {"type": "string", "description": "Optional: Cloudflare account ID"}
                 },
-                "required": ["cloud_account_id", "action_id"]
+                "required": ["action_id"]
             }),
         },
         ToolDef {
@@ -260,6 +281,8 @@ pub async fn dispatch(ctx: &ToolContext, name: &str, args: &Value, sink: &EventS
         "cloud_list_resources" => cloud_list_resources(ctx, args).await,
         "tfc_list_workspaces" => tfc_list_workspaces(ctx, args).await,
         "tfc_run_status" => tfc_run_status(ctx, args).await,
+        "cloudflare_list_zones" => cloudflare_list_zones(ctx, args).await,
+        "cloudflare_get_zone_analytics" => cloudflare_get_zone_analytics(ctx, args).await,
         "cloudflare_list_tunnels" => cloudflare_list_tunnels(ctx, args).await,
         "cloudflare_list_dns" => cloudflare_list_dns(ctx, args).await,
         "cloudflare_upsert_dns" => cloudflare_upsert_dns(ctx, args).await,
@@ -470,29 +493,151 @@ async fn tfc_run_status(ctx: &ToolContext, args: &Value) -> String {
     }
 }
 
-async fn cloudflare_list_tunnels(ctx: &ToolContext, args: &Value) -> String {
-    let account_id = match args.get("cloud_account_id").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => s,
-        _ => return "error: missing 'cloud_account_id'".into(),
+async fn resolve_cf_account(
+    ctx: &ToolContext,
+    args: &Value,
+) -> Result<(crate::storage::models::CloudAccount, String, Option<String>), String> {
+    let acc_id_opt = args
+        .get("cloud_account_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+
+    let account = if let Some(id) = acc_id_opt {
+        match ctx.db.get_cloud_account(id) {
+            Ok(Some(a)) if a.kind == "cloudflare" => a,
+            Ok(Some(_)) => return Err("error: account is not kind 'cloudflare'".into()),
+            Ok(None) => return Err(format!("error: cloud account '{id}' not found")),
+            Err(e) => return Err(format!("error: {e}")),
+        }
+    } else {
+        let accounts = ctx.db.list_cloud_accounts().map_err(|e| e.to_string())?;
+        accounts
+            .into_iter()
+            .find(|a| a.kind == "cloudflare")
+            .ok_or_else(|| {
+                "error: no connected Cloudflare account found in xConsole. Connect via Settings -> Cloud Accounts or Cloudflare Plugin.".to_string()
+            })?
     };
-    let account = match ctx.db.get_cloud_account(account_id) {
-        Ok(Some(a)) if a.kind == "cloudflare" => a,
-        Ok(Some(_)) => return "error: account is not kind 'cloudflare'".into(),
-        Ok(None) => return format!("error: cloud account '{account_id}' not found"),
-        Err(e) => return format!("error: {e}"),
-    };
-    let token = match crate::infra::cloudflare::load_cf_token(&account.id) {
+
+    let token = crate::infra::cloudflare::load_cf_token(&account.id).map_err(|e| e.to_string())?;
+    let cf_acc = account.project_id.clone();
+    Ok((account, token, cf_acc))
+}
+
+async fn cloudflare_list_zones(ctx: &ToolContext, args: &Value) -> String {
+    let (_account, token, cf_acc) = match resolve_cf_account(ctx, args).await {
         Ok(t) => t,
-        Err(e) => return format!("error: {e}"),
+        Err(e) => return e,
     };
-    let cf_acc = match account.project_id.as_deref().filter(|s| !s.is_empty()) {
-        Some(id) => id,
-        None => return "error: account missing Cloudflare Account ID".into(),
+    match crate::infra::cloudflare::list_zones(&token, cf_acc.as_deref()).await {
+        Ok(zones) => {
+            if zones.is_empty() {
+                "No DNS zones found in Cloudflare account".into()
+            } else {
+                let lines: Vec<String> = zones
+                    .iter()
+                    .map(|z| {
+                        let acc_name = z.account.as_ref().map(|a| a.name.as_str()).unwrap_or("-");
+                        format!(
+                            "- Domain: {} | Zone ID: {} | Status: {} | Account: {}",
+                            z.name, z.id, z.status, acc_name
+                        )
+                    })
+                    .collect();
+                lines.join("\n")
+            }
+        }
+        Err(e) => format!("error: {e}"),
+    }
+}
+
+async fn cloudflare_get_zone_analytics(ctx: &ToolContext, args: &Value) -> String {
+    let (_account, token, cf_acc) = match resolve_cf_account(ctx, args).await {
+        Ok(t) => t,
+        Err(e) => return e,
     };
-    match crate::infra::cloudflare::list_tunnels(&token, cf_acc).await {
+
+    let mut zone_id = args
+        .get("zone_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Auto-resolve domain name to Zone ID if user passed domain (e.g. "example.com")
+    if zone_id.is_empty() || zone_id.contains('.') {
+        let domain_query = zone_id.clone();
+        if let Ok(zones) = crate::infra::cloudflare::list_zones(&token, cf_acc.as_deref()).await {
+            if let Some(matched) = zones.iter().find(|z| !domain_query.is_empty() && (z.name == domain_query || z.id == domain_query)) {
+                zone_id = matched.id.clone();
+            } else if let Some(first) = zones.first() {
+                zone_id = first.id.clone();
+            }
+        }
+    }
+
+    if zone_id.is_empty() {
+        return "error: missing 'zone_id' and could not auto-detect active Cloudflare zone".into();
+    }
+
+    let since_minutes = args.get("since_minutes").and_then(|v| v.as_i64()).or_else(|| {
+        args.get("since").and_then(|v| v.as_i64())
+    });
+
+    match crate::infra::cloudflare::get_zone_analytics(&token, &zone_id, since_minutes).await {
+        Ok(val) => {
+            let totals = val.get("totals").unwrap_or(&val);
+            let req_all = totals.get("requests").and_then(|r| r.get("all")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let req_cached = totals.get("requests").and_then(|r| r.get("cached")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let req_uncached = totals.get("requests").and_then(|r| r.get("uncached")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let bw_all = totals.get("bandwidth").and_then(|r| r.get("all")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let bw_cached = totals.get("bandwidth").and_then(|r| r.get("cached")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let threats = totals.get("threats").and_then(|r| r.get("all")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let pageviews = totals.get("pageviews").and_then(|r| r.get("all")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let uniques = totals.get("uniques").and_then(|r| r.get("all")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let since = totals.get("since").and_then(|v| v.as_str()).unwrap_or("recent");
+            let until = totals.get("until").and_then(|v| v.as_str()).unwrap_or("now");
+
+            let cache_pct = if req_all > 0 { (req_cached as f64 / req_all as f64) * 100.0 } else { 0.0 };
+            let bw_mb = (bw_all as f64) / (1024.0 * 1024.0);
+
+            format!(
+                "### Cloudflare Web Traffic & Analytics (Zone: {zone_id})\n\
+                - Period: {since} -> {until}\n\
+                - Total HTTP Requests: {req_all} ({cache_pct:.1}% cached: {req_cached} cached, {req_uncached} uncached)\n\
+                - Total Bandwidth: {bw_mb:.2} MB ({bw_cached} bytes cached)\n\
+                - Unique Visitors: {uniques}\n\
+                - Total Pageviews: {pageviews}\n\
+                - Blocked Security Threats: {threats}"
+            )
+        }
+        Err(e) => format!("error: {e}"),
+    }
+}
+
+async fn cloudflare_list_tunnels(ctx: &ToolContext, args: &Value) -> String {
+    let (account, token, cf_acc_opt) = match resolve_cf_account(ctx, args).await {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let cf_acc = match cf_acc_opt.as_deref().filter(|s| !s.is_empty()) {
+        Some(id) => id.to_string(),
+        None => {
+            // Auto-resolve account ID from accounts list
+            if let Ok(accs) = crate::infra::cloudflare::list_accounts(&token).await {
+                if let Some(first) = accs.first() {
+                    first.id.clone()
+                } else {
+                    return "error: account missing Cloudflare Account ID".into();
+                }
+            } else {
+                return "error: account missing Cloudflare Account ID".into();
+            }
+        }
+    };
+    match crate::infra::cloudflare::list_tunnels(&token, &cf_acc).await {
         Ok(tunnels) => {
             if tunnels.is_empty() {
-                "No tunnels found in Cloudflare account".into()
+                format!("No tunnels found in Cloudflare account '{}'", account.name)
             } else {
                 let lines: Vec<String> = tunnels
                     .iter()
@@ -514,25 +659,25 @@ async fn cloudflare_list_tunnels(ctx: &ToolContext, args: &Value) -> String {
 }
 
 async fn cloudflare_list_dns(ctx: &ToolContext, args: &Value) -> String {
-    let account_id = match args.get("cloud_account_id").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => s,
-        _ => return "error: missing 'cloud_account_id'".into(),
-    };
-    let zone_id = match args.get("zone_id").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => s,
-        _ => return "error: missing 'zone_id'".into(),
-    };
-    let account = match ctx.db.get_cloud_account(account_id) {
-        Ok(Some(a)) if a.kind == "cloudflare" => a,
-        Ok(Some(_)) => return "error: account is not kind 'cloudflare'".into(),
-        Ok(None) => return format!("error: cloud account '{account_id}' not found"),
-        Err(e) => return format!("error: {e}"),
-    };
-    let token = match crate::infra::cloudflare::load_cf_token(&account.id) {
+    let (_account, token, cf_acc) = match resolve_cf_account(ctx, args).await {
         Ok(t) => t,
-        Err(e) => return format!("error: {e}"),
+        Err(e) => return e,
     };
-    match crate::infra::cloudflare::list_dns_records(&token, zone_id).await {
+    let mut zone_id = args.get("zone_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if zone_id.is_empty() || zone_id.contains('.') {
+        let domain_query = zone_id.clone();
+        if let Ok(zones) = crate::infra::cloudflare::list_zones(&token, cf_acc.as_deref()).await {
+            if let Some(matched) = zones.iter().find(|z| !domain_query.is_empty() && (z.name == domain_query || z.id == domain_query)) {
+                zone_id = matched.id.clone();
+            } else if let Some(first) = zones.first() {
+                zone_id = first.id.clone();
+            }
+        }
+    }
+    if zone_id.is_empty() {
+        return "error: missing 'zone_id'".into();
+    }
+    match crate::infra::cloudflare::list_dns_records(&token, &zone_id).await {
         Ok(records) => {
             if records.is_empty() {
                 "No DNS records found for zone".into()
@@ -554,14 +699,21 @@ async fn cloudflare_list_dns(ctx: &ToolContext, args: &Value) -> String {
 }
 
 async fn cloudflare_upsert_dns(ctx: &ToolContext, args: &Value) -> String {
-    let account_id = match args.get("cloud_account_id").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => s,
-        _ => return "error: missing 'cloud_account_id'".into(),
+    let (account, token, cf_acc) = match resolve_cf_account(ctx, args).await {
+        Ok(t) => t,
+        Err(e) => return e,
     };
-    let zone_id = match args.get("zone_id").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => s,
+    let mut zone_id = match args.get("zone_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
         _ => return "error: missing 'zone_id'".into(),
     };
+    if zone_id.contains('.') {
+        if let Ok(zones) = crate::infra::cloudflare::list_zones(&token, cf_acc.as_deref()).await {
+            if let Some(matched) = zones.iter().find(|z| z.name == zone_id || z.id == zone_id) {
+                zone_id = matched.id.clone();
+            }
+        }
+    }
     let r_type = match args.get("type").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => s,
         _ => return "error: missing 'type'".into(),
@@ -577,22 +729,11 @@ async fn cloudflare_upsert_dns(ctx: &ToolContext, args: &Value) -> String {
     let proxied = args.get("proxied").and_then(|v| v.as_bool()).unwrap_or(false);
     let record_id = args.get("record_id").and_then(|v| v.as_str()).map(String::from);
 
-    let account = match ctx.db.get_cloud_account(account_id) {
-        Ok(Some(a)) if a.kind == "cloudflare" => a,
-        Ok(Some(_)) => return "error: account is not kind 'cloudflare'".into(),
-        Ok(None) => return format!("error: cloud account '{account_id}' not found"),
-        Err(e) => return format!("error: {e}"),
-    };
-    let token = match crate::infra::cloudflare::load_cf_token(&account.id) {
-        Ok(t) => t,
-        Err(e) => return format!("error: {e}"),
-    };
-
     // Snapshot existing record for rollback
     let mut before_state: Option<String> = None;
     if let Some(rec_id) = &record_id {
         if !rec_id.is_empty() {
-            if let Ok(records) = crate::infra::cloudflare::list_dns_records(&token, zone_id).await {
+            if let Ok(records) = crate::infra::cloudflare::list_dns_records(&token, &zone_id).await {
                 if let Some(existing) = records.into_iter().find(|r| r.id == *rec_id) {
                     let input_snap = crate::infra::cloudflare::CfDnsRecordInput {
                         id: Some(existing.id),
@@ -619,7 +760,7 @@ async fn cloudflare_upsert_dns(ctx: &ToolContext, args: &Value) -> String {
         comment: Some("Managed by xConsole AI".into()),
     };
 
-    match crate::infra::cloudflare::upsert_dns_record(&token, zone_id, &input).await {
+    match crate::infra::cloudflare::upsert_dns_record(&token, &zone_id, &input).await {
         Ok(rec) => {
             let is_update = before_state.is_some();
             let summary = if is_update {
@@ -647,34 +788,30 @@ async fn cloudflare_upsert_dns(ctx: &ToolContext, args: &Value) -> String {
 }
 
 async fn cloudflare_set_security_level(ctx: &ToolContext, args: &Value) -> String {
-    let account_id = match args.get("cloud_account_id").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => s,
-        _ => return "error: missing 'cloud_account_id'".into(),
+    let (account, token, cf_acc) = match resolve_cf_account(ctx, args).await {
+        Ok(t) => t,
+        Err(e) => return e,
     };
-    let zone_id = match args.get("zone_id").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => s,
+    let mut zone_id = match args.get("zone_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
         _ => return "error: missing 'zone_id'".into(),
     };
+    if zone_id.contains('.') {
+        if let Ok(zones) = crate::infra::cloudflare::list_zones(&token, cf_acc.as_deref()).await {
+            if let Some(matched) = zones.iter().find(|z| z.name == zone_id || z.id == zone_id) {
+                zone_id = matched.id.clone();
+            }
+        }
+    }
     let level = match args.get("level").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => s,
         _ => return "error: missing 'level'".into(),
     };
 
-    let account = match ctx.db.get_cloud_account(account_id) {
-        Ok(Some(a)) if a.kind == "cloudflare" => a,
-        Ok(Some(_)) => return "error: account is not kind 'cloudflare'".into(),
-        Ok(None) => return format!("error: cloud account '{account_id}' not found"),
-        Err(e) => return format!("error: {e}"),
-    };
-    let token = match crate::infra::cloudflare::load_cf_token(&account.id) {
-        Ok(t) => t,
-        Err(e) => return format!("error: {e}"),
-    };
-
-    let old_settings = crate::infra::cloudflare::get_security_settings(&token, zone_id).await.ok();
+    let old_settings = crate::infra::cloudflare::get_security_settings(&token, &zone_id).await.ok();
     let old_level = old_settings.map(|s| s.security_level);
 
-    match crate::infra::cloudflare::set_security_level(&token, zone_id, level).await {
+    match crate::infra::cloudflare::set_security_level(&token, &zone_id, level).await {
         Ok(lvl) => {
             let _ = ctx.db.create_cloudflare_audit_log(&crate::storage::models::CloudflareAuditLogInput {
                 account_id: account.id.clone(),
@@ -694,14 +831,14 @@ async fn cloudflare_set_security_level(ctx: &ToolContext, args: &Value) -> Strin
 }
 
 async fn cloudflare_get_history(ctx: &ToolContext, args: &Value) -> String {
-    let account_id = match args.get("cloud_account_id").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => s,
-        _ => return "error: missing 'cloud_account_id'".into(),
+    let (account, _token, _cf_acc) = match resolve_cf_account(ctx, args).await {
+        Ok(t) => t,
+        Err(e) => return e,
     };
-    match ctx.db.list_cloudflare_audit_logs(account_id, 20) {
+    match ctx.db.list_cloudflare_audit_logs(&account.id, 20) {
         Ok(logs) => {
             if logs.is_empty() {
-                "No Cloudflare edit history found for this account.".to_string()
+                format!("No Cloudflare edit history found for account '{}'.", account.name)
             } else {
                 let lines: Vec<String> = logs
                     .iter()
@@ -721,9 +858,9 @@ async fn cloudflare_get_history(ctx: &ToolContext, args: &Value) -> String {
 }
 
 async fn cloudflare_revert_action(ctx: &ToolContext, args: &Value) -> String {
-    let account_id = match args.get("cloud_account_id").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => s,
-        _ => return "error: missing 'cloud_account_id'".into(),
+    let (account, token, cf_acc) = match resolve_cf_account(ctx, args).await {
+        Ok(t) => t,
+        Err(e) => return e,
     };
     let action_id = match args.get("action_id").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => s,
@@ -740,24 +877,13 @@ async fn cloudflare_revert_action(ctx: &ToolContext, args: &Value) -> String {
         return "error: this action was already reverted".into();
     }
 
-    let account = match ctx.db.get_cloud_account(account_id) {
-        Ok(Some(a)) if a.kind == "cloudflare" => a,
-        Ok(Some(_)) => return "error: account is not kind 'cloudflare'".into(),
-        Ok(None) => return format!("error: cloud account '{account_id}' not found"),
-        Err(e) => return format!("error: {e}"),
-    };
-    let token = match crate::infra::cloudflare::load_cf_token(&account.id) {
-        Ok(t) => t,
-        Err(e) => return format!("error: {e}"),
-    };
-
     match log.action_type.as_str() {
         "create_dns" => {
             if let Some(target_id) = &log.target_id {
                 let zone_id = account.region.clone().unwrap_or_default();
                 if !zone_id.is_empty() {
                     let _ = crate::infra::cloudflare::delete_dns_record(&token, &zone_id, target_id).await;
-                } else if let Ok(zones) = crate::infra::cloudflare::list_zones(&token, account.project_id.as_deref()).await {
+                } else if let Ok(zones) = crate::infra::cloudflare::list_zones(&token, cf_acc.as_deref()).await {
                     for z in zones {
                         if crate::infra::cloudflare::delete_dns_record(&token, &z.id, target_id).await.is_ok() {
                             break;
@@ -776,7 +902,7 @@ async fn cloudflare_revert_action(ctx: &ToolContext, args: &Value) -> String {
                 let actual_zone = if !zone_id.is_empty() {
                     zone_id
                 } else {
-                    let zones = match crate::infra::cloudflare::list_zones(&token, account.project_id.as_deref()).await {
+                    let zones = match crate::infra::cloudflare::list_zones(&token, cf_acc.as_deref()).await {
                         Ok(z) => z,
                         Err(e) => return format!("error listing zones: {e}"),
                     };

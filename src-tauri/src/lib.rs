@@ -531,6 +531,7 @@ pub fn run() {
             commands::cloudflare::set_cloudflare_security_level,
             commands::cloudflare::list_cloudflare_history,
             commands::cloudflare::revert_cloudflare_action,
+            commands::cloudflare::get_cloudflare_zone_analytics,
             commands::plugin::list_installed_plugins,
             commands::plugin::get_disabled_plugin_ids_cmd,
             commands::plugin::get_plugin_readme_cmd,

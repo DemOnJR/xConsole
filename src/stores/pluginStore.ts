@@ -196,7 +196,8 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   autoUpdateEnabled: localStorage.getItem("xconsole_plugin_auto_update") === "true",
 
   isPluginViewOpen: (pluginId: string) => {
-    return Boolean(get().openViews[pluginId]);
+    const norm = pluginId === "analytics" ? "xconsole-plugin-analytics" : pluginId === "cloudflare" ? "xconsole-plugin-cloudflare" : pluginId;
+    return Boolean(get().openViews[norm] || get().openViews[pluginId]);
   },
 
   selectPlugin: (pluginId: string | null) => {
@@ -259,17 +260,24 @@ export const usePluginStore = create<PluginState>((set, get) => ({
 
       // Compute active extension slots once
       const activeNavItems = allPlugins
-        .filter((p) => p.enabled !== false && p.capabilities?.navItem)
-        .map((p) => ({
-          ...(p.capabilities!.navItem as any),
-          id: p.id,
-        }))
+        .filter((p) => {
+          const nav = p.capabilities?.navItem || (p.capabilities as any)?.nav_item;
+          return p.enabled !== false && Boolean(nav);
+        })
+        .map((p) => {
+          const nav = (p.capabilities?.navItem || (p.capabilities as any)?.nav_item) as any;
+          return {
+            ...nav,
+            id: p.id,
+          };
+        })
         .sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
 
       const activeAgentTools: PluginAgentToolCapability[] = [];
       for (const p of allPlugins) {
-        if (p.enabled !== false && p.capabilities?.agentTools) {
-          activeAgentTools.push(...(p.capabilities.agentTools as any));
+        const tools = p.capabilities?.agentTools || (p.capabilities as any)?.agent_tools;
+        if (p.enabled !== false && tools) {
+          activeAgentTools.push(...(tools as any));
         }
       }
 
@@ -453,21 +461,27 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   },
 
   openPluginView: (pluginId: string) => {
+    const norm = pluginId === "analytics" ? "xconsole-plugin-analytics" : pluginId === "cloudflare" ? "xconsole-plugin-cloudflare" : pluginId;
     set((s) => ({
-      openViews: { ...s.openViews, [pluginId]: true },
+      openViews: { ...s.openViews, [norm]: true, [pluginId]: true },
     }));
   },
 
   closePluginView: (pluginId: string) => {
+    const norm = pluginId === "analytics" ? "xconsole-plugin-analytics" : pluginId === "cloudflare" ? "xconsole-plugin-cloudflare" : pluginId;
     set((s) => ({
-      openViews: { ...s.openViews, [pluginId]: false },
+      openViews: { ...s.openViews, [norm]: false, [pluginId]: false },
     }));
   },
 
   togglePluginView: (pluginId: string) => {
-    set((s) => ({
-      openViews: { ...s.openViews, [pluginId]: !s.openViews[pluginId] },
-    }));
+    const norm = pluginId === "analytics" ? "xconsole-plugin-analytics" : pluginId === "cloudflare" ? "xconsole-plugin-cloudflare" : pluginId;
+    set((s) => {
+      const nextState = !s.openViews[norm] && !s.openViews[pluginId];
+      return {
+        openViews: { ...s.openViews, [norm]: nextState, [pluginId]: nextState },
+      };
+    });
   },
 
   openMarketplace: () => set({ marketplaceOpen: true }),
