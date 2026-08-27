@@ -5,6 +5,7 @@ import manifest from "../plugin.json";
 export const databasePlugin: PluginDefinition = definePlugin({
   manifest: manifest as any,
   renderNode: DatabaseNode,
+  renderCanvasNode: DatabaseNode,
   apply: () => {
     console.log(`[Plugin Harness] Database MySQL plugin mounted`);
     return () => {
