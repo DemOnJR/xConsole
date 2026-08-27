@@ -6,8 +6,8 @@
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch"
+    "build": "tsc --noEmit",
+    "dev": "tsc --noEmit --watch"
   },
   "keywords": [
     "xconsole-plugin",
