@@ -1,4 +1,4 @@
-﻿import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { NodeResizer, useStore, type NodeProps } from "@xyflow/react";
 
 import { useAgentStore } from "../../../src/stores/agentStore";
@@ -59,7 +59,7 @@ import {
 } from "./agentCommands";
 import { notify } from "../../../src/lib/notify";
 import { catalogForProvider } from "../../../src/lib/providerCatalog";
-import { ImageIcon } from "../../../src/components/icons";
+import { ImageIcon, ToolsIcon, RefreshIcon, CloseIcon } from "../../../src/components/icons";
 import { createChatSnippet, shouldCreateSnippet, type ChatSnippet } from "../../../src/lib/snippetDetect";
 import { SnippetPreviewModal } from "./SnippetPreviewModal";
 import { TrajectoryModal } from "./TrajectoryModal";
@@ -1580,8 +1580,17 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
       />
 
       {/* Slim terminal status line (no buttons — everything is a command). */}
-      <div className="flex cursor-move select-none items-center gap-1 border-b border-[var(--border)] bg-[var(--surface)] px-2 py-1 font-mono text-[11px]">
-        <span className="shrink-0 text-cyan-400">{streaming ? "●" : "❯"}</span>
+      <div className="flex cursor-move select-none items-center gap-1.5 border-b border-[var(--border)] bg-[var(--surface)] px-2 py-1 font-mono text-[11px]">
+        <span className="flex items-center justify-center shrink-0 w-3 h-3 text-cyan-400">
+          {streaming ? (
+            <span className="relative flex h-2 w-2 items-center justify-center">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-60"></span>
+              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-cyan-400"></span>
+            </span>
+          ) : (
+            <span className="text-[10px] text-gray-500 font-mono leading-none">❯</span>
+          )}
+        </span>
         <span
           className="xc-agent-title max-w-[280px] truncate font-medium text-[var(--text)] hover:text-cyan-300"
           data-tooltip={`Session: ${conversations.find((c) => c.id === sessionId)?.title || "agent"} (double-click to rename)`}
@@ -1605,20 +1614,22 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
           <span className="rounded bg-indigo-500/20 px-1 text-[9px] text-indigo-300">plan</span>
         ) : null}
         {loopTask ? (
-          <span className="rounded bg-cyan-500/20 px-1 text-[9px] text-cyan-300">
-            ⟳ {loopCount}/{loopMax}
+          <span className="flex items-center gap-1 rounded bg-cyan-500/20 px-1 text-[9px] text-cyan-300">
+            <RefreshIcon size={9} className="animate-spin" /> {loopCount}/{loopMax}
           </span>
         ) : null}
-        {ttsEnabled ? <span className="text-[9px] text-[var(--text-faint)]">🔊</span> : null}
+        {ttsEnabled ? (
+          <span className="rounded bg-emerald-500/20 px-1 text-[9px] text-emerald-300 font-mono">tts</span>
+        ) : null}
         <span className="ml-auto flex items-center gap-0.5">
           <button
             type="button"
             onMouseDown={(e) => e.stopPropagation()}
             onClick={() => setShowTrajectory(true)}
             data-tooltip="Inspect trajectory & events (/trajectory)"
-            className="rounded px-1.5 py-0.5 text-[10px] text-cyan-400 hover:bg-[var(--border)] hover:text-cyan-200 font-mono"
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-cyan-400 hover:bg-[var(--border)] hover:text-cyan-200 font-mono"
           >
-            ⚡ trace
+            <ToolsIcon size={11} /> trace
           </button>
           <button
             type="button"
@@ -1643,9 +1654,9 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
             onMouseDown={(e) => e.stopPropagation()}
             onClick={() => removeNode(id)}
             data-tooltip="Close agent window"
-            className="rounded px-1.5 py-0.5 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+            className="rounded p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 flex items-center justify-center"
           >
-            ✕
+            <CloseIcon size={11} />
           </button>
         </span>
       </div>

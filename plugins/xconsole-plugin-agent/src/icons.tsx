@@ -700,3 +700,44 @@ export function PauseIcon(props: IconProps) {
   );
 }
 
+export function TargetIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <circle cx="12" cy="12" r="10" />
+      <circle cx="12" cy="12" r="6" />
+      <circle cx="12" cy="12" r="2" />
+    </svg>
+  );
+}
+
+export function SequentialDots({
+  size = 18,
+  className = "text-cyan-400",
+}: {
+  size?: number;
+  className?: string;
+}) {
+  return (
+    <svg
+      width={size}
+      height={Math.round(size * 0.4)}
+      viewBox="0 0 24 10"
+      fill="currentColor"
+      className={`inline-block align-middle ${className}`}
+    >
+      <circle cx="4" cy="5" r="2.8">
+        <animate attributeName="opacity" values="0.25;1;0.25" dur="1.1s" repeatCount="indefinite" begin="0s" />
+        <animate attributeName="r" values="2.2;3.2;2.2" dur="1.1s" repeatCount="indefinite" begin="0s" />
+      </circle>
+      <circle cx="12" cy="5" r="2.8">
+        <animate attributeName="opacity" values="0.25;1;0.25" dur="1.1s" repeatCount="indefinite" begin="0.22s" />
+        <animate attributeName="r" values="2.2;3.2;2.2" dur="1.1s" repeatCount="indefinite" begin="0.22s" />
+      </circle>
+      <circle cx="20" cy="5" r="2.8">
+        <animate attributeName="opacity" values="0.25;1;0.25" dur="1.1s" repeatCount="indefinite" begin="0.44s" />
+        <animate attributeName="r" values="2.2;3.2;2.2" dur="1.1s" repeatCount="indefinite" begin="0.44s" />
+      </circle>
+    </svg>
+  );
+}
+
