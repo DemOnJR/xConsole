@@ -143,23 +143,30 @@ pub fn list_plugins() -> Vec<PluginManifest> {
         }
     }
 
-    // 2. Scan workspace/builtin plugins in `./plugins/` relative to current working directory
-    let local_plugins_dir = PathBuf::from("plugins");
-    if local_plugins_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&local_plugins_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let manifest_file = path.join("plugin.json");
-                    if manifest_file.exists() {
-                        if let Ok(content) = fs::read_to_string(&manifest_file) {
-                            if let Ok(mut manifest) = serde_json::from_str::<PluginManifest>(&content) {
-                                // Avoid duplicate if already loaded from user directory
-                                if !plugins.iter().any(|p| p.id == manifest.id) {
-                                    manifest.installed_path = Some(path.to_string_lossy().to_string());
-                                    manifest.is_builtin = true;
-                                    manifest.enabled = !disabled_ids.contains(&manifest.id);
-                                    plugins.push(manifest);
+    // 2. Scan workspace/builtin plugins in `./plugins/` or `../plugins/`
+    let candidates = [
+        PathBuf::from("plugins"),
+        PathBuf::from("../plugins"),
+        dirs::home_dir().map(|h| h.join(".xconsole").join("plugins")).unwrap_or_default(),
+    ];
+
+    for local_plugins_dir in candidates {
+        if local_plugins_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&local_plugins_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let manifest_file = path.join("plugin.json");
+                        if manifest_file.exists() {
+                            if let Ok(content) = fs::read_to_string(&manifest_file) {
+                                if let Ok(mut manifest) = serde_json::from_str::<PluginManifest>(&content) {
+                                    // Avoid duplicate if already loaded
+                                    if !plugins.iter().any(|p| p.id == manifest.id) {
+                                        manifest.installed_path = Some(path.to_string_lossy().to_string());
+                                        manifest.is_builtin = local_plugins_dir.ends_with("plugins") && !local_plugins_dir.starts_with(dirs::home_dir().unwrap_or_default());
+                                        manifest.enabled = !disabled_ids.contains(&manifest.id);
+                                        plugins.push(manifest);
+                                    }
                                 }
                             }
                         }
@@ -170,6 +177,38 @@ pub fn list_plugins() -> Vec<PluginManifest> {
     }
 
     plugins
+}
+
+pub fn get_plugin_readme(plugin_id: &str) -> Result<String, String> {
+    let plugins = list_plugins();
+    if let Some(plugin) = plugins.iter().find(|p| p.id == plugin_id) {
+        if let Some(ref path_str) = plugin.installed_path {
+            let path = PathBuf::from(path_str).join("README.md");
+            if path.exists() {
+                if let Ok(content) = fs::read_to_string(path) {
+                    return Ok(content);
+                }
+            }
+        }
+    }
+
+    let local_readme = PathBuf::from("plugins").join(plugin_id).join("README.md");
+    if local_readme.exists() {
+        if let Ok(content) = fs::read_to_string(local_readme) {
+            return Ok(content);
+        }
+    }
+
+    let parent_readme = PathBuf::from("../plugins").join(plugin_id).join("README.md");
+    if parent_readme.exists() {
+        if let Ok(content) = fs::read_to_string(parent_readme) {
+            return Ok(content);
+        }
+    }
+
+    Ok(format!(
+        "# {plugin_id}\n\nDocumentation is available on GitHub: https://github.com/DemOnJR/{plugin_id}"
+    ))
 }
 
 /// 1-Command installer: clones from GitHub repo or copies local path into ~/.xconsole/plugins/
@@ -341,17 +380,14 @@ pub fn uninstall_plugin(plugin_id: &str) -> Result<(), String> {
     let plugins = list_plugins();
     let plugin = plugins
         .into_iter()
-        .find(|p| p.id == plugin_id)
-        .ok_or_else(|| format!("Pluginul '{plugin_id}' nu a fost găsit"))?;
+        .find(|p| p.id == plugin_id);
 
-    if plugin.is_builtin {
-        return Err("Pluginurile implicite (built-in) nu pot fi șterse de pe disc; le poți doar dezactiva.".into());
-    }
-
-    if let Some(path_str) = plugin.installed_path {
-        let path = PathBuf::from(path_str);
-        if path.exists() {
-            fs::remove_dir_all(&path).map_err(|e| format!("Eroare la ștergerea folderului pluginului: {e}"))?;
+    if let Some(p) = plugin {
+        if let Some(path_str) = p.installed_path {
+            let path = PathBuf::from(path_str);
+            if path.exists() && !p.is_builtin {
+                let _ = fs::remove_dir_all(&path);
+            }
         }
     }
 

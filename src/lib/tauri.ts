@@ -1368,6 +1368,10 @@ export const api = {
   // Plugin Harness (DeepSeek Harness / Cordis paradigm)
   listInstalledPlugins: () =>
     invoke<PluginManifest[]>("list_installed_plugins"),
+  getDisabledPluginIds: () =>
+    invoke<string[]>("get_disabled_plugin_ids_cmd"),
+  getPluginReadme: (pluginId: string) =>
+    invoke<string>("get_plugin_readme_cmd", { pluginId }),
   installPlugin: (source: string) =>
     invoke<PluginManifest>("install_plugin_cmd", { source }),
   linkPlugin: (path: string) =>

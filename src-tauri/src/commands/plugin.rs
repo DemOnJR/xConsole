@@ -1,8 +1,19 @@
 use crate::plugins::{self, PluginManifest};
+use std::collections::HashSet;
 
 #[tauri::command]
 pub fn list_installed_plugins() -> Result<Vec<PluginManifest>, String> {
     Ok(plugins::list_plugins())
+}
+
+#[tauri::command]
+pub fn get_disabled_plugin_ids_cmd() -> Result<HashSet<String>, String> {
+    Ok(plugins::load_disabled_plugin_ids())
+}
+
+#[tauri::command]
+pub fn get_plugin_readme_cmd(plugin_id: String) -> Result<String, String> {
+    plugins::get_plugin_readme(&plugin_id)
 }
 
 #[tauri::command]

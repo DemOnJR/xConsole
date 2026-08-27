@@ -532,6 +532,8 @@ pub fn run() {
             commands::cloudflare::list_cloudflare_history,
             commands::cloudflare::revert_cloudflare_action,
             commands::plugin::list_installed_plugins,
+            commands::plugin::get_disabled_plugin_ids_cmd,
+            commands::plugin::get_plugin_readme_cmd,
             commands::plugin::install_plugin_cmd,
             commands::plugin::link_plugin_cmd,
             commands::plugin::uninstall_plugin_cmd,

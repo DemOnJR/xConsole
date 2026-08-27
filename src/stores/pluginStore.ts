@@ -127,6 +127,7 @@ interface PluginState {
   activeNavItems: PluginNavItemCapability[];
   activeAgentTools: PluginAgentToolCapability[];
   marketplaceOpen: boolean;
+  selectedPluginId: string | null;
   loading: boolean;
   installing: boolean;
   error: string | null;
@@ -136,6 +137,8 @@ interface PluginState {
 
   // Actions
   loadPlugins: () => Promise<void>;
+  selectPlugin: (pluginId: string | null) => void;
+  getPluginReadme: (pluginId: string) => Promise<string>;
   registerDefinition: (def: PluginDefinition) => void;
   installPlugin: (source: string) => Promise<PluginManifest>;
   linkPlugin: (path: string) => Promise<PluginManifest>;
@@ -161,6 +164,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   activeNavItems: [],
   activeAgentTools: [],
   marketplaceOpen: false,
+  selectedPluginId: null,
   loading: false,
   installing: false,
   error: null,
@@ -169,24 +173,44 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     return Boolean(get().openViews[pluginId]);
   },
 
+  selectPlugin: (pluginId: string | null) => {
+    set({ selectedPluginId: pluginId });
+  },
+
+  getPluginReadme: async (pluginId: string) => {
+    try {
+      return await api.getPluginReadme(pluginId);
+    } catch {
+      return `# ${pluginId}\n\nDocumentation is available on GitHub: https://github.com/DemOnJR/${pluginId}`;
+    }
+  },
+
   loadPlugins: async () => {
     set({ loading: true, error: null });
     try {
-      const backendPlugins = await api.listInstalledPlugins().catch(() => []);
-      
+      const [backendPlugins, disabledList] = await Promise.all([
+        api.listInstalledPlugins().catch(() => []),
+        api.getDisabledPluginIds().catch(() => []),
+      ]);
+      const disabledSet = new Set(disabledList);
+
       // Merge with registered definitions
       const defs = get().definitions;
       const mergedMap = new Map<string, PluginManifest>();
 
       // Put builtin definitions
       for (const [id, def] of Object.entries(defs)) {
-        mergedMap.set(id, def.manifest);
+        mergedMap.set(id, {
+          ...def.manifest,
+          enabled: !disabledSet.has(id),
+        });
       }
 
       // Put backend loaded plugins and dynamically load missing definitions
       for (const bp of backendPlugins) {
         const path = bp.installedPath || (bp as any).installed_path;
-        if (!defs[bp.id] && path && bp.enabled !== false) {
+        const isEnabled = bp.enabled !== false && !disabledSet.has(bp.id);
+        if (!defs[bp.id] && path && isEnabled) {
           const bundlePath = `${path}/dist/index.js`;
           try {
             const loaded = await loadPluginBundle(bp, bundlePath);
@@ -200,6 +224,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
 
         mergedMap.set(bp.id, {
           ...bp,
+          enabled: isEnabled,
           capabilities: defs[bp.id]?.manifest?.capabilities ?? bp.capabilities,
         });
       }
@@ -305,7 +330,13 @@ export const usePluginStore = create<PluginState>((set, get) => ({
       set((state) => {
         const nextViews = { ...state.openViews };
         delete nextViews[pluginId];
-        return { openViews: nextViews };
+        const nextDefs = { ...state.definitions };
+        delete nextDefs[pluginId];
+        return {
+          openViews: nextViews,
+          definitions: nextDefs,
+          selectedPluginId: state.selectedPluginId === pluginId ? null : state.selectedPluginId,
+        };
       });
       await get().loadPlugins();
     } catch (e) {
@@ -317,6 +348,14 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   togglePlugin: async (pluginId: string, enabled?: boolean) => {
     const current = get().plugins.find((p) => p.id === pluginId);
     const nextEnabled = enabled !== undefined ? enabled : !(current?.enabled ?? true);
+    
+    // Immediate optimistic update
+    set((state) => ({
+      plugins: state.plugins.map((p) =>
+        p.id === pluginId ? { ...p, enabled: nextEnabled } : p
+      ),
+    }));
+
     try {
       if (!nextEnabled) {
         const fork = activeForks.get(pluginId);
@@ -330,6 +369,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
       await get().loadPlugins();
     } catch (e) {
       set({ error: String(e) });
+      await get().loadPlugins();
       throw e;
     }
   },

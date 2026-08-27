@@ -176,10 +176,19 @@ export function DocEditor({
   );
 }
 
-export function Card({ children, className = "" }: { children: ReactNode; className?: string }) {
+export function Card({
+  children,
+  className = "",
+  onClick,
+}: {
+  children: ReactNode;
+  className?: string;
+  onClick?: (e: React.MouseEvent<HTMLDivElement>) => void;
+}) {
   return (
     <div
-      className={`rounded-lg border border-[var(--border)] bg-[var(--bg)] p-3 ${className}`}
+      onClick={onClick}
+      className={`rounded-xl border border-[var(--border)] bg-[var(--surface-2)] ${className}`}
     >
       {children}
     </div>

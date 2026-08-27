@@ -1,14 +1,18 @@
 import { useState, type ChangeEvent, type KeyboardEvent } from "react";
 import { usePluginStore } from "../../../stores/pluginStore";
 import { Button, Card, TextInput } from "../ui";
+import { PluginDetailView } from "../../plugins/PluginDetailView";
 
 export function PluginsSection() {
   const {
     plugins,
+    definitions,
     installPlugin,
     uninstallPlugin,
     togglePlugin,
     openMarketplace,
+    selectedPluginId,
+    selectPlugin,
     installing,
     openPluginView,
   } = usePluginStore();
@@ -16,6 +20,7 @@ export function PluginsSection() {
   const [source, setSource] = useState("");
   const [installError, setInstallError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [uninstallConfirmId, setUninstallConfirmId] = useState<string | null>(null);
 
   const handleInstall = async () => {
     if (!source.trim()) return;
@@ -30,6 +35,17 @@ export function PluginsSection() {
       setInstallError(String(e));
     }
   };
+
+  if (selectedPluginId) {
+    return (
+      <div className="flex h-full flex-col">
+        <PluginDetailView
+          pluginId={selectedPluginId}
+          onBack={() => selectPlugin(null)}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col">
@@ -64,14 +80,14 @@ export function PluginsSection() {
             Instalează un plugin nou
           </h4>
           <p className="text-[11px] text-gray-400 mb-3">
-            Lipește un URL de GitHub (e.g. <code>xconsole-plugins/xconsole-plugin-cloudflare</code>) sau calea către un folder local:
+            Lipește un URL de GitHub (e.g. <code>DemOnJR/xconsole-plugin-redis</code>) sau calea către un folder local:
           </p>
           <div className="flex gap-2">
             <TextInput
               value={source}
               onChange={(e: ChangeEvent<HTMLInputElement>) => setSource(e.target.value)}
               onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => e.key === "Enter" && handleInstall()}
-              placeholder="e.g. xconsole-plugins/xconsole-plugin-redis"
+              placeholder="e.g. DemOnJR/xconsole-plugin-redis"
               className="text-xs font-mono flex-1"
             />
             <Button
@@ -104,21 +120,24 @@ export function PluginsSection() {
 
           {plugins.map((plugin) => {
             const isEnabled = plugin.enabled !== false;
+            const def = definitions[plugin.id];
+            const hasView = Boolean(def?.renderView);
 
             return (
               <Card
                 key={plugin.id}
-                className={`p-4 transition border ${
+                className={`p-4 transition border cursor-pointer ${
                   isEnabled
-                    ? "border-[var(--border)] bg-[var(--surface-2)]"
+                    ? "border-[var(--border)] bg-[var(--surface-2)] hover:border-indigo-500/50"
                     : "border-white/5 bg-white/[0.02] opacity-60"
                 }`}
+                onClick={() => selectPlugin(plugin.id)}
               >
                 <div className="flex items-start justify-between gap-4">
                   <div className="space-y-1.5 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="text-xl">{plugin.icon}</span>
-                      <span className="font-semibold text-xs text-gray-100">
+                      <span className="text-xl">{plugin.icon || "🧩"}</span>
+                      <span className="font-semibold text-xs text-gray-100 hover:text-indigo-300 transition">
                         {plugin.name}
                       </span>
                       <span className="rounded bg-white/10 px-1.5 py-0.2 text-[9px] font-mono text-gray-400">
@@ -129,7 +148,7 @@ export function PluginsSection() {
                       </span>
                     </div>
 
-                    <p className="text-xs text-gray-300">
+                    <p className="text-xs text-gray-300 line-clamp-2">
                       {plugin.description}
                     </p>
 
@@ -138,8 +157,19 @@ export function PluginsSection() {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-3 shrink-0">
-                    {plugin.capabilities?.navItem && isEnabled && (
+                  <div
+                    className="flex items-center gap-2 shrink-0"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <Button
+                      variant="ghost"
+                      className="text-xs text-indigo-400 hover:text-indigo-300 px-2 py-1"
+                      onClick={() => selectPlugin(plugin.id)}
+                    >
+                      📖 Detalii
+                    </Button>
+
+                    {hasView && isEnabled && (
                       <Button
                         variant="ghost"
                         className="text-xs text-indigo-400 hover:text-indigo-300 px-2 py-1"
@@ -149,27 +179,50 @@ export function PluginsSection() {
                       </Button>
                     )}
 
-                    <label className="relative inline-flex items-center cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={isEnabled}
-                        onChange={() => togglePlugin(plugin.id, !isEnabled)}
-                        className="sr-only peer"
-                      />
-                      <div className="w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
-                    </label>
+                    {/* Toggle Switch */}
+                    <div onClick={(e) => e.stopPropagation()}>
+                      <label className="relative inline-flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={isEnabled}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            togglePlugin(plugin.id, !isEnabled);
+                          }}
+                          className="sr-only peer"
+                        />
+                        <div className="w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+                      </label>
+                    </div>
 
-                    {!plugin.isBuiltin && (
+                    {uninstallConfirmId === plugin.id ? (
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="danger"
+                          className="text-[10px] py-0.5 px-1.5"
+                          onClick={async () => {
+                            await uninstallPlugin(plugin.id);
+                            setUninstallConfirmId(null);
+                          }}
+                        >
+                          Confirmă
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          className="text-[10px] py-0.5 px-1.5"
+                          onClick={() => setUninstallConfirmId(null)}
+                        >
+                          ✕
+                        </Button>
+                      </div>
+                    ) : (
                       <Button
                         variant="ghost"
-                        className="text-xs text-red-400 hover:text-red-300 hover:bg-red-950/30 px-2 py-1"
-                        onClick={async () => {
-                          if (confirm(`Sigur dorești să dezinstalezi pluginul '${plugin.name}'?`)) {
-                            await uninstallPlugin(plugin.id);
-                          }
-                        }}
+                        className="text-xs text-gray-500 hover:text-red-400 px-1.5 py-1"
+                        title="Dezinstalează plugin"
+                        onClick={() => setUninstallConfirmId(plugin.id)}
                       >
-                        Șterge
+                        🗑️
                       </Button>
                     )}
                   </div>
