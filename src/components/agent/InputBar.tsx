@@ -157,13 +157,13 @@ export const InputBar = memo(function InputBar({
         type="button"
         className={`${iconBtn} ${
           (agentMode === "plan" || planMode)
-            ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30"
+            ? "bg-zinc-800 text-zinc-200 border border-zinc-700"
             : agentMode === "code"
-              ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+              ? "bg-zinc-800 text-amber-300 border border-zinc-700"
               : agentMode === "standard"
-                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                ? "bg-zinc-800 text-zinc-200 border border-zinc-700"
                 : agentMode === "minimal"
-                  ? "bg-purple-500/20 text-purple-300 border border-purple-500/30"
+                  ? "bg-zinc-800 text-zinc-300 border border-zinc-700"
                   : ""
         }`}
         onClick={onPickMode ?? onTogglePlan}

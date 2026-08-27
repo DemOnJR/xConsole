@@ -6,23 +6,23 @@
 
 :root {
   color-scheme: dark;
-  /* Theme tokens (defaults = Tokyo Night). Overridden at runtime by themeStore. */
-  --bg: #0b0f17;
-  --surface: #11161f;
-  --surface-2: #0d121b;
-  --surface-hover: #161c28;
-  --border: #1f2737;
-  --border-strong: #2a3344;
-  --text: #e5e7eb;
-  --text-dim: #9ca3af;
-  --text-faint: #6b7280;
-  --accent: #3b82f6;
-  --accent-fg: #ffffff;
-  --accent-muted: color-mix(in srgb, var(--accent) 18%, transparent);
-  --success: #9ece6a;
-  --warning: #e0af68;
-  --danger: #f7768e;
-  --info: #7dcfff;
+  /* Theme tokens (defaults = CommandCode Minimal). Overridden at runtime by themeStore. */
+  --bg: #090a0c;
+  --surface: #121417;
+  --surface-2: #0d0f11;
+  --surface-hover: #1a1d21;
+  --border: #20242a;
+  --border-strong: #2e333b;
+  --text: #ededef;
+  --text-dim: #9aa0a6;
+  --text-faint: #5f6368;
+  --accent: #e4e4e7;
+  --accent-fg: #090a0c;
+  --accent-muted: color-mix(in srgb, var(--accent) 12%, transparent);
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --info: #38bdf8;
 
   /* Layout / density (structural — not theme-swapped) */
   --radius-sm: 4px;

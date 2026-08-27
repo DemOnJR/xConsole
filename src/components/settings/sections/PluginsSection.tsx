@@ -29,7 +29,7 @@ export function PluginsSection() {
     try {
       const p = await installPlugin(source.trim());
       setSource("");
-      setSuccess(`Pluginul '${p.name}' a fost instalat cu succes!`);
+      setSuccess(`Plugin '${p.name}' installed successfully.`);
       setTimeout(() => setSuccess(null), 4000);
     } catch (e) {
       setInstallError(String(e));
@@ -48,39 +48,39 @@ export function PluginsSection() {
   }
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex items-center justify-between border-b border-[var(--border)] px-6 py-4">
+    <div className="flex h-full flex-col font-sans">
+      <div className="flex items-center justify-between border-b border-[var(--border)] px-6 py-3.5">
         <div>
           <div className="flex items-center gap-2">
             <h3 className="text-sm font-semibold text-gray-100">
-              Pluginuri &amp; Extensii Modulare (Harness)
+              Plugins &amp; Extensions
             </h3>
-            <span className="rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 px-1.5 py-0.2 text-[10px] font-mono">
-              xConsole Engine
+            <span className="rounded bg-white/10 text-zinc-300 border border-white/10 px-1.5 py-0.2 text-[10px] font-mono">
+              Harness Core
             </span>
           </div>
-          <p className="text-xs text-gray-400 mt-0.5">
-            Arhitectură de pluginuri spatiotemporal composable: extinde xConsole fără să îngreunezi nucleul aplicației.
+          <p className="text-xs text-zinc-400 mt-0.5">
+            Microkernel architecture — modular, decoupled extensions for xConsole.
           </p>
         </div>
 
         <Button
           variant="primary"
-          className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs border-none"
+          className="bg-zinc-100 hover:bg-white text-zinc-950 text-xs font-medium border-none px-3 py-1.5"
           onClick={openMarketplace}
         >
-          🌐 Deschide Marketplace &rarr;
+          Marketplace &rarr;
         </Button>
       </div>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-4">
         {/* Quick install box */}
-        <Card className="p-4 bg-[var(--surface-2)]">
+        <Card className="p-4 bg-[var(--surface-2)] border-[var(--border)]">
           <h4 className="text-xs font-semibold text-gray-200 mb-1">
-            Instalează un plugin nou
+            Install Plugin
           </h4>
-          <p className="text-[11px] text-gray-400 mb-3">
-            Lipește un URL de GitHub (e.g. <code>DemOnJR/xconsole-plugin-redis</code>) sau calea către un folder local:
+          <p className="text-[11px] text-zinc-400 mb-3">
+            Enter GitHub repo (e.g. <code>DemOnJR/xconsole-plugin-redis</code>) or local path:
           </p>
           <div className="flex gap-2">
             <TextInput
@@ -88,25 +88,25 @@ export function PluginsSection() {
               onChange={(e: ChangeEvent<HTMLInputElement>) => setSource(e.target.value)}
               onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => e.key === "Enter" && handleInstall()}
               placeholder="e.g. DemOnJR/xconsole-plugin-redis"
-              className="text-xs font-mono flex-1"
+              className="text-xs font-mono flex-1 bg-[var(--surface)] border-[var(--border)]"
             />
             <Button
               variant="primary"
-              className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs whitespace-nowrap border-none"
+              className="bg-zinc-100 hover:bg-white text-zinc-950 text-xs font-medium whitespace-nowrap px-3 py-1.5 border-none"
               disabled={installing || !source.trim()}
               onClick={handleInstall}
             >
-              {installing ? "Instalare…" : "🚀 Instalează"}
+              {installing ? "Installing…" : "Install"}
             </Button>
           </div>
 
           {installError && (
-            <p className="mt-2 text-xs text-red-400 bg-red-950/40 border border-red-800/40 rounded p-2">
+            <p className="mt-2 text-xs text-red-400 bg-red-950/40 border border-red-900/40 rounded p-2">
               ❌ {installError}
             </p>
           )}
           {success && (
-            <p className="mt-2 text-xs text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 rounded p-2">
+            <p className="mt-2 text-xs text-emerald-300 bg-zinc-900 border border-emerald-900/50 rounded p-2">
               ✓ {success}
             </p>
           )}
@@ -114,8 +114,8 @@ export function PluginsSection() {
 
         {/* Installed plugins list */}
         <div className="space-y-3">
-          <h4 className="text-xs font-semibold text-gray-300">
-            Pluginuri active ({plugins.length})
+          <h4 className="text-xs font-semibold text-zinc-300 font-mono">
+            INSTALLED PLUGINS ({plugins.length})
           </h4>
 
           {plugins.map((plugin) => {
@@ -128,32 +128,32 @@ export function PluginsSection() {
                 key={plugin.id}
                 className={`p-4 transition border cursor-pointer ${
                   isEnabled
-                    ? "border-[var(--border)] bg-[var(--surface-2)] hover:border-indigo-500/50"
-                    : "border-white/5 bg-white/[0.02] opacity-60"
+                    ? "border-[var(--border)] bg-[var(--surface-2)] hover:border-zinc-500"
+                    : "border-white/5 bg-white/[0.02] opacity-55"
                 }`}
                 onClick={() => selectPlugin(plugin.id)}
               >
                 <div className="flex items-start justify-between gap-4">
                   <div className="space-y-1.5 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="text-xl">{plugin.icon || "🧩"}</span>
-                      <span className="font-semibold text-xs text-gray-100 hover:text-indigo-300 transition">
+                      <span className="text-lg">{plugin.icon || "🧩"}</span>
+                      <span className="font-semibold text-xs text-gray-100 hover:text-white transition">
                         {plugin.name}
                       </span>
-                      <span className="rounded bg-white/10 px-1.5 py-0.2 text-[9px] font-mono text-gray-400">
+                      <span className="rounded bg-white/10 px-1.5 py-0.2 text-[9px] font-mono text-zinc-400">
                         v{plugin.version}
                       </span>
-                      <span className="rounded bg-indigo-500/10 text-indigo-400 px-1.5 py-0.2 text-[9px] uppercase">
+                      <span className="rounded bg-white/5 text-zinc-400 px-1.5 py-0.2 text-[9px] uppercase font-mono">
                         {plugin.category}
                       </span>
                     </div>
 
-                    <p className="text-xs text-gray-300 line-clamp-2">
+                    <p className="text-xs text-zinc-400 line-clamp-2">
                       {plugin.description}
                     </p>
 
-                    <div className="text-[10px] text-gray-500 font-mono">
-                      ID: {plugin.id} &bull; Autor: {plugin.author}
+                    <div className="text-[10px] text-zinc-500 font-mono">
+                      id: {plugin.id} &bull; author: {plugin.author}
                     </div>
                   </div>
 
@@ -163,19 +163,19 @@ export function PluginsSection() {
                   >
                     <Button
                       variant="ghost"
-                      className="text-xs text-indigo-400 hover:text-indigo-300 px-2 py-1"
+                      className="text-xs text-zinc-300 hover:text-white px-2 py-1"
                       onClick={() => selectPlugin(plugin.id)}
                     >
-                      📖 Detalii
+                      docs
                     </Button>
 
                     {hasView && isEnabled && (
                       <Button
                         variant="ghost"
-                        className="text-xs text-indigo-400 hover:text-indigo-300 px-2 py-1"
+                        className="text-xs text-zinc-200 hover:text-white px-2 py-1 border border-[var(--border)]"
                         onClick={() => openPluginView(plugin.id)}
                       >
-                        Deschide View &rarr;
+                        Open View
                       </Button>
                     )}
 
@@ -191,7 +191,7 @@ export function PluginsSection() {
                           }}
                           className="sr-only peer"
                         />
-                        <div className="w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+                        <div className="w-8 h-4.5 bg-zinc-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-zinc-950 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-zinc-200 peer-checked:after:bg-zinc-900"></div>
                       </label>
                     </div>
 
@@ -205,7 +205,7 @@ export function PluginsSection() {
                             setUninstallConfirmId(null);
                           }}
                         >
-                          Confirmă
+                          Confirm
                         </Button>
                         <Button
                           variant="ghost"
@@ -218,8 +218,8 @@ export function PluginsSection() {
                     ) : (
                       <Button
                         variant="ghost"
-                        className="text-xs text-gray-500 hover:text-red-400 px-1.5 py-1"
-                        title="Dezinstalează plugin"
+                        className="text-xs text-zinc-500 hover:text-red-400 px-1.5 py-1"
+                        title="Uninstall plugin"
                         onClick={() => setUninstallConfirmId(plugin.id)}
                       >
                         🗑️

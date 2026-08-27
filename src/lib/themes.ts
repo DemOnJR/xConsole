@@ -73,8 +73,119 @@ export interface Theme {
   xterm: XtermColors;
 }
 
-// Tokyo Night — the app's original palette, kept as the default so nothing
-// changes visually until the user picks another theme.
+// CommandCode / Claude Minimal — Clean, technical, minimal, monochromatic dark palette
+const COMMAND_CODE: Theme = {
+  id: "commandcode",
+  name: "CommandCode Minimal",
+  vars: withDerived({
+    bg: "#090a0c",
+    surface: "#121417",
+    surface2: "#0d0f11",
+    surfaceHover: "#1a1d21",
+    border: "#20242a",
+    borderStrong: "#2e333b",
+    text: "#ededef",
+    textDim: "#9aa0a6",
+    textFaint: "#5f6368",
+    accent: "#e4e4e7",
+    accentFg: "#090a0c",
+    success: "#4ade80",
+    warning: "#fbbf24",
+    danger: "#f87171",
+    info: "#38bdf8",
+  }),
+  xterm: {
+    background: "#090a0c",
+    foreground: "#ededef",
+    cursor: "#ededef",
+    selectionBackground: "#282c34",
+    black: "#181a1f",
+    brightBlack: "#4b515d",
+    red: "#f87171",
+    green: "#4ade80",
+    yellow: "#fbbf24",
+    blue: "#60a5fa",
+    magenta: "#c084fc",
+    cyan: "#38bdf8",
+    white: "#ededef",
+  },
+};
+
+const GROK_DARK: Theme = {
+  id: "grok-dark",
+  name: "Grok Pure Dark",
+  vars: withDerived({
+    bg: "#000000",
+    surface: "#0d0d0d",
+    surface2: "#080808",
+    surfaceHover: "#171717",
+    border: "#1f1f1f",
+    borderStrong: "#2e2e2e",
+    text: "#f5f5f5",
+    textDim: "#9e9e9e",
+    textFaint: "#5c5c5c",
+    accent: "#ffffff",
+    accentFg: "#000000",
+    success: "#22c55e",
+    warning: "#eab308",
+    danger: "#ef4444",
+    info: "#0ea5e9",
+  }),
+  xterm: {
+    background: "#000000",
+    foreground: "#f5f5f5",
+    cursor: "#ffffff",
+    selectionBackground: "#262626",
+    black: "#171717",
+    brightBlack: "#404040",
+    red: "#ef4444",
+    green: "#22c55e",
+    yellow: "#eab308",
+    blue: "#3b82f6",
+    magenta: "#a855f7",
+    cyan: "#06b6d4",
+    white: "#f5f5f5",
+  },
+};
+
+const T3_CODE: Theme = {
+  id: "t3code",
+  name: "T3 Minimalist",
+  vars: withDerived({
+    bg: "#0d0f12",
+    surface: "#15181e",
+    surface2: "#101317",
+    surfaceHover: "#1d2128",
+    border: "#242831",
+    borderStrong: "#353b47",
+    text: "#e6edf3",
+    textDim: "#8d96a0",
+    textFaint: "#57606a",
+    accent: "#d29922",
+    accentFg: "#0d0f12",
+    success: "#3fb950",
+    warning: "#d29922",
+    danger: "#f85149",
+    info: "#58a6ff",
+  }),
+  xterm: {
+    background: "#0d0f12",
+    foreground: "#e6edf3",
+    cursor: "#d29922",
+    selectionBackground: "#263245",
+    black: "#1d2128",
+    brightBlack: "#484f58",
+    red: "#f85149",
+    green: "#3fb950",
+    yellow: "#d29922",
+    blue: "#58a6ff",
+    magenta: "#bc8cff",
+    cyan: "#39c5cf",
+    white: "#e6edf3",
+  },
+};
+
+// Tokyo Night
 const TOKYO_NIGHT: Theme = {
   id: "tokyo-night",
   name: "Tokyo Night",
@@ -335,6 +446,9 @@ const SOLARIZED: Theme = {
 };
 
 export const THEMES: Theme[] = [
+  COMMAND_CODE,
+  GROK_DARK,
+  T3_CODE,
   TOKYO_NIGHT,
   CATPPUCCIN,
   DRACULA,
@@ -344,10 +458,10 @@ export const THEMES: Theme[] = [
   SOLARIZED,
 ];
 
-export const DEFAULT_THEME_ID = TOKYO_NIGHT.id;
+export const DEFAULT_THEME_ID = COMMAND_CODE.id;
 
 export function themeById(id: string | null | undefined): Theme {
-  return THEMES.find((t) => t.id === id) ?? TOKYO_NIGHT;
+  return THEMES.find((t) => t.id === id) ?? COMMAND_CODE;
 }
 
 /** Build a custom theme from a partial set of base colors (the rest derive from defaults). */
