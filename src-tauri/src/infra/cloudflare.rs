@@ -138,6 +138,23 @@ fn make_client() -> Client {
         .unwrap_or_default()
 }
 
+pub fn apply_auth(builder: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
+    let token = token.trim();
+    if token.contains(':') && !token.starts_with("v4.0-") && token.contains('@') {
+        let mut parts = token.splitn(2, ':');
+        let email = parts.next().unwrap_or("").trim();
+        let key = parts.next().unwrap_or("").trim();
+        builder.header("X-Auth-Email", email).header("X-Auth-Key", key)
+    } else if token.contains('\n') && token.contains('@') {
+        let mut parts = token.lines();
+        let email = parts.next().unwrap_or("").trim();
+        let key = parts.next().unwrap_or("").trim();
+        builder.header("X-Auth-Email", email).header("X-Auth-Key", key)
+    } else {
+        builder.bearer_auth(token)
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Core Cloudflare API Helpers
 // -----------------------------------------------------------------------------
@@ -146,9 +163,8 @@ fn make_client() -> Client {
 #[allow(dead_code)]
 pub async fn verify_token(token: &str) -> Result<CfVerifyResponse, String> {
     let client = make_client();
-    let res = client
-        .get(format!("{CF_API}/user/tokens/verify"))
-        .bearer_auth(token)
+    let req = client.get(format!("{CF_API}/user/tokens/verify"));
+    let res = apply_auth(req, token)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {e}"))?;
@@ -175,9 +191,8 @@ pub async fn verify_token(token: &str) -> Result<CfVerifyResponse, String> {
 /// List all accounts the token has access to.
 pub async fn list_accounts(token: &str) -> Result<Vec<CfAccount>, String> {
     let client = make_client();
-    let res = client
-        .get(format!("{CF_API}/accounts?page=1&per_page=50"))
-        .bearer_auth(token)
+    let req = client.get(format!("{CF_API}/accounts?page=1&per_page=50"));
+    let res = apply_auth(req, token)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {e}"))?;
@@ -211,9 +226,8 @@ pub async fn list_zones(token: &str, cf_account_id: Option<&str>) -> Result<Vec<
         }
     }
 
-    let res = client
-        .get(&url)
-        .bearer_auth(token)
+    let req = client.get(&url);
+    let res = apply_auth(req, token)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {e}"))?;
@@ -246,9 +260,8 @@ pub async fn list_tunnels(token: &str, cf_account_id: &str) -> Result<Vec<CfTunn
     let client = make_client();
     let url = format!("{CF_API}/accounts/{cf_account_id}/cfd_tunnel?is_deleted=false&per_page=50");
 
-    let res = client
-        .get(&url)
-        .bearer_auth(token)
+    let req = client.get(&url);
+    let res = apply_auth(req, token)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {e}"))?;
@@ -295,10 +308,8 @@ pub async fn create_tunnel(
         "config_src": "cloudflare"
     });
 
-    let res = client
-        .post(&url)
-        .bearer_auth(token)
-        .json(&body)
+    let req = client.post(&url).json(&body);
+    let res = apply_auth(req, token)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {e}"))?;
@@ -331,9 +342,8 @@ pub async fn delete_tunnel(
     let client = make_client();
     let url = format!("{CF_API}/accounts/{cf_account_id}/cfd_tunnel/{tunnel_id}");
 
-    let res = client
-        .delete(&url)
-        .bearer_auth(token)
+    let req = client.delete(&url);
+    let res = apply_auth(req, token)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {e}"))?;
@@ -363,9 +373,8 @@ pub async fn get_tunnel_config(
     let client = make_client();
     let url = format!("{CF_API}/accounts/{cf_account_id}/cfd_tunnel/{tunnel_id}/configurations");
 
-    let res = client
-        .get(&url)
-        .bearer_auth(token)
+    let req = client.get(&url);
+    let res = apply_auth(req, token)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {e}"))?;
@@ -423,10 +432,8 @@ pub async fn save_tunnel_config(
         }
     });
 
-    let res = client
-        .put(&url)
-        .bearer_auth(token)
-        .json(&body)
+    let req = client.put(&url).json(&body);
+    let res = apply_auth(req, token)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {e}"))?;
@@ -464,9 +471,8 @@ pub async fn get_tunnel_token(
     let client = make_client();
     let url = format!("{CF_API}/accounts/{cf_account_id}/cfd_tunnel/{tunnel_id}/token");
 
-    let res = client
-        .get(&url)
-        .bearer_auth(token)
+    let req = client.get(&url);
+    let res = apply_auth(req, token)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {e}"))?;
@@ -501,9 +507,8 @@ pub async fn list_dns_records(token: &str, zone_id: &str) -> Result<Vec<CfDnsRec
     let client = make_client();
     let url = format!("{CF_API}/zones/{zone_id}/dns_records?page=1&per_page=100");
 
-    let res = client
-        .get(&url)
-        .bearer_auth(token)
+    let req = client.get(&url);
+    let res = apply_auth(req, token)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {e}"))?;
@@ -547,16 +552,19 @@ pub async fn upsert_dns_record(
         if !rec_id.is_empty() {
             // Update existing
             let url = format!("{CF_API}/zones/{zone_id}/dns_records/{rec_id}");
-            client.put(&url).bearer_auth(token).json(&body).send().await
+            let req = client.put(&url).json(&body);
+            apply_auth(req, token).send().await
         } else {
             // Create new
             let url = format!("{CF_API}/zones/{zone_id}/dns_records");
-            client.post(&url).bearer_auth(token).json(&body).send().await
+            let req = client.post(&url).json(&body);
+            apply_auth(req, token).send().await
         }
     } else {
         // Create new
         let url = format!("{CF_API}/zones/{zone_id}/dns_records");
-        client.post(&url).bearer_auth(token).json(&body).send().await
+        let req = client.post(&url).json(&body);
+        apply_auth(req, token).send().await
     }
     .map_err(|e| format!("HTTP request failed: {e}"))?;
 
@@ -588,9 +596,8 @@ pub async fn delete_dns_record(
     let client = make_client();
     let url = format!("{CF_API}/zones/{zone_id}/dns_records/{record_id}");
 
-    let res = client
-        .delete(&url)
-        .bearer_auth(token)
+    let req = client.delete(&url);
+    let res = apply_auth(req, token)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {e}"))?;
@@ -623,9 +630,8 @@ pub async fn get_security_settings(
     let client = make_client();
 
     let sec_url = format!("{CF_API}/zones/{zone_id}/settings/security_level");
-    let sec_res = client
-        .get(&sec_url)
-        .bearer_auth(token)
+    let sec_req = client.get(&sec_url);
+    let sec_res = apply_auth(sec_req, token)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {e}"))?;
@@ -643,7 +649,8 @@ pub async fn get_security_settings(
         .to_string();
 
     let ssl_url = format!("{CF_API}/zones/{zone_id}/settings/ssl");
-    let ssl_res = client.get(&ssl_url).bearer_auth(token).send().await;
+    let ssl_req = client.get(&ssl_url);
+    let ssl_res = apply_auth(ssl_req, token).send().await;
     let ssl_val = if let Ok(resp) = ssl_res {
         if let Ok(json) = resp.json::<Value>().await {
             json.get("result")
@@ -675,10 +682,8 @@ pub async fn set_security_level(
 
     let body = json!({ "value": level });
 
-    let res = client
-        .patch(&url)
-        .bearer_auth(token)
-        .json(&body)
+    let req = client.patch(&url).json(&body);
+    let res = apply_auth(req, token)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {e}"))?;

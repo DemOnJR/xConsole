@@ -141,11 +141,37 @@ function CloudForm({
               />
             </Field>
           )}
+          {kind === "cloudflare" && (
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-3 text-[11px] space-y-1.5 text-gray-300">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-white">📖 Permisiuni necesare pentru Token:</span>
+                <button
+                  type="button"
+                  className="text-xs text-[#f48120] hover:underline"
+                  onClick={() => openUrl("https://dash.cloudflare.com/profile/api-tokens")}
+                >
+                  Deschide Cloudflare API Tokens ↗
+                </button>
+              </div>
+              <p className="text-gray-400">
+                Apasă <strong>+ Create Token</strong> &rarr; <strong>Custom token (Get started)</strong> și adaugă:
+              </p>
+              <ul className="list-disc list-inside text-gray-300 space-y-0.5 font-mono text-[10px]">
+                <li>Account &rarr; Cloudflare Tunnel (Edit)</li>
+                <li>Zone &rarr; DNS (Edit)</li>
+                <li>Zone &rarr; Zone Settings (Edit)</li>
+                <li>Zone &rarr; Zone (Read)</li>
+              </ul>
+              <p className="text-gray-400 text-[10px] pt-1 border-t border-white/5">
+                <em>Sau folosește <strong>Global API Key</strong> (Profil &rarr; API Tokens &rarr; Global API Key &rarr; View).</em>
+              </p>
+            </div>
+          )}
           <Field
             label="Credentials"
             hint={
               kind === "cloudflare"
-                ? "Cloudflare API Token (cu permisiuni de Tunnels, DNS, Security)"
+                ? "API Token sau Global API Key (salvat securizat în Keychain)"
                 : kind === "aws"
                   ? "Line 1: access key ID, line 2: secret access key (keychain only)"
                   : kind === "gcp"

@@ -46,33 +46,11 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
   const [dnsSearch, setDnsSearch] = useState("");
   const [dnsTypeFilter, setDnsTypeFilter] = useState("ALL");
 
-  const [loggingIn, setLoggingIn] = useState(false);
   const [copiedToken, setCopiedToken] = useState(false);
 
   useEffect(() => {
     loadAccounts();
   }, [loadAccounts]);
-
-  const handle1ClickLogin = async () => {
-    setLoggingIn(true);
-    try {
-      const authUrl = await api.startCloudflareOAuthLogin();
-      await openUrl(authUrl);
-      // Poll accounts
-      let count = 0;
-      const interval = setInterval(async () => {
-        count++;
-        await loadAccounts();
-        if (count > 30) {
-          clearInterval(interval);
-          setLoggingIn(false);
-        }
-      }, 2000);
-    } catch (e) {
-      alert(`Eroare la conectare: ${e}`);
-      setLoggingIn(false);
-    }
-  };
 
   const handleCreateTunnel = async () => {
     if (!newTunnelName.trim()) return;
@@ -136,6 +114,27 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
     return matchesSearch && matchesType;
   });
 
+  const [showSetupGuide, setShowSetupGuide] = useState(false);
+  const [tokenInput, setTokenInput] = useState("");
+  const [savingToken, setSavingToken] = useState(false);
+  const [tokenError, setTokenError] = useState<string | null>(null);
+
+  const handleSaveManualToken = async () => {
+    if (!tokenInput.trim()) return;
+    setSavingToken(true);
+    setTokenError(null);
+    try {
+      await api.saveCloudflareManualToken(tokenInput.trim());
+      await loadAccounts();
+      setTokenInput("");
+      setShowSetupGuide(false);
+    } catch (e) {
+      setTokenError(String(e));
+    } finally {
+      setSavingToken(false);
+    }
+  };
+
   return (
     <div className="flex h-full flex-col bg-[var(--surface)] text-[var(--text)]">
       {/* Header bar */}
@@ -178,23 +177,13 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
         </div>
 
         <div className="flex items-center gap-2">
-          {accounts.length === 0 ? (
-            <Button
-              variant="primary"
-              className="bg-[#f48120] hover:bg-[#e06d0e] text-white text-xs border-none"
-              disabled={loggingIn}
-              onClick={handle1ClickLogin}
-            >
-              {loggingIn ? "Așteptare conectare…" : "☁️ 1-Click Login cu Cloudflare"}
-            </Button>
-          ) : (
+          {accounts.length > 0 && (
             <Button
               variant="ghost"
-              className="text-xs text-gray-400 hover:text-white"
-              onClick={handle1ClickLogin}
-              title="Adaugă un alt cont Cloudflare sau reconectează-te"
+              className="text-xs text-gray-300 hover:text-white"
+              onClick={() => setShowSetupGuide((v) => !v)}
             >
-              + Conectează alt cont
+              {showSetupGuide ? "✕ Închide Ghidul" : "📖 Ghid / Adaugă cont"}
             </Button>
           )}
 
@@ -206,21 +195,125 @@ export function CloudflareManager({ onClose }: { onClose?: () => void }) {
         </div>
       </div>
 
-      {accounts.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center p-8 text-center">
-          <div className="text-4xl mb-3">☁️</div>
-          <h3 className="text-base font-semibold text-gray-100 mb-1">Niciun cont Cloudflare conectat</h3>
-          <p className="text-xs text-gray-400 max-w-md mb-6">
-            Conectează-te în 1-Click pentru a accesa și gestiona tunelele Zero Trust, rutele de ingress către servere, înregistrările DNS și nivelul de securitate WAF.
-          </p>
-          <Button
-            variant="primary"
-            className="bg-[#f48120] hover:bg-[#e06d0e] text-white px-6 py-2 border-none"
-            disabled={loggingIn}
-            onClick={handle1ClickLogin}
-          >
-            {loggingIn ? "Așteptare autorizare în browser…" : "☁️ Conectare 1-Click cu Cloudflare"}
-          </Button>
+      {accounts.length === 0 || showSetupGuide ? (
+        <div className="flex-1 overflow-y-auto p-6 md:p-8 flex flex-col items-center">
+          <div className="w-full max-w-2xl bg-[var(--surface-2)] border border-[var(--border)] rounded-2xl p-6 shadow-xl">
+            <div className="flex items-center gap-3 mb-4">
+              <span className="text-3xl">☁️</span>
+              <div>
+                <h3 className="text-base font-bold text-white">Ghid de Conectare Cont Cloudflare</h3>
+                <p className="text-xs text-gray-400">
+                  Urmează acești 3 pași simpli pentru a oferi aplicației acces la Tunele Zero Trust, DNS și Securitate.
+                </p>
+              </div>
+            </div>
+
+            {/* Step 1 */}
+            <div className="mt-5 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#f48120] text-xs font-bold text-white">1</span>
+                    <h4 className="text-xs font-semibold text-white">Deschide pagina Cloudflare API Tokens</h4>
+                  </div>
+                  <p className="mt-1 text-[11px] text-gray-400">
+                    Apasă butonul de mai jos pentru a deschide panoul oficial Cloudflare în browser:
+                  </p>
+                </div>
+                <Button
+                  variant="primary"
+                  className="bg-[#f48120] hover:bg-[#e06d0e] text-white text-xs whitespace-nowrap"
+                  onClick={() => openUrl("https://dash.cloudflare.com/profile/api-tokens")}
+                >
+                  Deschide Cloudflare ↗
+                </Button>
+              </div>
+            </div>
+
+            {/* Step 2 */}
+            <div className="mt-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#f48120] text-xs font-bold text-white">2</span>
+                <h4 className="text-xs font-semibold text-white">Creează Token-ul cu permisiunile necesare</h4>
+              </div>
+
+              <div className="text-[11px] text-gray-300 space-y-2 pl-7">
+                <p>
+                  1. Apasă pe butonul albastru <strong>`+ Create Token`</strong> (dreapta-sus).
+                </p>
+                <p>
+                  2. La secțiunea de jos <strong>Custom token</strong>, apasă <strong>`Get started`</strong>.
+                </p>
+                <p>
+                  3. Numește token-ul: <code className="bg-black/40 px-1.5 py-0.5 rounded text-[#f48120]">xConsole</code>
+                </p>
+                <p>
+                  4. La <strong>Permissions</strong>, adaugă aceste 4 rânduri:
+                </p>
+                <div className="rounded-lg bg-black/40 border border-white/10 p-2.5 space-y-1.5 font-mono text-[11px]">
+                  <div className="flex items-center justify-between text-gray-200">
+                    <span>🛡️ Account &rarr; Cloudflare Tunnel</span>
+                    <span className="text-[#f48120] font-semibold">Edit</span>
+                  </div>
+                  <div className="flex items-center justify-between text-gray-200">
+                    <span>🌐 Zone &rarr; DNS</span>
+                    <span className="text-[#f48120] font-semibold">Edit</span>
+                  </div>
+                  <div className="flex items-center justify-between text-gray-200">
+                    <span>🔒 Zone &rarr; Zone Settings</span>
+                    <span className="text-[#f48120] font-semibold">Edit</span>
+                  </div>
+                  <div className="flex items-center justify-between text-gray-200">
+                    <span>👁️ Zone &rarr; Zone</span>
+                    <span className="text-blue-400 font-semibold">Read</span>
+                  </div>
+                </div>
+                <p className="text-[11px] text-gray-400">
+                  5. Lasă <em>Account Resources</em> pe <strong>All accounts</strong> și <em>Zone Resources</em> pe <strong>All zones</strong>, apoi apasă <strong>Continue to summary</strong> &rarr; <strong>Create Token</strong> &rarr; <strong>Copy</strong>.
+                </p>
+              </div>
+
+              <div className="mt-3 ml-7 pt-3 border-t border-white/5 text-[11px] text-gray-400 flex items-center justify-between">
+                <span>💡 <em>Alternativă rapidă:</em> Poți folosi și <strong>Global API Key</strong> (Profil &rarr; API Tokens &rarr; Global API Key &rarr; View).</span>
+              </div>
+            </div>
+
+            {/* Step 3 */}
+            <div className="mt-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#f48120] text-xs font-bold text-white">3</span>
+                <h4 className="text-xs font-semibold text-white">Lipește token-ul și finalizează conectarea</h4>
+              </div>
+
+              <div className="pl-7 space-y-3">
+                <div className="flex gap-2">
+                  <TextInput
+                    type="password"
+                    value={tokenInput}
+                    onChange={(e) => setTokenInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleSaveManualToken()}
+                    placeholder="Lipește API Token-ul sau Global API Key aici..."
+                    className="flex-1 text-xs"
+                    autoFocus
+                  />
+                  <Button
+                    variant="primary"
+                    className="bg-[#2563eb] hover:bg-[#1d4ed8] text-white text-xs px-5 whitespace-nowrap border-none"
+                    disabled={savingToken || !tokenInput.trim()}
+                    onClick={handleSaveManualToken}
+                  >
+                    {savingToken ? "Se conectează…" : "Salvează și Conectează &check;"}
+                  </Button>
+                </div>
+
+                {tokenError && (
+                  <p className="text-xs text-red-400 bg-red-950/40 border border-red-800/50 rounded-lg p-2">
+                    ❌ {tokenError}
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
       ) : (
         <div className="flex flex-1 flex-col overflow-hidden">
