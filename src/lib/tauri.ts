@@ -1370,6 +1370,8 @@ export const api = {
     invoke<PluginManifest[]>("list_installed_plugins"),
   installPlugin: (source: string) =>
     invoke<PluginManifest>("install_plugin_cmd", { source }),
+  linkPlugin: (path: string) =>
+    invoke<PluginManifest>("link_plugin_cmd", { path }),
   uninstallPlugin: (pluginId: string) =>
     invoke<void>("uninstall_plugin_cmd", { pluginId }),
   togglePlugin: (pluginId: string, enabled: boolean) =>

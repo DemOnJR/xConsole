@@ -137,6 +137,7 @@ interface PluginState {
   loadPlugins: () => Promise<void>;
   registerDefinition: (def: PluginDefinition) => void;
   installPlugin: (source: string) => Promise<PluginManifest>;
+  linkPlugin: (path: string) => Promise<PluginManifest>;
   uninstallPlugin: (pluginId: string) => Promise<void>;
   togglePlugin: (pluginId: string, enabled?: boolean) => Promise<void>;
   openPluginView: (pluginId: string) => void;
@@ -260,6 +261,19 @@ export const usePluginStore = create<PluginState>((set, get) => ({
       await get().loadPlugins();
       set({ installing: false });
       return installed;
+    } catch (e) {
+      set({ error: String(e), installing: false });
+      throw e;
+    }
+  },
+
+  linkPlugin: async (path: string) => {
+    set({ installing: true, error: null });
+    try {
+      const linked = await api.linkPlugin(path);
+      await get().loadPlugins();
+      set({ installing: false });
+      return linked;
     } catch (e) {
       set({ error: String(e), installing: false });
       throw e;

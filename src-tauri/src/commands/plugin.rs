@@ -21,6 +21,11 @@ pub fn toggle_plugin_cmd(plugin_id: String, enabled: bool) -> Result<bool, Strin
 }
 
 #[tauri::command]
+pub fn link_plugin_cmd(path: String) -> Result<PluginManifest, String> {
+    plugins::link_plugin(&path)
+}
+
+#[tauri::command]
 pub fn reload_plugins_cmd() -> Result<Vec<PluginManifest>, String> {
     Ok(plugins::list_plugins())
 }

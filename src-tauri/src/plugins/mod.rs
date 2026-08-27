@@ -250,6 +250,36 @@ pub fn install_plugin(source: &str) -> Result<PluginManifest, String> {
     Ok(manifest)
 }
 
+/// Links a local plugin repository directory for hot-reload developer workflow
+pub fn link_plugin(local_path: &str) -> Result<PluginManifest, String> {
+    let src = Path::new(local_path);
+    if !src.exists() {
+        return Err(format!("Calea locală '{}' nu există", local_path));
+    }
+    let manifest_path = src.join("plugin.json");
+    if !manifest_path.exists() {
+        return Err(format!("'{}' nu conține un fișier 'plugin.json'", src.display()));
+    }
+    let content = fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("Nu s-a putut citi plugin.json: {e}"))?;
+    let mut manifest = serde_json::from_str::<PluginManifest>(&content)
+        .map_err(|e| format!("Format invalid în plugin.json: {e}"))?;
+
+    let plugins_dir = get_plugins_dir();
+    let target_dir = plugins_dir.join(&manifest.id);
+
+    if target_dir.exists() {
+        let _ = fs::remove_dir_all(&target_dir);
+    }
+    copy_dir_recursive(src, &target_dir)
+        .map_err(|e| format!("Eroare la linkarea pluginului: {e}"))?;
+
+    manifest.installed_path = Some(src.to_string_lossy().to_string());
+    manifest.enabled = true;
+    manifest.is_builtin = false;
+    Ok(manifest)
+}
+
 pub fn uninstall_plugin(plugin_id: &str) -> Result<(), String> {
     let plugins = list_plugins();
     let plugin = plugins
