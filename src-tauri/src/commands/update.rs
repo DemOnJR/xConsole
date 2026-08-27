@@ -473,6 +473,13 @@ pub async fn start_app_update(app: AppHandle, db: tauri::State<'_, Db>) -> Resul
     cmd.spawn()
         .map_err(|e| format!("failed to launch the updater: {e}"))?;
 
+    // Close the running app immediately so Windows releases file locks on the binary and build files
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        app_handle.exit(0);
+    });
+
     Ok(backup.to_string_lossy().into_owned())
 }
 
