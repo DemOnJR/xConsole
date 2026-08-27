@@ -4,6 +4,7 @@ import { GoalModule } from "./GoalModule";
 import { ToolCallsModule } from "./ToolCallsModule";
 import { ContextMemoryModule } from "./ContextMemoryModule";
 import { TerminalLogsModule } from "./TerminalLogsModule";
+import { TrajectoryModal } from "./TrajectoryModal";
 import type { GoalTaskItem, AgentChatMessage } from "./types";
 
 export interface AgentNodeProps {
@@ -17,6 +18,7 @@ export const AgentNodeView = memo(function AgentNodeView({
   onClose,
 }: AgentNodeProps) {
   const [activeModule, setActiveModule] = useState<"goal" | "tools" | "context" | "logs" | null>(null);
+  const [showTrajectory, setShowTrajectory] = useState(false);
   const [goal, setGoal] = useState<string>("Complete current objective and verify system readiness.");
   const [tasks, setTasks] = useState<GoalTaskItem[]>([
     { id: "1", text: "Scan project architecture & verify dependencies", done: true },
@@ -86,6 +88,14 @@ export const AgentNodeView = memo(function AgentNodeView({
       className="flex h-full w-full flex-col overflow-hidden rounded-xl border border-[var(--border-strong)] bg-[var(--surface)] text-[var(--text)] shadow-2xl font-sans"
       style={{ fontSize: `${fontSize}px` }}
     >
+      {/* Trajectory Modal Popup */}
+      {showTrajectory && (
+        <TrajectoryModal
+          messages={messages}
+          onClose={() => setShowTrajectory(false)}
+        />
+      )}
+
       {/* Top Header Bar */}
       <div className="flex h-9 items-center justify-between border-b border-[var(--border)] bg-[var(--surface-2)] px-3 text-xs shrink-0 select-none">
         <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -96,9 +106,14 @@ export const AgentNodeView = memo(function AgentNodeView({
         </div>
 
         <div className="flex items-center gap-1 shrink-0 font-mono text-[10px]">
-          <span className="rounded bg-zinc-800 text-cyan-400 border border-zinc-700 px-1.5 py-0.5">
+          <button
+            type="button"
+            onClick={() => setShowTrajectory(true)}
+            className="rounded bg-zinc-800 text-cyan-400 hover:bg-zinc-700 hover:text-cyan-300 border border-zinc-700 px-1.5 py-0.5 transition cursor-pointer"
+            title="Open Agent Trajectory & Event Inspector"
+          >
             ⚡ trace
-          </span>
+          </button>
           <button
             type="button"
             onClick={() => setFontSize((f) => Math.max(10, f - 1))}
