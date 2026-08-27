@@ -238,6 +238,9 @@ pub fn install_plugin(source: &str) -> Result<PluginManifest, String> {
         ));
     }
 
+    // Option B: Local build pipeline on user's machine (pnpm install && pnpm build)
+    let _ = build_plugin_locally(&target_dir);
+
     let content = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("Nu s-a putut citi plugin.json: {e}"))?;
     let mut manifest = serde_json::from_str::<PluginManifest>(&content)
@@ -250,6 +253,56 @@ pub fn install_plugin(source: &str) -> Result<PluginManifest, String> {
     Ok(manifest)
 }
 
+fn run_pm_command(dir: &Path, args: &[&str]) -> Result<(), String> {
+    let mut cmd = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.arg("/C");
+        c.arg(args[0]);
+        for a in &args[1..] {
+            c.arg(a);
+        }
+        c
+    } else {
+        let mut c = Command::new(args[0]);
+        for a in &args[1..] {
+            c.arg(a);
+        }
+        c
+    };
+
+    cmd.current_dir(dir);
+    let output = cmd.output().map_err(|e| format!("Failed to execute '{}': {e}", args.join(" ")))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Command '{}' failed: {err}", args.join(" ")));
+    }
+    Ok(())
+}
+
+/// Executes local compilation pipeline (pnpm install && pnpm build)
+pub fn build_plugin_locally(plugin_dir: &Path) -> Result<(), String> {
+    let pkg_json = plugin_dir.join("package.json");
+    if !pkg_json.exists() {
+        return Ok(());
+    }
+
+    // Step 1: Install dependencies (try pnpm -> npm fallback)
+    if let Err(e_pnpm) = run_pm_command(plugin_dir, &["pnpm", "install"]) {
+        if let Err(e_npm) = run_pm_command(plugin_dir, &["npm", "install"]) {
+            eprintln!("[Plugin Build] Warning during install: {e_pnpm}; {e_npm}");
+        }
+    }
+
+    // Step 2: Run build script (try pnpm run build -> npm run build fallback)
+    if let Err(e_pnpm) = run_pm_command(plugin_dir, &["pnpm", "run", "build"]) {
+        if let Err(e_npm) = run_pm_command(plugin_dir, &["npm", "run", "build"]) {
+            eprintln!("[Plugin Build] Warning during build: {e_pnpm}; {e_npm}");
+        }
+    }
+
+    Ok(())
+}
+
 /// Links a local plugin repository directory for hot-reload developer workflow
 pub fn link_plugin(local_path: &str) -> Result<PluginManifest, String> {
     let src = Path::new(local_path);
@@ -260,6 +313,10 @@ pub fn link_plugin(local_path: &str) -> Result<PluginManifest, String> {
     if !manifest_path.exists() {
         return Err(format!("'{}' nu conține un fișier 'plugin.json'", src.display()));
     }
+
+    // Compile local build before linking
+    let _ = build_plugin_locally(src);
+
     let content = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("Nu s-a putut citi plugin.json: {e}"))?;
     let mut manifest = serde_json::from_str::<PluginManifest>(&content)
