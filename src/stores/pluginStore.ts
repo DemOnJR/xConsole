@@ -8,6 +8,7 @@ import {
   toCordisPlugin,
 } from "../sdk/plugin";
 import { rootContext, type Fork } from "../sdk/cordis";
+import { loadPluginBundle } from "../sdk/loader";
 import { cloudflarePlugin } from "../../plugins/xconsole-plugin-cloudflare/src/index";
 import { databasePlugin } from "../../plugins/xconsole-plugin-database/src/index";
 import { sftpPlugin } from "../../plugins/xconsole-plugin-sftp/src/index";
@@ -182,8 +183,21 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         mergedMap.set(id, def.manifest);
       }
 
-      // Put backend loaded plugins
+      // Put backend loaded plugins and dynamically load missing definitions
       for (const bp of backendPlugins) {
+        const path = bp.installedPath || (bp as any).installed_path;
+        if (!defs[bp.id] && path && bp.enabled !== false) {
+          const bundlePath = `${path}/dist/index.js`;
+          try {
+            const loaded = await loadPluginBundle(bp, bundlePath);
+            if (loaded) {
+              defs[bp.id] = loaded;
+            }
+          } catch {
+            // ignore if external bundle is not built yet
+          }
+        }
+
         mergedMap.set(bp.id, {
           ...bp,
           capabilities: defs[bp.id]?.manifest?.capabilities ?? bp.capabilities,
