@@ -2,7 +2,7 @@
   "id": "xconsole-plugin-agent",
   "name": "Autonomous AI Agent Engine",
   "version": "1.0.0",
-  "description": "Multi-provider AI pairing assistant with tool execution, file editing, shell execution, safety gates, and self-composition.",
+  "description": "Full-featured autonomous agent console with tool streaming, file editing, terminal execution, vision analysis, safety gates, and goal loops.",
   "author": "xConsole Team",
   "repository": "https://github.com/DemOnJR/xconsole-plugin-agent",
   "icon": "🤖",
@@ -17,11 +17,107 @@
       "order": 10
     },
     "canvasNode": {
-      "type": "agentNode",
+      "type": "agent",
       "title": "AI Agent Assistant",
-      "defaultWidth": 520,
-      "defaultHeight": 650
+      "defaultWidth": 540,
+      "defaultHeight": 680
     },
+    "agentTools": [
+      {
+        "name": "execute_bash",
+        "description": "Execute commands on remote VPS or local environment with real-time streaming stdout/stderr.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "command": { "type": "string" }
+          },
+          "required": ["command"]
+        }
+      },
+      {
+        "name": "edit_file",
+        "description": "Targeted search-and-replace edit on remote or local files with syntax verification.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string" },
+            "target": { "type": "string" },
+            "replacement": { "type": "string" }
+          },
+          "required": ["path", "target", "replacement"]
+        }
+      },
+      {
+        "name": "read_file",
+        "description": "Read file contents with optional line slice window.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string" },
+            "start_line": { "type": "number" },
+            "end_line": { "type": "number" }
+          },
+          "required": ["path"]
+        }
+      },
+      {
+        "name": "write_file",
+        "description": "Write entire file content with automatic parent directory creation.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string" },
+            "content": { "type": "string" }
+          },
+          "required": ["path", "content"]
+        }
+      },
+      {
+        "name": "search_code",
+        "description": "Fast regex/ripgrep pattern search across code repositories and directories.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string" },
+            "path": { "type": "string" }
+          },
+          "required": ["query"]
+        }
+      },
+      {
+        "name": "fetch_web_page",
+        "description": "Fetch and convert web documentation to clean Markdown for context analysis.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "url": { "type": "string" }
+          },
+          "required": ["url"]
+        }
+      },
+      {
+        "name": "ask_user",
+        "description": "Prompt user with clarifying multiple-choice or text input questions.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "question": { "type": "string" }
+          },
+          "required": ["question"]
+        }
+      },
+      {
+        "name": "present_plan",
+        "description": "Present structured technical plan for interactive user review and approval.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "plan": { "type": "string" }
+          },
+          "required": ["plan"]
+        }
+      }
+    ],
     "settingsSection": {
       "id": "agent",
       "title": "Agent & Safety"
