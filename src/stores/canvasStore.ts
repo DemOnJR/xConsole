@@ -175,6 +175,7 @@ interface CanvasState {
   growTile: (id: string, delta: number, axis: TileMoveAxis) => void;
   /** Give a tile its own full-width row — or merge it back. */
   toggleTileFullWidth: (id: string) => void;
+  toggleFillPane: (id: string) => void;
   clear: () => void;
   /**
    * Queue a command to be typed into a terminal node once its SSH session is ready.
@@ -529,6 +530,33 @@ export const useCanvasStore = create<CanvasState>()(
           return null;
         }
         return get().addAgent(position);
+      },
+
+      toggleFillPane: (id: string) => {
+        const node = get().nodes.find((n) => n.id === id);
+        if (!node) return;
+        const pane = get().paneSize;
+        const w = Number(node.width) || NODE_W;
+        const h = Number(node.height) || NODE_H;
+        const fillsPane =
+          pane && w >= pane.width - 4 && h >= pane.height - 4 && node.position.x <= 4 && node.position.y <= 4;
+        if (fillsPane) {
+          set((s) => ({
+            nodes: s.nodes.map((n) =>
+              n.id === id
+                ? { ...n, position: { x: 80, y: 80 }, width: NODE_W, height: NODE_H }
+                : n,
+            ),
+          }));
+        } else if (pane) {
+          set((s) => ({
+            nodes: s.nodes.map((n) =>
+              n.id === id
+                ? { ...n, position: { x: 0, y: 0 }, width: pane.width, height: pane.height }
+                : n,
+            ),
+          }));
+        }
       },
 
       addGoal: (goalId, position) => {

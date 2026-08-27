@@ -12,7 +12,6 @@ import { useCanvasStore } from "../stores/canvasStore";
 import { useVpsStore } from "../stores/vpsStore";
 import { useTransferStore } from "../stores/transferStore";
 import { usePluginStore } from "../stores/pluginStore";
-import { toggleAgentFillPane } from "./agent/AgentNode";
 
 function RailBtn({
   active,
@@ -164,7 +163,7 @@ export function NavRail() {
                 const node = useCanvasStore.getState().nodes.find((n) => n.type === "agent");
                 if (node) {
                   useCanvasStore.getState().focus(node.id);
-                  toggleAgentFillPane(node.id);
+                  useCanvasStore.getState().toggleFillPane(node.id);
                 }
               }}
               badge={agentNeedsYou > 0 ? agentNeedsYou : undefined}
