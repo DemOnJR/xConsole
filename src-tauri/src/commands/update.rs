@@ -256,6 +256,42 @@ pub struct ChannelInfo {
     pub can_self_update: bool,
 }
 
+/// Searches for the installer/updater executable in standard installation paths
+pub fn find_updater_binary() -> Option<PathBuf> {
+    let base = install_base();
+    let candidates = [
+        base.join("uninstall.exe"),
+        base.join("xConsole-Setup.exe"),
+        base.join("installer.exe"),
+        base.join("updater.exe"),
+    ];
+    for c in &candidates {
+        if c.exists() {
+            return Some(c.clone());
+        }
+    }
+
+    if let Ok(curr) = std::env::current_exe() {
+        if let Some(parent) = curr.parent() {
+            let sibs = [
+                parent.join("uninstall.exe"),
+                parent.join("xConsole-Setup.exe"),
+                parent.join("installer.exe"),
+                parent.parent().map(|p| p.join("uninstall.exe")).unwrap_or_default(),
+                parent.parent().map(|p| p.join("xConsole-Setup.exe")).unwrap_or_default(),
+                parent.parent().map(|p| p.join("installer.exe")).unwrap_or_default(),
+            ];
+            for s in &sibs {
+                if s.exists() {
+                    return Some(s.clone());
+                }
+            }
+        }
+    }
+
+    None
+}
+
 #[tauri::command]
 pub fn get_update_channel(db: tauri::State<'_, Db>) -> Result<ChannelInfo, String> {
     let channel = active_channel(&db);
@@ -266,7 +302,7 @@ pub fn get_update_channel(db: tauri::State<'_, Db>) -> Result<ChannelInfo, Strin
         channel,
         local_branch: local_branch(&src),
         current: local_head(&src).as_deref().map(short),
-        can_self_update: base.join("uninstall.exe").exists(),
+        can_self_update: find_updater_binary().is_some(),
     })
 }
 
@@ -284,7 +320,7 @@ pub async fn check_for_update(db: tauri::State<'_, Db>) -> Result<UpdateInfo, St
     let src = base.join("src");
     let local = local_head(&src);
     let local_br = local_branch(&src);
-    let can_self_update = base.join("uninstall.exe").exists();
+    let can_self_update = find_updater_binary().is_some();
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -441,20 +477,16 @@ pub async fn start_app_update(app: AppHandle, db: tauri::State<'_, Db>) -> Resul
     // that was already checked out to dev (and the new installer will reaffirm it).
     let src = install_base().join("src");
     if src.join(".git").exists() {
-        ensure_checkout_branch(&src, &channel)
-            .map_err(|e| format!("could not prepare '{channel}' update: {e}"))?;
+        let _ = ensure_checkout_branch(&src, &channel);
     }
 
     let backup = backup_user_data(&app)?;
 
-    let updater = install_base().join("uninstall.exe");
-    if !updater.exists() {
-        return Err(
-            "The xConsole updater wasn't found. Re-run the installer from \
-             https://github.com/DemOnJR/xConsole to update."
-                .into(),
-        );
-    }
+    let updater = find_updater_binary().ok_or_else(|| {
+        "The xConsole updater wasn't found. Re-run the installer from \
+         https://github.com/DemOnJR/xConsole to update."
+            .to_string()
+    })?;
 
     // Launch the installer in update mode for this channel. Detached so it outlives
     // this app — the installer stops the running app before swapping the exe.
@@ -468,16 +500,25 @@ pub async fn start_app_update(app: AppHandle, db: tauri::State<'_, Db>) -> Resul
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0000_0008); // DETACHED_PROCESS
+        // DETACHED_PROCESS (0x00000008) | CREATE_NEW_PROCESS_GROUP (0x00000200)
+        cmd.creation_flags(0x0000_0208);
     }
     cmd.spawn()
         .map_err(|e| format!("failed to launch the updater: {e}"))?;
 
-    // Close the running app immediately so Windows releases file locks on the binary and build files
+    // Finalize DB state before terminating
+    db.finalize_on_exit();
+
+    // Close all open windows and terminate the app process immediately
+    // so Windows releases file locks on the binary and build files
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        for (_, window) in app_handle.webview_windows() {
+            let _ = window.destroy();
+        }
         app_handle.exit(0);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        std::process::exit(0);
     });
 
     Ok(backup.to_string_lossy().into_owned())
