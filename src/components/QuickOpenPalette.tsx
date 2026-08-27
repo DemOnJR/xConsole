@@ -242,13 +242,13 @@ export function QuickOpenPalette() {
 
     items.push({
       id: "app-analytics",
-      category: "System",
-      title: "Analytics & Monitoring",
-      subtitle: "View server CPU, RAM, and disk utilization telemetry",
+      category: "Plugins",
+      title: "Analytics & Telemetry",
+      subtitle: "View process telemetry, prompt cache hit rates, CPU, and RAM metrics",
       icon: "📊",
-      keywords: ["analytics", "metrics", "monitoring", "cpu", "ram", "charts"],
+      keywords: ["analytics", "metrics", "monitoring", "cpu", "ram", "charts", "cache"],
       action: () => {
-        useUiStore.getState().toggleAnalytics();
+        usePluginStore.getState().togglePluginView("xconsole-plugin-analytics");
         close();
       },
     });

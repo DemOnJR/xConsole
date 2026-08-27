@@ -13,6 +13,7 @@ import { cloudflarePlugin } from "../../plugins/xconsole-plugin-cloudflare/src/i
 import { databasePlugin } from "../../plugins/xconsole-plugin-database/src/index";
 import { sftpPlugin } from "../../plugins/xconsole-plugin-sftp/src/index";
 import { agentPlugin } from "../../plugins/xconsole-plugin-agent/src/index";
+import { analyticsPlugin } from "../../plugins/xconsole-plugin-analytics/src/index";
 
 // Provide Core Services into Cordis Microkernel
 rootContext.provide("api", api);
@@ -81,6 +82,18 @@ export const FEATURED_COMMUNITY_PLUGINS: FeaturedCommunityPlugin[] = [
     category: "ai",
     stars: 180,
     tags: ["agent", "ai", "llm", "tools", "deepseek"],
+  },
+  {
+    id: "xconsole-plugin-analytics",
+    name: "Analytics & Telemetry",
+    version: "1.0.0",
+    description: "Real-time process telemetry, CPU/RAM/GPU monitoring, model cache hits, and AI tool usage analytics.",
+    author: "xConsole Team",
+    repository: "https://github.com/DemOnJR/xconsole-plugin-analytics",
+    icon: "📊",
+    category: "system",
+    stars: 110,
+    tags: ["analytics", "monitoring", "cpu", "ram", "gpu", "telemetry"],
   },
   {
     id: "xconsole-plugin-redis",
@@ -159,6 +172,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     "xconsole-plugin-database": databasePlugin,
     "xconsole-plugin-sftp": sftpPlugin,
     "xconsole-plugin-agent": agentPlugin,
+    "xconsole-plugin-analytics": analyticsPlugin,
   },
   openViews: {},
   activeNavItems: [],

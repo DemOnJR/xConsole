@@ -1,7 +1,6 @@
 import { useEffect, useRef } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { WorkspacePanel } from "./components/WorkspacePanel";
-import { AnalyticsPage } from "../plugins/xconsole-plugin-agent/src/AnalyticsPage";
 import { ServerPanel } from "./components/ServerPanel";
 import { CanvasFlow } from "./components/CanvasFlow";
 import { SettingsModal } from "./components/settings/SettingsModal";
@@ -122,7 +121,6 @@ function UnlockedApp() {
   useOsFileDrop();
 
   const leftOpen = useUiStore((s) => s.leftOpen);
-  const mainView = useUiStore((s) => s.mainView);
   const rightOpen = useUiStore((s) => s.rightOpen);
   const leftWidth = useUiStore((s) => s.leftWidth);
   const rightWidth = useUiStore((s) => s.rightWidth);
@@ -233,49 +231,43 @@ function UnlockedApp() {
         <div className="flex min-h-0 flex-1 overflow-hidden">
           <NavRail />
 
-          {mainView === "analytics" ? (
-            <AnalyticsPage />
-          ) : (
+          {leftOpen ? (
             <>
-              {leftOpen ? (
-                <>
-                  <WorkspacePanel width={leftWidth} />
-                  <DrawerSplitter
-                    side="left"
-                    width={leftWidth}
-                    onWidthChange={setLeftWidth}
-                  />
-                </>
-              ) : null}
-
-              <main className="relative min-w-0 flex-1">
-                <CanvasFlow />
-                {nodes.length === 0 && (
-                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                    <div className="max-w-sm px-6 text-center">
-                      <p className="text-base text-[var(--text-dim)]">
-                        Drag a server from the hosts panel onto the canvas, or click it.
-                      </p>
-                      <p className="mt-2 text-sm text-[var(--text-faint)]">
-                        Use the left rail for workspaces, servers, agent, and console.
-                      </p>
-                    </div>
-                  </div>
-                )}
-              </main>
-
-              {rightOpen ? (
-                <>
-                  <DrawerSplitter
-                    side="right"
-                    width={rightWidth}
-                    onWidthChange={setRightWidth}
-                  />
-                  <ServerPanel width={rightWidth} />
-                </>
-              ) : null}
+              <WorkspacePanel width={leftWidth} />
+              <DrawerSplitter
+                side="left"
+                width={leftWidth}
+                onWidthChange={setLeftWidth}
+              />
             </>
-          )}
+          ) : null}
+
+          <main className="relative min-w-0 flex-1">
+            <CanvasFlow />
+            {nodes.length === 0 && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                <div className="max-w-sm px-6 text-center">
+                  <p className="text-base text-[var(--text-dim)]">
+                    Drag a server from the hosts panel onto the canvas, or click it.
+                  </p>
+                  <p className="mt-2 text-sm text-[var(--text-faint)]">
+                    Use the left rail for workspaces, servers, agent, and console.
+                  </p>
+                </div>
+              </div>
+            )}
+          </main>
+
+          {rightOpen ? (
+            <>
+              <DrawerSplitter
+                side="right"
+                width={rightWidth}
+                onWidthChange={setRightWidth}
+              />
+              <ServerPanel width={rightWidth} />
+            </>
+          ) : null}
         </div>
 
         <StatusStrip />

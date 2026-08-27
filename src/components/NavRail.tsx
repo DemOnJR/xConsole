@@ -64,8 +64,6 @@ function HostsIcon({ size = 18 }: { size?: number }) {
  */
 export function NavRail() {
   const leftOpen = useUiStore((s) => s.leftOpen);
-  const mainView = useUiStore((s) => s.mainView);
-  const toggleAnalytics = useUiStore((s) => s.toggleAnalytics);
   const rightOpen = useUiStore((s) => s.rightOpen);
   const toggleLeft = useUiStore((s) => s.toggleLeft);
   const toggleRight = useUiStore((s) => s.toggleRight);
@@ -101,19 +99,11 @@ export function NavRail() {
   return (
     <nav className="xc-rail" aria-label="Main navigation">
       <RailBtn
-        active={leftOpen && mainView === "canvas"}
+        active={leftOpen}
         title={leftOpen ? "Hide workspaces" : "Workspaces"}
         onClick={toggleLeft}
       >
         <FolderIcon size={18} />
-      </RailBtn>
-
-      <RailBtn
-        active={mainView === "analytics"}
-        title={mainView === "analytics" ? "Back to canvas" : "Analytics"}
-        onClick={toggleAnalytics}
-      >
-        <ChartIcon size={18} />
       </RailBtn>
 
       <RailBtn
@@ -221,6 +211,21 @@ export function NavRail() {
               onClick={() => usePluginStore.getState().togglePluginView("xconsole-plugin-cloudflare")}
             >
               <CloudIcon size={18} />
+            </RailBtn>
+          );
+        }
+
+        const isAnalytics = navItem.id === "xconsole-plugin-analytics" || navItem.id === "analytics";
+        if (isAnalytics) {
+          const isViewOpen = Boolean(openViews[navItem.id] || openViews["xconsole-plugin-analytics"]);
+          return (
+            <RailBtn
+              key={navItem.id}
+              active={isViewOpen}
+              title="Analytics & Resource Telemetry"
+              onClick={() => usePluginStore.getState().togglePluginView("xconsole-plugin-analytics")}
+            >
+              <ChartIcon size={18} />
             </RailBtn>
           );
         }
