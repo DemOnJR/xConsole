@@ -710,12 +710,12 @@ pub async fn set_security_level(
 // 1-Click Cloudflare OAuth 2.0 PKCE Browser Login
 // -----------------------------------------------------------------------------
 
-const CF_OAUTH_CLIENT_ID: &str = "54d11594-84e4-4136-a4f9-a6383914e654";
+const CF_OAUTH_CLIENT_ID: &str = "54d11594-84e4-41aa-b438-e81b8fa78ee7";
 const CF_OAUTH_AUTH_URL: &str = "https://dash.cloudflare.com/oauth2/auth";
 const CF_OAUTH_TOKEN_URL: &str = "https://dash.cloudflare.com/oauth2/token";
 
 /// Start a lightweight local loopback HTTP server to handle the 1-Click Cloudflare OAuth 2.0 Login.
-/// Listens on `127.0.0.1:<random_port>` and returns the complete authorization URL to open in browser.
+/// Listens on `localhost:8976` (the official registered port for Cloudflare OAuth) and returns the authorization URL.
 pub async fn start_oauth_listener(db: Db) -> Result<String, String> {
     use ring::digest::{digest, SHA256};
     use ring::rand::{SecureRandom, SystemRandom};
@@ -738,19 +738,17 @@ pub async fn start_oauth_listener(db: Db) -> Result<String, String> {
         .map_err(|_| "Failed to generate state bytes".to_string())?;
     let state = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(state_bytes);
 
-    // 4. Bind local listener on ephemeral port
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| format!("Failed to bind local loopback listener: {e}"))?;
+    // 4. Bind local listener on registered port 8976
+    let listener = match TcpListener::bind("127.0.0.1:8976").await {
+        Ok(l) => l,
+        Err(_) => TcpListener::bind("0.0.0.0:8976").await.map_err(|e| {
+            format!("Portul 8976 este deja utilizat de o altă instanță sau aplicație: {e}")
+        })?,
+    };
 
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("Failed to get local port: {e}"))?
-        .port();
-
-    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+    let redirect_uri = "http://localhost:8976/oauth/callback".to_string();
     let encoded_redirect = urlencoding_encode(&redirect_uri);
-    let scopes = "account:read user:read workers:write workers_kv:write workers_routes:write workers_scripts:write zone:read offline_access";
+    let scopes = "account:read user:read workers:write workers_kv:write workers_routes:write workers_scripts:write zone:read ssl_certs:write d1:write pages:write ai:write queues:write offline_access";
     let encoded_scopes = urlencoding_encode(scopes);
 
     let auth_url = format!(
