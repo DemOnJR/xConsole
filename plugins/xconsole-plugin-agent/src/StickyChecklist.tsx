@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+﻿import { useMemo, useState } from "react";
 import type { AgentActivityItem, AgentChatMessage, TurnSegment } from "../../../src/stores/agentStore";
 import { isTodoItem } from "./AgentActivity";
 
@@ -329,3 +329,4 @@ export function StickyChecklist({
     </div>
   );
 }
+

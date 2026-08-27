@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 import type { DbResultSet } from "../../../src/lib/tauri";
 
 interface RedisKeyModalProps {
@@ -180,7 +180,7 @@ export function RedisKeyModal({
             className="rounded p-1 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
             onClick={onClose}
           >
-            G��
+            ✕
           </button>
         </div>
 
@@ -257,7 +257,7 @@ export function RedisKeyModal({
                 onClick={() => void handleSave()}
                 className="rounded bg-violet-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
               >
-                {busy ? "SavingGǪ" : "Save Changes"}
+                {busy ? "Saving…" : "Save Changes"}
               </button>
             ) : null}
           </div>
@@ -266,3 +266,4 @@ export function RedisKeyModal({
     </div>
   );
 }
+

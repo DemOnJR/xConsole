@@ -1,4 +1,4 @@
-export interface GoalTaskItem {
+﻿export interface GoalTaskItem {
   id: string;
   text: string;
   done: boolean;
@@ -11,3 +11,4 @@ export interface AgentChatMessage {
   created_at?: string;
   tokens?: number;
 }
+

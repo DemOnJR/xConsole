@@ -1,4 +1,4 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import { useAgentStore } from "../../../src/stores/agentStore";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -175,3 +175,4 @@ export function ImagePreview({
     </div>
   );
 }
+

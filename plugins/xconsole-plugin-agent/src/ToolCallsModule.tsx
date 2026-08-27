@@ -1,4 +1,4 @@
-export function ToolCallsModule() {
+﻿export function ToolCallsModule() {
   const sampleTools = [
     { name: "execute_bash", status: "success", call: "cargo test", duration: "1.2s" },
     { name: "edit_file", status: "success", call: "src/lib.rs (lines 45-60)", duration: "180ms" },
@@ -26,3 +26,4 @@ export function ToolCallsModule() {
     </div>
   );
 }
+

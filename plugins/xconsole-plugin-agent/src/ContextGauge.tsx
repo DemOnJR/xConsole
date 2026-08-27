@@ -1,4 +1,4 @@
-import { useState, type PointerEvent } from "react";
+﻿import { useState, type PointerEvent } from "react";
 import type { ContextUsage } from "../../../src/lib/streamStats";
 
 /** Circular context-window gauge: donut of % used, hover popover with
@@ -78,3 +78,4 @@ export function ContextGauge({
     </div>
   );
 }
+

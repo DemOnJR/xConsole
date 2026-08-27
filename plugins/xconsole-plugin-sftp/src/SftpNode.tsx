@@ -8,7 +8,7 @@ import {
 /**
  * SFTP sessions that outlive their component, keyed by canvas node id.
  *
- * A node unmounts for reasons that are not "the user closed it" G«ˆ the agent panel
+ * A node unmounts for reasons that are not "the user closed it" ‚Äî the agent panel
  * expanding to full width, a workspace switch, any parent that re-renders it out of the
  * tree. Tearing the connection down there is what made the file browser and its current
  * directory vanish whenever something unrelated happened. Terminals already worked this
@@ -55,7 +55,18 @@ import { useSessionStore } from "../../../src/stores/sessionStore";
 import { useTransferStore } from "../../../src/stores/transferStore";
 import { useVpsStore } from "../../../src/stores/vpsStore";
 import { dialog } from "../../../src/stores/dialogStore";
-import { ChevronUpIcon, FolderIcon } from "../../../src/components/icons";
+import {
+  ChevronUpIcon,
+  ChevronDownIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  CloseIcon,
+  FolderIcon,
+  ColumnsIcon,
+  StarIcon,
+  RefreshIcon,
+  PauseIcon,
+} from "../../../src/components/icons";
 import { fileKindFor } from "../../../src/components/fileIcons";
 import { SftpContextMenu, type SftpMenuState } from "./SftpContextMenu";
 import { SftpPermissionsDialog } from "./SftpPermissionsDialog";
@@ -141,10 +152,16 @@ function TreeNode({
       >
         <button
           type="button"
-          className="w-3 shrink-0 text-[10px] text-gray-600 hover:text-gray-300"
+          className="w-3 shrink-0 flex items-center justify-center text-gray-500 hover:text-gray-300"
           onClick={() => onToggle(path)}
         >
-          {loadingPaths.has(path) ? "G«™" : isOpen ? "G˚+" : "G˚+"}
+          {loadingPaths.has(path) ? (
+            <RefreshIcon size={9} className="animate-spin" />
+          ) : isOpen ? (
+            <ChevronDownIcon size={9} />
+          ) : (
+            <ChevronRightIcon size={9} />
+          )}
         </button>
         <button
           type="button"
@@ -214,7 +231,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
 
   /** Paths currently selected, for the bulk actions. */
   const [selection, setSelection] = useState<Set<string>>(() => new Set());
-  /** Anchor for shift-click ranges G«ˆ the last row clicked without shift. */
+  /** Anchor for shift-click ranges ‚Äî the last row clicked without shift. */
   const anchorRef = useRef<string | null>(null);
   const [clipboardTick, setClipboardTick] = useState(0);
 
@@ -259,7 +276,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
   /// Throw away the current session and open a new one, landing back where the user was.
   ///
   /// The panel used to hold one session id for its whole life. When the link dropped, that
-  /// id stayed in place and every call after it failed the same way G«ˆ the only way out was
+  /// id stayed in place and every call after it failed the same way ‚Äî the only way out was
   /// to close the panel and open another, because closing is the one path that clears the
   /// remembered session.
   const reconnect = useCallback(async (): Promise<string | null> => {
@@ -496,7 +513,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
         .then((h) => loadLocalDir(h))
         .catch(() => void loadLocalDir());
     } else if (localEntries.length === 0 && !localLoading) {
-      // Restored path from last session G«ˆ list it.
+      // Restored path from last session ‚Äî list it.
       void loadLocalDir(localPath);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only when dual pane opens
@@ -584,7 +601,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
       })
       .map((e) => e.path);
     if (paths.length === 0) {
-      setError("Nothing to upload G«ˆ remote already has matching files.");
+      setError("Nothing to upload ‚Äî remote already has matching files.");
       return;
     }
     const ok = await dialog.confirm({
@@ -612,7 +629,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
       })
       .map((e) => e.path);
     if (paths.length === 0) {
-      setError("Nothing to download G«ˆ local already has matching files.");
+      setError("Nothing to download ‚Äî local already has matching files.");
       return;
     }
     const ok = await dialog.confirm({
@@ -624,7 +641,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
     void downloadRemoteToLocal(paths);
   };
 
-  // Dual-pane drag: remote GÂ∆ local (download) and local GÂ∆ remote (upload).
+  // Dual-pane drag: remote ‚Üí local (download) and local ‚Üí remote (upload).
   useEffect(() => {
     if (!dualPane) return;
     const offLocal = onInternalDrop(localDropId, (payload) => {
@@ -659,11 +676,11 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
       offLocal();
       offRemote();
     };
-    // downloadRemoteToLocal / refreshListing close over current dirs G«ˆ rebind on nav.
+    // downloadRemoteToLocal / refreshListing close over current dirs ‚Äî rebind on nav.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional path deps
   }, [dualPane, localDropId, dropId, data.vpsId, localPath, path]);
 
-  // Report saves pushed back from the external editor G«ˆ especially refusals, which
+  // Report saves pushed back from the external editor ‚Äî especially refusals, which
   // are the whole point of the guard and must not be silent.
   useEffect(() => {
     let un: (() => void) | undefined;
@@ -691,8 +708,8 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
     (async () => {
       try {
         // Reattach to the session this node had before it was unmounted. Nodes unmount
-        // for reasons that have nothing to do with the user closing the panel G«ˆ the
-        // agent panel expanding, a workspace switch G«ˆ and reconnecting there dropped
+        // for reasons that have nothing to do with the user closing the panel ‚Äî the
+        // agent panel expanding, a workspace switch ‚Äî and reconnecting there dropped
         // the browser back to the home directory every time.
         const previous = keptSftpSessions.get(id);
         if (previous) {
@@ -798,7 +815,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
   const [hideDotfiles, setHideDotfiles] = useState(
     () => localStorage.getItem("xconsole-sftp-hide-dots") === "1",
   );
-  /** Quick extension filter (e.g. "php") G«ˆ empty = all. */
+  /** Quick extension filter (e.g. "php") ‚Äî empty = all. */
   const [extFilter, setExtFilter] = useState("");
   type SortMode = "name" | "size" | "dirs";
   const [sortMode, setSortMode] = useState<SortMode>(() => {
@@ -806,7 +823,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
     return s === "name" || s === "size" || s === "dirs" ? s : "dirs";
   });
   const [showKeysHelp, setShowKeysHelp] = useState(false);
-  /** Local pane width % when dual-pane is on (18G«Ù55). */
+  /** Local pane width % when dual-pane is on (18‚Äì55). */
   const [localPanePct, setLocalPanePct] = useState(() => {
     try {
       const n = Number(localStorage.getItem("xconsole-sftp-pane-pct"));
@@ -838,7 +855,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
     }
   };
 
-  /** What the rows currently show G«ˆ the directory, or the hits from a search. */
+  /** What the rows currently show ‚Äî the directory, or the hits from a search. */
   const visible = useCallback((): SftpEntry[] => {
     let list: SftpEntry[];
     if (results) {
@@ -889,7 +906,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
   /**
    * Click, ctrl-click and shift-click, the way every file manager does it.
    *
-   * Plain click replaces the selection rather than opening G«ˆ opening moved to
+   * Plain click replaces the selection rather than opening ‚Äî opening moved to
    * double-click, which is what makes a selection possible at all: you cannot select
    * something that navigates away the moment you touch it.
    */
@@ -1030,7 +1047,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
    *
    * Every printable key appends to `query` whether or not the box is open yet, and the box
    * is a controlled input reading that same state. So the characters that arrive in the
-   * window between the box opening and the browser moving focus into it are not lost G«ˆ
+   * window between the box opening and the browser moving focus into it are not lost ‚Äî
    * that gap is exactly where a naive "open it, then let the input take over" drops a
    * letter or two, and dropping the first letters of a filename makes the whole feature
    * useless.
@@ -1222,7 +1239,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
   const openEntry = (entry: SftpEntry) => {
     // A search hit is a path from somewhere else in the tree, and `find` does not say
     // whether it is a file or a directory. Going to its folder and filtering to its name
-    // lands on it either way, and shows it in context G«ˆ which is what someone who
+    // lands on it either way, and shows it in context ‚Äî which is what someone who
     // searched for it actually wants to see.
     if (results) {
       setResults(null);
@@ -1325,7 +1342,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
     if (!mode?.trim()) return;
     const cleaned = mode.trim().replace(/^0/, "");
     if (!/^[0-7]{3,4}$/.test(cleaned)) {
-      setError("Invalid mode G«ˆ use 3G«Ù4 octal digits (e.g. 755).");
+      setError("Invalid mode ‚Äî use 3‚Äì4 octal digits (e.g. 755).");
       return;
     }
     try {
@@ -1376,7 +1393,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
   };
 
   /// Repoint an existing symlink. Pre-filled with the current target, because the usual
-  /// edit is a small change to it G«ˆ a version number G«ˆ not typing a path from scratch.
+  /// edit is a small change to it ‚Äî a version number ‚Äî not typing a path from scratch.
   const handleEditLink = async (entry: SftpEntry) => {
     const next = await dialog.prompt({
       title: `Link target for ${entry.name}`,
@@ -1566,7 +1583,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
   // constant on-screen size by countering the zoom.
   const layoutMode = useCanvasStore((s) => s.layoutMode);
   // Read through the tick so the menu re-renders when another panel fills the
-  // clipboard G«ˆ the clipboard itself is module state and cannot be subscribed to.
+  // clipboard ‚Äî the clipboard itself is module state and cannot be subscribed to.
   const canPaste = clipboardTick >= 0 && !!fileClipboard && fileClipboard.paths.length > 0;
 
   const freeform = layoutMode === "freeform";
@@ -1605,7 +1622,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
         minHeight={220}
         // Always mounted, not just when selected: needing to click a node before you
         // could resize it was the whole reason edges were "hard to grab". The handles
-        // stay invisible until hover G«ˆ see .xc-resize-* in styles.css, which also gives
+        // stay invisible until hover ‚Äî see .xc-resize-* in styles.css, which also gives
         // them a hit area far wider than the 1px line they draw.
         isVisible
         lineClassName="!border-cyan-500"
@@ -1645,7 +1662,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
             void navigator.clipboard.writeText(String(data.host ?? ""));
           }}
         >
-          SFTP -+ {maskHost(String(data.host ?? ""))}
+          SFTP ¬∑ {maskHost(String(data.host ?? ""))}
         </button>
         {linkedTerminalId && (
           <button
@@ -1657,27 +1674,31 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
             }`}
             data-tooltip={
               followTerminal
-                ? "Following SSH path G«ˆ click to pause"
-                : "Paused G«ˆ click to follow SSH path"
+                ? "Following SSH path ‚Äî click to pause"
+                : "Paused ‚Äî click to follow SSH path"
             }
             onClick={(e) => {
               e.stopPropagation();
               toggleFollow();
             }}
           >
-            {followTerminal ? "GÉ¶ sync" : "G≈+ sync"}
+            {followTerminal ? (
+              <span className="flex items-center gap-1"><RefreshIcon size={11} className="animate-spin" /> sync</span>
+            ) : (
+              <span className="flex items-center gap-1"><PauseIcon size={11} /> sync</span>
+            )}
           </button>
         )}
         <div className="ml-auto flex items-center gap-1">
           <button
-            className="rounded px-1.5 py-0.5 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+            className="rounded p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
             data-tooltip="Close SFTP"
             onClick={(e) => {
               e.stopPropagation();
               closeNode();
             }}
           >
-            G£Ú
+            <CloseIcon size={12} />
           </button>
         </div>
       </div>
@@ -1687,21 +1708,21 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
           {/* Also bound to the mouse's side buttons while the pointer is over this panel. */}
           <button
             type="button"
-            className="rounded px-1 py-0.5 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 disabled:opacity-30"
+            className="rounded p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 disabled:opacity-30 flex items-center justify-center"
             data-tooltip="Back (mouse button 4)"
             disabled={!history.canBack || loading}
             onClick={history.back}
           >
-            G«¶
+            <ChevronLeftIcon size={12} />
           </button>
           <button
             type="button"
-            className="rounded px-1 py-0.5 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 disabled:opacity-30"
+            className="rounded p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 disabled:opacity-30 flex items-center justify-center"
             data-tooltip="Forward (mouse button 5)"
             disabled={!history.canForward || loading}
             onClick={history.forward}
           >
-            G«¶
+            <ChevronRightIcon size={12} />
           </button>
           <button
             type="button"
@@ -1745,11 +1766,13 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
             }
             onClick={toggleDualPane}
           >
-            G∫Î Dual
+            <span className="flex items-center gap-1">
+              <ColumnsIcon size={11} /> Dual
+            </span>
           </button>
           <button
             type="button"
-            className={`rounded px-1.5 py-0.5 text-[10px] ${
+            className={`rounded p-1 text-[10px] ${
               bookmarks.includes(path)
                 ? "text-amber-300"
                 : "text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
@@ -1759,7 +1782,10 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
             }
             onClick={toggleBookmark}
           >
-            Gˇ‡
+            <StarIcon
+              size={12}
+              className={bookmarks.includes(path) ? "fill-amber-300 text-amber-300" : ""}
+            />
           </button>
           {bookmarks.length > 0 ? (
             <select
@@ -1772,7 +1798,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
               }}
             >
               <option value="" disabled>
-                Gˇ‡
+                Bookmarks
               </option>
               {bookmarks.map((b) => (
                 <option key={b} value={b}>
@@ -1792,7 +1818,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
               }}
             >
               <option value="" disabled>
-                G≈¶
+                Recent Paths
               </option>
               {recentPaths.map((b) => (
                 <option key={b} value={b}>
@@ -1853,7 +1879,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
               })
             }
           >
-            -+-+
+            ¬∑¬∑
           </button>
           <select
             className="rounded border border-[var(--border)] bg-[var(--bg)] px-1 py-0.5 text-[10px] text-gray-400"
@@ -1910,7 +1936,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
               if (e.key === "Enter") navigateToPath();
             }}
             onBlur={() => setPathInput(path)}
-            data-tooltip="Remote path G«ˆ press Enter to go"
+            data-tooltip="Remote path ‚Äî press Enter to go"
           />
         </div>
 
@@ -1922,8 +1948,8 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
             onClick={() => void handleCopyPath(path)}
           >
             {rows.length} item{rows.length === 1 ? "" : "s"}
-            {hideDotfiles ? " -+ dots hidden" : ""}
-            {selection.size > 0 ? ` -+ ${selection.size} selected` : ""}
+            {hideDotfiles ? " ¬∑ dots hidden" : ""}
+            {selection.size > 0 ? ` ¬∑ ${selection.size} selected` : ""}
           </button>
           {dualPane && localPath ? (
             <button
@@ -1932,7 +1958,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
               title="Click to copy local path"
               onClick={() => void navigator.clipboard.writeText(localPath)}
             >
-              Local {localEntries.length} -+ {localPath}
+              Local {localEntries.length} ¬∑ {localPath}
             </button>
           ) : null}
         </div>
@@ -1956,8 +1982,8 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
               <span>F9 refresh</span>
               {dualPane ? (
                 <>
-                  <span>F5 GÂ∆ local</span>
-                  <span>F6 GÂÊ remote</span>
+                  <span>F5 ‚Üí local</span>
+                  <span>F6 ‚Üë remote</span>
                   <span>F7 compare</span>
                   <span>Ctrl+L local path</span>
                   <span>Drag panes transfer</span>
@@ -1977,7 +2003,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                 className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 text-[11px] text-gray-200 outline-none focus:border-cyan-600"
                 value={query}
                 spellCheck={false}
-                placeholder="name containsG«™"
+                placeholder="name contains‚Ä¶"
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Escape") {
@@ -1986,7 +2012,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                     panelRef.current?.focus();
                   }
                   if (e.key === "Enter") {
-                    // In the directory, Enter opens the single match G«ˆ the fastest path
+                    // In the directory, Enter opens the single match ‚Äî the fastest path
                     // from "type a name" to "be in it". In advanced mode it searches.
                     if (advanced || recursive) void runSearch();
                     else if (rows.length > 0) openEntry(rows[0]);
@@ -2007,13 +2033,13 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
               </button>
               <button
                 type="button"
-                className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-[var(--border)] hover:text-gray-200"
+                className="shrink-0 rounded p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 flex items-center justify-center"
                 onClick={() => {
                   closeSearch();
                   panelRef.current?.focus();
                 }}
               >
-                G£Ú
+                <CloseIcon size={12} />
               </button>
             </div>
 
@@ -2044,7 +2070,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                   disabled={searching}
                   onClick={() => void runSearch()}
                 >
-                  {searching ? "SearchingG«™" : "Search"}
+                  {searching ? "Searching‚Ä¶" : "Search"}
                 </button>
                 {results && (
                   <button
@@ -2067,14 +2093,14 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                   } under ${path}`
                 : query.trim()
                   ? `${rows.length} of ${entries.length} in this folder`
-                  : "Type to filter this folder G«ˆ Advanced searches inside subdirectories"}
+                  : "Type to filter this folder ‚Äî Advanced searches inside subdirectories"}
             </div>
           </div>
         )}
 
         {linkedTerminalId && followTerminal && !terminalCwd && (
           <div className="border-b border-amber-900/30 bg-amber-950/20 px-2 py-0.5 text-[10px] text-amber-300/90">
-            Linked to terminal G«ˆ cd in SSH or type a path above
+            Linked to terminal ‚Äî cd in SSH or type a path above
           </div>
         )}
 
@@ -2097,18 +2123,18 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
             </button>
             <button
               type="button"
-              className="shrink-0 rounded px-1.5 py-0.5 text-red-400/80 hover:bg-red-900/30 hover:text-red-200"
+              className="shrink-0 rounded p-1 text-red-400/80 hover:bg-red-900/30 hover:text-red-200 flex items-center justify-center"
               onClick={() => setError(null)}
               data-tooltip="Dismiss"
             >
-              G£Ú
+              <CloseIcon size={12} />
             </button>
           </div>
         )}
 
         {status === "connecting" && (
           <div className="flex flex-1 items-center justify-center text-xs text-gray-500">
-            Connecting SFTPG«™
+            Connecting SFTP‚Ä¶
           </div>
         )}
 
@@ -2133,7 +2159,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                     }}
                     data-tooltip="Up"
                   >
-                    G«¶
+                    ‚Äπ
                   </button>
                   <button
                     type="button"
@@ -2162,7 +2188,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                         : "Bookmark local path"
                     }
                   >
-                    Gˇ‡
+                    ‚òÖ
                   </button>
                   {localBookmarks.length > 0 ? (
                     <select
@@ -2175,7 +2201,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                       data-tooltip="Local bookmarks"
                     >
                       <option value="" disabled>
-                        Gˇ‡
+                        ‚òÖ
                       </option>
                       {localBookmarks.map((b) => (
                         <option key={b} value={b}>
@@ -2198,7 +2224,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                     onClick={() => void downloadRemoteToLocal()}
                     data-tooltip="Download selected remote items into this local folder"
                   >
-                    GÂÙ
+                    ‚Üì
                   </button>
                   <button
                     type="button"
@@ -2207,7 +2233,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                     onClick={() => void uploadLocalSelection()}
                     data-tooltip="Upload selected local files/folders to the remote folder"
                   >
-                    GÂÊ Upload
+                    ‚Üë Upload
                   </button>
                   <button
                     type="button"
@@ -2219,15 +2245,15 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                     onClick={() => setCompareOn((v) => !v)}
                     data-tooltip="Compare local vs remote files by name and size"
                   >
-                    GÁ‰
+                    ‚áÑ
                   </button>
                   {compareOn && compareStats ? (
                     <>
                       <span
                         className="max-w-[90px] truncate font-mono text-[9px] text-gray-500"
-                        title={`Only local: ${compareStats.onlyLocal} -+ Only remote: ${compareStats.onlyRemote} -+ Size diff: ${compareStats.diff}`}
+                        title={`Only local: ${compareStats.onlyLocal} ¬∑ Only remote: ${compareStats.onlyRemote} ¬∑ Size diff: ${compareStats.diff}`}
                       >
-                        L{compareStats.onlyLocal} R{compareStats.onlyRemote} +ˆ
+                        L{compareStats.onlyLocal} R{compareStats.onlyRemote} Œî
                         {compareStats.diff}
                       </span>
                       <button
@@ -2240,7 +2266,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                         onClick={() => void syncLocalMissing()}
                         data-tooltip="Upload only-local + size-diff files to remote"
                       >
-                        GÂÊ miss
+                        ‚Üë miss
                       </button>
                       <button
                         type="button"
@@ -2253,7 +2279,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                         onClick={() => void syncRemoteMissing()}
                         data-tooltip="Download only-remote + size-diff files to local"
                       >
-                        GÂÙ miss
+                        ‚Üì miss
                       </button>
                     </>
                   ) : null}
@@ -2269,11 +2295,11 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                   )}
                   {localLoading && localEntries.length === 0 ? (
                     <div className="px-2 py-3 text-center text-[10px] text-gray-500">
-                      LoadingG«™
+                      Loading‚Ä¶
                     </div>
                   ) : localEntries.length === 0 ? (
                     <div className="px-2 py-3 text-center text-[10px] text-gray-600">
-                      Empty folder G«ˆ drag remote files here to download
+                      Empty folder ‚Äî drag remote files here to download
                     </div>
                   ) : (
                     localEntries.map((entry) => {
@@ -2341,7 +2367,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                           }}
                         >
                           <span className="shrink-0 text-gray-500">
-                            {entry.is_dir ? "=ÉÙ¸" : "=ÉÙ‰"}
+                            {entry.is_dir ? "üìÅ" : "üìÑ"}
                           </span>
                           <span className="min-w-0 truncate text-gray-200">{entry.name}</span>
                           {!entry.is_dir && (
@@ -2356,7 +2382,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                           {mark === "only-local" ? (
                             <span className="shrink-0 text-[9px] text-emerald-400">L</span>
                           ) : mark === "diff" ? (
-                            <span className="shrink-0 text-[9px] text-amber-400">+ˆ</span>
+                            <span className="shrink-0 text-[9px] text-amber-400">Œî</span>
                           ) : null}
                         </button>
                       </div>
@@ -2465,7 +2491,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                 </div>
               )}
               {loading && rows.length === 0 ? (
-                <div className="px-2 py-4 text-center text-xs text-gray-500">LoadingG«™</div>
+                <div className="px-2 py-4 text-center text-xs text-gray-500">Loading‚Ä¶</div>
               ) : rows.length === 0 ? (
                 <div className="px-2 py-4 text-center text-xs text-gray-600">
                   {results
@@ -2473,8 +2499,8 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                     : query.trim()
                       ? "Nothing in this folder matches"
                       : dualPane
-                        ? "Empty G«ˆ F4 new file -+ F8 folder -+ F5/F6 transfer -+ drag across panes"
-                        : "Empty directory G«ˆ F4 new file -+ F8 new folder -+ drop files to upload"}
+                        ? "Empty ‚Äî F4 new file ¬∑ F8 folder ¬∑ F5/F6 transfer ¬∑ drag across panes"
+                        : "Empty directory ‚Äî F4 new file ¬∑ F8 new folder ¬∑ drop files to upload"}
                 </div>
               ) : (
                 rows.map((entry) => {
@@ -2538,7 +2564,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                       }}
                     >
                       {(() => {
-                        // Shape says what family it belongs to, colour says which member G«ˆ
+                        // Shape says what family it belongs to, colour says which member ‚Äî
                         // see fileIcons.tsx for why both are needed at this size.
                         const kind = fileKindFor(entry);
                         return (
@@ -2546,7 +2572,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                             className={`shrink-0 ${kind.className}`}
                             data-tooltip={
                               entry.link_broken
-                                ? "Broken symlink G«ˆ its target does not exist"
+                                ? "Broken symlink ‚Äî its target does not exist"
                                 : kind.label
                             }
                           >
@@ -2573,7 +2599,7 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                           it points, and opening a dialog to find out defeats the purpose. */}
                       {entry.link_target && (
                         <span className="truncate font-mono text-[10px] text-violet-300/70">
-                          GÂ∆ {entry.link_target}
+                          ‚Üí {entry.link_target}
                         </span>
                       )}
                       {!entry.is_dir && !entry.is_symlink && (
@@ -2584,17 +2610,17 @@ export const SftpNode = memo(function SftpNode({ id, data, selected, dragging }:
                       {mark === "only-remote" ? (
                         <span className="shrink-0 text-[9px] text-sky-400">R</span>
                       ) : mark === "diff" ? (
-                        <span className="shrink-0 text-[9px] text-amber-400">+ˆ</span>
+                        <span className="shrink-0 text-[9px] text-amber-400">Œî</span>
                       ) : null}
                     </button>
-                    {/* Folders download too now G«ˆ the engine walks them. */}
+                    {/* Folders download too now ‚Äî the engine walks them. */}
                     <button
                       type="button"
                       className="shrink-0 cursor-default rounded px-1.5 py-0.5 text-[10px] text-gray-500 opacity-0 hover:bg-[var(--border)] hover:text-gray-200 group-hover:opacity-100"
                       data-tooltip={entry.is_dir ? "Download this folder" : "Download"}
                       onClick={() => void downloadEntry(entry)}
                     >
-                      GÂÙ
+                      ‚Üì
                     </button>
                   </div>
                   );

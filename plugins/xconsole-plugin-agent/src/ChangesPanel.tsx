@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import { useEditsStore } from "../../../src/stores/editsStore";
 import { useWorkspaceStore } from "../../../src/stores/workspaceStore";
 import { lineDiff, type DiffResult } from "../../../src/lib/diff";
@@ -362,3 +362,4 @@ function DiffBody({ diff }: { diff: DiffResult | null }) {
     </div>
   );
 }
+

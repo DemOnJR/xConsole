@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+﻿import { describe, expect, it } from "vitest";
 import type { AgentConversationMeta } from "../../../src/lib/tauri";
 import { filterAgentConversations, shouldShowHistoryFilter } from "./historyFilter";
 
@@ -58,3 +58,4 @@ describe("filterAgentConversations", () => {
     expect(result).toHaveLength(1);
   });
 });
+

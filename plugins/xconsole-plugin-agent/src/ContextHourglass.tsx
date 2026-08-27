@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+﻿import { useEffect, useId, useRef, useState } from "react";
 
 function sandColor(percent: number): string {
   if (percent >= 90) return "#f87171";
@@ -102,3 +102,4 @@ export function ContextHourglass({
     </svg>
   );
 }
+

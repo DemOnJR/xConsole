@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+﻿import { describe, expect, it } from "vitest";
 import { parseChecklist, findLatestChecklist } from "./StickyChecklist";
 import { formatWorkingDuration, type AgentChatMessage } from "../../../src/stores/agentStore";
 
@@ -56,4 +56,5 @@ describe("StickyChecklist", () => {
     expect(found).toBe("[>] First step\n[ ] Second step");
   });
 });
+
 

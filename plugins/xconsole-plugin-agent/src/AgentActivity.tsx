@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from "react";
+﻿import { memo, useEffect, useMemo, useState } from "react";
 import { useAgentStore, type AgentActivityItem } from "../../../src/stores/agentStore";
 import type { DiffLine } from "../../../src/lib/tauri";
 import { CodeHighlight, ConsoleOutput, langFromPath, ShellCommand } from "./SyntaxHighlight";
@@ -720,3 +720,4 @@ export const AgentActivityFeed = memo(function AgentActivityFeed({
     </div>
   );
 });
+

@@ -1,4 +1,4 @@
-import { useState } from "react";
+ï»¿import { useState } from "react";
 import type { DbResultSet } from "../../../src/lib/tauri";
 
 export interface ColumnDraft {
@@ -221,7 +221,7 @@ export function CreateTableModal({
             className="rounded p-1 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
             onClick={onClose}
           >
-            G£ò
+            âœ•
           </button>
         </div>
 
@@ -353,7 +353,7 @@ export function CreateTableModal({
                       onClick={() => removeColumn(col.id)}
                       className="rounded px-1.5 py-0.5 text-xs text-red-400 hover:bg-red-950/40 hover:text-red-300 disabled:opacity-20"
                     >
-                      G£ò
+                      âœ•
                     </button>
                   </div>
                 </div>
@@ -387,10 +387,11 @@ export function CreateTableModal({
             onClick={() => void handleCreate()}
             className="rounded bg-violet-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
           >
-            {busy ? "Creating TableGÇª" : "Create Table"}
+            {busy ? "Creating Tableâ€¦" : "Create Table"}
           </button>
         </div>
       </div>
     </div>
   );
 }
+

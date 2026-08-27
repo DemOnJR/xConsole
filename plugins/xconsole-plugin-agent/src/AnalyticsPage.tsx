@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import { api, type AgentAnalytics, type ResourceSnapshot } from "../../../src/lib/tauri";
 import { useUiStore } from "../../../src/stores/uiStore";
 
@@ -285,3 +285,4 @@ export function AnalyticsPage() {
     </div>
   );
 }
+

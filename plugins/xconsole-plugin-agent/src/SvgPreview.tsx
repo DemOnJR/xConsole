@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo, useCallback } from "react";
+﻿import React, { useState, useRef, useMemo, useCallback } from "react";
 import { CodeHighlight } from "./SyntaxHighlight";
 
 interface SvgPreviewProps {
@@ -337,3 +337,4 @@ export function SvgPreview({
     </div>
   );
 }
+

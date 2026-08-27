@@ -161,7 +161,7 @@ export function SftpCodeEditor({ sessionId, entry, onClose, onSaved }: Props) {
         <div className="flex items-center gap-2 border-b border-[var(--border)] px-4 py-2">
           <h3 className="text-sm font-medium text-gray-200">Edit</h3>
           <span className="truncate font-mono text-[10px] text-gray-500">{entry.path}</span>
-          {dirty && <span className="text-[10px] text-amber-400">GùÅ unsaved</span>}
+          {dirty && <span className="text-[10px] text-amber-400">â— unsaved</span>}
 
           <div className="ml-auto flex items-center gap-2">
             {/* Encoding Selector */}
@@ -188,7 +188,7 @@ export function SftpCodeEditor({ sessionId, entry, onClose, onSaved }: Props) {
               onClick={() => void save()}
               disabled={!dirty || saving || loading}
             >
-              {saving ? "SavingGÇª" : "Save"}
+              {saving ? "Savingâ€¦" : "Save"}
             </button>
             <button
               type="button"
@@ -202,14 +202,14 @@ export function SftpCodeEditor({ sessionId, entry, onClose, onSaved }: Props) {
 
         <div className="min-h-0 flex-1 p-2">
           {loading ? (
-            <p className="p-2 text-xs text-gray-500">LoadingGÇª</p>
+            <p className="p-2 text-xs text-gray-500">Loadingâ€¦</p>
           ) : (
             <CodeEditArea value={content} onChange={setContent} path={entry.path} />
           )}
         </div>
 
         <div className="flex items-center gap-2 border-t border-[var(--border)] px-4 py-1.5 text-[10px] text-gray-600">
-          <span>Ctrl/Gîÿ+S to save -+ encoding: <strong className="text-gray-400">{encoding}</strong></span>
+          <span>Ctrl/âŒ˜+S to save Â· encoding: <strong className="text-gray-400">{encoding}</strong></span>
           {error && <span className="ml-auto text-red-300">{error}</span>}
         </div>
       </div>

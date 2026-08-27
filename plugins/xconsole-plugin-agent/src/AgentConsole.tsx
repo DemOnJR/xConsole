@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+﻿import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useAgentStore, type AgentChatMessage, type TurnSegment } from "../../../src/stores/agentStore";
 import { plainText } from "../../../src/lib/plainText";
 import { AgentMarkdown } from "./AgentMarkdown";
@@ -273,3 +273,4 @@ export const AgentConsole = memo(function AgentConsole({
     </div>
   );
 });
+

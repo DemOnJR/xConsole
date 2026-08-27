@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+﻿import { describe, expect, it } from "vitest";
 import type { AgentChatMessage } from "../../../src/stores/agentStore";
 import { exportConversationMarkdown } from "../../../src/lib/agentExport";
 import { consoleRows } from "./agentConsoleRows";
@@ -82,3 +82,4 @@ describe("Agent Compaction Transcript Preservation", () => {
     expect(exported).toContain("Packages patched successfully.");
   });
 });
+

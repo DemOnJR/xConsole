@@ -1,4 +1,4 @@
-import type { SessionCacheTotals, TokenStats } from "../../../src/lib/streamStats";
+﻿import type { SessionCacheTotals, TokenStats } from "../../../src/lib/streamStats";
 import { cacheBreakdown, formatCacheTooltip } from "../../../src/lib/streamStats";
 import { CacheIcon } from "../../../src/components/icons";
 
@@ -52,3 +52,4 @@ export function CacheMeter({
     </button>
   );
 }
+

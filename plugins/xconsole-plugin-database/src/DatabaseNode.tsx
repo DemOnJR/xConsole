@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+ï»¿import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NodeResizer, useStore, type NodeProps } from "@xyflow/react";
 import { api, type DbColumn, type DbResultSet, type DbRowKey } from "../../../src/lib/tauri";
 import { useCanvasStore, type DbNode as DbNodeType } from "../../../src/stores/canvasStore";
@@ -51,7 +51,7 @@ const PAGE_SIZE_OPTIONS = [25, 50, 100, 200, 500, 1000] as const;
 
 /**
  * Split a SQL dump into statements for sequential import.
- * Handles `--` line comments and `/* GÇª *GÇï/` block comments.
+ * Handles `--` line comments and `/* â€¦ *â€‹/` block comments.
  */
 function splitSqlStatements(script: string): string[] {
   const stripped = script
@@ -246,7 +246,7 @@ function Grid({
                 setShowFilterBar(false);
               }
             }}
-            placeholder="Quick search loaded rows on this page (Esc to close)GÇª"
+            placeholder="Quick search loaded rows on this page (Esc to close)â€¦"
             className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 text-[11px] text-gray-200 outline-none focus:border-violet-500"
           />
           {filterText && (
@@ -382,7 +382,7 @@ function Grid({
                 onSqlTemplate(lines.join("\n"));
               }}
             >
-              <span>GåÆ SQL</span>
+              <span>â†’ SQL</span>
             </button>
           ) : null}
           {canDelete ? (
@@ -444,13 +444,13 @@ function Grid({
                     className="cursor-pointer whitespace-nowrap border-b border-r border-[var(--border)] px-2 py-1 font-medium text-gray-300 hover:bg-[var(--surface-hover)] transition-colors last:border-r-0"
                     title={
                       meta
-                        ? `${meta.data_type}${meta.primary ? " -+ Primary key" : ""}`
+                        ? `${meta.data_type}${meta.primary ? " Â· Primary key" : ""}`
                         : c
                     }
                   >
                     <div className="flex items-center gap-1.5">
                       {meta?.primary ? (
-                        <span className="text-amber-400 text-[10px]">=ƒöæ</span>
+                        <span className="text-amber-400 text-[10px]">ðŸ”‘</span>
                       ) : null}
                       <span>{c}</span>
                       {isSorted ? (
@@ -461,7 +461,7 @@ function Grid({
                         )
                       ) : (
                         <span className="opacity-0 hover:opacity-50 text-[9px] text-gray-500">
-                          Gçà
+                          â‡…
                         </span>
                       )}
                     </div>
@@ -1288,7 +1288,7 @@ export const DatabaseNode = memo(function DatabaseNode({
       });
       if (typed === null) return;
       if (typed.trim() !== sel.table) {
-        setError("Drop cancelled GÇö table name did not match.");
+        setError("Drop cancelled â€” table name did not match.");
         return;
       }
     }
@@ -1381,7 +1381,7 @@ export const DatabaseNode = memo(function DatabaseNode({
         } catch (e) {
           errors.push(String(e));
           if (errors.length >= 20) {
-            errors.push("GÇªstopped after 20 statement errors");
+            errors.push("â€¦stopped after 20 statement errors");
             break;
           }
         }
@@ -1390,7 +1390,7 @@ export const DatabaseNode = memo(function DatabaseNode({
       setTab("sql");
       setSql(
         text.length > 4000
-          ? `${text.slice(0, 4000)}\n/* GÇªimported ${ok}/${statements.length} statements */`
+          ? `${text.slice(0, 4000)}\n/* â€¦imported ${ok}/${statements.length} statements */`
           : text,
       );
       if (errors.length > 0) {
@@ -1555,7 +1555,7 @@ export const DatabaseNode = memo(function DatabaseNode({
         </button>
         <span className="shrink-0 text-[10px] text-gray-500 font-mono">
           {instances.length} inst{instances.length === 1 ? "" : "s"}
-          {connectedCount > 0 ? ` -+ ${connectedCount} live` : ""}
+          {connectedCount > 0 ? ` Â· ${connectedCount} live` : ""}
         </span>
 
         {sel ? (
@@ -1597,7 +1597,7 @@ export const DatabaseNode = memo(function DatabaseNode({
             type="button"
             onClick={cycleLayout}
             className="rounded p-1 text-gray-400 hover:bg-[var(--border)] hover:text-violet-300 transition-colors"
-            data-tooltip={`Rotate Position: ${pos.toUpperCase()} (Click to rotate Left GåÆ Top GåÆ Right GåÆ Bottom)`}
+            data-tooltip={`Rotate Position: ${pos.toUpperCase()} (Click to rotate Left â†’ Top â†’ Right â†’ Bottom)`}
           >
             {renderLayoutIcon()}
           </button>
@@ -1848,7 +1848,7 @@ export const DatabaseNode = memo(function DatabaseNode({
                       <ChevronLeftIcon size={11} />
                     </button>
                     <span className="tabular-nums font-mono text-[10px] text-gray-300 px-1">
-                      {page * pageSize + 1}GÇô{page * pageSize + (rows?.rows.length ?? 0)}
+                      {page * pageSize + 1}â€“{page * pageSize + (rows?.rows.length ?? 0)}
                       {tableRowCount != null ? (
                         <span className="text-gray-500"> / {tableRowCount.toLocaleString()}</span>
                       ) : null}
@@ -1897,7 +1897,7 @@ export const DatabaseNode = memo(function DatabaseNode({
                     onClick={() => setAutoRefresh((v) => !v)}
                     data-tooltip={
                       autoRefresh
-                        ? `Live auto-refresh active (${settings.refreshInterval}s) GÇö click to stop`
+                        ? `Live auto-refresh active (${settings.refreshInterval}s) â€” click to stop`
                         : `Auto-refresh page every ${settings.refreshInterval}s`
                     }
                   >
@@ -1990,7 +1990,7 @@ export const DatabaseNode = memo(function DatabaseNode({
                         if (e.key === "Enter") applyFilter();
                         if (e.key === "Escape") setFilterBarOpen(false);
                       }}
-                      placeholder="Value to searchGÇª"
+                      placeholder="Value to searchâ€¦"
                       className="w-full rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-0.5 text-[11px] text-gray-100 outline-none focus:border-violet-500"
                     />
                   </div>
@@ -2045,7 +2045,7 @@ export const DatabaseNode = memo(function DatabaseNode({
                     type="text"
                     value={tableTabsFilter}
                     onChange={(e) => setTableTabsFilter(e.target.value)}
-                    placeholder="FilterGÇª"
+                    placeholder="Filterâ€¦"
                     className="w-full rounded border border-[var(--border)] bg-[var(--surface)] pl-4 pr-1 py-0.5 text-[9px] text-gray-200 outline-none focus:border-violet-500 placeholder:text-gray-600"
                   />
                 </div>
@@ -2071,7 +2071,7 @@ export const DatabaseNode = memo(function DatabaseNode({
                             ? "bg-violet-600 text-white font-medium shadow-xs"
                             : "bg-[var(--surface)] text-gray-400 hover:bg-[var(--surface-hover)] hover:text-gray-200 border border-[var(--border)]"
                         }`}
-                        title={`${t.name} -+ ${t.rows.toLocaleString()} rows`}
+                        title={`${t.name} Â· ${t.rows.toLocaleString()} rows`}
                       >
                         <TableIcon size={10} className={active ? "text-white" : "text-gray-500"} />
                         <span>{t.name}</span>
@@ -2245,7 +2245,7 @@ export const DatabaseNode = memo(function DatabaseNode({
                       data-tooltip="Run query (Ctrl+Enter)"
                     >
                       <PlayIcon size={11} />
-                      <span>{busy ? "RunningGÇª" : "Run"}</span>
+                      <span>{busy ? "Runningâ€¦" : "Run"}</span>
                     </button>
 
                     <button
@@ -2369,11 +2369,11 @@ export const DatabaseNode = memo(function DatabaseNode({
                         data-tooltip="Favorites"
                       >
                         <option value="" disabled>
-                          Gÿà Favorites ({sqlFavorites.length})
+                          â˜… Favorites ({sqlFavorites.length})
                         </option>
                         {sqlFavorites.map((q, i) => (
                           <option key={`f-${i}`} value={q}>
-                            {q.length > 50 ? `${q.slice(0, 50)}GÇª` : q}
+                            {q.length > 50 ? `${q.slice(0, 50)}â€¦` : q}
                           </option>
                         ))}
                       </select>
@@ -2394,7 +2394,7 @@ export const DatabaseNode = memo(function DatabaseNode({
                         </option>
                         {sqlHistory.map((q, i) => (
                           <option key={i} value={q}>
-                            {q.length > 60 ? `${q.slice(0, 60)}GÇª` : q}
+                            {q.length > 60 ? `${q.slice(0, 60)}â€¦` : q}
                           </option>
                         ))}
                       </select>
@@ -2410,7 +2410,7 @@ export const DatabaseNode = memo(function DatabaseNode({
                       <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-gray-400">
                         {sqlResult.rows.length} row{sqlResult.rows.length === 1 ? "" : "s"}
                         {sqlResult.affected != null
-                          ? ` -+ ${sqlResult.affected} affected`
+                          ? ` Â· ${sqlResult.affected} affected`
                           : ""}
                       </span>
                     ) : null}
@@ -2554,3 +2554,4 @@ export const DatabaseNode = memo(function DatabaseNode({
     </div>
   );
 });
+

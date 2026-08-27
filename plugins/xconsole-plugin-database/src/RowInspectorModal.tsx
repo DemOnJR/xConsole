@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import type { DbColumn, DbResultSet } from "../../../src/lib/tauri";
 import {
   CloseIcon,
@@ -154,7 +154,7 @@ export function RowInspectorModal({
             <span>Row Inspector & Editor</span>
             {tableName && (
               <span className="font-mono text-[11px] text-violet-300">
-                -+ {tableName}
+                · {tableName}
               </span>
             )}
           </div>
@@ -251,7 +251,7 @@ export function RowInspectorModal({
               type="text"
               value={fieldFilter}
               onChange={(e) => setFieldFilter(e.target.value)}
-              placeholder="Filter columns or valuesGǪ"
+              placeholder="Filter columns or values…"
               className="w-full rounded border border-[var(--border)] bg-[var(--surface)] pl-6 pr-2 py-0.5 text-[11px] text-gray-200 outline-none focus:border-violet-500 placeholder:text-gray-600"
             />
           </div>
@@ -441,7 +441,7 @@ export function RowInspectorModal({
                 ) : (
                   <CheckIcon size={12} />
                 )}
-                <span>{saving ? "SavingGǪ" : saveSuccess ? "Saved!" : "Save Changes"}</span>
+                <span>{saving ? "Saving…" : saveSuccess ? "Saved!" : "Save Changes"}</span>
               </button>
             )}
 
@@ -457,3 +457,4 @@ export function RowInspectorModal({
     </div>
   );
 }
+

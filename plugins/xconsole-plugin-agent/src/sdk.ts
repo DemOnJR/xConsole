@@ -1,4 +1,4 @@
-import type React from "react";
+﻿import type React from "react";
 
 export interface PluginManifest {
   id: string;
@@ -22,3 +22,4 @@ export interface PluginDefinition {
 export function definePlugin(def: PluginDefinition): PluginDefinition {
   return def;
 }
+

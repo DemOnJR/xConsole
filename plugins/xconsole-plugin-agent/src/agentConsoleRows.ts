@@ -1,4 +1,4 @@
-import type { AgentActivityItem, AgentChatMessage } from "../../../src/stores/agentStore";
+﻿import type { AgentActivityItem, AgentChatMessage } from "../../../src/stores/agentStore";
 import { segmentsFromMessage } from "../../../src/stores/turnSegments";
 
 export type AgentConsoleRow =
@@ -87,4 +87,5 @@ function activityRow(item: AgentActivityItem): AgentConsoleRow | null {
   }
   return null;
 }
+
 

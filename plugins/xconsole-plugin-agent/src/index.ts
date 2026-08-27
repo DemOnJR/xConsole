@@ -1,4 +1,4 @@
-import { definePlugin, type PluginDefinition } from "./sdk";
+﻿import { definePlugin, type PluginDefinition } from "./sdk";
 import { AgentNodeView } from "./AgentNode";
 import manifest from "../plugin.json";
 
@@ -16,3 +16,4 @@ export const agentPlugin: PluginDefinition = definePlugin({
 
 export default agentPlugin;
 export { AgentNodeView };
+

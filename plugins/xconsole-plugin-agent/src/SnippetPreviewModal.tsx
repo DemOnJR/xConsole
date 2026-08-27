@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from "react";
+﻿import { memo, useEffect, useState } from "react";
 import type { ChatSnippet } from "../../../src/lib/snippetDetect";
 import { CodeHighlight } from "./SyntaxHighlight";
 
@@ -163,3 +163,4 @@ export const SnippetPreviewModal = memo(function SnippetPreviewModal({
     </div>
   );
 });
+

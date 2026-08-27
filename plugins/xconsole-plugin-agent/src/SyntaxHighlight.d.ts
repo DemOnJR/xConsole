@@ -1,4 +1,4 @@
-/** Map common fence / alias names to a registered highlight.js language id. */
+﻿/** Map common fence / alias names to a registered highlight.js language id. */
 export declare function normalizeLanguage(raw?: string): string | undefined;
 /** Extract language from react-markdown `className` (e.g. `language-python`). */
 export declare function langFromMarkdownClass(className?: string): string | undefined;

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+﻿import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { ContextUsage } from "../../../src/lib/streamStats";
@@ -215,3 +215,4 @@ export function AgentContextUsageButton({
     </div>
   );
 }
+

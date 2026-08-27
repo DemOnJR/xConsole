@@ -1,4 +1,4 @@
-import type { QueuedMessage } from "../../../src/stores/agentStore";
+﻿import type { QueuedMessage } from "../../../src/stores/agentStore";
 import { previewSrc } from "../../../src/lib/vision";
 
 export function QueuedMessages({
@@ -84,3 +84,4 @@ export function QueuedMessages({
     </div>
   );
 }
+

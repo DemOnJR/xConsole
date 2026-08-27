@@ -1,4 +1,4 @@
-import type { AgentConversationMeta } from "../../../src/lib/tauri";
+﻿import type { AgentConversationMeta } from "../../../src/lib/tauri";
 
 export function shouldShowHistoryFilter(conversations: AgentConversationMeta[]): boolean {
   return conversations.length > 1;
@@ -17,3 +17,4 @@ export function filterAgentConversations(
       (conversation.summary ?? "").toLowerCase().includes(normalizedQuery),
   );
 }
+

@@ -1,4 +1,4 @@
-import { definePlugin, type PluginDefinition } from "./sdk";
+﻿import { definePlugin, type PluginDefinition } from "./sdk";
 import { DatabaseNode } from "./DatabaseNode";
 import manifest from "../plugin.json";
 
@@ -15,3 +15,4 @@ export const databasePlugin: PluginDefinition = definePlugin({
 });
 
 export default databasePlugin;
+

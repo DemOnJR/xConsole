@@ -1,4 +1,4 @@
-export interface DbConnectionConfig {
+﻿export interface DbConnectionConfig {
   id: string;
   name: string;
   kind: "mysql" | "postgres" | "sqlite" | "redis";
@@ -23,3 +23,4 @@ export interface DbTableInfo {
   columns: DbTableColumn[];
   rowCount?: number;
 }
+

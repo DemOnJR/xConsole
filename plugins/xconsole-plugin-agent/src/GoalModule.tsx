@@ -1,4 +1,4 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import type { GoalTaskItem } from "./types";
 
 export function GoalModule({
@@ -96,3 +96,4 @@ export function GoalModule({
     </div>
   );
 }
+

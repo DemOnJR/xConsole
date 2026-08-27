@@ -1,4 +1,4 @@
-export interface SlashCommandDef {
+﻿export interface SlashCommandDef {
   name: string;
   description: string;
   syntax: string;
@@ -234,3 +234,4 @@ export function parseExactSlashCommand(input: string): SlashCommandDef | null {
   if (!q || q.rest) return null;
   return SLASH_COMMANDS.find((cmd) => cmd.name === q.name) ?? null;
 }
+

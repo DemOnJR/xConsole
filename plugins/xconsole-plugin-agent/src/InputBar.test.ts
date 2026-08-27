@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+﻿import { describe, expect, it } from "vitest";
 import { reasoningCapable } from "./InputBar";
 
 describe("reasoningCapable", () => {
@@ -24,3 +24,4 @@ describe("reasoningCapable", () => {
     expect(reasoningCapable(undefined, undefined)).toBe(false);
   });
 });
+

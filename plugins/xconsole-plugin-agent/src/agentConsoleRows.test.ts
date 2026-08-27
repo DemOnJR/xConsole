@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+﻿import { describe, expect, it } from "vitest";
 import type { AgentChatMessage } from "../../../src/stores/agentStore";
 import { consoleRows } from "./agentConsoleRows";
 
@@ -104,3 +104,4 @@ describe("Agent Console rows", () => {
     });
   });
 });
+

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+﻿import { describe, expect, it } from "vitest";
 import { activitySummary, isCommandItem, liveGerund, visibleActivityItems } from "./AgentActivity";
 import type { AgentActivityItem } from "../../../src/stores/agentStore";
 
@@ -71,3 +71,4 @@ describe("activitySummary", () => {
     expect(text).toContain("wrote 1 file");
   });
 });
+

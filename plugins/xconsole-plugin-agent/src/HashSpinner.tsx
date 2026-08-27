@@ -1,4 +1,4 @@
-import { activityKind, motionForKind, type ActivityKind, type HashMotion } from "../../../src/lib/activityMotion";
+﻿import { activityKind, motionForKind, type ActivityKind, type HashMotion } from "../../../src/lib/activityMotion";
 import type { AgentActivityItem } from "../../../src/stores/agentStore";
 
 /** Four strokes of a #. CSS moves each bar into figures, then back. */
@@ -24,3 +24,4 @@ export function HashSpinner({
     </span>
   );
 }
+

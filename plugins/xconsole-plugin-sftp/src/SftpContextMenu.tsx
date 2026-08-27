@@ -15,7 +15,7 @@ interface Props {
   onEdit: (entry: SftpEntry) => void;
   onEditExternal: (entry: SftpEntry) => void;
   onDownload: (entry: SftpEntry) => void;
-  /** Directory G�� one archive, built on the server then transferred. */
+  /** Directory → one archive, built on the server then transferred. */
   onDownloadArchive: (entry: SftpEntry, format: ArchiveFormat) => void;
   onUpload: () => void;
   onProperties: (entry: SftpEntry) => void;
@@ -29,7 +29,7 @@ interface Props {
   onOpenTerminalHere: (entry: SftpEntry | null) => void;
   onNewFolder: () => void;
   onNewFile: () => void;
-  /** How many rows are selected G�� decides whether the menu talks about one or many. */
+  /** How many rows are selected — decides whether the menu talks about one or many. */
   selectionCount: number;
   onDownloadSelection: (entry: SftpEntry | null) => void;
   onDeleteSelection: (entry: SftpEntry | null) => void;
@@ -146,7 +146,7 @@ export function SftpContextMenu({
             </>
           ) : (
             <>
-              {item("EditGǪ", () => onEdit(entry))}
+              {item("Edit…", () => onEdit(entry))}
               {externalEditorName
                 ? item(`Open in ${externalEditorName}`, () => onEditExternal(entry))
                 : null}
@@ -154,9 +154,9 @@ export function SftpContextMenu({
             </>
           )}
           <div className="my-1 border-t border-[var(--border)]" />
-          {item("Upload hereGǪ", onUpload)}
+          {item("Upload here…", onUpload)}
           <div className="my-1 border-t border-[var(--border)]" />
-          {/* With several rows highlighted the menu acts on all of them, and says so G��
+          {/* With several rows highlighted the menu acts on all of them, and says so —
               a menu that silently applies to one of six is how the wrong file gets
               deleted. `many` is only true when the clicked row is part of that set;
               clicking outside it selects that row first. */}
@@ -166,7 +166,7 @@ export function SftpContextMenu({
               {item(`Copy ${selectionCount} items`, () => onCopy(entry))}
               {item(`Cut ${selectionCount} items`, () => onCut(entry))}
               {onChmodSelection
-                ? item(`Chmod ${selectionCount} itemsGǪ`, () => onChmodSelection(entry))
+                ? item(`Chmod ${selectionCount} items…`, () => onChmodSelection(entry))
                 : null}
               {item(`Delete ${selectionCount} items`, () => onDeleteSelection(entry), {
                 danger: true,
@@ -182,13 +182,13 @@ export function SftpContextMenu({
           )}
           {canPaste ? item("Paste here", onPaste) : null}
           <div className="my-1 border-t border-[var(--border)]" />
-          {item("PropertiesGǪ", () => onProperties(entry))}
+          {item("Properties…", () => onProperties(entry))}
           {onChmodSelection && !many
-            ? item("ChmodGǪ", () => onChmodSelection(entry))
+            ? item("Chmod…", () => onChmodSelection(entry))
             : null}
           {/* Only for links: for anything else there is no target to point anywhere. */}
-          {entry.is_symlink ? item("Edit link targetGǪ", () => onEditLink(entry)) : null}
-          {item("RenameGǪ", () => onRename(entry))}
+          {entry.is_symlink ? item("Edit link target…", () => onEditLink(entry)) : null}
+          {item("Rename…", () => onRename(entry))}
           {onDuplicate ? item("Duplicate", () => onDuplicate(entry)) : null}
           {item(
             many ? `Copy ${selectionCount} paths` : "Copy path",
@@ -200,13 +200,13 @@ export function SftpContextMenu({
         </>
       ) : (
         <>
-          {item("Upload hereGǪ", onUpload)}
+          {item("Upload here…", onUpload)}
           {canPaste ? item("Paste here", onPaste) : null}
           <div className="my-1 border-t border-[var(--border)]" />
           {item("Open terminal here", () => onOpenTerminalHere(null))}
-          {item("New directoryGǪ", onNewFolder)}
-          {item("New fileGǪ", onNewFile)}
-          {item("New symlinkGǪ", onNewLink)}
+          {item("New directory…", onNewFolder)}
+          {item("New file…", onNewFile)}
+          {item("New symlink…", onNewLink)}
           <div className="my-1 border-t border-[var(--border)]" />
           {item("Refresh", onRefresh)}
         </>

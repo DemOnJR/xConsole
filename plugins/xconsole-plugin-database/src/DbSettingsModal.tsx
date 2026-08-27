@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 import { api, type DbSavedConnection } from "../../../src/lib/tauri";
 import {
   CloseIcon,
@@ -390,9 +390,9 @@ export function DbSettingsModal({
                   className="rounded border border-[var(--border)] bg-[var(--bg)] px-2.5 py-1 text-gray-200 outline-none focus:border-violet-500 font-mono"
                 >
                   <option value="NULL">NULL (italic)</option>
-                  <option value="G��">G�� (dash)</option>
+                  <option value="—">— (dash)</option>
                   <option value="(empty)">(empty)</option>
-                  <option value="++">++ (null symbol)</option>
+                  <option value="ø">ø (null symbol)</option>
                 </select>
               </div>
 
@@ -466,7 +466,7 @@ export function DbSettingsModal({
                 Remembered credentials stored in the encrypted OS keychain for this server:
               </div>
               {loadingLogins ? (
-                <p className="py-4 text-center text-gray-500">Loading saved credentialsGǪ</p>
+                <p className="py-4 text-center text-gray-500">Loading saved credentials…</p>
               ) : savedLogins.length === 0 ? (
                 <div className="rounded-lg border border-[var(--border)] p-4 text-center text-gray-500">
                   No saved logins for this server. Check "Remember this password" when signing in to save one.
@@ -486,9 +486,9 @@ export function DbSettingsModal({
                           </span>
                         </div>
                         <div className="mt-0.5 truncate font-mono text-[10px] text-gray-500">
-                          {saved.container ? `docker:${saved.container} -+ ` : ""}
+                          {saved.container ? `docker:${saved.container} · ` : ""}
                           {saved.host}:{saved.port}
-                          {saved.database ? ` -+ db:${saved.database}` : ""}
+                          {saved.database ? ` · db:${saved.database}` : ""}
                         </div>
                       </div>
                       <button
@@ -528,3 +528,4 @@ export function DbSettingsModal({
     </div>
   );
 }
+

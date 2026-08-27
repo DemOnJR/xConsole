@@ -1,4 +1,4 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import { useHarnessStore } from "../../../../src/stores/harnessStore";
 import { useAgentStore } from "../../../../src/stores/agentStore";
 
@@ -43,7 +43,7 @@ export function ToolCallsModule() {
       {/* Header bar */}
       <div className="flex items-center justify-between px-3 py-1.5 bg-[var(--surface-2)]/40">
         <div className="flex items-center gap-2">
-          <span className="text-cyan-400 select-none font-semibold">⚡</span>
+          <span className="text-cyan-400 select-none font-semibold"></span>
           <span className="text-[10px] text-[var(--text-dim)] uppercase tracking-wider font-semibold">
             TOOL EXECUTIONS ({recentActivities.length})
           </span>
@@ -116,3 +116,4 @@ export function ToolCallsModule() {
     </div>
   );
 }
+

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+﻿import { describe, expect, it } from "vitest";
 import {
   filterSlashCommands,
   isSlashInput,
@@ -63,3 +63,4 @@ describe("Agent Slash Commands", () => {
     expect(filterSlashCommands("/gemini").map((m) => m.name)).toContain("vision");
   });
 });
+

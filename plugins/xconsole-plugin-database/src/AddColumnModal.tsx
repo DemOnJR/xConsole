@@ -1,4 +1,4 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import type { DbColumn, DbResultSet } from "../../../src/lib/tauri";
 
 interface AddColumnModalProps {
@@ -134,7 +134,7 @@ export function AddColumnModal({
             className="rounded p-1 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
             onClick={onClose}
           >
-            G��
+            ✕
           </button>
         </div>
 
@@ -265,10 +265,11 @@ export function AddColumnModal({
             onClick={() => void handleAdd()}
             className="rounded bg-violet-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
           >
-            {busy ? "Adding ColumnGǪ" : "Add Column"}
+            {busy ? "Adding Column…" : "Add Column"}
           </button>
         </div>
       </div>
     </div>
   );
 }
+

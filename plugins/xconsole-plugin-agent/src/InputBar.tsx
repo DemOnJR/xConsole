@@ -1,4 +1,4 @@
-import { memo, useMemo, type MouseEvent, type PointerEvent } from "react";
+﻿import { memo, useMemo, type MouseEvent, type PointerEvent } from "react";
 import type { AiProvider } from "../../../src/lib/tauri";
 import type { ContextUsage, SessionCacheTotals, TokenStats } from "../../../src/lib/streamStats";
 import { BrainIcon, EyeIcon, PlanIcon, ServerIcon, ShieldIcon, SparkIcon } from "../../../src/components/icons";
@@ -157,20 +157,20 @@ export const InputBar = memo(function InputBar({
         type="button"
         className={`${iconBtn} ${
           (agentMode === "plan" || planMode)
-            ? "bg-zinc-800 text-zinc-200 border border-zinc-700"
+            ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30"
             : agentMode === "code"
-              ? "bg-zinc-800 text-amber-300 border border-zinc-700"
+              ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
               : agentMode === "standard"
-                ? "bg-zinc-800 text-zinc-200 border border-zinc-700"
+                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
                 : agentMode === "minimal"
-                  ? "bg-zinc-800 text-zinc-300 border border-zinc-700"
+                  ? "bg-purple-500/20 text-purple-300 border border-purple-500/30"
                   : ""
         }`}
         onClick={onPickMode ?? onTogglePlan}
         onPointerDown={stopNode}
         onMouseDown={stopNode}
         aria-label={`Runtime mode: ${agentMode || (planMode ? "plan" : "auto")}`}
-        data-tooltip={`Mode: ${agentMode || (planMode ? "plan" : "auto")}\nChoose runtime mode: 🤖 Auto · 📋 Plan · ⚡ Code · 🌐 Standard · 🛡️ Minimal (/mode)`}
+        data-tooltip={`Mode: ${agentMode || (planMode ? "plan" : "auto")}\nChoose runtime mode:  Auto ·  Plan ·  Code ·  Standard ·  Minimal (/mode)`}
       >
         <PlanIcon size={14} />
       </button>
@@ -209,7 +209,7 @@ export const InputBar = memo(function InputBar({
             className="xc-git-pill max-w-[88px] truncate px-1 text-[10px] text-[var(--text-faint)]"
             data-tooltip={`Repo: ${gitLabel}`}
           >
-            ⎇ {gitLabel}
+             {gitLabel}
           </span>
         ) : null}
 
@@ -273,3 +273,5 @@ export const InputBar = memo(function InputBar({
     </div>
   );
 });
+
+

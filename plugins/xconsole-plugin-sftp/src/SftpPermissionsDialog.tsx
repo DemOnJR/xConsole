@@ -148,7 +148,7 @@ export function SftpPermissionsDialog({ entry, vpsId, onClose, onApplied }: Prop
 
         <div className="space-y-3 px-4 py-3">
           {loading ? (
-            <p className="text-xs text-gray-500">LoadingGǪ</p>
+            <p className="text-xs text-gray-500">Loading…</p>
           ) : (
             <>
               <div className="grid grid-cols-2 gap-2">
@@ -259,7 +259,7 @@ export function SftpPermissionsDialog({ entry, vpsId, onClose, onApplied }: Prop
             onClick={() => void apply()}
             disabled={loading || saving}
           >
-            {saving ? "ApplyingGǪ" : "OK"}
+            {saving ? "Applying…" : "OK"}
           </button>
         </div>
       </div>

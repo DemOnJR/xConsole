@@ -1,4 +1,4 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import type { DbColumn, DbResultSet } from "../../../src/lib/tauri";
 
 interface InsertRowModalProps {
@@ -165,7 +165,7 @@ export function InsertRowModal({
         <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
           <div>
             <h3 className="text-sm font-semibold text-[var(--text)]">
-              {isRedis ? "Add Redis Key" : `Insert Row -+ ${schema}.${table}`}
+              {isRedis ? "Add Redis Key" : `Insert Row · ${schema}.${table}`}
             </h3>
             <p className="text-[11px] text-[var(--text-dim)]">
               {isRedis
@@ -178,7 +178,7 @@ export function InsertRowModal({
             className="rounded p-1 text-[var(--text-dim)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
             onClick={onClose}
           >
-            G��
+            ✕
           </button>
         </div>
 
@@ -399,7 +399,7 @@ export function InsertRowModal({
               onClick={() => void handleSave(false)}
               className="rounded bg-violet-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
             >
-              {busy ? "InsertingGǪ" : "Insert Row"}
+              {busy ? "Inserting…" : "Insert Row"}
             </button>
           </div>
         </div>
@@ -407,3 +407,4 @@ export function InsertRowModal({
     </div>
   );
 }
+

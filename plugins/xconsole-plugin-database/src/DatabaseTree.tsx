@@ -15,6 +15,8 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   LayersIcon,
+  DockerIcon,
+  ServerIcon,
 } from "../../../src/components/icons";
 import { useMaskHost } from "../../../src/lib/privacy";
 
@@ -24,7 +26,7 @@ import { useMaskHost } from "../../../src/lib/privacy";
  * Every instance is listed as soon as it's discovered, signed in or not, so the tree
  * answers "what is actually running on this box" before any credential is typed. Sign-in
  * is per instance because a native install and a container routinely have different
- * passwords GÇö one shared login form would just fail against half of them.
+ * passwords â€” one shared login form would just fail against half of them.
  */
 export interface DbInstance {
   endpoint: DbEndpoint;
@@ -79,7 +81,7 @@ function SignIn({
   onForget,
 }: {
   instance: DbInstance;
-  /** Which server to tunnel through GÇö the endpoint itself doesn't carry it. */
+  /** Which server to tunnel through â€” the endpoint itself doesn't carry it. */
   vpsId: string;
   onConnected: (sessionId: string, version: string, schemas: string[]) => void;
   onError: (message: string) => void;
@@ -167,7 +169,7 @@ function SignIn({
             disabled={busy}
             className="min-w-0 flex-1 truncate rounded bg-violet-600 px-2 py-0.5 text-[11px] text-white hover:bg-violet-500 disabled:opacity-50"
           >
-            {busy ? "ConnectingGÇª" : `Connect as ${saved.username}`}
+            {busy ? "Connectingâ€¦" : `Connect as ${saved.username}`}
           </button>
           <button
             type="button"
@@ -252,15 +254,15 @@ function SignIn({
         disabled={busy}
         className="w-full rounded bg-violet-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-violet-500 disabled:opacity-50"
       >
-        {busy ? "ConnectingGÇª" : "Sign in"}
+        {busy ? "Connectingâ€¦" : "Sign in"}
       </button>
     </form>
   );
 }
 
 /**
- * The whole server's databases in one tree: every database instance found on the host GÇö
- * native installs and Docker containers alike, named and labelled with what they are GÇö
+ * The whole server's databases in one tree: every database instance found on the host â€”
+ * native installs and Docker containers alike, named and labelled with what they are â€”
  * and under each, its schemas/databases and tables.
  */
 export function DatabaseTree({
@@ -396,7 +398,7 @@ export function DatabaseTree({
               }`}
               data-tooltip={
                 connectedOnly
-                  ? "Showing connected servers only GÇö click to show all"
+                  ? "Showing connected servers only â€” click to show all"
                   : "Filter to connected servers only"
               }
             >
@@ -428,7 +430,7 @@ export function DatabaseTree({
             onKeyDown={(e) => {
               if (e.key === "Escape") setFilter("");
             }}
-            placeholder="Quick search tablesGÇª"
+            placeholder="Quick search tablesâ€¦"
             spellCheck={false}
             className="w-full rounded border border-[var(--border)] bg-[var(--surface)] pl-5 pr-5 py-0.5 text-[10px] text-gray-200 outline-none focus:border-violet-500 placeholder:text-gray-600"
           />
@@ -454,7 +456,7 @@ export function DatabaseTree({
       <div className="min-h-0 flex-1 overflow-auto py-1 space-y-0.5">
         {scanning && instances.length === 0 ? (
           <p className="px-2 py-2 text-[11px] text-gray-500">
-            Looking for databases over SSHGÇª
+            Looking for databases over SSHâ€¦
           </p>
         ) : null}
 
@@ -476,7 +478,7 @@ export function DatabaseTree({
                   type="button"
                   onClick={() => toggleInstance(inst)}
                   className="flex min-w-0 flex-1 items-center gap-1 text-left"
-                  title={`${maskHost(ep.host)}:${ep.port}${ep.image ? ` -+ ${ep.image}` : ""}`}
+                  title={`${maskHost(ep.host)}:${ep.port}${ep.image ? ` Â· ${ep.image}` : ""}`}
                 >
                   <span className="w-2.5 shrink-0 text-gray-500">
                     {inst.expanded ? (
@@ -486,10 +488,14 @@ export function DatabaseTree({
                     )}
                   </span>
                   <span
-                    className="shrink-0 text-xs"
+                    className="shrink-0 flex items-center"
                     title={docker ? "Docker container" : "Installed on the host"}
                   >
-                    {docker ? "=ƒÉ¦" : "=ƒûÑ"}
+                    {docker ? (
+                      <DockerIcon size={12} className="text-cyan-400" />
+                    ) : (
+                      <ServerIcon size={12} className="text-gray-400" />
+                    )}
                   </span>
                   <span className="truncate font-medium text-[11px]">
                     {docker && ep.container ? ep.container : "host"}
@@ -613,7 +619,7 @@ export function DatabaseTree({
                                           ? "bg-violet-600/25 text-violet-200 font-medium border-l-2 border-violet-500"
                                           : "text-gray-400 hover:bg-[var(--border)]/60 hover:text-gray-200"
                                       }`}
-                                      title={`${t.rows.toLocaleString()} rows -+ ${bytes(t.bytes)} -+ ${t.engine || t.kind}`}
+                                      title={`${t.rows.toLocaleString()} rows Â· ${bytes(t.bytes)} Â· ${t.engine || t.kind}`}
                                     >
                                       <span className="min-w-0 flex-1 truncate font-mono text-[10.5px]">
                                         {t.name}
@@ -635,7 +641,7 @@ export function DatabaseTree({
                             {open && tables.length === 0 ? (
                               <p className="py-0.5 pl-10 text-[10px] text-gray-600">
                                 {inst.busy
-                                  ? "Loading tablesGÇª"
+                                  ? "Loading tablesâ€¦"
                                   : filterQ
                                     ? "No matching tables."
                                     : "No tables in database."}
@@ -655,4 +661,5 @@ export function DatabaseTree({
     </div>
   );
 }
+
 

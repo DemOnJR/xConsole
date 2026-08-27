@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import { useAgentStore } from "../../../src/stores/agentStore";
 import { api, type AgentPlanFull } from "../../../src/lib/tauri";
 import { computePlanDiff } from "../../../src/lib/planDiff";
@@ -336,7 +336,7 @@ export function PlanModal() {
 
                     {activeActivityLabel && (
                       <div className="text-[10px] text-amber-200/90 font-mono break-all leading-tight">
-                        ⚙️ {activeActivityLabel}
+                         {activeActivityLabel}
                       </div>
                     )}
 
@@ -435,3 +435,5 @@ export function PlanModal() {
     </div>
   );
 }
+
+

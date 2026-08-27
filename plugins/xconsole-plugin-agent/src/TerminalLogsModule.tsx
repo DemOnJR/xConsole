@@ -1,4 +1,4 @@
-export function TerminalLogsModule() {
+﻿export function TerminalLogsModule() {
   return (
     <div className="border-b border-[var(--border)] bg-black/70 px-3 py-2.5 text-xs font-mono">
       <div className="flex items-center justify-between pb-1 border-b border-white/10">
@@ -15,3 +15,4 @@ export function TerminalLogsModule() {
     </div>
   );
 }
+

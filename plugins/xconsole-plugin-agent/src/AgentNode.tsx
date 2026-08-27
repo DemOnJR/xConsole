@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+﻿import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { NodeResizer, useStore, type NodeProps } from "@xyflow/react";
 
 import { useAgentStore } from "../../../src/stores/agentStore";
@@ -199,30 +199,30 @@ function QuestionCard({
   };
 
   return (
-    <div className="mb-2 rounded-lg border border-[var(--border-strong)] bg-[var(--surface-2)] p-3 last:mb-0">
-      <div className="mb-1.5 text-[11px] font-mono font-medium text-zinc-300">
-        Agent needs your input
+    <div className="mb-2 rounded-md border border-indigo-500/40 bg-indigo-500/10 p-2 last:mb-0">
+      <div className="mb-1.5 text-[11px] font-medium text-indigo-200">
+        The agent needs your input
       </div>
       {question.questions.map((q, qi) => (
         <div key={qi} className="mb-2 last:mb-0">
           {q.header && (
-            <div className="text-[10px] font-mono uppercase tracking-wider text-zinc-400">
+            <div className="text-[10px] uppercase tracking-wider text-indigo-300/70">
               {q.header}
             </div>
           )}
           <div className="mb-1 text-[12px] text-gray-200">{q.question}</div>
           {q.options && q.options.length > 0 && (
-            <div className="mb-1.5 flex flex-wrap gap-1">
+            <div className="mb-1 flex flex-wrap gap-1">
               {q.options.map((opt) => {
                 const on = (picked[qi] ?? []).includes(opt);
                 return (
                   <button
                     key={opt}
                     onClick={() => toggle(qi, opt, q.multi)}
-                    className={`rounded-md border px-2.5 py-1 text-[10px] font-mono transition ${
+                    className={`rounded-full border px-2 py-0.5 text-[10px] ${
                       on
-                        ? "border-zinc-200 bg-zinc-200 text-zinc-950 font-semibold"
-                        : "border-[var(--border)] bg-[var(--surface)] text-zinc-400 hover:text-zinc-200 hover:border-zinc-500"
+                        ? "border-indigo-500 bg-indigo-600/40 text-indigo-100"
+                        : "border-[var(--border)] text-gray-300 hover:bg-[var(--border)]"
                     }`}
                   >
                     {opt}
@@ -235,14 +235,14 @@ function QuestionCard({
             value={other[qi] ?? ""}
             onChange={(e) => setOther((o) => ({ ...o, [qi]: e.target.value }))}
             placeholder="Other… (type your own answer)"
-            className="w-full rounded border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1 text-[11px] text-gray-200 outline-none placeholder:text-zinc-600 focus:border-zinc-400 font-mono"
+            className="w-full rounded border border-[var(--border-strong)] bg-[var(--bg)] px-2 py-1 text-[11px] text-gray-200 outline-none placeholder:text-gray-600 focus:border-[#3d4a61]"
           />
         </div>
       ))}
-      <div className="flex justify-end pt-1">
+      <div className="flex justify-end">
         <button
           onClick={submit}
-          className="rounded bg-zinc-100 px-3 py-1 text-[11px] font-medium text-zinc-950 hover:bg-white transition"
+          className="rounded-md bg-indigo-600 px-2.5 py-1 text-[11px] text-white hover:bg-indigo-500"
         >
           Send answer
         </button>
@@ -1602,10 +1602,10 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
           {conversations.find((c) => c.id === sessionId)?.title || "agent"}
         </span>
         {planMode ? (
-          <span className="rounded bg-zinc-800 border border-zinc-700 px-1.5 py-0.2 text-[9px] font-mono text-zinc-300">plan</span>
+          <span className="rounded bg-indigo-500/20 px-1 text-[9px] text-indigo-300">plan</span>
         ) : null}
         {loopTask ? (
-          <span className="rounded bg-zinc-800 border border-zinc-700 px-1.5 py-0.2 text-[9px] font-mono text-zinc-300">
+          <span className="rounded bg-cyan-500/20 px-1 text-[9px] text-cyan-300">
             ⟳ {loopCount}/{loopMax}
           </span>
         ) : null}
@@ -2400,5 +2400,6 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
 
   );
 });
+
 
 

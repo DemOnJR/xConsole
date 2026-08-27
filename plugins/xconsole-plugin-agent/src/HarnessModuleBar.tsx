@@ -1,4 +1,4 @@
-export function HarnessModuleBar({
+﻿export function HarnessModuleBar({
   activeModule,
   onToggleModule,
   showGoal,
@@ -89,3 +89,4 @@ export function HarnessModuleBar({
     </div>
   );
 }
+

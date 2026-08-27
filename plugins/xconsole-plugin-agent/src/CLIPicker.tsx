@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 
 export interface CLIPickerOption {
   id: string;
@@ -265,3 +265,4 @@ export function CLIPicker({
     </div>
   );
 }
+
