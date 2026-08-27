@@ -62,12 +62,12 @@ export interface PluginManifest {
   homepage?: string;
   repository?: string;
   icon: string;
-  category: PluginCategory;
+  category: PluginCategory | string;
   enabled?: boolean;
   isBuiltin?: boolean;
   installedPath?: string;
   using?: string[];
-  capabilities: PluginCapabilities;
+  capabilities?: PluginCapabilities | Record<string, any>;
 }
 
 export interface PluginContext {

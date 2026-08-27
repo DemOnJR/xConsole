@@ -1,4 +1,4 @@
-import { definePlugin, type PluginDefinition } from "../../../src/sdk/plugin";
+import { definePlugin, type PluginDefinition } from "./sdk";
 import { SftpNode } from "./SftpNode";
 import manifest from "../plugin.json";
 

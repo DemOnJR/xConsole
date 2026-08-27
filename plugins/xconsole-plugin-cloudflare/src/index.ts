@@ -1,4 +1,4 @@
-import { definePlugin, type PluginDefinition } from "../../../src/sdk/plugin";
+import { definePlugin, type PluginDefinition } from "./sdk";
 import { CloudflareManager } from "./CloudflareManager";
 import manifest from "../plugin.json";
 

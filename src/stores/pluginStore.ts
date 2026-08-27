@@ -196,7 +196,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
       const activeNavItems = allPlugins
         .filter((p) => p.enabled !== false && p.capabilities?.navItem)
         .map((p) => ({
-          ...p.capabilities.navItem!,
+          ...(p.capabilities!.navItem as any),
           id: p.id,
         }))
         .sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
@@ -204,7 +204,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
       const activeAgentTools: PluginAgentToolCapability[] = [];
       for (const p of allPlugins) {
         if (p.enabled !== false && p.capabilities?.agentTools) {
-          activeAgentTools.push(...p.capabilities.agentTools);
+          activeAgentTools.push(...(p.capabilities.agentTools as any));
         }
       }
 
