@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import React, { useState, useMemo, useDeferredValue } from "react";
 import type { AgentAnalytics, CachePoint } from "../types";
 import { AreaChart } from "./AreaChart";
 import {
@@ -13,8 +13,9 @@ interface CacheTelemetryTabProps {
   data: AgentAnalytics;
 }
 
-export function CacheTelemetryTab({ data }: CacheTelemetryTabProps) {
+export const CacheTelemetryTab = React.memo(function CacheTelemetryTab({ data }: CacheTelemetryTabProps) {
   const [searchQuery, setSearchQuery] = useState("");
+  const deferredSearch = useDeferredValue(searchQuery);
   const [minPctFilter, setMinPctFilter] = useState<number>(0);
 
   // Compute metrics
@@ -42,7 +43,7 @@ export function CacheTelemetryTab({ data }: CacheTelemetryTabProps) {
 
   // Filtered log table
   const filteredLog = useMemo(() => {
-    const q = searchQuery.toLowerCase().trim();
+    const q = deferredSearch.toLowerCase().trim();
     return data.cache
       .filter((item: CachePoint) => {
         if (item.pct < minPctFilter) return false;
@@ -55,7 +56,7 @@ export function CacheTelemetryTab({ data }: CacheTelemetryTabProps) {
       })
       .slice()
       .reverse(); // Newest first
-  }, [data.cache, searchQuery, minPctFilter]);
+  }, [data.cache, deferredSearch, minPctFilter]);
 
   return (
     <div className="flex flex-col gap-6 animate-in fade-in duration-200">
@@ -250,4 +251,4 @@ export function CacheTelemetryTab({ data }: CacheTelemetryTabProps) {
       </div>
     </div>
   );
-}
+});

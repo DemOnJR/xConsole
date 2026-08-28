@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import React, { useState, useMemo, useDeferredValue } from "react";
 import type { AgentAnalytics, ConversationStat, ToolCount } from "../types";
 import {
   ChatIcon,
@@ -12,21 +12,22 @@ interface ConversationsTabProps {
   data: AgentAnalytics;
 }
 
-export function ConversationsTab({ data }: ConversationsTabProps) {
+export const ConversationsTab = React.memo(function ConversationsTab({ data }: ConversationsTabProps) {
   const [searchQuery, setSearchQuery] = useState("");
+  const deferredSearch = useDeferredValue(searchQuery);
   const [selectedId, setSelectedId] = useState<string | null>(
     data.conversations[0]?.id || null,
   );
 
   const filteredConversations = useMemo(() => {
-    const q = searchQuery.toLowerCase().trim();
+    const q = deferredSearch.toLowerCase().trim();
     if (!q) return data.conversations;
     return data.conversations.filter(
       (c: ConversationStat) =>
         (c.title || "").toLowerCase().includes(q) ||
         c.id.toLowerCase().includes(q),
     );
-  }, [data.conversations, searchQuery]);
+  }, [data.conversations, deferredSearch]);
 
   const selectedConv = useMemo(
     () => data.conversations.find((c: ConversationStat) => c.id === selectedId) || null,
@@ -237,4 +238,4 @@ export function ConversationsTab({ data }: ConversationsTabProps) {
       </div>
     </div>
   );
-}
+});

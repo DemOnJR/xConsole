@@ -1,4 +1,4 @@
-import { useState, useId } from "react";
+import React, { useState, useId, useMemo, useCallback } from "react";
 
 interface AreaChartProps {
   data: number[];
@@ -15,7 +15,7 @@ interface AreaChartProps {
   valueFormatter?: (v: number) => string;
 }
 
-export function AreaChart({
+export const AreaChart = React.memo(function AreaChart({
   data,
   labels,
   height = 140,
@@ -30,14 +30,6 @@ export function AreaChart({
   const chartId = useId();
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
-  if (!data || data.length === 0) {
-    return (
-      <div className="flex h-36 items-center justify-center text-xs text-[var(--text-faint,#71717a)]">
-        No telemetry samples collected yet
-      </div>
-    );
-  }
-
   const w = 600;
   const h = height;
   const padTop = 12;
@@ -47,36 +39,57 @@ export function AreaChart({
   const plotWidth = w - padLeft - padRight;
   const plotHeight = h - padTop - padBottom;
 
-  const min = Math.min(...data);
-  const max = Math.max(...data);
-  const avg = data.reduce((a, b) => a + b, 0) / data.length;
-  const span = Math.max(1e-4, max - min);
+  const chartMetrics = useMemo(() => {
+    if (!data || data.length === 0) {
+      return null;
+    }
 
-  const points = data.map((v, i) => {
-    const x = padLeft + (i / Math.max(1, data.length - 1)) * plotWidth;
-    const y = padTop + plotHeight - ((v - min) / span) * plotHeight;
-    return { x, y, value: v, label: labels?.[i] };
-  });
+    const min = Math.min(...data);
+    const max = Math.max(...data);
+    const avg = data.reduce((a, b) => a + b, 0) / data.length;
+    const span = Math.max(1e-4, max - min);
 
-  const polylinePts = points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
-  const areaPath = `M ${points[0]?.x ?? 0} ${padTop + plotHeight} L ${polylinePts} L ${points[points.length - 1]?.x ?? 0} ${padTop + plotHeight} Z`;
+    const points = data.map((v, i) => {
+      const x = padLeft + (i / Math.max(1, data.length - 1)) * plotWidth;
+      const y = padTop + plotHeight - ((v - min) / span) * plotHeight;
+      return { x, y, value: v, label: labels?.[i] };
+    });
 
-  const format = valueFormatter || ((v: number) => `${v.toFixed(1)}${unit ? ` ${unit}` : ""}`);
+    const polylinePts = points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+    const areaPath = `M ${points[0]?.x ?? 0} ${padTop + plotHeight} L ${polylinePts} L ${points[points.length - 1]?.x ?? 0} ${padTop + plotHeight} Z`;
 
-  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    return { min, max, avg, points, polylinePts, areaPath };
+  }, [data, labels, height, plotWidth, plotHeight]);
+
+  const handleMouseMove = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
+    if (!data || data.length === 0) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const clientX = e.clientX - rect.left;
     const normX = Math.max(0, Math.min(1, (clientX - padLeft) / plotWidth));
     const idx = Math.round(normX * (data.length - 1));
     if (idx >= 0 && idx < data.length) {
-      setHoverIndex(idx);
+      setHoverIndex((prev) => (prev === idx ? prev : idx));
     }
-  };
+  }, [data, plotWidth]);
 
+  const handleMouseLeave = useCallback(() => {
+    setHoverIndex(null);
+  }, []);
+
+  if (!chartMetrics) {
+    return (
+      <div className="flex h-36 items-center justify-center text-xs text-[var(--text-faint,#71717a)]">
+        No telemetry samples collected yet
+      </div>
+    );
+  }
+
+  const { min, max, avg, points, polylinePts, areaPath } = chartMetrics;
+  const format = valueFormatter || ((v: number) => `${v.toFixed(1)}${unit ? ` ${unit}` : ""}`);
   const activePoint = hoverIndex !== null ? points[hoverIndex] : null;
 
   return (
-    <div className="flex flex-col gap-2 select-none">
+    <div className="flex flex-col gap-2 select-none" style={{ contain: "content" }}>
       {(title || subtitle) && (
         <div className="flex items-baseline justify-between gap-2">
           <div>
@@ -101,8 +114,9 @@ export function AreaChart({
           viewBox={`0 0 ${w} ${h}`}
           preserveAspectRatio="none"
           className="block overflow-visible cursor-crosshair"
+          shapeRendering="geometricPrecision"
           onMouseMove={handleMouseMove}
-          onMouseLeave={() => setHoverIndex(null)}
+          onMouseLeave={handleMouseLeave}
         >
           <defs>
             <linearGradient id={`grad-${chartId}`} x1="0" y1="0" x2="0" y2="1">
@@ -161,7 +175,7 @@ export function AreaChart({
         {/* Hover Tooltip Overlay */}
         {activePoint && (
           <div
-            className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-full rounded-md border border-[var(--border,#3f3f46)] bg-[var(--surface,#09090b)] px-2.5 py-1 text-xs shadow-xl transition-transform"
+            className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-full rounded-md border border-[var(--border,#3f3f46)] bg-[var(--surface,#09090b)] px-2.5 py-1 text-xs shadow-xl"
             style={{
               left: `${(activePoint.x / w) * 100}%`,
               top: `${Math.max(24, (activePoint.y / h) * 100)}%`,
@@ -180,4 +194,4 @@ export function AreaChart({
       </div>
     </div>
   );
-}
+});

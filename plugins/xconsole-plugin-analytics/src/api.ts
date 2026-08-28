@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AgentAnalytics, Vps } from "./types";
+import type { AgentAnalytics, ResourceSnapshot, Vps } from "./types";
 
 async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   try {
@@ -18,5 +18,6 @@ async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Prom
 
 export const api = {
   agentAnalytics: () => tauriInvoke<AgentAnalytics>("agent_analytics"),
+  appResourceSnapshot: () => tauriInvoke<ResourceSnapshot>("app_resource_snapshot"),
   listVps: () => tauriInvoke<Vps[]>("list_vps_cmd"),
 };

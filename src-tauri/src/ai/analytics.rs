@@ -1,11 +1,14 @@
-//! Agent + app analytics assembled for the left-rail dashboard.
-
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
+use std::sync::{Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
 use crate::storage::Db;
+
+static SYSTEM_HOLDER: Mutex<Option<sysinfo::System>> = Mutex::new(None);
+static CACHED_ANALYTICS: RwLock<Option<(AgentAnalytics, Instant)>> = RwLock::new(None);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CachePoint {
@@ -56,6 +59,17 @@ pub struct AgentAnalytics {
 }
 
 pub fn collect(db: &Db) -> AgentAnalytics {
+    // Check if we have a fresh cached analytics structure (< 3s old)
+    if let Ok(guard) = CACHED_ANALYTICS.read() {
+        if let Some((cached, instant)) = guard.as_ref() {
+            if instant.elapsed() < Duration::from_secs(3) {
+                let mut fast_clone = cached.clone();
+                fast_clone.resource = resource_snapshot();
+                return fast_clone;
+            }
+        }
+    }
+
     let cache = read_cache_log(400);
     let cache_avg_pct = if cache.is_empty() {
         0.0
@@ -74,13 +88,20 @@ pub fn collect(db: &Db) -> AgentAnalytics {
         .map(|(name, count)| ToolCount { name, count })
         .collect();
     tools_all.sort_by(|a, b| b.count.cmp(&a.count).then(a.name.cmp(&b.name)));
-    AgentAnalytics {
+
+    let full = AgentAnalytics {
         cache,
         cache_avg_pct,
         conversations,
         tools_all,
         resource: resource_snapshot(),
+    };
+
+    if let Ok(mut guard) = CACHED_ANALYTICS.write() {
+        *guard = Some((full.clone(), Instant::now()));
     }
+
+    full
 }
 
 fn read_cache_log(max: usize) -> Vec<CachePoint> {
@@ -167,12 +188,17 @@ fn conversation_stats(db: &Db, limit: i64) -> Vec<ConversationStat> {
 
 pub fn resource_snapshot() -> ResourceSnapshot {
     use sysinfo::{Pid, ProcessesToUpdate, System};
-    let mut sys = System::new();
-    sys.refresh_memory();
     let pid = Pid::from_u32(std::process::id());
-    sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-    // A second refresh so cpu_usage() has a delta instead of 0.
-    std::thread::sleep(std::time::Duration::from_millis(80));
+
+    let mut guard = SYSTEM_HOLDER.lock().unwrap_or_else(|e| e.into_inner());
+    let sys = guard.get_or_insert_with(|| {
+        let mut s = System::new();
+        s.refresh_memory();
+        s.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+        s
+    });
+
+    sys.refresh_memory();
     sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
 
     let (process_ram_mb, cpu_pct) = sys

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import React, { useMemo, type ReactNode } from "react";
 
 interface GaugeProps {
   value: number; // 0 to 100
@@ -11,7 +11,7 @@ interface GaugeProps {
   formatValue?: (v: number) => string;
 }
 
-export function Gauge({
+export const Gauge = React.memo(function Gauge({
   value,
   label,
   sublabel,
@@ -27,14 +27,16 @@ export function Gauge({
   const offset = circumference - (clamped / 100) * circumference;
 
   // Auto determine color if not provided
-  let strokeColor = color;
-  if (!strokeColor) {
-    if (clamped >= 85) strokeColor = "#ef4444"; // Red
-    else if (clamped >= 65) strokeColor = "#f59e0b"; // Amber
-    else strokeColor = "#10b981"; // Emerald
-  }
+  const strokeColor = useMemo(() => {
+    if (color) return color;
+    if (clamped >= 85) return "#ef4444"; // Red
+    if (clamped >= 65) return "#f59e0b"; // Amber
+    return "#10b981"; // Emerald
+  }, [color, clamped]);
 
-  const formatted = formatValue ? formatValue(clamped) : `${Math.round(clamped)}%`;
+  const formatted = useMemo(() => {
+    return formatValue ? formatValue(clamped) : `${Math.round(clamped)}%`;
+  }, [formatValue, clamped]);
 
   return (
     <div className="flex flex-col items-center justify-center p-3 rounded-xl border border-[var(--border,#27272a)] bg-[var(--surface-2,#18181b)]/40 hover:border-[var(--accent,#06b6d4)]/40 transition-colors">
@@ -61,7 +63,8 @@ export function Gauge({
             strokeDashoffset={offset}
             strokeLinecap="round"
             fill="none"
-            className="transition-all duration-700 ease-out"
+            className="transition-all duration-300 ease-out"
+            style={{ willChange: "stroke-dashoffset" }}
           />
         </svg>
 
@@ -82,4 +85,4 @@ export function Gauge({
       </div>
     </div>
   );
-}
+});

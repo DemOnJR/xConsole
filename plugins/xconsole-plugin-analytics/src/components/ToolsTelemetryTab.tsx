@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import React, { useState, useMemo, useDeferredValue } from "react";
 import type { AgentAnalytics, ToolCount } from "../types";
 import {
   ToolIcon,
@@ -30,8 +30,9 @@ function getToolCategory(name: string): { label: string; color: string; icon: st
   return { label: "General Tool", color: "text-zinc-400 bg-zinc-500/10 border-zinc-500/20", icon: "gen" };
 }
 
-export function ToolsTelemetryTab({ data }: ToolsTelemetryTabProps) {
+export const ToolsTelemetryTab = React.memo(function ToolsTelemetryTab({ data }: ToolsTelemetryTabProps) {
   const [searchQuery, setSearchQuery] = useState("");
+  const deferredSearch = useDeferredValue(searchQuery);
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [sortBy, setSortBy] = useState<"count" | "name">("count");
 
@@ -57,7 +58,7 @@ export function ToolsTelemetryTab({ data }: ToolsTelemetryTabProps) {
 
   // Filtered tools
   const filteredTools = useMemo(() => {
-    const q = searchQuery.toLowerCase().trim();
+    const q = deferredSearch.toLowerCase().trim();
     return data.tools_all
       .filter((t: ToolCount) => {
         if (selectedCategory !== "all" && getToolCategory(t.name).label !== selectedCategory) {
@@ -70,7 +71,7 @@ export function ToolsTelemetryTab({ data }: ToolsTelemetryTabProps) {
         if (sortBy === "count") return b.count - a.count;
         return a.name.localeCompare(b.name);
       });
-  }, [data.tools_all, searchQuery, selectedCategory, sortBy]);
+  }, [data.tools_all, deferredSearch, selectedCategory, sortBy]);
 
   return (
     <div className="flex flex-col gap-6 animate-in fade-in duration-200">
@@ -235,4 +236,4 @@ export function ToolsTelemetryTab({ data }: ToolsTelemetryTabProps) {
       </div>
     </div>
   );
-}
+});

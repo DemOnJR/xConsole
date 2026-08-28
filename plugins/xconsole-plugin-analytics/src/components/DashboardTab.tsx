@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import React, { useMemo } from "react";
 import type { AgentAnalytics, ResourceSnapshot, CachePoint, ToolCount } from "../types";
 import { AreaChart } from "./AreaChart";
 import { Gauge } from "./Gauge";
@@ -18,7 +18,7 @@ interface DashboardTabProps {
   onSelectTab: (tabId: string) => void;
 }
 
-export function DashboardTab({ data, samples, onSelectTab }: DashboardTabProps) {
+export const DashboardTab = React.memo(function DashboardTab({ data, samples, onSelectTab }: DashboardTabProps) {
   const lastSample = samples[samples.length - 1] ?? data.resource;
 
   // Cache sparkline numbers
@@ -351,4 +351,4 @@ export function DashboardTab({ data, samples, onSelectTab }: DashboardTabProps) 
       </div>
     </div>
   );
-}
+});

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import React, { useState, useMemo } from "react";
 import type { AgentAnalytics, ResourceSnapshot, ToolCount, CachePoint } from "../types";
 import {
   DownloadIcon,
@@ -12,17 +12,18 @@ interface ExportReportsTabProps {
   samples: ResourceSnapshot[];
 }
 
-export function ExportReportsTab({ data, samples }: ExportReportsTabProps) {
+export const ExportReportsTab = React.memo(function ExportReportsTab({ data, samples }: ExportReportsTabProps) {
   const [copied, setCopied] = useState(false);
 
-  const fullReport = {
-    exportedAt: new Date().toISOString(),
-    version: "2.0.0",
-    analytics: data,
-    recentResourceSamples: samples,
-  };
-
-  const jsonString = JSON.stringify(fullReport, null, 2);
+  const jsonString = useMemo(() => {
+    const fullReport = {
+      exportedAt: new Date().toISOString(),
+      version: "2.0.0",
+      analytics: data,
+      recentResourceSamples: samples,
+    };
+    return JSON.stringify(fullReport, null, 2);
+  }, [data, samples]);
 
   const handleCopy = () => {
     void navigator.clipboard.writeText(jsonString);
@@ -159,4 +160,4 @@ export function ExportReportsTab({ data, samples }: ExportReportsTabProps) {
       </div>
     </div>
   );
-}
+});

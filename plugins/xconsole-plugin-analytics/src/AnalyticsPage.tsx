@@ -54,41 +54,66 @@ export function AnalyticsPage({ onClose }: { onClose?: () => void }) {
   const [samples, setSamples] = useState<ResourceSnapshot[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [pollIntervalSec, setPollIntervalSec] = useState<number>(3); // 3 seconds default
+  const [pollIntervalSec, setPollIntervalSec] = useState<number>(1); // 1s default for 60fps-smooth stream
   const [isPaused, setIsPaused] = useState(false);
 
-  // Fetch telemetry
-  const fetchTelemetry = useCallback(async () => {
+  // 1. Fetch full analytics (cache, tools, sessions, resource)
+  const fetchFullAnalytics = useCallback(async (showLoading = false) => {
     try {
-      setIsRefreshing(true);
+      if (showLoading) setIsRefreshing(true);
       const a = await api.agentAnalytics();
       setData(a);
       setErr(null);
       setSamples((prev) => {
-        const next = [...prev.slice(-179), a.resource];
+        const next = [...prev.slice(-119), a.resource];
         return next;
       });
     } catch (e: unknown) {
       setErr(String(e));
     } finally {
-      setIsRefreshing(false);
+      if (showLoading) setIsRefreshing(false);
     }
   }, []);
 
-  // Polling loop
-  useEffect(() => {
-    void fetchTelemetry();
+  // 2. Fast lightweight resource tick (<0.2ms) for continuous smooth sliding window
+  const fetchResourceTick = useCallback(async () => {
+    if (document.hidden) return;
+    try {
+      const snap = await api.appResourceSnapshot();
+      setSamples((prev) => {
+        const next = [...prev.slice(-119), snap];
+        return next;
+      });
+    } catch {
+      // ignore transient tick failure
+    }
+  }, []);
 
+  // Initial full fetch on mount & periodic 15s background refresh
+  useEffect(() => {
+    void fetchFullAnalytics(true);
+
+    const fullInterval = window.setInterval(() => {
+      if (!document.hidden && !isPaused) {
+        void fetchFullAnalytics(false);
+      }
+    }, 15000);
+
+    return () => window.clearInterval(fullInterval);
+  }, [fetchFullAnalytics, isPaused]);
+
+  // Fast real-time hardware stream polling loop
+  useEffect(() => {
     if (isPaused || pollIntervalSec <= 0) return;
 
     const intervalId = window.setInterval(() => {
-      void fetchTelemetry();
+      void fetchResourceTick();
     }, pollIntervalSec * 1000);
 
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [fetchTelemetry, isPaused, pollIntervalSec]);
+  }, [fetchResourceTick, isPaused, pollIntervalSec]);
 
   // Handle ESC key to close modal
   useEffect(() => {
@@ -174,7 +199,7 @@ export function AnalyticsPage({ onClose }: { onClose?: () => void }) {
           {/* Manual Refresh Button */}
           <button
             type="button"
-            onClick={() => void fetchTelemetry()}
+            onClick={() => void fetchFullAnalytics(true)}
             disabled={isRefreshing}
             className="flex h-8 items-center gap-1.5 rounded-lg border border-[var(--border,#27272a)] bg-[var(--surface,#09090b)] px-2.5 text-xs font-mono text-[var(--text-dim,#a1a1aa)] hover:bg-white/5 hover:text-white transition cursor-pointer disabled:opacity-50"
             title="Manual refresh"

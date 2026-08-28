@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { api } from "../api";
 import type { Vps } from "../types";
 import {
@@ -9,7 +9,7 @@ import {
   CheckCircleIcon,
 } from "../icons";
 
-export function InfrastructureTab() {
+export const InfrastructureTab = React.memo(function InfrastructureTab() {
   const [vpsList, setVpsList] = useState<Vps[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -159,4 +159,4 @@ export function InfrastructureTab() {
       </div>
     </div>
   );
-}
+});

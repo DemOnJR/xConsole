@@ -1,6 +1,5 @@
-//! Best-effort GPU name / load / VRAM for any vendor (NVIDIA, AMD, Intel, …).
-//! NVIDIA still uses `nvidia-smi` when present; everything else falls back to
-//! OS APIs so Intel iGPUs and AMD cards are not reported as "n/a".
+use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Default)]
 pub struct GpuSnapshot {
@@ -10,22 +9,49 @@ pub struct GpuSnapshot {
     pub mem_total_mb: Option<u64>,
 }
 
+static HAS_NVIDIA: OnceLock<bool> = OnceLock::new();
+static CACHED_GPU: RwLock<Option<(GpuSnapshot, Instant)>> = RwLock::new(None);
+
 pub fn snapshot() -> GpuSnapshot {
-    if let Some(s) = probe_nvidia() {
-        return s;
+    // 1. Fast path: return cached snapshot if fresh (< 5s)
+    if let Ok(guard) = CACHED_GPU.read() {
+        if let Some((snap, instant)) = guard.as_ref() {
+            if instant.elapsed() < Duration::from_secs(5) {
+                return snap.clone();
+            }
+        }
     }
-    #[cfg(windows)]
-    {
-        if let Some(s) = probe_windows() {
+
+    // 2. Slow path: probe without blocking caller for too long
+    let snap = probe_all();
+    if let Ok(mut guard) = CACHED_GPU.write() {
+        *guard = Some((snap.clone(), Instant::now()));
+    }
+    snap
+}
+
+fn probe_all() -> GpuSnapshot {
+    let has_nvidia = *HAS_NVIDIA.get_or_init(|| probe_nvidia().is_some());
+    if has_nvidia {
+        if let Some(s) = probe_nvidia() {
             return s;
         }
     }
+
+    #[cfg(windows)]
+    {
+        if let Some(s) = probe_windows_cached() {
+            return s;
+        }
+    }
+
     #[cfg(target_os = "linux")]
     {
         if let Some(s) = probe_linux() {
             return s;
         }
     }
+
     GpuSnapshot::default()
 }
 
@@ -65,10 +91,16 @@ fn probe_nvidia() -> Option<GpuSnapshot> {
 }
 
 #[cfg(windows)]
-fn probe_windows() -> Option<GpuSnapshot> {
-    // Names from WMI (Intel iGPU included — registry VRAM is often 0 for shared).
-    // Dedicated VRAM from the display-class registry (accurate above 4 GB).
-    // Load / dedicated-used from GPU Engine / Adapter Memory counters (all vendors).
+static STATIC_WIN_GPU: OnceLock<Option<GpuSnapshot>> = OnceLock::new();
+
+#[cfg(windows)]
+fn probe_windows_cached() -> Option<GpuSnapshot> {
+    let static_info = STATIC_WIN_GPU.get_or_init(probe_windows_static);
+    static_info.clone()
+}
+
+#[cfg(windows)]
+fn probe_windows_static() -> Option<GpuSnapshot> {
     let script = r#"
 $ErrorActionPreference = 'SilentlyContinue'
 $names = @(Get-CimInstance Win32_VideoController | Where-Object { $_.Name -and $_.PNPDeviceID } | ForEach-Object { $_.Name.Trim() } | Select-Object -Unique)
@@ -77,17 +109,7 @@ $totalBytes = 0
 Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\*' |
   Where-Object { $_.'HardwareInformation.qwMemorySize' } |
   ForEach-Object { $n = [int64]$_.'HardwareInformation.qwMemorySize'; if ($n -gt $totalBytes) { $totalBytes = $n } }
-$util = ''
-$used = ''
-try {
-  $c = Get-Counter '\GPU Engine(*)\Utilization Percentage'
-  if ($c) { $util = [int][math]::Round(($c.CounterSamples | Measure-Object CookedValue -Maximum).Maximum) }
-} catch {}
-try {
-  $m = Get-Counter '\GPU Adapter Memory(*)\Dedicated Usage'
-  if ($m) { $used = [int](($m.CounterSamples | Measure-Object CookedValue -Maximum).Maximum / 1MB) }
-} catch {}
-Write-Output ("{0}|{1}|{2}|{3}" -f $util, $used, [int]($totalBytes / 1MB), $name)
+Write-Output ("||{0}|{1}" -f [int]($totalBytes / 1MB), $name)
 "#;
     let out = crate::proc::quiet_command("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])

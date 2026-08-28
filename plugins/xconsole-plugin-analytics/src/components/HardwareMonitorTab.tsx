@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import React, { useMemo } from "react";
 import type { ResourceSnapshot } from "../types";
 import { AreaChart } from "./AreaChart";
 import { Gauge } from "./Gauge";
@@ -14,7 +14,7 @@ interface HardwareMonitorTabProps {
   lastSample: ResourceSnapshot;
 }
 
-export function HardwareMonitorTab({ samples, lastSample }: HardwareMonitorTabProps) {
+export const HardwareMonitorTab = React.memo(function HardwareMonitorTab({ samples, lastSample }: HardwareMonitorTabProps) {
   const cpuData = useMemo(() => samples.map((s: ResourceSnapshot) => s.cpu_pct), [samples]);
   const systemRamData = useMemo(() => samples.map((s: ResourceSnapshot) => s.ram_mb), [samples]);
   const timestamps = useMemo(
@@ -151,4 +151,4 @@ export function HardwareMonitorTab({ samples, lastSample }: HardwareMonitorTabPr
       </div>
     </div>
   );
-}
+});
