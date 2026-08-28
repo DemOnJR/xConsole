@@ -6,7 +6,7 @@ export const VISION_MODE_KEY = "agent.vision_mode";
 export const VISION_PROVIDER_KEY = "agent.vision_provider";
 export const VISION_MODEL_KEY = "agent.vision_model";
 
-const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i;
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|ico|avif|tiff)$/i;
 const MAX_EDGE = 2048;
 const MAX_BYTES = 8 * 1024 * 1024;
 
@@ -24,9 +24,15 @@ export function isImagePath(path: string): boolean {
 export function mimeFromName(name: string): string {
   const ext = name.trim().toLowerCase().split(".").pop() ?? "";
   if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "png") return "image/png";
   if (ext === "gif") return "image/gif";
   if (ext === "webp") return "image/webp";
-  return "image/png";
+  if (ext === "svg") return "image/svg+xml";
+  if (ext === "bmp") return "image/bmp";
+  if (ext === "ico") return "image/x-icon";
+  if (ext === "avif") return "image/avif";
+  if (ext === "tiff" || ext === "tif") return "image/tiff";
+  return "";
 }
 
 export function fileBaseName(path: string): string {
@@ -118,13 +124,13 @@ export async function bytesToChatImage(
   name: string,
   mimeHint?: string,
 ): Promise<ChatImage> {
-  const mime = mimeHint && mimeHint.startsWith("image/") ? mimeHint : mimeFromName(name);
+  const mime = (mimeHint && mimeHint.startsWith("image/") ? mimeHint : mimeFromName(name)) || "image/png";
   const blob = new Blob([bytes as BlobPart], { type: mime });
   return normalizeImageBlob(blob, name, mime);
 }
 
 export async function fileToChatImage(file: File): Promise<ChatImage> {
-  return normalizeImageBlob(file, file.name || "image.png", file.type || mimeFromName(file.name));
+  return normalizeImageBlob(file, file.name || "image.png", file.type || mimeFromName(file.name) || "image/png");
 }
 
 async function normalizeImageBlob(blob: Blob, name: string, mime: string): Promise<ChatImage> {
@@ -182,28 +188,103 @@ export function previewSrc(img: ChatImage): string {
   return `data:${img.media_type || "image/png"};base64,${img.data}`;
 }
 
-/** Image files sitting on a paste/drop DataTransfer (browser clipboard). */
-export function imagesFromClipboardEvent(data: DataTransfer | null | undefined): File[] {
-  if (!data) return [];
-  const out: File[] = [];
+/** All files sitting on a paste/drop DataTransfer, partitioned into images and other files. */
+export function filesFromClipboardEvent(data: DataTransfer | null | undefined): { images: File[]; files: File[] } {
+  if (!data) return { images: [], files: [] };
+  const images: File[] = [];
+  const files: File[] = [];
   const seen = new Set<string>();
   const add = (file: File | null | undefined) => {
     if (!file) return;
     const type = (file.type || mimeFromName(file.name)).toLowerCase();
-    if (!type.startsWith("image/")) return;
     const key = `${file.name}:${file.size}:${type}`;
     if (seen.has(key)) return;
     seen.add(key);
-    out.push(file);
+    if (type.startsWith("image/") || isImagePath(file.name)) {
+      images.push(file);
+    } else {
+      files.push(file);
+    }
   };
   for (const file of Array.from(data.files ?? [])) add(file);
   for (const item of Array.from(data.items ?? [])) {
     if (item.kind === "file") add(item.getAsFile());
   }
-  return out;
+  return { images, files };
 }
 
-/** True when the OS clipboard is likely a screenshot (WebView2 often omits the bytes). */
+/** Image files sitting on a paste/drop DataTransfer (browser clipboard). */
+export function imagesFromClipboardEvent(data: DataTransfer | null | undefined): File[] {
+  return filesFromClipboardEvent(data).images;
+}
+
+/** Parse candidate absolute local file paths from text/uri-list or text/plain. */
+export function extractFilePathsFromClipboard(data: DataTransfer | null | undefined): string[] {
+  if (!data) return [];
+  const paths: string[] = [];
+  const uriList = data.getData("text/uri-list") || "";
+  if (uriList) {
+    for (const line of uriList.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      if (trimmed.startsWith("file:///")) {
+        let raw = trimmed.slice("file:///".length);
+        try {
+          raw = decodeURIComponent(raw);
+        } catch {
+          /* ignore decode error */
+        }
+        if (/^[a-zA-Z]:\//i.test(raw)) {
+          paths.push(raw.replace(/\//g, "\\"));
+        } else {
+          paths.push("/" + raw);
+        }
+      } else if (trimmed.startsWith("file://")) {
+        let raw = trimmed.slice("file://".length);
+        try {
+          raw = decodeURIComponent(raw);
+        } catch {
+          /* ignore */
+        }
+        paths.push(raw);
+      }
+    }
+  }
+
+  const text = data.getData("text/plain") || "";
+  if (text && text.length < 4000) {
+    const rawLines = text
+      .split(/\r?\n/)
+      .map((l) => l.trim().replace(/^["']|["']$/g, ""))
+      .filter(Boolean);
+    const isWindowsPath = (s: string) => /^[a-zA-Z]:[\\/][^<>:"|?*\n\r]+$/.test(s);
+    const isUnixPath = (s: string) => /^\/[^<>:"|?*\n\r]+$/.test(s);
+    if (
+      rawLines.length > 0 &&
+      rawLines.length <= 20 &&
+      rawLines.every((l) => isWindowsPath(l) || isUnixPath(l) || l.startsWith("file://"))
+    ) {
+      for (const line of rawLines) {
+        if (line.startsWith("file:///")) {
+          let raw = line.slice("file:///".length);
+          try {
+            raw = decodeURIComponent(raw);
+          } catch {
+            /* ignore */
+          }
+          if (/^[a-zA-Z]:\//i.test(raw)) paths.push(raw.replace(/\//g, "\\"));
+          else paths.push("/" + raw);
+        } else if (!paths.includes(line)) {
+          paths.push(line);
+        }
+      }
+    }
+  }
+
+  return Array.from(new Set(paths));
+}
+
+/** True when the OS clipboard is likely a screenshot or copied file. */
 export function clipboardLooksLikeImage(data: DataTransfer | null | undefined): boolean {
   if (!data) return false;
   if (imagesFromClipboardEvent(data).length > 0) return true;
@@ -211,7 +292,10 @@ export function clipboardLooksLikeImage(data: DataTransfer | null | undefined): 
   if (types.some((t) => t.startsWith("image/") || t === "files" || t.includes("png") || t.includes("dib"))) {
     return true;
   }
+  const paths = extractFilePathsFromClipboard(data);
+  if (paths.some((p) => isImagePath(p))) return true;
   const text = data.getData("text/plain")?.trim() ?? "";
   if (text && isImagePath(text)) return true;
   return false;
 }
+

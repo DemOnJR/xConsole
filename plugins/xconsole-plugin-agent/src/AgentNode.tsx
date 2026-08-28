@@ -27,7 +27,9 @@ import {
   bytesToChatImage,
   clipboardLooksLikeImage,
   defaultVisionModel,
+  extractFilePathsFromClipboard,
   fileBaseName,
+  filesFromClipboardEvent,
   fileToChatImage,
   imagesFromClipboardEvent,
   isGeminiProvider,
@@ -59,7 +61,7 @@ import {
 } from "./agentCommands";
 import { notify } from "../../../src/lib/notify";
 import { catalogForProvider } from "../../../src/lib/providerCatalog";
-import { ImageIcon, ToolsIcon, RefreshIcon, CloseIcon } from "../../../src/components/icons";
+import { PaperclipIcon, ImageIcon, ToolsIcon, RefreshIcon, CloseIcon } from "../../../src/components/icons";
 import { createChatSnippet, shouldCreateSnippet, type ChatSnippet } from "../../../src/lib/snippetDetect";
 import { SnippetPreviewModal } from "./SnippetPreviewModal";
 import { TrajectoryModal } from "./TrajectoryModal";
@@ -1289,6 +1291,12 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     requestAnimationFrame(() => inputRef.current?.focus());
   };
 
+  const addSnippets = (snips: ChatSnippet[]) => {
+    if (snips.length === 0) return;
+    setPendingSnippets((cur) => [...cur, ...snips].slice(0, 10));
+    requestAnimationFrame(() => inputRef.current?.focus());
+  };
+
   const insertComposerText = (text: string) => {
     const el = inputRef.current;
     const cur = el?.value ?? "";
@@ -1306,16 +1314,87 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     });
   };
 
-  const attachClipboardImages = async (data: DataTransfer | null | undefined): Promise<boolean> => {
-    const files = imagesFromClipboardEvent(data);
-    if (files.length) {
-      addImages(await Promise.all(files.map((f) => fileToChatImage(f))));
+  const loadImagePath = async (path: string): Promise<ChatImage | null> => {
+    try {
+      const b64 = await api.localFsReadBytes(path, 10 * 1024 * 1024);
+      const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      return await bytesToChatImage(bin, fileBaseName(path));
+    } catch {
+      return null;
+    }
+  };
+
+  const attachClipboardFilesAndImages = async (data: DataTransfer | null | undefined): Promise<boolean> => {
+    if (!data) return false;
+    let attached = false;
+
+    // 1. Direct File items on clipboard (pasted from web or OS)
+    const { images, files } = filesFromClipboardEvent(data);
+    if (images.length > 0) {
+      const chatImgs = await Promise.all(images.map((f) => fileToChatImage(f)));
+      addImages(chatImgs);
+      attached = true;
+    }
+    if (files.length > 0) {
+      const snips: ChatSnippet[] = [];
+      for (const f of files) {
+        try {
+          const content = await f.text();
+          if (content) {
+            snips.push(createChatSnippet(content, f.name));
+          }
+        } catch {
+          /* ignore unreadable */
+        }
+      }
+      if (snips.length > 0) {
+        addSnippets(snips);
+        attached = true;
+      }
+    }
+
+    if (attached) return true;
+
+    // 2. Candidate local file paths on clipboard (e.g. copied from Windows Explorer / Finder)
+    const candidatePaths = extractFilePathsFromClipboard(data);
+    if (candidatePaths.length > 0) {
+      const imgs: ChatImage[] = [];
+      const snips: ChatSnippet[] = [];
+      for (const path of candidatePaths) {
+        if (isImagePath(path)) {
+          const img = await loadImagePath(path);
+          if (img) imgs.push(img);
+        } else {
+          try {
+            const content = await api.localFsReadText(path, 2 * 1024 * 1024);
+            if (content) {
+              snips.push(createChatSnippet(content, fileBaseName(path)));
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+      if (imgs.length > 0) {
+        addImages(imgs);
+        attached = true;
+      }
+      if (snips.length > 0) {
+        addSnippets(snips);
+        attached = true;
+      }
+    }
+
+    if (attached) return true;
+
+    // 3. Fallback: OS image / screenshot clipboard
+    const png = await clipboardImagePng();
+    if (png) {
+      addImages([await bytesToChatImage(png, "clipboard.png")]);
       return true;
     }
-    const png = await clipboardImagePng();
-    if (!png) return false;
-    addImages([await bytesToChatImage(png, "clipboard.png")]);
-    return true;
+
+    return false;
   };
 
   const onAgentPaste = (e: ClipboardEvent) => {
@@ -1335,28 +1414,29 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     }
 
     const data = e.clipboardData;
-    const htmlImages = imagesFromClipboardEvent(data);
-    const looksImage = clipboardLooksLikeImage(data);
+    const { images: htmlImages, files: htmlFiles } = filesFromClipboardEvent(data);
+    const candidatePaths = extractFilePathsFromClipboard(data);
+    const looksImage = clipboardLooksLikeImage(data) || candidatePaths.length > 0;
+    const hasFiles = htmlImages.length > 0 || htmlFiles.length > 0 || candidatePaths.length > 0;
     const otherField =
       !!target &&
       target !== inputRef.current &&
       (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || !!target.isContentEditable);
 
-    if (otherField && htmlImages.length === 0 && !looksImage) return;
+    if (otherField && !hasFiles && !looksImage) return;
 
     const text = data?.getData("text/plain") ?? "";
-    if (!htmlImages.length && !looksImage && text && otherField) return;
+    if (!hasFiles && !looksImage && text && otherField) return;
 
     e.preventDefault();
     e.stopPropagation();
     void (async () => {
-      const got = await attachClipboardImages(data);
+      const got = await attachClipboardFilesAndImages(data);
       if (got) return;
       if (text && !otherField) {
         if (shouldCreateSnippet(text)) {
           const snip = createChatSnippet(text);
-          setPendingSnippets((cur) => [...cur, snip].slice(0, 10));
-          requestAnimationFrame(() => inputRef.current?.focus());
+          addSnippets([snip]);
         } else {
           insertComposerText(text);
         }
@@ -1373,26 +1453,29 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     return () => window.removeEventListener("paste", fn, true);
   }, []);
 
-  const loadImagePath = async (path: string): Promise<ChatImage | null> => {
-    try {
-      const b64 = await api.localFsReadBytes(path, 10 * 1024 * 1024);
-      const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-      return await bytesToChatImage(bin, fileBaseName(path));
-    } catch (e) {
-      void notify("Vision", String(e));
-      return null;
-    }
-  };
-
   const attachPaths = async (paths: string[]) => {
     const imgs: ChatImage[] = [];
+    const snips: ChatSnippet[] = [];
     for (const path of paths) {
-      if (!isImagePath(path)) continue;
-      const img = await loadImagePath(path);
-      if (img) imgs.push(img);
+      if (isImagePath(path)) {
+        const img = await loadImagePath(path);
+        if (img) imgs.push(img);
+      } else {
+        try {
+          const content = await api.localFsReadText(path, 2 * 1024 * 1024);
+          if (content) {
+            snips.push(createChatSnippet(content, fileBaseName(path)));
+          }
+        } catch {
+          // If reading as text fails, ignore
+        }
+      }
     }
     if (imgs.length) addImages(imgs);
-    else if (paths.length) void notify("Vision", "Drop a PNG, JPEG, GIF, or WebP.");
+    if (snips.length) addSnippets(snips);
+    if (!imgs.length && !snips.length && paths.length) {
+      void notify("Attachments", "Could not read the dropped file(s).");
+    }
   };
 
   useEffect(() => {
@@ -2067,10 +2150,32 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
             if (e.dataTransfer.types.includes("Files")) e.preventDefault();
           }}
           onDrop={(e) => {
-            const files = [...e.dataTransfer.files].filter((f) => f.type.startsWith("image/"));
-            if (!files.length) return;
+            const rawFiles = [...e.dataTransfer.files];
+            if (!rawFiles.length) return;
             e.preventDefault();
-            void Promise.all(files.map((f) => fileToChatImage(f))).then((imgs) => addImages(imgs));
+            const imgs: File[] = [];
+            const others: File[] = [];
+            for (const f of rawFiles) {
+              if (f.type.startsWith("image/") || isImagePath(f.name)) imgs.push(f);
+              else others.push(f);
+            }
+            if (imgs.length) {
+              void Promise.all(imgs.map((f) => fileToChatImage(f))).then((res) => addImages(res));
+            }
+            if (others.length) {
+              void (async () => {
+                const snips: ChatSnippet[] = [];
+                for (const f of others) {
+                  try {
+                    const content = await f.text();
+                    if (content) snips.push(createChatSnippet(content, f.name));
+                  } catch {
+                    /* ignore */
+                  }
+                }
+                if (snips.length) addSnippets(snips);
+              })();
+            }
           }}
         >
           {/* Slash Commands Suggestion Menu */}
@@ -2301,7 +2406,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
               placeholder={
                 streaming
                   ? "Queue a follow-up — you can edit it before it sends…"
-                  : "Ask anything… (paste an image · / for commands · Enter to send)"
+                  : "Ask anything… (paste files/images · / for commands · Enter to send)"
               }
               spellCheck={false}
               autoComplete="off"
@@ -2310,24 +2415,45 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/png,image/jpeg,image/gif,image/webp"
               multiple
               className="hidden"
               onChange={(e) => {
-                const files = [...(e.target.files ?? [])];
+                const rawFiles = [...(e.target.files ?? [])];
                 e.target.value = "";
-                if (!files.length) return;
-                void Promise.all(files.map((f) => fileToChatImage(f))).then((imgs) => addImages(imgs));
+                if (!rawFiles.length) return;
+                const imgs: File[] = [];
+                const others: File[] = [];
+                for (const f of rawFiles) {
+                  if (f.type.startsWith("image/") || isImagePath(f.name)) imgs.push(f);
+                  else others.push(f);
+                }
+                if (imgs.length) {
+                  void Promise.all(imgs.map((f) => fileToChatImage(f))).then((res) => addImages(res));
+                }
+                if (others.length) {
+                  void (async () => {
+                    const snips: ChatSnippet[] = [];
+                    for (const f of others) {
+                      try {
+                        const content = await f.text();
+                        if (content) snips.push(createChatSnippet(content, f.name));
+                      } catch {
+                        /* ignore */
+                      }
+                    }
+                    if (snips.length) addSnippets(snips);
+                  })();
+                }
               }}
             />
             <button
               type="button"
               className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--text-faint)] hover:bg-[var(--border)] hover:text-[var(--text)]"
-              data-tooltip="Attach image — Ctrl+V anywhere in this window, drop, or pick a file"
+              data-tooltip="Attach files or images — Ctrl+V anywhere in this window, drop, or pick files"
               onClick={() => fileInputRef.current?.click()}
-              aria-label="Attach image"
+              aria-label="Attach files or images"
             >
-              <ImageIcon size={14} />
+              <PaperclipIcon size={14} />
             </button>
           </div>
 
