@@ -98,6 +98,7 @@ export const PROVIDER_PRESETS: {
     model: "claude-sonnet-4-5",
   },
   { id: "kilo", label: "Kilo AI", kind: "openai", base_url: "https://api.kilo.ai/api/gateway", model: "anthropic/claude-sonnet-4.5" },
+  { id: "nvidia", label: "NVIDIA NIM", kind: "openai", base_url: "https://integrate.api.nvidia.com/v1", model: "moonshotai/kimi-k3" },
   { id: "openrouter", label: "OpenRouter", kind: "openai", base_url: "https://openrouter.ai/api/v1", model: "stealth/ox-alpha" },
   { id: "xai", label: "xAI (Grok)", kind: "openai", base_url: "https://api.x.ai/v1", model: "grok-4" },
   { id: "groq", label: "Groq", kind: "openai", base_url: "https://api.groq.com/openai/v1", model: "llama-3.3-70b-versatile" },

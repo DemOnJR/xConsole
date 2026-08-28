@@ -115,6 +115,8 @@ const MODELS: &[(&str, &str, ModelPrice)] = &[
     ("moonshot", "kimi-k3", ModelPrice { input: 0.40, output: 1.60, cache_read: 0.10, cache_write: 0.40 }),
     ("moonshot", "kimi-k2.7-code", ModelPrice { input: 0.30, output: 1.20, cache_read: 0.08, cache_write: 0.30 }),
     ("moonshot", "kimi-k2", ModelPrice { input: 0.30, output: 1.20, cache_read: 0.08, cache_write: 0.30 }),
+    ("moonshot", "kimi", ModelPrice { input: 0.40, output: 1.60, cache_read: 0.10, cache_write: 0.40 }),
+    ("moonshot", "", ModelPrice { input: 0.40, output: 1.60, cache_read: 0.10, cache_write: 0.40 }),
 
     // --- GLM & MiniMax ---
     ("glm", "glm-5.3", ModelPrice { input: 0.50, output: 1.50, cache_read: 0.10, cache_write: 0.50 }),

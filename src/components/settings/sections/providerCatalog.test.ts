@@ -37,9 +37,22 @@ describe("provider catalog", () => {
       "cursor",
       "codex",
       "opencode",
+      "nvidia",
     ]) {
       expect(ids).toContain(id);
     }
+  });
+
+  it("lists Kimi K3 and Llama models for NVIDIA NIM", () => {
+    const nvidia = PROVIDER_CATALOG.find((p) => p.id === "nvidia");
+    expect(nvidia).toBeDefined();
+    expect(nvidia?.name).toBe("NVIDIA NIM");
+    expect(nvidia?.kind).toBe("openai");
+    expect(nvidia?.flavor).toBe("openai");
+    expect(nvidia?.baseUrl).toBe("https://integrate.api.nvidia.com/v1");
+    expect(nvidia?.defaultModel).toBe("moonshotai/kimi-k3");
+    expect(nvidia?.models).toContain("moonshotai/kimi-k3");
+    expect(nvidia?.models).toContain("meta/llama-3.3-70b-instruct");
   });
 
   it("lists Gemini models for Antigravity CLI (agy)", () => {

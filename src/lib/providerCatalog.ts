@@ -148,7 +148,7 @@ export const PROVIDER_CATALOG: CatalogProvider[] = [
 
   // N
   { id: "nous", name: "Nous Research", kind: "openai", flavor: "openai", baseUrl: "https://api.nousresearch.com/v1", defaultModel: "hermes-4", models: ["hermes-4"], needsKey: true, group: "N" },
-  { id: "nvidia", name: "NVIDIA NIM", kind: "openai", flavor: "openai", baseUrl: "https://integrate.api.nvidia.com/v1", defaultModel: "meta/llama-3.3-70b-instruct", models: ["meta/llama-3.3-70b-instruct", "deepseek-ai/deepseek-r1"], needsKey: true, group: "N" },
+  { id: "nvidia", name: "NVIDIA NIM", kind: "openai", flavor: "openai", baseUrl: "https://integrate.api.nvidia.com/v1", defaultModel: "moonshotai/kimi-k3", models: ["moonshotai/kimi-k3", "moonshotai/kimi-k2.6", "meta/llama-3.3-70b-instruct", "deepseek-ai/deepseek-r1", "nvidia/llama-3.1-nemotron-70b-instruct", "meta/llama-3.1-405b-instruct", "mistralai/mistral-large-2-instruct"], needsKey: true, group: "N" },
 
   // O
   { id: "ollama", name: "Ollama (local)", kind: "ollama", flavor: "local", baseUrl: "http://localhost:11434", defaultModel: "qwen3.5:9b", models: [], needsKey: false, group: "O" },

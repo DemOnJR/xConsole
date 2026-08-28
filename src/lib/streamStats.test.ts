@@ -4,6 +4,7 @@ import {
   cacheBreakdown,
   cacheHitRate,
   contextUsageFromMessages,
+  defaultContextLimit,
   displayTurnStats,
   emptySessionCache,
   formatCacheLine,
@@ -201,5 +202,28 @@ describe("contextUsageFromMessages", () => {
 
   it("returns null for empty messages", () => {
     expect(contextUsageFromMessages([])).toBeNull();
+  });
+});
+
+describe("defaultContextLimit", () => {
+  it("returns 256K for Kimi and Moonshot models", () => {
+    expect(defaultContextLimit("openai", "moonshotai/kimi-k3")).toBe(256_000);
+    expect(defaultContextLimit("openai", "kimi-k2.5")).toBe(256_000);
+    expect(defaultContextLimit("openai", "moonshot-v1-32k")).toBe(256_000);
+  });
+
+  it("returns 1M for DeepSeek and Gemini models", () => {
+    expect(defaultContextLimit("openai", "deepseek-chat")).toBe(1_000_000);
+    expect(defaultContextLimit("openai", "gemini-2.5-flash")).toBe(1_000_000);
+  });
+
+  it("returns 200K for CLI and Anthropic", () => {
+    expect(defaultContextLimit("anthropic", "claude-sonnet-4-5")).toBe(200_000);
+    expect(defaultContextLimit("codex_cli", "gpt-5")).toBe(200_000);
+    expect(defaultContextLimit("antigravity_cli", "claude-sonnet-4-6")).toBe(200_000);
+  });
+
+  it("falls back to 128K default", () => {
+    expect(defaultContextLimit("openai", "meta/llama-3.3-70b-instruct")).toBe(128_000);
   });
 });
