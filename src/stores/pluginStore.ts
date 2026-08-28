@@ -29,12 +29,6 @@ export interface FeaturedCommunityPlugin {
   tags: string[];
 }
 
-import agentPlugin from "../../plugins/xconsole-plugin-agent/src/index";
-import analyticsPlugin from "../../plugins/xconsole-plugin-analytics/src/index";
-import cloudflarePlugin from "../../plugins/xconsole-plugin-cloudflare/src/index";
-import databasePlugin from "../../plugins/xconsole-plugin-database/src/index";
-import sftpPlugin from "../../plugins/xconsole-plugin-sftp/src/index";
-
 export function normalizePluginId(pluginId: string): string {
   if (!pluginId) return "";
   const id = pluginId.trim();
@@ -45,20 +39,6 @@ export function normalizePluginId(pluginId: string): string {
   if (id === "sftp" || id === "ftp" || id === "xconsole-plugin-sftp") return "xconsole-plugin-sftp";
   return id;
 }
-
-const STATIC_BUILTIN_DEFINITIONS: Record<string, PluginDefinition> = {
-  "xconsole-plugin-agent": agentPlugin,
-  "agent": agentPlugin,
-  "xconsole-plugin-analytics": analyticsPlugin,
-  "analytics": analyticsPlugin,
-  "xconsole-plugin-cloudflare": cloudflarePlugin,
-  "cloudflare": cloudflarePlugin,
-  "xconsole-plugin-database": databasePlugin,
-  "database": databasePlugin,
-  "db": databasePlugin,
-  "xconsole-plugin-sftp": sftpPlugin,
-  "sftp": sftpPlugin,
-};
 
 /**
  * Auto-discover all plugins inside the workspace plugins/ directory.
@@ -71,7 +51,7 @@ const discoveredPluginModules = import.meta.glob<{
 }>("../../plugins/*/src/index.{ts,tsx}", { eager: true });
 
 function getBuiltinPluginDefinitions(): Record<string, PluginDefinition> {
-  const defs: Record<string, PluginDefinition> = { ...STATIC_BUILTIN_DEFINITIONS };
+  const defs: Record<string, PluginDefinition> = {};
   for (const [, mod] of Object.entries(discoveredPluginModules)) {
     const candidate =
       mod.default ||

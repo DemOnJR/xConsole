@@ -1357,6 +1357,15 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
         }
         write_channel_file(&branch);
         rep.log(format!("Source is on channel '{branch}'."));
+        rep.log("Synchronizing plugin submodules...");
+        let _ = run_tool(
+            rep,
+            &env,
+            Some(&src),
+            "git",
+            &["submodule", "update", "--init", "--recursive"],
+            "git submodule update",
+        );
         Ok(())
     });
 

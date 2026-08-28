@@ -138,6 +138,7 @@ fn ensure_checkout_branch(src: &Path, channel: &str) -> Result<(), String> {
     git_in(src, &["checkout", "-B", channel, &remote])
         .or_else(|_| git_in(src, &["checkout", "-B", channel, "FETCH_HEAD"]))?;
     let _ = git_in(src, &["reset", "--hard", "HEAD"]);
+    let _ = git_in(src, &["submodule", "update", "--init", "--recursive"]);
     let _ = git_in(src, &["branch", "--set-upstream-to", &remote, channel]);
     write_channel_file(channel);
     Ok(())
