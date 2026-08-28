@@ -1,0 +1,35 @@
+{
+  "name": "@xconsole/plugin-analytics",
+  "version": "2.0.0",
+  "description": "Real-time process telemetry, CPU/RAM/GPU monitoring, prompt cache efficiency, agent tool usage intelligence, and infrastructure metrics for xConsole.",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "xconsole-plugin",
+    "analytics",
+    "monitoring",
+    "telemetry",
+    "gpu",
+    "cpu",
+    "ram"
+  ],
+  "author": "xConsole Team",
+  "license": "MIT",
+  "peerDependencies": {
+    "@tauri-apps/api": ">=2.0.0",
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0",
+    "zustand": ">=5.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/api": "^2.11.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.8.0"
+  }
+}
