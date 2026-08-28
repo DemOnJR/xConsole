@@ -60,11 +60,8 @@ function getBuiltinPluginDefinitions(): Record<string, PluginDefinition> {
         (v: any) => v && typeof v === "object" && v.manifest?.id,
       );
     if (candidate && candidate.manifest?.id) {
-      defs[candidate.manifest.id] = candidate;
-      const short = candidate.manifest.id.replace(/^xconsole-plugin-/, "");
-      if (short && !defs[short]) {
-        defs[short] = candidate;
-      }
+      const canonicalId = normalizePluginId(candidate.manifest.id);
+      defs[canonicalId] = candidate;
     }
   }
   return defs;
@@ -247,39 +244,46 @@ export const usePluginStore = create<PluginState>((set, get) => ({
       const mergedMap = new Map<string, PluginManifest>();
 
       // Put builtin definitions
-      for (const [id, def] of Object.entries(defs)) {
+      for (const [rawId, def] of Object.entries(defs)) {
+        const id = normalizePluginId(def.manifest?.id || rawId);
         mergedMap.set(id, {
           ...def.manifest,
-          enabled: !disabledSet.has(id),
+          id,
+          enabled: !disabledSet.has(id) && !disabledSet.has(rawId),
         });
       }
 
       // Put backend loaded plugins and dynamically load missing definitions
       for (const bp of backendPlugins) {
+        const id = normalizePluginId(bp.id);
         const path = bp.installedPath || (bp as any).installed_path;
-        const isEnabled = bp.enabled !== false && !disabledSet.has(bp.id);
-        if (!defs[bp.id] && path && isEnabled) {
+        const isEnabled = bp.enabled !== false && !disabledSet.has(id) && !disabledSet.has(bp.id);
+        if (!defs[id] && path && isEnabled) {
           const bundlePath = `${path}/dist/index.js`;
           try {
             const loaded = await loadPluginBundle(bp, bundlePath);
             if (loaded) {
-              defs[bp.id] = loaded;
+              defs[id] = loaded;
             }
           } catch {
             // ignore if external bundle is not built yet
           }
         }
 
-        mergedMap.set(bp.id, {
+        const existing = mergedMap.get(id);
+        mergedMap.set(id, {
+          ...(existing ?? {}),
           ...bp,
+          id,
           enabled: isEnabled,
-          capabilities: defs[bp.id]?.manifest?.capabilities ?? bp.capabilities,
+          capabilities: defs[id]?.manifest?.capabilities ?? bp.capabilities,
         });
       }
 
       const allPlugins = Array.from(mergedMap.values());
 
-      // Compute active extension slots once
+      // Compute active extension slots once (deduplicated by plugin id)
+      const seenNavIds = new Set<string>();
       const activeNavItems = allPlugins
         .filter((p) => {
           const nav = p.capabilities?.navItem || (p.capabilities as any)?.nav_item;
@@ -289,16 +293,27 @@ export const usePluginStore = create<PluginState>((set, get) => ({
           const nav = (p.capabilities?.navItem || (p.capabilities as any)?.nav_item) as any;
           return {
             ...nav,
-            id: p.id,
+            id: normalizePluginId(p.id),
           };
+        })
+        .filter((item) => {
+          if (seenNavIds.has(item.id)) return false;
+          seenNavIds.add(item.id);
+          return true;
         })
         .sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
 
       const activeAgentTools: PluginAgentToolCapability[] = [];
+      const seenToolNames = new Set<string>();
       for (const p of allPlugins) {
         const tools = p.capabilities?.agentTools || (p.capabilities as any)?.agent_tools;
         if (p.enabled !== false && tools) {
-          activeAgentTools.push(...(tools as any));
+          for (const tool of (tools as any[])) {
+            if (tool && tool.name && !seenToolNames.has(tool.name)) {
+              seenToolNames.add(tool.name);
+              activeAgentTools.push(tool);
+            }
+          }
         }
       }
 
