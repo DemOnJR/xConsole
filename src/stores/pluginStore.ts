@@ -29,6 +29,37 @@ export interface FeaturedCommunityPlugin {
   tags: string[];
 }
 
+import agentPlugin from "../../plugins/xconsole-plugin-agent/src/index";
+import analyticsPlugin from "../../plugins/xconsole-plugin-analytics/src/index";
+import cloudflarePlugin from "../../plugins/xconsole-plugin-cloudflare/src/index";
+import databasePlugin from "../../plugins/xconsole-plugin-database/src/index";
+import sftpPlugin from "../../plugins/xconsole-plugin-sftp/src/index";
+
+export function normalizePluginId(pluginId: string): string {
+  if (!pluginId) return "";
+  const id = pluginId.trim();
+  if (id === "analytics" || id === "xconsole-plugin-analytics") return "xconsole-plugin-analytics";
+  if (id === "cloudflare" || id === "xconsole-plugin-cloudflare") return "xconsole-plugin-cloudflare";
+  if (id === "database" || id === "db" || id === "xconsole-plugin-database") return "xconsole-plugin-database";
+  if (id === "agent" || id === "xconsole-plugin-agent") return "xconsole-plugin-agent";
+  if (id === "sftp" || id === "ftp" || id === "xconsole-plugin-sftp") return "xconsole-plugin-sftp";
+  return id;
+}
+
+const STATIC_BUILTIN_DEFINITIONS: Record<string, PluginDefinition> = {
+  "xconsole-plugin-agent": agentPlugin,
+  "agent": agentPlugin,
+  "xconsole-plugin-analytics": analyticsPlugin,
+  "analytics": analyticsPlugin,
+  "xconsole-plugin-cloudflare": cloudflarePlugin,
+  "cloudflare": cloudflarePlugin,
+  "xconsole-plugin-database": databasePlugin,
+  "database": databasePlugin,
+  "db": databasePlugin,
+  "xconsole-plugin-sftp": sftpPlugin,
+  "sftp": sftpPlugin,
+};
+
 /**
  * Auto-discover all plugins inside the workspace plugins/ directory.
  * No manual imports needed — adding, updating, or removing plugins in plugins/
@@ -40,7 +71,7 @@ const discoveredPluginModules = import.meta.glob<{
 }>("../../plugins/*/src/index.{ts,tsx}", { eager: true });
 
 function getBuiltinPluginDefinitions(): Record<string, PluginDefinition> {
-  const defs: Record<string, PluginDefinition> = {};
+  const defs: Record<string, PluginDefinition> = { ...STATIC_BUILTIN_DEFINITIONS };
   for (const [, mod] of Object.entries(discoveredPluginModules)) {
     const candidate =
       mod.default ||
@@ -50,6 +81,10 @@ function getBuiltinPluginDefinitions(): Record<string, PluginDefinition> {
       );
     if (candidate && candidate.manifest?.id) {
       defs[candidate.manifest.id] = candidate;
+      const short = candidate.manifest.id.replace(/^xconsole-plugin-/, "");
+      if (short && !defs[short]) {
+        defs[short] = candidate;
+      }
     }
   }
   return defs;
@@ -98,20 +133,26 @@ const COMMUNITY_CATALOG: FeaturedCommunityPlugin[] = [
 
 export function getFeaturedCommunityPlugins(): FeaturedCommunityPlugin[] {
   const defs = getBuiltinPluginDefinitions();
-  const builtins: FeaturedCommunityPlugin[] = Object.values(defs).map((d) => ({
-    id: d.manifest.id,
-    name: d.manifest.name,
-    version: d.manifest.version || "1.0.0",
-    description: d.manifest.description || "",
-    author: d.manifest.author || "xConsole Team",
-    repository: (d.manifest as any).repository || `https://github.com/DemOnJR/${d.manifest.id}`,
-    icon: (d.manifest as any).icon || "PuzzleIcon",
-    category: (d.manifest as any).category || "extension",
-    stars: 120,
-    tags: (d.manifest as any).tags || [d.manifest.id],
-  }));
+  const uniqueBuiltins = new Map<string, FeaturedCommunityPlugin>();
 
-  return [...builtins, ...COMMUNITY_CATALOG];
+  for (const d of Object.values(defs)) {
+    const id = d.manifest?.id;
+    if (!id || uniqueBuiltins.has(id)) continue;
+    uniqueBuiltins.set(id, {
+      id: d.manifest.id,
+      name: d.manifest.name,
+      version: d.manifest.version || "1.0.0",
+      description: d.manifest.description || "",
+      author: d.manifest.author || "xConsole Team",
+      repository: (d.manifest as any).repository || `https://github.com/DemOnJR/${d.manifest.id}`,
+      icon: (d.manifest as any).icon || "PuzzleIcon",
+      category: (d.manifest as any).category || "extension",
+      stars: 120,
+      tags: (d.manifest as any).tags || [d.manifest.id],
+    });
+  }
+
+  return [...Array.from(uniqueBuiltins.values()), ...COMMUNITY_CATALOG];
 }
 
 export const FEATURED_COMMUNITY_PLUGINS = getFeaturedCommunityPlugins();
@@ -196,7 +237,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   autoUpdateEnabled: localStorage.getItem("xconsole_plugin_auto_update") === "true",
 
   isPluginViewOpen: (pluginId: string) => {
-    const norm = pluginId === "analytics" ? "xconsole-plugin-analytics" : pluginId === "cloudflare" ? "xconsole-plugin-cloudflare" : pluginId;
+    const norm = normalizePluginId(pluginId);
     return Boolean(get().openViews[norm] || get().openViews[pluginId]);
   },
 
@@ -461,21 +502,21 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   },
 
   openPluginView: (pluginId: string) => {
-    const norm = pluginId === "analytics" ? "xconsole-plugin-analytics" : pluginId === "cloudflare" ? "xconsole-plugin-cloudflare" : pluginId;
+    const norm = normalizePluginId(pluginId);
     set((s) => ({
       openViews: { ...s.openViews, [norm]: true, [pluginId]: true },
     }));
   },
 
   closePluginView: (pluginId: string) => {
-    const norm = pluginId === "analytics" ? "xconsole-plugin-analytics" : pluginId === "cloudflare" ? "xconsole-plugin-cloudflare" : pluginId;
+    const norm = normalizePluginId(pluginId);
     set((s) => ({
       openViews: { ...s.openViews, [norm]: false, [pluginId]: false },
     }));
   },
 
   togglePluginView: (pluginId: string) => {
-    const norm = pluginId === "analytics" ? "xconsole-plugin-analytics" : pluginId === "cloudflare" ? "xconsole-plugin-cloudflare" : pluginId;
+    const norm = normalizePluginId(pluginId);
     set((s) => {
       const nextState = !s.openViews[norm] && !s.openViews[pluginId];
       return {

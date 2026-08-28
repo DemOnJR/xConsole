@@ -15,7 +15,7 @@ import { UpdateNotice } from "./components/UpdateNotice";
 import { TransfersPanel } from "./components/TransfersPanel";
 import { PluginMarketplaceModal } from "./components/plugins/PluginMarketplaceModal";
 import { QuickOpenPalette } from "./components/QuickOpenPalette";
-import { usePluginStore } from "./stores/pluginStore";
+import { usePluginStore, normalizePluginId } from "./stores/pluginStore";
 import { useUpdateStore } from "./stores/updateStore";
 import { useCanvasStore } from "./stores/canvasStore";
 import { useAgentStore } from "./stores/agentStore";
@@ -281,12 +281,7 @@ function UnlockedApp() {
         const renderedIds = new Set<string>();
         return Object.entries(openViews).map(([pluginId, isOpen]) => {
           if (!isOpen) return null;
-          const normId =
-            pluginId === "analytics"
-              ? "xconsole-plugin-analytics"
-              : pluginId === "cloudflare"
-                ? "xconsole-plugin-cloudflare"
-                : pluginId;
+          const normId = normalizePluginId(pluginId);
           if (renderedIds.has(normId)) return null;
           renderedIds.add(normId);
 

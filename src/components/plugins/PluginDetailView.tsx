@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { usePluginStore } from "../../stores/pluginStore";
+import { usePluginStore, normalizePluginId } from "../../stores/pluginStore";
 import { Button, Card, TextInput } from "../settings/ui";
 import { AgentMarkdown } from "../../../plugins/xconsole-plugin-agent/src/AgentMarkdown";
 import { PluginIcon } from "./PluginIcon";
@@ -29,8 +29,9 @@ export function PluginDetailView({
     installing,
   } = usePluginStore();
 
-  const plugin = plugins.find((p) => p.id === pluginId);
-  const def = definitions[pluginId];
+  const normId = normalizePluginId(pluginId);
+  const plugin = plugins.find((p) => p.id === pluginId || p.id === normId);
+  const def = definitions[normId] || definitions[pluginId];
 
   const [activeTab, setActiveTab] = useState<"readme" | "capabilities" | "git" | "manifest">("readme");
   const [readme, setReadme] = useState<string>("");
@@ -106,7 +107,7 @@ export function PluginDetailView({
 
   const handleOpenView = () => {
     closeMarketplace();
-    openPluginView(plugin.id);
+    openPluginView(normId);
   };
 
   const handleChangeRemote = async () => {

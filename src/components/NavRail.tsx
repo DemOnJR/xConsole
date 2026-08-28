@@ -219,7 +219,11 @@ export function NavRail() {
 
         const isAnalytics = navItem.id === "xconsole-plugin-analytics" || navItem.id === "analytics";
         if (isAnalytics) {
-          const isViewOpen = Boolean(openViews[navItem.id] || openViews["xconsole-plugin-analytics"]);
+          const isViewOpen = Boolean(
+            openViews[navItem.id] ||
+            openViews["xconsole-plugin-analytics"] ||
+            openViews["analytics"]
+          );
           return (
             <RailBtn
               key={navItem.id}

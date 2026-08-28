@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, type ChangeEvent, type KeyboardEvent } from "react";
 import {
   usePluginStore,
+  normalizePluginId,
   FEATURED_COMMUNITY_PLUGINS,
 } from "../../stores/pluginStore";
 import { Button, TextInput, Card } from "../settings/ui";
@@ -389,7 +390,8 @@ export function PluginMarketplaceModal() {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
                     {plugins.map((plugin) => {
                       const isEnabled = plugin.enabled !== false;
-                      const def = definitions[plugin.id];
+                      const normId = normalizePluginId(plugin.id);
+                      const def = definitions[normId] || definitions[plugin.id];
                       const hasView = Boolean(def?.renderView);
 
                       return (

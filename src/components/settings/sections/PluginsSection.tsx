@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, type ChangeEvent, type KeyboardEvent } from "react";
-import { usePluginStore } from "../../../stores/pluginStore";
+import { usePluginStore, normalizePluginId } from "../../../stores/pluginStore";
+import { useUiStore } from "../../../stores/uiStore";
 import { Button, Card, TextInput } from "../ui";
 import { PluginDetailView } from "../../plugins/PluginDetailView";
 import { PluginIcon } from "../../plugins/PluginIcon";
@@ -336,7 +337,8 @@ export function PluginsSection() {
 
           {plugins.map((plugin) => {
             const isEnabled = plugin.enabled !== false;
-            const def = definitions[plugin.id];
+            const normId = normalizePluginId(plugin.id);
+            const def = definitions[normId] || definitions[plugin.id];
             const hasView = Boolean(def?.renderView);
             const hasUpdate = Boolean(availableUpdates[plugin.id]?.has_update);
             const isUpdating = Boolean(updatingPluginIds[plugin.id]);
@@ -419,7 +421,10 @@ export function PluginsSection() {
                       <Button
                         variant="ghost"
                         className="text-xs text-zinc-200 hover:text-white px-2 py-1 border border-[var(--border)]"
-                        onClick={() => openPluginView(plugin.id)}
+                        onClick={() => {
+                          useUiStore.getState().closeSettings();
+                          openPluginView(plugin.id);
+                        }}
                       >
                         Open View
                       </Button>
