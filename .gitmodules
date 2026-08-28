@@ -1,0 +1,15 @@
+[submodule "plugins/xconsole-plugin-agent"]
+	path = plugins/xconsole-plugin-agent
+	url = https://github.com/DemOnJR/xconsole-plugin-agent.git
+[submodule "plugins/xconsole-plugin-analytics"]
+	path = plugins/xconsole-plugin-analytics
+	url = https://github.com/DemOnJR/xconsole-plugin-analytics.git
+[submodule "plugins/xconsole-plugin-cloudflare"]
+	path = plugins/xconsole-plugin-cloudflare
+	url = https://github.com/DemOnJR/xconsole-plugin-cloudflare.git
+[submodule "plugins/xconsole-plugin-database"]
+	path = plugins/xconsole-plugin-database
+	url = https://github.com/DemOnJR/xconsole-plugin-database.git
+[submodule "plugins/xconsole-plugin-sftp"]
+	path = plugins/xconsole-plugin-sftp
+	url = https://github.com/DemOnJR/xconsole-plugin-sftp.git
