@@ -19,9 +19,13 @@
 - Remote control over WhatsApp needs `src-tauri/sidecar/whatsapp` — a small Go binary
   built on `whatsmeow`, because pairing by QR means the multi-device protocol and no
   Rust crate speaks it.
-- **Build it before packaging**: `src-tauri/sidecar/whatsapp/build.sh` (honours `GOOS`
-  / `GOARCH`). The installer copies the result beside the xConsole executable; in a
-  development tree it is found where the script leaves it.
+- **The installer builds it** (step 9), fetching a portable Go into `tools\go` if the
+  machine has none, then copying the result beside the xConsole executable. That step is
+  never fatal — a failure logs why and the install finishes with two transports, because
+  one optional transport must not sink a twenty-minute build.
+- By hand: `src-tauri/sidecar/whatsapp/build.sh` (honours `GOOS` / `GOARCH`). In a
+  development tree the binary is found where the script leaves it, and Settings > Remote
+  control can also be pointed at one built elsewhere.
 - The binary is **not** committed — it is 25MB and platform-specific. The Go sources
   are. A build without it still ships Discord and Telegram, and the settings screen
   says WhatsApp is unavailable rather than hanging on a QR that never arrives.
