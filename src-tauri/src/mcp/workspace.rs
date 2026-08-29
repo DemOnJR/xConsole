@@ -61,14 +61,15 @@ pub fn prepare_agent_workspace(
     let instructions = r#"# Remote VPS Environment
 
 You are working directly on the user's remote Linux VPS server(s).
-All MCP tools (`run_command`, `read_file`, `write_file`, `list_vps_targets`) execute directly against the active VPS target.
+All MCP tools (`run_command`, `read_file`, `read_file_range`, `edit_file`, `write_file`, `list_directory`, `grep_search`, `file_search`, `list_vps_targets`) execute directly against the active VPS target.
 
 ## OPERATIONAL GUIDELINES:
 - **Direct VPS execution**: You are operating directly on the server.
-- **Websites & Domains (Code-First by default)**: When the user mentions a domain name or website URL (e.g. `example.com`), ALWAYS check if this website is hosted on the connected VPS target(s) FIRST. Inspect web server configs (`/etc/nginx/sites-enabled/`, `/etc/nginx/conf.d/`, `/etc/apache2/`, docker compose, etc.) to locate its project root / source code path (e.g. `/var/www/...`, `/root/...`). Read, inspect, and edit the source code and config files directly on the server filesystem. Do NOT treat the website as an external black box or rely primarily on `curl` when you have direct server filesystem and source code access.
-- **Running shell commands**: Always use the MCP tool `run_command` with the exact Linux shell command (e.g. `docker compose -f /root/OLDS/docker-compose.yml up -d`, `find /root/OLDS -type f`, `grep -rn 'foo' /path`). NEVER prepend `ssh` or attempt to run local SSH/SCP client commands. The MCP bridge handles the SSH transport automatically.
-- **Reading files**: Use `read_file(path)` with absolute Linux paths (e.g. `/root/OLDS/OLDS_Studio/src/app.tsx`).
-- **Writing / Editing files**: Use `write_file(path, content)` with the full updated file contents. Never use `cat << 'EOF'` or local temp files.
+- **Diff-First Code Editing**: For editing existing files, ALWAYS prefer `edit_file(path, old_string, new_string)`. Provide a unique exact snippet of code to replace. Only use `write_file` when creating brand new files or when completely rewriting tiny files.
+- **Large Files & Logs**: Use `read_file_range(path, offset, limit)` to inspect specific line windows, or `grep_search(path, pattern)` to search for relevant code/errors. Avoid calling `read_file` on massive files.
+- **Inspecting Directories**: Use `list_directory(path)` or `file_search(path, pattern)` to discover filesystem structure.
+- **Websites & Domains (Code-First by default)**: When the user mentions a domain name or website URL (e.g. `example.com`), ALWAYS check if this website is hosted on the connected VPS target(s) FIRST. Inspect web server configs (`/etc/nginx/sites-enabled/`, `/etc/nginx/conf.d/`, `/etc/apache2/`, docker compose, etc.) to locate its project root / source code path (e.g. `/var/www/...`, `/root/...`). Read, inspect, and edit the source code and config files directly on the server filesystem.
+- **Running shell commands**: Always use the MCP tool `run_command` with the exact Linux shell command (e.g. `docker compose -f /root/docker-compose.yml up -d`, `systemctl restart nginx`). NEVER prepend `ssh` or attempt to run local SSH/SCP client commands. The MCP bridge handles the SSH transport automatically.
 - **Chat response style**: Speak naturally to the user as an expert engineer working directly on their server. Do not output raw SSH connection strings, ports, or hostnames in normal conversation unless asked.
 "#;
     let _ = fs::write(root.join("AGENTS.md"), instructions);

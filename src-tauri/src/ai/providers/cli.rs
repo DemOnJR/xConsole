@@ -897,6 +897,22 @@ fn human_mcp_label(tool: &str, params: Option<&serde_json::Value>) -> (String, O
                 .unwrap_or("…");
             (format!("Read file · {path}"), None)
         }
+        "read_file_range" => {
+            let path = params
+                .and_then(|p| p.get("path"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("…");
+            let offset = params.and_then(|p| p.get("offset")).and_then(|c| c.as_u64()).unwrap_or(1);
+            let limit = params.and_then(|p| p.get("limit")).and_then(|c| c.as_u64()).unwrap_or(250);
+            (format!("Read {path} (lines {offset}–{})", offset + limit - 1), None)
+        }
+        "edit_file" => {
+            let path = params
+                .and_then(|p| p.get("path"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("…");
+            (format!("Edit file · {path}"), None)
+        }
         "write_file" => {
             let path = params
                 .and_then(|p| p.get("path"))
@@ -914,6 +930,31 @@ fn human_mcp_label(tool: &str, params: Option<&serde_json::Value>) -> (String, O
                     Some(content.to_string())
                 },
             )
+        }
+        "list_directory" => {
+            let path = params
+                .and_then(|p| p.get("path"))
+                .and_then(|c| c.as_str())
+                .unwrap_or(".");
+            (format!("List directory · {path}"), None)
+        }
+        "grep_search" => {
+            let pat = params
+                .and_then(|p| p.get("pattern"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("…");
+            let path = params
+                .and_then(|p| p.get("path"))
+                .and_then(|c| c.as_str())
+                .unwrap_or(".");
+            (format!("Grep '{pat}' in {path}"), None)
+        }
+        "file_search" => {
+            let pat = params
+                .and_then(|p| p.get("pattern"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("…");
+            (format!("Find files '{pat}'"), None)
         }
         "list_vps_targets" => ("List VPS targets".into(), None),
         "skills_list" => ("List skills".into(), None),

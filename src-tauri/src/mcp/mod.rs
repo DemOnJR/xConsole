@@ -5,11 +5,19 @@ mod workspace;
 
 pub use workspace::{prepare_agent_workspace, prepare_cursor_workspace};
 
-use server::run_stdio_server;
-
 /// Entry point for `xconsole.exe --xconsole-mcp-stdio`.
 pub fn run_stdio() {
-    if let Err(e) = run_stdio_server() {
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("xconsole mcp runtime init error: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = rt.block_on(server::run_stdio_server()) {
         eprintln!("xconsole mcp error: {e}");
         std::process::exit(1);
     }
