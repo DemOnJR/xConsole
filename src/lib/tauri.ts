@@ -392,17 +392,50 @@ export type ProviderKind =
 
 
 
-/** Remote-control (Discord) status. The bot token is never returned. */
-export interface RemoteStatus {
+/** Which chat platform a remote-control bridge speaks. */
+export type RemoteKind = "discord" | "telegram" | "whatsapp";
+
+/** One transport's configuration. Bot tokens are never returned. */
+export interface TransportStatus {
+  kind: RemoteKind;
   enabled: boolean;
-  channel_id: string;
+  chat_id: string;
   allowed_user_ids: string;
+  has_token: boolean;
+  /** Whether this platform needs a credential pasted in at all. WhatsApp does not. */
+  needs_token: boolean;
+  /** Whether this platform refuses to arm without a chat id. Only Discord does. */
+  chat_required: boolean;
+  /** False when this transport would refuse to run, so the UI can say why. */
+  usable: boolean;
+}
+
+/** Remote-control status: the shared settings plus every transport. */
+export interface RemoteStatus {
+  /** The master switch. Every transport is off while this is. */
+  enabled: boolean;
   prefix: string;
   safety_mode: string;
   targets: string[];
-  has_token: boolean;
-  /** False when the config would refuse to run, so the UI can say why. */
+  transports: TransportStatus[];
+  /** True when at least one transport is armed. */
   usable: boolean;
+}
+
+/** Pairing state for the WhatsApp bridge. */
+export interface WhatsAppStatus {
+  /** The sidecar binary was found. False means WhatsApp cannot be offered at all. */
+  available: boolean;
+  running: boolean;
+  connected: boolean;
+  /** A device is paired. Survives restarts — the session lives on disk. */
+  linked: boolean;
+  jid?: string | null;
+  phone?: string | null;
+  push_name?: string | null;
+  /** The pairing QR, already rendered as SVG by the Rust side. */
+  qr_svg?: string | null;
+  error?: string | null;
 }
 
 /** A named background agent: an identity the autonomous goal loop runs under. */
@@ -1169,16 +1202,27 @@ export const api = {
 
   listProviders: () => invoke<AiProvider[]>("list_providers"),
   getRemoteStatus: () => invoke<RemoteStatus>("get_remote_status"),
-  saveRemoteConfig: (input: {
-    enabled: boolean;
-    channelId: string;
-    allowedUserIds: string;
-    prefix: string;
-    safetyMode: string;
-    targets: string[];
-    token?: string | null;
-  }) => invoke<RemoteStatus>("save_remote_config", input),
-  clearRemoteToken: () => invoke<void>("clear_remote_token"),
+  saveRemoteConfig: (
+    shared: { enabled: boolean; prefix: string; safetyMode: string; targets: string[] },
+    transports: {
+      kind: RemoteKind;
+      enabled: boolean;
+      chatId: string;
+      allowedUserIds: string;
+      /** Null or empty keeps the stored credential; the UI is never shown it. */
+      token?: string | null;
+    }[],
+  ) => invoke<RemoteStatus>("save_remote_config", { shared, transports }),
+  clearRemoteToken: (kind: RemoteKind) =>
+    invoke<RemoteStatus>("clear_remote_token", { kind }),
+  /** Ask the platform who a saved token belongs to. Telegram only, so far. */
+  testRemoteToken: (kind: RemoteKind) => invoke<string>("test_remote_token", { kind }),
+
+  whatsappStatus: () => invoke<WhatsAppStatus>("whatsapp_status"),
+  /** Start pairing. Progress arrives on the `remote://whatsapp` event. */
+  whatsappLinkStart: () => invoke<WhatsAppStatus>("whatsapp_link_start"),
+  whatsappLinkCancel: () => invoke<WhatsAppStatus>("whatsapp_link_cancel"),
+  whatsappUnlink: () => invoke<WhatsAppStatus>("whatsapp_unlink"),
 
   listPersonas: () => invoke<Persona[]>("list_personas"),
   savePersona: (input: PersonaInput) => invoke<Persona>("save_persona", { input }),

@@ -68,3 +68,8 @@ bench/results/provider-cache.json
 *.njsproj
 *.sln
 *.sw?
+
+# WhatsApp sidecar build output. The Go sources are tracked; the binary is not —
+# it is 25MB, platform-specific, and rebuilt by sidecar/whatsapp/build.sh.
+src-tauri/sidecar/whatsapp/xconsole-whatsapp
+src-tauri/sidecar/whatsapp/xconsole-whatsapp.exe
