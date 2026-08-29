@@ -9,7 +9,6 @@ import {
   type CanvasNode,
   type LayoutMode,
 } from "./canvasStore";
-import { useSessionStore } from "./sessionStore";
 import { reconcile, type TileLayout } from "../lib/tileLayout";
 import {
   deserializeSplit,
@@ -18,18 +17,71 @@ import {
   type SavedSplit,
 } from "../lib/tileTree";
 
-/** Deterministic node id for a workspace slot (stable across reopen). */
+/**
+ * Fallback node id for a workspace slot, for saves that predate stored ids.
+ *
+ * Positional, and that is the whole problem with it: closing a node shifts every node
+ * after it into a new slot. Only [`restoredNodeIds`] may use it, and only where there
+ * is no stored id to prefer.
+ */
 export const workspaceNodeId = (workspaceId: string, index: number) =>
   `${workspaceId}::${index}`;
 
-/** True when every live node already uses the deterministic workspace id. */
-export function workspaceIdsAlreadyBound(workspaceId: string, nodeIds: string[]): boolean {
-  return nodeIds.every((id, i) => id === workspaceNodeId(workspaceId, i));
+/**
+ * The id each saved node is restored under.
+ *
+ * A node id is an identity, not a position. It keys the live SSH session
+ * (`sessionStore.sessions`) and it is React's key for the pane, so re-deriving it from
+ * the array index meant that closing one terminal renamed every terminal after it —
+ * and because the old and new id sets overlapped, React reused a pane component under
+ * an id that now belonged to a *different* session. The reused pane kept streaming the
+ * session it was already attached to (its effect watches `[id, vpsId]`, and for two
+ * terminals on the same host neither changed), while a freshly mounted pane picked up
+ * that same session from the store. Two panes, one session, and the third left running
+ * on the server with nothing showing it.
+ *
+ * So: the stored id wins, always. The slot is a fallback for saves written before ids
+ * were stored, and a tiebreak for a corrupt file with duplicates — never a rename of a
+ * node that already has a name.
+ */
+export function restoredNodeIds(workspaceId: string, saved: SavedNode[]): string[] {
+  const ids: (string | null)[] = saved.map(() => null);
+  const used = new Set<string>();
+
+  // Stored ids are claimed first, across the whole set. Interleaving the two passes
+  // would let a slot fallback squat on an id a later node was about to claim as its
+  // own — renaming a live node, which is the failure this function exists to prevent.
+  // A repeat is left for the second pass: two nodes sharing an id is exactly the state
+  // that mirrors one terminal into two panes.
+  saved.forEach((n, i) => {
+    const stored = n.id?.trim();
+    if (stored && !used.has(stored)) {
+      ids[i] = stored;
+      used.add(stored);
+    }
+  });
+
+  // Whatever is left gets a free slot. Probing past the end of the array keeps the
+  // fallbacks clear of any stored id that already looks like a slot.
+  let probe = 0;
+  return ids.map((id, i) => {
+    if (id) return id;
+    let slot = workspaceNodeId(workspaceId, i);
+    while (used.has(slot)) slot = workspaceNodeId(workspaceId, saved.length + probe++);
+    used.add(slot);
+    return slot;
+  });
 }
 
 /** Serialized node persisted in a workspace (no live session state). */
-interface SavedNode {
-  /** Legacy: persisted node id. Restore now derives a deterministic id by slot. */
+export interface SavedNode {
+  /**
+   * The node's identity, and the key its live SSH session is stored under.
+   *
+   * Absent only in saves old enough to predate it being written, which restore fills
+   * in by slot. Everything else must treat it as the node's name: a node that is
+   * still on screen never gets a different one.
+   */
   id?: string;
   vpsId: string;
   name: string;
@@ -304,43 +356,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       project_json: existing?.project_json ?? null,
     });
 
-    // Rebind only when a node still has a random id. Doing this on every autosave
-    // rewrote the canvas store, which rescheduled another save, forever.
-    if (!workspaceIdsAlreadyBound(ws.id, nodes.map((n) => n.id))) {
-      const sess = useSessionStore.getState();
-      const rebound = nodes.map((n, i) => {
-        const newId = workspaceNodeId(ws.id, i);
-        if (n.id !== newId) {
-          const info = sess.sessions[n.id];
-          if (info) {
-            sess.setInfo(newId, info);
-            sess.remove(n.id);
-          }
-        }
-        return { ...n, id: newId };
-      });
-      const reboundEdges: CanvasEdge[] = edges.map((e) => {
-        const srcIdx = nodes.findIndex((n) => n.id === e.source);
-        const tgtIdx = nodes.findIndex((n) => n.id === e.target);
-        const srcId = srcIdx >= 0 ? workspaceNodeId(ws.id, srcIdx) : e.source;
-        const tgtId = tgtIdx >= 0 ? workspaceNodeId(ws.id, tgtIdx) : e.target;
-        return {
-          ...e,
-          id: `link-${srcId}-${tgtId}`,
-          source: srcId,
-          target: tgtId,
-        };
-      });
-      useCanvasStore.getState().setNodes(rebound);
-      useCanvasStore.getState().setEdges(reboundEdges);
-      // The nodes just changed id, so the in-memory tile layout would point at ids that
-      // no longer exist and silently reset to the balanced default. Re-point it.
-      useCanvasStore
-        .getState()
-        .setTileLayout(
-          deserializeTiles(savedTiles.rows, savedTiles.columns, rebound.map((n) => n.id), savedTiles.tree),
-        );
-    }
+    // Nothing is re-keyed here on purpose. Node ids are written to the save as they
+    // are and read back as they are; a live node keeps the id its session is stored
+    // under for as long as it is on screen. See `restoredNodeIds`.
 
     await get().load();
     set({ activeId: ws.id });
@@ -422,15 +440,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       }
     }
     const layout = (ws.layout_mode as LayoutMode) || "freeform";
+    // Worked out for the whole set first, so the links and edges below resolve a slot
+    // to the id that slot is actually being restored under.
+    const ids = restoredNodeIds(id, saved);
+    const idAt = (index: number) => ids[index] ?? workspaceNodeId(id, index);
     const nodes: CanvasNode[] = saved.map((s, i) => {
-      const nodeId = workspaceNodeId(id, i);
+      const nodeId = ids[i];
       const data = {
         vpsId: s.vpsId,
         name: s.name,
         host: s.host,
         ...(s.nodeType === "sftp" && s.linkedTerminalIndex != null
           ? {
-              linkedTerminalId: workspaceNodeId(id, s.linkedTerminalIndex),
+              linkedTerminalId: idAt(s.linkedTerminalIndex),
               followTerminal: s.followTerminal ?? true,
             }
           : {}),
@@ -455,8 +477,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       } as CanvasNode;
     });
     const edges: CanvasEdge[] = savedEdges.map((e) => {
-      const srcId = workspaceNodeId(id, e.sourceIndex);
-      const tgtId = workspaceNodeId(id, e.targetIndex);
+      const srcId = idAt(e.sourceIndex);
+      const tgtId = idAt(e.targetIndex);
       return {
         id: `link-${srcId}-${tgtId}`,
         source: srcId,

@@ -1,11 +1,72 @@
 import { describe, expect, it } from "vitest";
-import { deserializeTiles, parseSavedNodes, workspaceIdsAlreadyBound, workspaceNodeId } from "./workspaceStore";
+import {
+  deserializeTiles,
+  parseSavedNodes,
+  restoredNodeIds,
+  workspaceNodeId,
+  type SavedNode,
+} from "./workspaceStore";
 
-describe("workspaceIdsAlreadyBound", () => {
-  it("is true for an empty canvas and for already-rebinding ids", () => {
-    expect(workspaceIdsAlreadyBound("ws", [])).toBe(true);
-    expect(workspaceIdsAlreadyBound("ws", [workspaceNodeId("ws", 0), workspaceNodeId("ws", 1)])).toBe(true);
-    expect(workspaceIdsAlreadyBound("ws", ["random-uuid"])).toBe(false);
+const node = (id: string | undefined, name: string): SavedNode => ({
+  id,
+  vpsId: "vps-k8s",
+  name,
+  host: "217.160.69.3",
+  x: 0,
+  y: 0,
+  width: 800,
+  height: 450,
+  nodeType: "terminal",
+});
+
+describe("node identity across a close", () => {
+  it("never hands a live node the id of a different one", () => {
+    // The bug this exists for: ids used to be derived from the array index, so closing
+    // one terminal renamed every terminal after it. The node that had been `ws::2` took
+    // over `ws::1` — an id that still belonged to another live SSH session — and the two
+    // survivors ended up rendering the same terminal while the third kept running on the
+    // server with nothing showing it.
+    const before = [node("uuid-a", "a"), node("uuid-b", "b"), node("uuid-c", "c")];
+    const idsBefore = restoredNodeIds("ws", before);
+    expect(idsBefore).toEqual(["uuid-a", "uuid-b", "uuid-c"]);
+
+    // Close the middle one. The survivors are saved and restored in the new order.
+    const after = [before[0], before[2]];
+    const idsAfter = restoredNodeIds("ws", after);
+
+    expect(idsAfter).toEqual(["uuid-a", "uuid-c"]);
+    // Stated as the invariant rather than as literals, because this is the property
+    // that matters: a surviving node's id is its own, not a slot it happens to occupy.
+    for (const [i, n] of after.entries()) {
+      expect(idsAfter[i]).toBe(idsBefore[before.indexOf(n)]);
+    }
+  });
+
+  it("falls back to the slot only for saves with no stored id", () => {
+    const ids = restoredNodeIds("ws", [node(undefined, "a"), node(undefined, "b")]);
+    expect(ids).toEqual([workspaceNodeId("ws", 0), workspaceNodeId("ws", 1)]);
+  });
+
+  it("mixes stored and missing ids without collision", () => {
+    // A workspace saved before ids were stored, then edited: some nodes have one and
+    // some do not. A slot fallback must not land on an id another node already holds.
+    const ids = restoredNodeIds("ws", [
+      node("ws::1", "a"),
+      node(undefined, "b"),
+      node("uuid-c", "c"),
+    ]);
+    expect(new Set(ids).size).toBe(3);
+    expect(ids[0]).toBe("ws::1");
+    expect(ids[2]).toBe("uuid-c");
+  });
+
+  it("refuses to let a duplicated id put two panes on one session", () => {
+    // A corrupt or hand-edited save. Two nodes sharing an id is precisely the state
+    // that mirrors one terminal into two panes, so the repeat is given its slot.
+    const ids = restoredNodeIds("ws", [node("same", "a"), node("same", "b")]);
+    expect(ids[0]).toBe("same");
+    expect(ids[1]).not.toBe("same");
+    expect(new Set(ids).size).toBe(2);
   });
 });
 
