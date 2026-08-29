@@ -623,6 +623,14 @@ async fn handle_event(app: &tauri::AppHandle, ev: serde_json::Value) {
             let jid = ev.get("jid").and_then(|j| j.as_str()).unwrap_or("").to_string();
             let push = ev.get("push_name").and_then(|j| j.as_str()).map(str::to_string);
             *shared().linking.lock().await = None;
+            let phone = if !jid.is_empty() {
+                let p = jid_user(&jid);
+                let db = app.state::<crate::storage::Db>();
+                let _ = db.set_setting("remote.whatsapp.paired_phone", &p);
+                Some(p)
+            } else {
+                None
+            };
             update_status(app, |s| {
                 s.linked = true;
                 s.connected = true;
@@ -630,8 +638,8 @@ async fn handle_event(app: &tauri::AppHandle, ev: serde_json::Value) {
                 // screen invites a second device being paired to the same account.
                 s.qr_svg = None;
                 s.error = None;
-                if !jid.is_empty() {
-                    s.phone = Some(jid_user(&jid));
+                if let Some(ref p) = phone {
+                    s.phone = Some(p.clone());
                     s.jid = Some(jid.clone());
                 }
                 if push.is_some() {
@@ -646,6 +654,8 @@ async fn handle_event(app: &tauri::AppHandle, ev: serde_json::Value) {
         "logged_out" => {
             // The phone unpaired us from WhatsApp's side. Say so plainly; the
             // alternative is a bridge that is armed in settings and silently deaf.
+            let db = app.state::<crate::storage::Db>();
+            let _ = db.set_setting("remote.whatsapp.paired_phone", "");
             update_status(app, |s| {
                 s.linked = false;
                 s.connected = false;
@@ -662,7 +672,13 @@ async fn handle_event(app: &tauri::AppHandle, ev: serde_json::Value) {
         }
         "message" => {
             if let Some(msg) = parse_message(&ev) {
+                crate::diag(&format!(
+                    "remote(whatsapp): received message id={} chat={} from={} is_bot={} text={:?}",
+                    msg.id, msg.chat_id, msg.author.id, msg.is_bot, msg.content
+                ));
                 shared().inbox.lock().await.push_back(msg);
+            } else {
+                crate::diag(&format!("remote(whatsapp): ignored unparseable/empty event: {:?}", ev));
             }
         }
         _ => {}
@@ -684,6 +700,11 @@ fn parse_message(ev: &serde_json::Value) -> Option<IncomingMessage> {
         return None;
     }
     let chat = ev.get("chat").and_then(|c| c.as_str()).unwrap_or("").trim();
+    // An echo is a message that xConsole itself sent (via its own SendMessage call).
+    // Messages the user types from their own phone on the same paired account have from_me=true
+    // but is_our_echo=false, and MUST be allowed to drive commands.
+    let is_bot = ev.get("is_our_echo").and_then(|f| f.as_bool()).unwrap_or(false);
+
     Some(IncomingMessage {
         id: ev.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
         chat_id: jid_user(chat),
@@ -702,9 +723,7 @@ fn parse_message(ev: &serde_json::Value) -> Option<IncomingMessage> {
                 .unwrap_or("someone")
                 .to_string(),
         },
-        // Our own outgoing messages come back on the same stream. Treating them as bot
-        // messages reuses the loop guard the other transports already rely on.
-        is_bot: ev.get("from_me").and_then(|f| f.as_bool()).unwrap_or(false),
+        is_bot,
         content: text.to_string(),
     })
 }

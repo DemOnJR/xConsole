@@ -413,11 +413,22 @@ pub fn load_config(db: &crate::storage::Db, kind: Kind) -> Config {
         Some(v) => v == "true",
         None => kind == Kind::Discord,
     };
+    let mut allowed = parse_id_list(&get(&kind.setting_allowed()));
+    // For WhatsApp, if the user paired a phone by QR scan but left the allowlist blank,
+    // the paired phone itself is the hardware-authenticated device owner.
+    if kind == Kind::WhatsApp && allowed.is_empty() {
+        if let Ok(Some(phone)) = db.get_setting("remote.whatsapp.paired_phone") {
+            if !phone.trim().is_empty() {
+                allowed.push(phone.trim().to_string());
+            }
+        }
+    }
+
     Config {
         kind,
         enabled: master && own,
         chat_id: get(&kind.setting_chat()).trim().to_string(),
-        allowed_user_ids: parse_id_list(&get(&kind.setting_allowed())),
+        allowed_user_ids: allowed,
         prefix: get(SETTING_PREFIX),
         // Strictest by default. An approval prompt opens a modal on a desktop nobody
         // is sitting at, so a remote turn that needs one blocks until it times out —
@@ -608,7 +619,7 @@ pub fn spawn(app: tauri::AppHandle) {
 /// and disabling it stops the traffic immediately.
 fn drive(app: tauri::AppHandle, mut transport: Box<dyn Transport>) {
     tauri::async_runtime::spawn(async move {
-        use tauri::Manager;
+        use tauri::{Emitter, Manager};
         let kind = transport.kind();
         loop {
             tokio::time::sleep(POLL_IDLE).await;
@@ -633,24 +644,69 @@ fn drive(app: tauri::AppHandle, mut transport: Box<dyn Transport>) {
             };
 
             for msg in messages {
+                crate::diag(&format!(
+                    "remote({}): incoming message id={} chat={} from={} is_bot={}: {:?}",
+                    kind.as_str(),
+                    msg.id,
+                    msg.chat_id,
+                    msg.author.id,
+                    msg.is_bot,
+                    msg.content
+                ));
+
                 let ask = match authorize(&cfg, &msg) {
                     Ok(text) => text,
-                    Err(Rejected::NotAllowed) => {
+                    Err(rej) => {
+                        let reason = match rej {
+                            Rejected::Disabled => "transport is disabled or not configured",
+                            Rejected::WrongChannel => "message in wrong channel",
+                            Rejected::FromBot => "message from bot itself (echo)",
+                            Rejected::NotAllowed => "sender is not in the allowlist",
+                            Rejected::NoPrefix => "message missing required command prefix",
+                            Rejected::Empty => "empty message content",
+                        };
                         crate::diag(&format!(
-                            "remote({}): refused a command from {} ({})",
+                            "remote({}): refused message from {} ({}): {} [prefix={:?}, content={:?}]",
                             kind.as_str(),
                             msg.author.display_name,
-                            msg.author.id
+                            msg.author.id,
+                            reason,
+                            cfg.prefix,
+                            msg.content
                         ));
+                        let _ = app.emit("remote://activity", serde_json::json!({
+                            "kind": kind.as_str(),
+                            "status": "rejected",
+                            "reason": reason,
+                            "sender": msg.author.id,
+                            "name": msg.author.display_name,
+                            "chat": msg.chat_id,
+                            "content": msg.content,
+                            "time": chrono::Local::now().format("%H:%M:%S").to_string(),
+                        }));
                         continue;
                     }
-                    Err(_) => continue,
                 };
+
                 crate::diag(&format!(
-                    "remote({}): running a command from {}",
+                    "remote({}): running a command from {} ({}): {:?}",
                     kind.as_str(),
-                    msg.author.display_name
+                    msg.author.display_name,
+                    msg.author.id,
+                    ask
                 ));
+
+                let _ = app.emit("remote://activity", serde_json::json!({
+                    "kind": kind.as_str(),
+                    "status": "executing",
+                    "reason": "running agent turn",
+                    "sender": msg.author.id,
+                    "name": msg.author.display_name,
+                    "chat": msg.chat_id,
+                    "content": ask,
+                    "time": chrono::Local::now().format("%H:%M:%S").to_string(),
+                }));
+
                 // Recorded before the turn, not after: a turn that takes a minute should
                 // not leave "where we last spoke" pointing at the previous platform.
                 let here = Route { kind, chat_id: msg.chat_id.clone() };
@@ -660,6 +716,23 @@ fn drive(app: tauri::AppHandle, mut transport: Box<dyn Transport>) {
                     let _turn = TURN_LOCK.lock().await;
                     run_remote_turn(&app, &cfg, &ask).await
                 };
+
+                crate::diag(&format!(
+                    "remote({}): turn finished, sending reply: {:?}",
+                    kind.as_str(),
+                    reply
+                ));
+
+                let _ = app.emit("remote://activity", serde_json::json!({
+                    "kind": kind.as_str(),
+                    "status": "replied",
+                    "reason": "reply sent",
+                    "sender": msg.author.id,
+                    "name": msg.author.display_name,
+                    "chat": msg.chat_id,
+                    "content": reply,
+                    "time": chrono::Local::now().format("%H:%M:%S").to_string(),
+                }));
 
                 // Answer where the message came from, unless the user asked to move.
                 let moved = redirect

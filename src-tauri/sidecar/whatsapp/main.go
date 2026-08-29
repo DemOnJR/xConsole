@@ -68,6 +68,7 @@ type Event struct {
 	SenderID       string `json:"sender_id,omitempty"`
 	SenderUsername string `json:"sender_username,omitempty"`
 	FromMe         bool   `json:"from_me,omitempty"`
+	IsOurEcho      bool   `json:"is_our_echo,omitempty"`
 	IsGroup        bool   `json:"is_group,omitempty"`
 	Text           string `json:"text,omitempty"`
 }
@@ -216,6 +217,7 @@ type bridge struct {
 	// extra round trip before the agent could even be asked.
 	mu        sync.Mutex
 	usernames map[string]string
+	sentIDs   map[string]time.Time
 }
 
 func (b *bridge) readCommands(ctx context.Context) {
@@ -250,9 +252,23 @@ func (b *bridge) send(ctx context.Context, cmd Command) {
 		return
 	}
 	msg := &waE2E.Message{Conversation: proto.String(cmd.Text)}
-	if _, err := b.client.SendMessage(ctx, jid, msg); err != nil {
+	resp, err := b.client.SendMessage(ctx, jid, msg)
+	if err != nil {
 		emit(Event{Type: "error", Message: "could not send a reply: " + err.Error()})
+		return
 	}
+	b.mu.Lock()
+	if b.sentIDs == nil {
+		b.sentIDs = make(map[string]time.Time)
+	}
+	b.sentIDs[resp.ID] = time.Now()
+	now := time.Now()
+	for id, t := range b.sentIDs {
+		if now.Sub(t) > 10*time.Minute {
+			delete(b.sentIDs, id)
+		}
+	}
+	b.mu.Unlock()
 }
 
 // parseChatJID accepts either a full JID or the bare user part xConsole stores.
@@ -301,17 +317,22 @@ func (b *bridge) onMessage(evt *events.Message) {
 		// messages to discard.
 		return
 	}
+	b.mu.Lock()
+	_, isOurEcho := b.sentIDs[evt.Info.ID]
+	b.mu.Unlock()
+
 	sender := evt.Info.Sender
 	emit(Event{
-		Type:     "message",
-		ID:       evt.Info.ID,
-		Chat:     evt.Info.Chat.String(),
-		SenderID: sender.String(),
+		Type:           "message",
+		ID:             evt.Info.ID,
+		Chat:           evt.Info.Chat.String(),
+		SenderID:       sender.String(),
 		// Best effort: an unresolvable username simply means the allowlist has to name
 		// the number instead. It must never fall back to the push name, which is a
 		// display name anyone can set to anything.
 		SenderUsername: b.username(sender),
 		FromMe:         evt.Info.IsFromMe,
+		IsOurEcho:      isOurEcho,
 		IsGroup:        evt.Info.IsGroup,
 		Text:           text,
 	})

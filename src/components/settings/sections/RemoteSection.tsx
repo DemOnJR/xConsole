@@ -16,17 +16,18 @@ import { Button, Card, Field, SectionHeader, Select, TextInput, Toggle } from ".
  * The dangerous setting is the allowlist, so the UI is built around it: no bridge can
  * be armed without one, and the state of the arming is stated plainly per transport
  * rather than left to be inferred from a toggle.
- *
- * The three are presented in order of how hard they are to set up, because that is the
- * question a user actually has when they arrive here. WhatsApp is a QR scan, Telegram
- * is one chat with BotFather, Discord is a developer-portal application.
- *
- * One at a time, behind tabs: three stacked cards is a long scroll of fields for two
- * platforms you are not setting up. The tabs carry each transport's state as a dot, so
- * hiding two of them does not hide whether they are armed — which is the one thing this
- * screen exists to say. Every draft is kept mounted-or-not in `drafts`, so Save still
- * saves all three; switching tabs is a view change, never an edit.
  */
+
+interface RemoteActivityItem {
+  kind: string;
+  status: "executing" | "rejected" | "replied";
+  reason: string;
+  sender: string;
+  name: string;
+  chat: string;
+  content: string;
+  time: string;
+}
 
 type Draft = {
   enabled: boolean;
@@ -57,8 +58,8 @@ const COPY: Record<
     chatHint: "Optional. A phone number or group id — leave blank to accept any chat an allowed person writes from.",
     allowLabel: "Who may command it",
     allowHint:
-      "Phone numbers in international form (+40 712 345 678), or @usernames. Comma separated. This is the whole security boundary — anyone listed here can run commands on your servers.",
-    allowPlaceholder: "+40712345678, @ada.lovelace",
+      "Phone numbers in international form (+40 712 345 678), or @usernames. If left blank, your paired phone number is authorized by default. Anyone listed here can run commands on your servers.",
+    allowPlaceholder: "Leave blank for paired phone, or +40712345678, @ada.lovelace",
   },
   telegram: {
     name: "Telegram",
@@ -94,6 +95,7 @@ export function RemoteSection() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [activities, setActivities] = useState<RemoteActivityItem[]>([]);
   const vpsList = useVpsStore((s) => s.vpsList);
 
   // Local drafts so the form does not fight the round trip on every keystroke.
@@ -139,6 +141,15 @@ export function RemoteSection() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    const unlisten = listen<RemoteActivityItem>("remote://activity", (e) => {
+      setActivities((prev) => [e.payload, ...prev].slice(0, 30));
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
+
   const save = async () => {
     setSaving(true);
     setError(null);
@@ -177,8 +188,6 @@ export function RemoteSection() {
     setDrafts((d) => ({ ...d, [kind]: { ...d[kind], ...p } }));
 
   const armed = status?.transports.filter((t) => t.usable) ?? [];
-  // Guarded rather than cast: the backend could name a transport this build has no copy
-  // for, and an undefined lookup would take the whole settings screen down.
   const lastRoute = ORDER.find((k) => k === status?.last_route);
 
   return (
@@ -200,8 +209,8 @@ export function RemoteSection() {
           {status.usable
             ? `Armed on ${armed.map((t) => COPY[t.kind].name).join(", ")} — an allowed person can command the agent.`
             : !status.enabled
-              ? "Not armed: remote control is off."
-              : "Not armed: no transport is fully configured yet."}
+              ? "Not armed: remote control master toggle is off (see bottom of this section)."
+              : "Not armed: configure and enable a transport above."}
           {status.usable && lastRoute && (
             <>
               {" "}
@@ -223,8 +232,7 @@ export function RemoteSection() {
           {ORDER.map((kind) => {
             const t = status?.transports.find((x) => x.kind === kind);
             const active = tab === kind;
-            // Armed, switched on but not finished, or off. Colour only where it reports
-            // something: a grey dot is not a problem, an amber one is unfinished work.
+            // Armed, switched on but not finished, or off.
             const state = t?.usable
               ? { colour: "bg-[var(--success)]", why: "armed" }
               : drafts[kind].enabled
@@ -244,7 +252,7 @@ export function RemoteSection() {
               >
                 {COPY[kind].name}
                 <span
-                  className={`h-1.5 w-1.5 shrink-0 ${state.colour}`}
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${state.colour}`}
                   data-tooltip={`${COPY[kind].name}: ${state.why}`}
                 />
               </button>
@@ -252,11 +260,9 @@ export function RemoteSection() {
           })}
         </div>
 
-        {/* Only the selected one is mounted; the other two keep their drafts in state
-            and are still written by Save. */}
+        {/* Only the selected one is mounted; the other two keep their drafts in state */}
         <div className="pt-4">
           <TransportCard
-            // Keyed, so a token-test result never survives into another platform's card.
             key={tab}
             kind={tab}
             draft={drafts[tab]}
@@ -270,12 +276,12 @@ export function RemoteSection() {
       <div className="grid gap-4 md:grid-cols-2">
         <Field
           label="Command prefix"
-          hint="Only messages starting with this are treated as commands. Blank means every message is. Shared by all three."
+          hint="Only messages starting with this are treated as commands (e.g. '!x status'). If left blank, ANY message from an allowed person is treated as a command."
         >
           <TextInput
             value={shared.prefix}
             onChange={(e) => setShared((s) => ({ ...s, prefix: e.target.value }))}
-            placeholder="!x"
+            placeholder="!x (or leave blank)"
           />
         </Field>
 
@@ -320,9 +326,7 @@ export function RemoteSection() {
         )}
       </Field>
 
-      {/* The thread is shared by every transport and outlives restarts, so it needs to be
-          visible and clearable — a persistent conversation nobody can see or reset is a
-          surprise, not a feature. */}
+      {/* The thread is shared by every transport and outlives restarts */}
       <Field
         label="Conversation"
         hint="All three apps share one thread, so a follow-up makes sense wherever you type it — ask about a server on Telegram, say “restart it” on WhatsApp. Everyone on an allowlist shares it."
@@ -347,16 +351,56 @@ export function RemoteSection() {
         </div>
       </Field>
 
+      {/* Live Activity & Diagnostics Log */}
+      <Field
+        label="Live Activity & Diagnostics"
+        hint="Real-time log of inbound messages, security evaluations, and agent responses. Helps verify messages in real time."
+      >
+        {activities.length === 0 ? (
+          <div className="border border-dashed border-[var(--border)] px-3 py-4 text-center text-[11px] text-gray-500 font-mono">
+            Waiting for messages... Send a message on WhatsApp/Telegram/Discord to see live evaluation here.
+          </div>
+        ) : (
+          <div className="max-h-48 overflow-y-auto border border-[var(--border)] bg-[var(--surface-2)] font-mono text-[11px] divide-y divide-[var(--border)]">
+            {activities.map((item, idx) => (
+              <div key={idx} className="p-2 space-y-1">
+                <div className="flex items-center gap-2 text-[10px]">
+                  <span className="text-gray-500">[{item.time}]</span>
+                  <span className="uppercase font-semibold text-cyan-400">{item.kind}</span>
+                  <span
+                    className={`px-1.5 py-0.2 rounded text-[9px] uppercase font-bold ${
+                      item.status === "executing"
+                        ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                        : item.status === "replied"
+                          ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                          : "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                    }`}
+                  >
+                    {item.status}
+                  </span>
+                  <span className="text-gray-400 truncate">
+                    from {item.sender || item.name} {item.reason ? `— ${item.reason}` : ""}
+                  </span>
+                </div>
+                <div className="text-gray-200 truncate pl-2 border-l border-zinc-700">
+                  {item.content}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Field>
+
       <div className="flex items-center gap-3 border-t border-[var(--border)] pt-4">
         <Toggle
           checked={shared.enabled}
           onChange={(v) => setShared((s) => ({ ...s, enabled: v }))}
-          label={shared.enabled ? "Remote control on" : "Remote control off"}
+          label={shared.enabled ? "Remote control master switch: ON" : "Remote control master switch: OFF"}
         />
         <div className="ml-auto flex items-center gap-3">
           {savedAt && <span className="font-mono text-[11px] text-gray-500">Saved</span>}
           <Button variant="primary" onClick={save} disabled={saving}>
-            {saving ? "Saving…" : "Save"}
+            {saving ? "Saving…" : "Save configuration"}
           </Button>
         </div>
       </div>
@@ -393,7 +437,7 @@ function TransportCard({
           <Toggle
             checked={draft.enabled}
             onChange={(v) => onChange({ enabled: v })}
-            label={draft.enabled ? "On" : "Off"}
+            label={draft.enabled ? "Transport On" : "Transport Off"}
           />
         </div>
       </div>
@@ -423,8 +467,6 @@ function TransportCard({
                 <Button
                   onClick={async () => {
                     setCheck("Checking…");
-                    // Answers "is my token right?" with a fact instead of a silent
-                    // bridge that never replies.
                     await api
                       .testRemoteToken(kind)
                       .then(setCheck)
@@ -472,10 +514,6 @@ function TransportCard({
 
 /**
  * WhatsApp pairing.
- *
- * The QR arrives as an event because pairing takes as long as the user takes to find
- * their phone, and WhatsApp rotates the code every twenty seconds — so this listens
- * rather than polls, and the code on screen is always the live one.
  */
 function WhatsAppLink({ onReload }: { onReload: () => void }) {
   const [wa, setWa] = useState<WhatsAppStatus | null>(null);
@@ -519,8 +557,6 @@ function WhatsAppLink({ onReload }: { onReload: () => void }) {
             disabled={busy}
             onClick={async () => {
               setBusy(true);
-              // Unpairs on WhatsApp's side too, so no stale "xConsole" device is left
-              // in the phone's linked-devices list for the user to hunt down.
               await api.whatsappUnlink().then(setWa).catch(() => {});
               setBusy(false);
               onReload();
@@ -531,10 +567,9 @@ function WhatsAppLink({ onReload }: { onReload: () => void }) {
         </div>
       ) : wa?.qr_svg ? (
         <div className="flex items-start gap-4">
-          {/* The QR is rendered by the Rust side, from the exact bytes WhatsApp sent. */}
           <div
             className="border border-[var(--border)] bg-white p-2 [&>svg]:block"
-            // eslint-disable-next-line react/no-danger -- generated locally, never user input
+            // eslint-disable-next-line react/no-danger
             dangerouslySetInnerHTML={{ __html: wa.qr_svg }}
           />
           <div className="space-y-2 text-[11px] text-gray-400">
