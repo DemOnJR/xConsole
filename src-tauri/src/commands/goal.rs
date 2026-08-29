@@ -43,6 +43,9 @@ pub async fn start_goal(
         created_at: None,
         updated_at: None,
         finished_at: None,
+        // A goal the user starts by hand runs as the default agent; personas are
+        // attached by `agent_delegate`.
+        persona_id: None,
     };
     db.insert_goal(&goal).map_err(|e| e.to_string())?;
     let _ = app.emit(&crate::ai::goal::goal_event(&id), crate::ai::provider::StreamEvent::Status("intake".into()));

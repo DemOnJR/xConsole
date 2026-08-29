@@ -223,6 +223,8 @@ pub struct CronJobInput {
     pub targets_json: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub reports_to: Option<String>,
 }
 
 /// A persistent goal session (the /goal autonomous mode). The loop controller in
@@ -248,12 +250,108 @@ pub struct GoalSession {
     pub next_check_at: Option<String>,
     /// How many plan→act→verify cycles have run.
     pub cycles: i64,
+    /// The persona running this goal. None = the default agent.
+    #[serde(default)]
+    pub persona_id: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
     #[serde(default)]
     pub finished_at: Option<String>,
+}
+
+/// A named agent the user can hand work to.
+///
+/// The user asked for agents with names and roles that go away, do the job, and come
+/// back when they are done. That behaviour already exists in the goal loop; what was
+/// missing was an identity to run it under. A persona supplies one: its own standing
+/// instructions, the servers it works on, how much it is trusted, and optionally its
+/// own model — so a persona doing routine log triage need not run on the same
+/// expensive model as one making architecture calls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Persona {
+    pub id: String,
+    /// What the user calls it: "Ada", "CEO", "night-shift".
+    pub name: String,
+    /// One line on what it is for. Shown in pickers and injected into its prompt.
+    #[serde(default)]
+    pub role: String,
+    /// Standing instructions, appended to the agent's soul for this persona's runs.
+    #[serde(default)]
+    pub instructions: String,
+    /// VPS ids this persona works on unless a task says otherwise.
+    #[serde(default)]
+    pub targets: Vec<String>,
+    /// Overrides the global safety mode when set.
+    #[serde(default)]
+    pub safety_mode: Option<String>,
+    /// Overrides the active provider when set.
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    /// Overrides the provider's model when set.
+    #[serde(default)]
+    pub model: Option<String>,
+    pub enabled: bool,
+    /// The persona this one reports to. None = reports to the user directly.
+    #[serde(default)]
+    pub reports_to: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+/// One message between agents (or to the user).
+///
+/// The user asked to be able to watch what the agents say to each other, so the
+/// exchange is stored as its own rows rather than left inside each agent's private
+/// transcript — otherwise "what did the programmer tell the CEO" is unanswerable
+/// without reading two separate conversations and guessing at the join.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentMessage {
+    pub id: String,
+    /// Sender persona id. None = the user.
+    #[serde(default)]
+    pub from_id: Option<String>,
+    /// Recipient persona id. None = the user.
+    #[serde(default)]
+    pub to_id: Option<String>,
+    /// "report" (upward), "request" (downward or sideways), "note".
+    pub kind: String,
+    pub body: String,
+    /// The delegated task this concerns, when there is one.
+    #[serde(default)]
+    pub goal_id: Option<String>,
+    #[serde(default)]
+    pub read_at: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
+/// Fields accepted when creating or updating a persona.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonaInput {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub instructions: String,
+    #[serde(default)]
+    pub targets: Vec<String>,
+    #[serde(default)]
+    pub safety_mode: Option<String>,
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// The persona this one reports to. None = reports to the user directly.
+    #[serde(default)]
+    pub reports_to: Option<String>,
 }
 
 /// The locked-in definition of "done" for a goal session.

@@ -456,6 +456,55 @@ impl Db {
                 finished_at   TEXT
             );
 
+            -- Named agents the user can hand work to. A persona is an identity the
+            -- goal loop runs under: its own instructions, default servers, safety
+            -- mode, and optionally its own provider so cheap grunt work and
+            -- architectural judgement do not have to share one model.
+            CREATE TABLE IF NOT EXISTS persona (
+                id            TEXT PRIMARY KEY,
+                name          TEXT NOT NULL,
+                role          TEXT NOT NULL DEFAULT '',
+                instructions  TEXT NOT NULL DEFAULT '',
+                -- JSON array of vps ids this persona works on by default.
+                targets_json  TEXT NOT NULL DEFAULT '[]',
+                -- Overrides the global safety mode when set ('full'|'allowlist'|'approve').
+                safety_mode   TEXT,
+                -- Overrides the active provider/model when set.
+                provider_id   TEXT,
+                model         TEXT,
+                enabled       INTEGER NOT NULL DEFAULT 1,
+                -- The persona this one reports to. NULL = reports to the user.
+                -- Forms the org chart; only a persona with no manager may address
+                -- the user directly, everyone else escalates upward.
+                reports_to    TEXT REFERENCES persona(id) ON DELETE SET NULL,
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- What the agents say to each other.
+            --
+            -- Kept as rows rather than buried in each goal's transcript so the whole
+            -- exchange can be read as one conversation: who asked whom for what, who
+            -- reported back, and what finally reached the user.
+            CREATE TABLE IF NOT EXISTS agent_message (
+                id           TEXT PRIMARY KEY,
+                -- Sender. NULL = the user.
+                from_id      TEXT,
+                -- Recipient. NULL = the user.
+                to_id        TEXT,
+                -- 'report' (upward), 'request' (downward/sideways), 'note' (broadcast).
+                kind         TEXT NOT NULL DEFAULT 'note',
+                body         TEXT NOT NULL,
+                -- The delegated task this concerns, when there is one.
+                goal_id      TEXT,
+                -- Set once the recipient has been shown it.
+                read_at      TEXT,
+                created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS agent_message_to_idx
+                ON agent_message(to_id, read_at);
+
             -- Pending/!resolved approvals for agent commands (approve safety mode).
             CREATE TABLE IF NOT EXISTS agent_approval (
                 id          TEXT PRIMARY KEY,
@@ -589,6 +638,10 @@ impl Db {
         let _ = conn.execute("ALTER TABLE workspace ADD COLUMN color_mode TEXT", []);
         let _ = conn.execute("ALTER TABLE workspace ADD COLUMN project_json TEXT", []);
         let _ = conn.execute("ALTER TABLE vps ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0", []);
+        // Which persona is running this goal. NULL = the default agent, which is what
+        // every goal created before personas existed was.
+        let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN persona_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE persona ADD COLUMN reports_to TEXT", []);
         let _ = conn.execute("ALTER TABLE infra_project ADD COLUMN backend TEXT DEFAULT 'vps'", []);
         let _ = conn.execute("ALTER TABLE infra_project ADD COLUMN cloud_account_id TEXT", []);
         let _ = conn.execute("ALTER TABLE infra_project ADD COLUMN config_json TEXT", []);
@@ -1134,6 +1187,7 @@ impl Db {
             created_at: r.get(9)?,
             updated_at: r.get(10)?,
             finished_at: r.get(11)?,
+            persona_id: r.get(12)?,
         })
     }
 
@@ -1141,7 +1195,7 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
-                    next_check_at, cycles, created_at, updated_at, finished_at
+                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id
              FROM goal_sessions ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], Self::row_to_goal)?;
@@ -1152,7 +1206,7 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
-                    next_check_at, cycles, created_at, updated_at, finished_at
+                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id
              FROM goal_sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query([id])?;
@@ -1167,8 +1221,8 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO goal_sessions
-               (id, title, raw_request, spec_json, status, kanban_json, memory_json, next_check_at, cycles)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+               (id, title, raw_request, spec_json, status, kanban_json, memory_json, next_check_at, cycles, persona_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 goal.id,
                 goal.title,
@@ -1179,6 +1233,7 @@ impl Db {
                 goal.memory_json,
                 goal.next_check_at,
                 goal.cycles,
+                goal.persona_id,
             ],
         )?;
         Ok(())
@@ -1208,12 +1263,242 @@ impl Db {
         Ok(())
     }
 
+    // ----- Personas (named background agents) -----
+
+    fn row_to_persona(r: &rusqlite::Row) -> rusqlite::Result<crate::storage::models::Persona> {
+        let targets_json: String = r.get(4)?;
+        Ok(crate::storage::models::Persona {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            role: r.get(2)?,
+            instructions: r.get(3)?,
+            // A malformed targets blob must not make the persona unreadable — an
+            // unusable persona row is worse than one that has forgotten its defaults.
+            targets: serde_json::from_str(&targets_json).unwrap_or_default(),
+            safety_mode: r.get(5)?,
+            provider_id: r.get(6)?,
+            model: r.get(7)?,
+            enabled: r.get::<_, i64>(8)? != 0,
+            reports_to: r.get(9)?,
+            created_at: r.get(10)?,
+            updated_at: r.get(11)?,
+        })
+    }
+
+    const PERSONA_COLS: &'static str =
+        "id, name, role, instructions, targets_json, safety_mode, provider_id, model,
+         enabled, reports_to, created_at, updated_at";
+
+    pub fn list_personas(&self) -> Result<Vec<crate::storage::models::Persona>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("SELECT {} FROM persona ORDER BY name", Self::PERSONA_COLS);
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], Self::row_to_persona)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_persona(&self, id: &str) -> Result<Option<crate::storage::models::Persona>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("SELECT {} FROM persona WHERE id = ?1", Self::PERSONA_COLS);
+        match conn.query_row(&sql, [id], Self::row_to_persona) {
+            Ok(p) => Ok(Some(p)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Find a persona by name, case-insensitively.
+    ///
+    /// The agent and the user refer to a persona by name ("ask Ada to…"), never by
+    /// uuid, and neither will reliably match its capitalisation.
+    pub fn get_persona_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::storage::models::Persona>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {} FROM persona WHERE lower(name) = lower(?1)",
+            Self::PERSONA_COLS
+        );
+        match conn.query_row(&sql, [name.trim()], Self::row_to_persona) {
+            Ok(p) => Ok(Some(p)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn upsert_persona(
+        &self,
+        input: &crate::storage::models::PersonaInput,
+    ) -> Result<crate::storage::models::Persona> {
+        let id = input
+            .id
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let targets_json = serde_json::to_string(&input.targets).unwrap_or_else(|_| "[]".into());
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO persona
+                   (id, name, role, instructions, targets_json, safety_mode, provider_id, model, enabled, reports_to)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(id) DO UPDATE SET
+                   name = excluded.name,
+                   role = excluded.role,
+                   instructions = excluded.instructions,
+                   targets_json = excluded.targets_json,
+                   safety_mode = excluded.safety_mode,
+                   provider_id = excluded.provider_id,
+                   model = excluded.model,
+                   enabled = excluded.enabled,
+                   reports_to = excluded.reports_to,
+                   updated_at = datetime('now')",
+                params![
+                    id,
+                    input.name.trim(),
+                    input.role.trim(),
+                    input.instructions,
+                    targets_json,
+                    input.safety_mode,
+                    input.provider_id,
+                    input.model,
+                    input.enabled as i64,
+                    input.reports_to,
+                ],
+            )?;
+        }
+        Ok(self
+            .get_persona(&id)?
+            .expect("persona just upserted"))
+    }
+
+    pub fn delete_persona(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM persona WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    // ----- Inter-agent messages -----
+
+    fn row_to_agent_message(
+        r: &rusqlite::Row,
+    ) -> rusqlite::Result<crate::storage::models::AgentMessage> {
+        Ok(crate::storage::models::AgentMessage {
+            id: r.get(0)?,
+            from_id: r.get(1)?,
+            to_id: r.get(2)?,
+            kind: r.get(3)?,
+            body: r.get(4)?,
+            goal_id: r.get(5)?,
+            read_at: r.get(6)?,
+            created_at: r.get(7)?,
+        })
+    }
+
+    const AGENT_MESSAGE_COLS: &'static str =
+        "id, from_id, to_id, kind, body, goal_id, read_at, created_at";
+
+    pub fn insert_agent_message(
+        &self,
+        msg: &crate::storage::models::AgentMessage,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agent_message (id, from_id, to_id, kind, body, goal_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                msg.id,
+                msg.from_id,
+                msg.to_id,
+                msg.kind,
+                msg.body,
+                msg.goal_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Unread messages addressed to `to_id` (None = the user's own inbox).
+    pub fn unread_agent_messages(
+        &self,
+        to_id: Option<&str>,
+    ) -> Result<Vec<crate::storage::models::AgentMessage>> {
+        let conn = self.conn.lock().unwrap();
+        // `to_id IS ?1` rather than `=`, so NULL (the user) matches instead of
+        // silently returning nothing the way SQL equality against NULL would.
+        let sql = format!(
+            "SELECT {} FROM agent_message
+             WHERE to_id IS ?1 AND read_at IS NULL
+             ORDER BY created_at",
+            Self::AGENT_MESSAGE_COLS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![to_id], Self::row_to_agent_message)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// The whole exchange, oldest first, so the UI can show it as one conversation.
+    /// `goal_id` narrows it to a single delegated task.
+    pub fn list_agent_messages(
+        &self,
+        goal_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<crate::storage::models::AgentMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let limit = limit.clamp(1, 1000);
+        let (sql, has_goal) = match goal_id {
+            Some(_) => (
+                format!(
+                    "SELECT {} FROM agent_message WHERE goal_id = ?1
+                     ORDER BY created_at DESC LIMIT ?2",
+                    Self::AGENT_MESSAGE_COLS
+                ),
+                true,
+            ),
+            None => (
+                format!(
+                    "SELECT {} FROM agent_message ORDER BY created_at DESC LIMIT ?1",
+                    Self::AGENT_MESSAGE_COLS
+                ),
+                false,
+            ),
+        };
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = if has_goal {
+            stmt.query_map(params![goal_id, limit], Self::row_to_agent_message)?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map(params![limit], Self::row_to_agent_message)?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        // Newest-first in SQL so LIMIT keeps the *recent* end; reversed here so the
+        // caller reads it as a conversation.
+        Ok(rows.into_iter().rev().collect())
+    }
+
+    pub fn mark_agent_messages_read(&self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for id in ids {
+            tx.execute(
+                "UPDATE agent_message SET read_at = datetime('now') WHERE id = ?1",
+                [id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Goals that are due to resume (status "waiting" with next_check_at <= now).
     pub fn list_due_goals(&self) -> Result<Vec<GoalSession>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
-                    next_check_at, cycles, created_at, updated_at, finished_at
+                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id
              FROM goal_sessions
              WHERE status = 'waiting' AND next_check_at IS NOT NULL
                AND next_check_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now')

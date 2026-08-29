@@ -6,6 +6,7 @@ pub mod db;
 pub mod goal;
 pub mod infra;
 pub mod lock;
+pub mod persona;
 pub mod plugin;
 pub mod remote_file;
 pub mod session;

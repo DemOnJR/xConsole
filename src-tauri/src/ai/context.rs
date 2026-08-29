@@ -749,6 +749,23 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
             stable.push(catalog);
         }
     }
+    // The team, when there is one. Stable across turns, so it belongs in the cached
+    // prefix; skipped entirely when no agents are defined, so a user who never set
+    // any pays nothing. Without it the agent has to spend a tool call on agent_list
+    // before it can even consider delegating, which it mostly will not bother to do.
+    if ctx.has_tools && !minimal {
+        let personas = ctx.db.list_personas().unwrap_or_default();
+        if personas.iter().any(|p| p.enabled) {
+            stable.push(format!(
+                "# Your team\n{}\n\
+                 Hand long-running or specialist work to them with agent_delegate (omit \
+                 `agent` to route by remit) and carry on — do not do their work yourself \
+                 while the user waits. agent_check follows progress; agent_thread shows \
+                 what they have said to each other.",
+                crate::ai::persona::format_org_chart(&personas)
+            ));
+        }
+    }
 
     // ---- DYNAMIC (volatile only): live screen, memory body, date. Keep this
     // tail under ~1.2K tokens so a 20K+ history session stays ≥95% cache hit.

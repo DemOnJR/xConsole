@@ -46,6 +46,8 @@ pub mod taste;
 pub mod tool_cache;
 pub mod edge_tts;
 pub mod parakeet;
+pub mod persona;
+pub mod persona_tools;
 pub mod piper;
 pub mod prefix_telemetry;
 pub mod text;

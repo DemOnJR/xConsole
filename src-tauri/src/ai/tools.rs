@@ -852,6 +852,7 @@ the xConsole canvas flow. Use this to demonstrate web components, designs, dashb
     ];
     defs.extend(web_tools::definitions());
     defs.extend(infra_tools::definitions());
+    defs.extend(crate::ai::persona_tools::definitions());
     defs
 }
 
@@ -1169,6 +1170,9 @@ pub async fn dispatch_with_telemetry(
             infra_tools::dispatch(ctx, call.name.as_str(), args, sink).await
         }
         "vision" => vision_tool(ctx, args).await,
+        n if crate::ai::persona_tools::is_persona_tool(n) => {
+            crate::ai::persona_tools::dispatch(ctx, n, args).await
+        }
         other => format!("error: unknown tool '{other}'"),
         }
     };
@@ -1291,6 +1295,12 @@ fn tool_activity_label(ctx: &ToolContext, call: &ToolCall) -> String {
                 format!("Run on {vps}: {cmd}")
             }
         }
+        "agent_list" => "List named agents".into(),
+        "agent_delegate" => format!(
+            "Delegate to {}",
+            args.get("agent").and_then(|v| v.as_str()).unwrap_or("an agent")
+        ),
+        "agent_check" => "Check delegated tasks".into(),
         "find_files" => format!(
             "Find {} on {}",
             args.get("pattern").and_then(|v| v.as_str()).unwrap_or("files"),
@@ -1548,6 +1558,9 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
         "web_fetch" => true,
         // Search and geo hit fixed endpoints, so they can't be aimed at an attacker.
         n if web_tools::is_web_tool(n) => false,
+        n if crate::ai::persona_tools::is_persona_tool(n) => {
+            crate::ai::persona_tools::tool_is_mutating(n)
+        }
         // Infra tools: allow read-only verbs, treat the rest (apply/destroy/import) as mutating.
         n if n.starts_with("terraform_")
             || n.starts_with("cloud_")

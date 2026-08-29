@@ -122,6 +122,14 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
         max_cycles: None,
         vps_targets: vec![],
     });
+    // The persona this goal belongs to, if any. Everything below — prompt, servers,
+    // trust level, model — reads from it, so a delegated run genuinely behaves like
+    // the named agent rather than merely being labelled with its name.
+    let persona = goal
+        .persona_id
+        .as_deref()
+        .and_then(|id| crate::ai::persona::resolve(&ctx.db, id));
+
     let kanban = parse_kanban(goal);
     let kanban_summary: Vec<String> = {
         let roots: Vec<&GoalTask> = kanban
@@ -168,8 +176,43 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
     );
     let epoch_hash = format!("{:08x}", raw_epoch.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32)));
 
+    // Identity, then the chain of command, then anything colleagues have said since
+    // the last cycle. Delivered as part of the prompt rather than left for the agent
+    // to fetch: a message nobody thought to check for is a message that never
+    // arrived, and the whole point of the hierarchy is that agents hear each other.
+    let persona_block = match persona.as_ref() {
+        Some(p) => {
+            let all = ctx.db.list_personas().unwrap_or_default();
+            let mut block = crate::ai::persona::prompt_block(p);
+            block.push_str(&crate::ai::persona::hierarchy_block(&all, p));
+            if let Ok(unread) = ctx.db.unread_agent_messages(Some(&p.id)) {
+                if !unread.is_empty() {
+                    block.push_str("\n\nNew messages for you:\n");
+                    for m in &unread {
+                        let from = m
+                            .from_id
+                            .as_deref()
+                            .and_then(|id| all.iter().find(|c| c.id == id))
+                            .map(|c| c.name.as_str())
+                            .unwrap_or("the user");
+                        block.push_str(&format!("- [{}] {from}: {}\n", m.kind, m.body));
+                    }
+                    // Marked read on delivery, so a message already folded into this
+                    // prompt is not re-delivered and re-acted on every cycle.
+                    let ids: Vec<String> = unread.iter().map(|m| m.id.clone()).collect();
+                    if let Err(e) = ctx.db.mark_agent_messages_read(&ids) {
+                        crate::diag(&format!("goal {}: could not mark messages read: {e}", goal.id));
+                    }
+                }
+            }
+            format!("{block}\n\n")
+        }
+        None => String::new(),
+    };
+
     let prompt = format!(
-        "You are driving an autonomous goal (Epoch: {epoch_hash}). Keep the kanban LIVE this cycle.\n\
+        "{persona_block}\
+         You are driving an autonomous goal (Epoch: {epoch_hash}). Keep the kanban LIVE this cycle.\n\
          Objective: {objective}\n\
          Success criteria (you may ONLY conclude 'done' via goal_check_criteria with evidence):\n\
          {criteria}\n\
@@ -187,6 +230,7 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
          - Do NOT call goal_schedule_wait unless the user specified a delay/timeout.\n\
          - If nothing is waiting, keep going: next check, next card.\n\
          This cycle: pick the next unfinished card (or add one), execute it with tools, update the board, then goal_check_criteria (verdict not_yet unless truly done).",
+        persona_block = persona_block,
         epoch_hash = epoch_hash,
         objective = spec.objective,
         criteria = sorted_criteria.iter().map(|c| format!("- {c}")).collect::<Vec<_>>().join("\n"),
@@ -217,8 +261,10 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
         prompts: crate::ai::interaction::PromptRegistry::new(),
         session_state: ctx.session_state.clone(),
         session_id: format!("goal:{}", goal.id),
-        targets: spec.vps_targets.clone(),
-        safety: safety::global_safety_mode(&ctx.db),
+        targets: crate::ai::persona::effective_targets(persona.as_ref(), &spec.vps_targets),
+        // A persona is how the user says "this one may restart services unattended,
+        // that one may only look" — which means nothing unless the loop honours it.
+        safety: crate::ai::persona::safety_mode(&ctx.db, persona.as_ref()),
         plan_mode: false,
         workspace_id: None,
         canvas: Vec::new(),
@@ -229,7 +275,10 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
     };
 
     let messages = vec![ChatMessage::user(prompt)];
-    let result = agent::run_turn(&tc, None, messages, false, &tx).await;
+    // A persona can pin its own provider, so routine triage need not run on the model
+    // reserved for architectural judgement.
+    let provider_override = persona.as_ref().and_then(|p| p.provider_id.clone());
+    let result = agent::run_turn(&tc, provider_override, messages, false, &tx).await;
     drop(tx);
     let _ = forward.await;
 
@@ -342,6 +391,28 @@ pub async fn resume_due_goals(ctx: &GoalContext) {
 
 /// Spawn the goal-resume ticker on the Tauri async runtime (same 30s cadence as
 /// cron's scheduler; resumes due "waiting" goals after an app restart too).
+/// Start a goal's loop using whatever the app already has in managed state.
+///
+/// The delegation tool has an `AppHandle` and nothing else; threading `GoalRunning`,
+/// `SessionManager`, `AgentHome` and the rest through `ToolContext` just to reach
+/// here would put goal plumbing in front of every unrelated tool.
+pub fn spawn_from_app(app: &tauri::AppHandle, goal_id: &str) {
+    use tauri::Manager;
+    let ctx = GoalContext {
+        app: app.clone(),
+        db: app.state::<Db>().inner().clone(),
+        sessions: app.state::<SessionManager>().inner().clone(),
+        home: app.state::<AgentHome>().inner().clone(),
+        approvals: app.state::<ApprovalRegistry>().inner().clone(),
+        running: app.state::<GoalRunning>().inner().clone(),
+        session_state: app.state::<SessionState>().inner().clone(),
+    };
+    let id = goal_id.to_string();
+    tauri::async_runtime::spawn(async move {
+        run_loop(&ctx, &id).await;
+    });
+}
+
 pub fn spawn_tick(ctx: GoalContext) {
     tauri::async_runtime::spawn(async move {
         loop {
