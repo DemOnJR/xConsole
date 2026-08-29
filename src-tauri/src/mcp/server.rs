@@ -1,10 +1,14 @@
-//! Minimal MCP stdio server (JSON-RPC, newline-delimited).
+//! High-Performance Async Model Context Protocol (MCP) Server.
+//!
+//! Provides JSON-RPC 2.0 over stdio and reverse-tunnel streams for external AI
+//! agents (Claude Code, Cursor Agent CLI, Antigravity, Aider, Grok).
 
-use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::ai::memory;
 use crate::ai::safety;
@@ -15,6 +19,28 @@ use crate::ssh::command::run_vps_command;
 use crate::ssh::shell_quote;
 use crate::storage::Db;
 
+const MAX_OUTPUT_BYTES: usize = 64 * 1024; // 64 KB safety cap per return payload
+
+fn truncate_output(s: &str) -> String {
+    if s.len() <= MAX_OUTPUT_BYTES {
+        return s.to_string();
+    }
+    let boundary = match s
+        .char_indices()
+        .take_while(|(idx, _)| *idx < MAX_OUTPUT_BYTES)
+        .last()
+    {
+        Some((idx, _)) => idx,
+        None => MAX_OUTPUT_BYTES,
+    };
+    let slice = &s[..boundary];
+    let omitted_bytes = s.len() - boundary;
+    let omitted_lines = s[boundary..].lines().count();
+    format!(
+        "{slice}\n\n[Output truncated: {omitted_lines} lines ({omitted_bytes} bytes) omitted. Use read_file_range or grep_search to inspect specific sections]"
+    )
+}
+
 struct McpSession {
     db: Db,
     home: AgentHome,
@@ -22,9 +48,12 @@ struct McpSession {
     safety: String,
     /// Active workspace id (empty if none) — for the project brief / scoped memory.
     workspace_id: String,
-    /// Shared dir the running app watches; canvas actions are dropped here as files
-    /// (the MCP process can't emit Tauri events directly).
+    /// Shared dir the running app watches; canvas actions are dropped here as files.
     queue_dir: PathBuf,
+    /// Ephemeral auth token when running over reverse tunnel
+    token: Option<String>,
+    /// Active task abort handles for client-driven request cancellation.
+    abort_handles: Arc<DashMap<String, tokio::task::AbortHandle>>,
 }
 
 static CANVAS_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -44,11 +73,8 @@ impl McpSession {
             .collect();
         let safety = std::env::var("XCONSOLE_SAFETY").unwrap_or_else(|_| "approve".into());
         let workspace_id = std::env::var("XCONSOLE_WORKSPACE_ID").unwrap_or_default();
+        let token = std::env::var("XCONSOLE_TOKEN").ok().filter(|s| !s.is_empty());
 
-        // DB open, app-lock aware. If the plaintext working file exists, the app is running /
-        // unlocked (or the DB is unencrypted) — share it via WAL. Otherwise, if the lock is on,
-        // use the remembered device key to decrypt; if there's no key, FAIL LOUD rather than
-        // creating an empty DB that could later overwrite the user's encrypted data.
         let data_dir_path = PathBuf::from(&data_dir);
         let db_path = data_dir_path.join("xconsole.db");
         let db = if db_path.exists() {
@@ -77,6 +103,8 @@ impl McpSession {
             safety,
             workspace_id,
             queue_dir: PathBuf::from(&data_dir).join("canvas-queue"),
+            token,
+            abort_handles: Arc::new(DashMap::new()),
         })
     }
 
@@ -102,11 +130,11 @@ impl McpSession {
             "tools": [
                 {
                     "name": "run_command",
-                    "description": "Run a shell command on one of the user's VPS servers over SSH.",
+                    "description": "Run a shell command directly on the user's remote Linux VPS over SSH.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "command": { "type": "string" },
+                            "command": { "type": "string", "description": "The bash/shell command string to execute." },
                             "vps_id": { "type": "string", "description": "Target VPS id; required when multiple targets are selected." }
                         },
                         "required": ["command"]
@@ -114,42 +142,112 @@ impl McpSession {
                 },
                 {
                     "name": "read_file",
-                    "description": "Read a text file from a VPS.",
+                    "description": "Read the entire content of a text file from a VPS.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "path": { "type": "string" },
-                            "vps_id": { "type": "string" }
+                            "path": { "type": "string", "description": "Absolute remote file path." },
+                            "vps_id": { "type": "string", "description": "Target VPS id." }
                         },
                         "required": ["path"]
                     }
                 },
                 {
-                    "name": "write_file",
-                    "description": "Write (overwrite) a text file on a VPS.",
+                    "name": "read_file_range",
+                    "description": "Read a specific line window of a remote file with line numbers (e.g. for inspecting large logs or source files).",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "path": { "type": "string" },
-                            "content": { "type": "string" },
-                            "vps_id": { "type": "string" }
+                            "path": { "type": "string", "description": "Absolute remote file path." },
+                            "offset": { "type": "integer", "description": "Start line (1-indexed). Defaults to 1." },
+                            "limit": { "type": "integer", "description": "Number of lines to read. Defaults to 250." },
+                            "vps_id": { "type": "string", "description": "Target VPS id." }
+                        },
+                        "required": ["path"]
+                    }
+                },
+                {
+                    "name": "edit_file",
+                    "description": "Targeted diff search-and-replace edit on a remote file. Replaces unique old_string with new_string. Always prefer this over rewriting entire files.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string", "description": "Absolute remote file path." },
+                            "old_string": { "type": "string", "description": "Unique exact snippet of current code to replace." },
+                            "new_string": { "type": "string", "description": "New replacement code." },
+                            "replace_all": { "type": "boolean", "description": "Replace all occurrences if multiple matches exist. Defaults to false." },
+                            "vps_id": { "type": "string", "description": "Target VPS id." }
+                        },
+                        "required": ["path", "old_string", "new_string"]
+                    }
+                },
+                {
+                    "name": "write_file",
+                    "description": "Create a new file or overwrite an existing file on a VPS. For editing existing code prefer edit_file.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string", "description": "Absolute remote file path." },
+                            "content": { "type": "string", "description": "Full file content." },
+                            "vps_id": { "type": "string", "description": "Target VPS id." }
                         },
                         "required": ["path", "content"]
                     }
                 },
                 {
+                    "name": "list_directory",
+                    "description": "List files and subdirectories in a remote directory with file sizes, permissions, and modification times.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string", "description": "Remote directory path (defaults to current dir)." },
+                            "vps_id": { "type": "string", "description": "Target VPS id." }
+                        },
+                        "required": []
+                    }
+                },
+                {
+                    "name": "grep_search",
+                    "description": "Fast regex/text pattern search across files in a remote directory.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "pattern": { "type": "string", "description": "Search pattern or regular expression." },
+                            "path": { "type": "string", "description": "Directory or file to search in (defaults to .)." },
+                            "case_sensitive": { "type": "boolean", "description": "Case sensitive match. Defaults to true." },
+                            "max_results": { "type": "integer", "description": "Max match lines. Defaults to 50." },
+                            "vps_id": { "type": "string", "description": "Target VPS id." }
+                        },
+                        "required": ["pattern"]
+                    }
+                },
+                {
+                    "name": "file_search",
+                    "description": "Search for files and directories matching a glob pattern.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "pattern": { "type": "string", "description": "File name pattern (e.g. '*.conf', 'Dockerfile', 'index.*')." },
+                            "path": { "type": "string", "description": "Root path to search from. Defaults to .." },
+                            "max_depth": { "type": "integer", "description": "Max directory search depth. Defaults to 5." },
+                            "vps_id": { "type": "string", "description": "Target VPS id." }
+                        },
+                        "required": ["pattern"]
+                    }
+                },
+                {
                     "name": "list_vps_targets",
-                    "description": "List VPS targets available this session (id, name, host).",
+                    "description": "List VPS targets available in this session (id, name, host, user, port).",
                     "inputSchema": { "type": "object", "properties": {} }
                 },
                 {
                     "name": "skills_list",
-                    "description": "List available agent skills (playbooks).",
+                    "description": "List available agent skills and operational playbooks.",
                     "inputSchema": { "type": "object", "properties": {} }
                 },
                 {
                     "name": "skill_view",
-                    "description": "Read a skill SKILL.md before using it.",
+                    "description": "Read a skill SKILL.md playbook before using it.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -185,9 +283,7 @@ impl McpSession {
                 },
                 {
                     "name": "set_project_brief",
-                    "description": "Write/replace the active workspace's project brief (CONTEXT.md) — \
-                                    a concise overview of the project the agent keeps up to date. Use \
-                                    this to initialize the brief on the first task in a workspace.",
+                    "description": "Write or update the active workspace project brief (CONTEXT.md).",
                     "inputSchema": {
                         "type": "object",
                         "properties": { "content": { "type": "string" } },
@@ -196,16 +292,16 @@ impl McpSession {
                 },
                 {
                     "name": "host_memory_get",
-                    "description": "Read the institutional PROFILE.md and MEMORY.md dossier for one selected VPS.",
+                    "description": "Read the institutional PROFILE.md and MEMORY.md dossier for a target VPS.",
                     "inputSchema": {
                         "type": "object",
-                        "properties": { "vps_id": { "type": "string", "description": "Exact selected VPS id." } },
+                        "properties": { "vps_id": { "type": "string", "description": "Selected VPS id." } },
                         "required": ["vps_id"]
                     }
                 },
                 {
                     "name": "host_memory_update",
-                    "description": "Update one selected VPS dossier: kind=profile replaces PROFILE.md; kind=memory appends a durable host fact. Never store secrets.",
+                    "description": "Update target VPS dossier (kind=profile replaces PROFILE.md; kind=memory appends facts).",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -218,7 +314,7 @@ impl McpSession {
                 },
                 {
                     "name": "canvas_open_terminal",
-                    "description": "Open a live terminal for a server on the xConsole canvas so the user can watch it.",
+                    "description": "Open a live terminal for a server on the xConsole canvas so the user watches in real time.",
                     "inputSchema": {
                         "type": "object",
                         "properties": { "vps_id": { "type": "string" } },
@@ -236,12 +332,12 @@ impl McpSession {
                 },
                 {
                     "name": "canvas_tile",
-                    "description": "Arrange the open canvas panels into a grid that fills the window.",
+                    "description": "Arrange open canvas panels into a clean tiled grid layout.",
                     "inputSchema": { "type": "object", "properties": {} }
                 },
                 {
                     "name": "canvas_close",
-                    "description": "Close a canvas panel. Pass node_id for one specific panel, or vps_id for all panels of a server.",
+                    "description": "Close a canvas panel. Pass node_id or vps_id.",
                     "inputSchema": {
                         "type": "object",
                         "properties": { "node_id": { "type": "string" }, "vps_id": { "type": "string" } },
@@ -250,7 +346,7 @@ impl McpSession {
                 },
                 {
                     "name": "canvas_refresh",
-                    "description": "Reconnect a terminal on the canvas (e.g. after the server rebooted). Pass node_id or vps_id.",
+                    "description": "Reconnect a terminal node on the canvas.",
                     "inputSchema": {
                         "type": "object",
                         "properties": { "node_id": { "type": "string" }, "vps_id": { "type": "string" } },
@@ -259,6 +355,276 @@ impl McpSession {
                 }
             ]
         })
+    }
+
+    fn resource_list(&self) -> Value {
+        let mut resources = Vec::new();
+
+        for id in &self.targets {
+            if let Ok(Some(vps)) = self.db.get_vps(id) {
+                resources.push(json!({
+                    "uri": format!("vps://{id}/sysinfo"),
+                    "name": format!("System Stats ({})", vps.name),
+                    "description": format!("Real-time OS, CPU, RAM and disk usage for {}", vps.name),
+                    "mimeType": "text/plain"
+                }));
+                resources.push(json!({
+                    "uri": format!("vps://{id}/profile"),
+                    "name": format!("Host Profile ({})", vps.name),
+                    "description": format!("Dossier and architecture notes for {}", vps.name),
+                    "mimeType": "text/markdown"
+                }));
+                resources.push(json!({
+                    "uri": format!("vps://{id}/memory"),
+                    "name": format!("Host Memory ({})", vps.name),
+                    "description": format!("Institutional learned facts for {}", vps.name),
+                    "mimeType": "text/markdown"
+                }));
+            }
+        }
+
+        if !self.workspace_id.is_empty() {
+            resources.push(json!({
+                "uri": "workspace://brief",
+                "name": "Workspace Project Brief",
+                "description": "Active workspace project overview and architecture brief (CONTEXT.md)",
+                "mimeType": "text/markdown"
+            }));
+        }
+
+        let skills = skills::discover(&self.home);
+        for s in skills {
+            resources.push(json!({
+                "uri": format!("skills://{}/{}", s.category, s.name),
+                "name": format!("Skill: {}/{}", s.category, s.name),
+                "description": s.description,
+                "mimeType": "text/markdown"
+            }));
+        }
+
+        json!({ "resources": resources })
+    }
+
+    fn resource_templates(&self) -> Value {
+        json!({
+            "resourceTemplates": [
+                {
+                    "uriTemplate": "vps://{vps_id}/sysinfo",
+                    "name": "VPS System Stats",
+                    "mimeType": "text/plain"
+                },
+                {
+                    "uriTemplate": "vps://{vps_id}/profile",
+                    "name": "VPS Host Profile",
+                    "mimeType": "text/markdown"
+                },
+                {
+                    "uriTemplate": "vps://{vps_id}/memory",
+                    "name": "VPS Host Memory",
+                    "mimeType": "text/markdown"
+                },
+                {
+                    "uriTemplate": "skills://{category}/{name}",
+                    "name": "Skill Playbook",
+                    "mimeType": "text/markdown"
+                }
+            ]
+        })
+    }
+
+    async fn resource_read(&self, uri: &str) -> (Value, bool) {
+        if uri == "workspace://brief" {
+            if self.workspace_id.is_empty() {
+                return (
+                    json!({ "error": "no active workspace configured" }),
+                    true,
+                );
+            }
+            let brief = workspace_context::load_brief(&self.home, &self.workspace_id);
+            return (
+                json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "text/markdown",
+                        "text": brief
+                    }]
+                }),
+                false,
+            );
+        }
+
+        if let Some(rest) = uri.strip_prefix("skills://") {
+            let mut parts = rest.splitn(2, '/');
+            let cat = parts.next().unwrap_or("");
+            let name = parts.next().unwrap_or("");
+            if let Some(body) = skills::read_skill(&self.home, cat, name) {
+                return (
+                    json!({
+                        "contents": [{
+                            "uri": uri,
+                            "mimeType": "text/markdown",
+                            "text": body
+                        }]
+                    }),
+                    false,
+                );
+            } else {
+                return (json!({ "error": format!("skill '{rest}' not found") }), true);
+            }
+        }
+
+        if let Some(rest) = uri.strip_prefix("vps://") {
+            let mut parts = rest.splitn(2, '/');
+            let vps_id = parts.next().unwrap_or("");
+            let kind = parts.next().unwrap_or("");
+
+            if !self.targets.iter().any(|t| t == vps_id) {
+                return (json!({ "error": format!("target '{vps_id}' not found") }), true);
+            }
+
+            match kind {
+                "profile" => {
+                    let profile = crate::ai::host_memory::load_profile(&self.home, vps_id);
+                    return (
+                        json!({
+                            "contents": [{
+                                "uri": uri,
+                                "mimeType": "text/markdown",
+                                "text": profile
+                            }]
+                        }),
+                        false,
+                    );
+                }
+                "memory" => {
+                    let memory = crate::ai::host_memory::load_memory(&self.home, vps_id);
+                    return (
+                        json!({
+                            "contents": [{
+                                "uri": uri,
+                                "mimeType": "text/markdown",
+                                "text": memory
+                            }]
+                        }),
+                        false,
+                    );
+                }
+                "sysinfo" => {
+                    let cmd = "uname -a; echo '--- UPTIME ---'; uptime; echo '--- MEMORY ---'; free -h; echo '--- DISK ---'; df -h /";
+                    match run_vps_command(&self.db, vps_id, cmd).await {
+                        Ok(out) => {
+                            return (
+                                json!({
+                                    "contents": [{
+                                        "uri": uri,
+                                        "mimeType": "text/plain",
+                                        "text": out.stdout
+                                    }]
+                                }),
+                                false,
+                            );
+                        }
+                        Err(e) => return (json!({ "error": format!("could not query sysinfo: {e}") }), true),
+                    }
+                }
+                _ => return (json!({ "error": format!("unknown resource kind '{kind}'") }), true),
+            }
+        }
+
+        (json!({ "error": format!("unrecognized URI '{uri}'") }), true)
+    }
+
+    fn prompt_list(&self) -> Value {
+        json!({
+            "prompts": [
+                {
+                    "name": "diagnose_server",
+                    "description": "Comprehensive server health diagnosis: checks uptime, CPU load, memory pressure, disk space, failed systemd services, and dmesg kernel errors.",
+                    "arguments": [
+                        { "name": "vps_id", "description": "Target VPS id to diagnose", "required": false }
+                    ]
+                },
+                {
+                    "name": "audit_web_stack",
+                    "description": "Audit web servers (Nginx/Apache/Caddy), active virtual hosts, listening ports, reverse proxies, and SSL certificates.",
+                    "arguments": [
+                        { "name": "vps_id", "description": "Target VPS id", "required": false }
+                    ]
+                },
+                {
+                    "name": "inspect_docker",
+                    "description": "Inspect running Docker containers, health status, container resource usage, and recent container errors.",
+                    "arguments": [
+                        { "name": "vps_id", "description": "Target VPS id", "required": false }
+                    ]
+                }
+            ]
+        })
+    }
+
+    fn prompt_get(&self, name: &str, args: &Value) -> Result<Value, String> {
+        let vps_id = self.resolve_vps(args).unwrap_or_else(|_| "selected target".into());
+        match name {
+            "diagnose_server" => Ok(json!({
+                "description": "Server health diagnosis",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": {
+                            "type": "text",
+                            "text": format!(
+                                "Please perform a complete diagnostic health check on VPS target '{vps_id}':\n\
+                                 1. Check system load and uptime: `uptime`\n\
+                                 2. Check memory usage: `free -h` and identify top memory processes: `ps aux --sort=-%mem | head -n 10`\n\
+                                 3. Check disk space and inodes: `df -h` and `df -i`\n\
+                                 4. Check failed systemd units: `systemctl --failed`\n\
+                                 5. Check recent kernel errors: `dmesg -T -l err,crit,alert,emerg | tail -n 25`\n\
+                                 Summarize any issues found and recommend corrective actions."
+                            )
+                        }
+                    }
+                ]
+            })),
+            "audit_web_stack" => Ok(json!({
+                "description": "Web server and virtual host audit",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": {
+                            "type": "text",
+                            "text": format!(
+                                "Please audit the web server and domain configuration on VPS target '{vps_id}':\n\
+                                 1. Check listening HTTP/HTTPS ports: `ss -tulpn | grep -E ':(80|443|8080|3000)'`\n\
+                                 2. Inspect web server status (Nginx/Apache/Caddy/Traefik): `systemctl status nginx apache2 caddy --no-pager 2>/dev/null`\n\
+                                 3. List active sites and config files (e.g. `/etc/nginx/sites-enabled/`, `/etc/nginx/conf.d/`, `/var/www/`)\n\
+                                 4. Check SSL certificate paths and expiration dates.\n\
+                                 Provide an overview of active domains, reverse proxy routes, and root folders."
+                            )
+                        }
+                    }
+                ]
+            })),
+            "inspect_docker" => Ok(json!({
+                "description": "Docker container inspection",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": {
+                            "type": "text",
+                            "text": format!(
+                                "Please inspect Docker containers on VPS target '{vps_id}':\n\
+                                 1. List running and stopped containers: `docker ps -a`\n\
+                                 2. Check container CPU/RAM stats: `docker stats --no-stream`\n\
+                                 3. Check docker compose files in `/root` or `/var/www`.\n\
+                                 4. Inspect logs of any failing or restarting containers: `docker logs --tail 50 <container_id>`\n\
+                                 Summarize the health of all containerized services."
+                            )
+                        }
+                    }
+                ]
+            })),
+            other => Err(format!("unknown prompt '{other}'")),
+        }
     }
 
     fn resolve_vps(&self, args: &Value) -> Result<String, String> {
@@ -280,9 +646,6 @@ impl McpSession {
         }
     }
 
-    /// Effective safety mode for a target, honoring per-VPS overrides over the
-    /// session default (so a server pinned to "approve" stays gated even when the
-    /// global mode is "full"/"allowlist").
     fn effective_safety(&self, vps_id: Option<&str>) -> String {
         match vps_id {
             Some(id) => safety::effective_mode(&self.db, &self.safety, id),
@@ -301,15 +664,6 @@ impl McpSession {
         }
     }
 
-    /// Authorize a read-only action (e.g. read_file). Gated on intent rather than
-    /// re-parsing an assembled shell string, so paths containing shell
-    /// metacharacters are read normally under allowlist mode.
-    ///
-    /// `path` is checked against [`safety::touches_sensitive_path`] even so. Gating on
-    /// intent must not become a way around the credential-path rule: the in-app tools
-    /// refuse to auto-read `/root/.ssh/id_rsa` under allowlist mode, and this path — which
-    /// hands its output to a model in a separate process — has no business being more
-    /// permissive than they are.
     fn allow_read(&self, vps_id: Option<&str>, path: &str) -> Result<(), String> {
         if safety::touches_sensitive_path(path) {
             return Err(
@@ -358,7 +712,7 @@ impl McpSession {
                         if !out.stderr.is_empty() {
                             s.push_str(&format!("stderr:\n{}\n", out.stderr.trim_end()));
                         }
-                        (s, out.exit_code != 0)
+                        (truncate_output(&s), out.exit_code != 0)
                     }
                     Err(e) => (format!("error: {e}"), true),
                 }
@@ -383,8 +737,79 @@ impl McpSession {
                         } else {
                             out.stdout
                         };
-                        (text, out.exit_code != 0)
+                        (truncate_output(&text), out.exit_code != 0)
                     }
+                    Err(e) => (format!("error: {e}"), true),
+                }
+            }
+            "read_file_range" => {
+                let path = match args.get("path").and_then(|v| v.as_str()) {
+                    Some(p) if !p.is_empty() => p,
+                    _ => return ("error: missing path".into(), true),
+                };
+                let offset = args.get("offset").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let vps_id = match self.resolve_vps(args) {
+                    Ok(id) => id,
+                    Err(e) => return (format!("error: {e}"), true),
+                };
+                if let Err(e) = self.allow_read(Some(&vps_id), path) {
+                    return (format!("error: {e}"), true);
+                }
+                let cmd = format!("cat -- {}", shell_quote(path));
+                match run_vps_command(&self.db, &vps_id, &cmd).await {
+                    Ok(out) if out.exit_code == 0 => {
+                        let formatted = crate::ai::file_ops::format_read(&out.stdout, offset, limit);
+                        (truncate_output(&formatted), false)
+                    }
+                    Ok(out) => (format!("exit_code: {}\nstderr:\n{}", out.exit_code, out.stderr), true),
+                    Err(e) => (format!("error: {e}"), true),
+                }
+            }
+            "edit_file" => {
+                let path = match args.get("path").and_then(|v| v.as_str()) {
+                    Some(p) if !p.is_empty() => p,
+                    _ => return ("error: missing path".into(), true),
+                };
+                let old_string = match args.get("old_string").and_then(|v| v.as_str()) {
+                    Some(s) if !s.is_empty() => s,
+                    _ => return ("error: missing old_string".into(), true),
+                };
+                let new_string = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+                let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+                let vps_id = match self.resolve_vps(args) {
+                    Ok(id) => id,
+                    Err(e) => return (format!("error: {e}"), true),
+                };
+                if let Err(e) = self.allow_read(Some(&vps_id), path) {
+                    return (format!("error: {e}"), true);
+                }
+                let read_cmd = format!("cat -- {}", shell_quote(path));
+                let before_out = match run_vps_command(&self.db, &vps_id, &read_cmd).await {
+                    Ok(o) => o,
+                    Err(e) => return (format!("error reading file: {e}"), true),
+                };
+                if before_out.exit_code != 0 && before_out.stdout.is_empty() {
+                    return (
+                        format!("error: could not read {path} (exit code {}). Use write_file to create it.", before_out.exit_code),
+                        true,
+                    );
+                }
+                let (next_content, count) = match crate::ai::file_ops::apply_edit(&before_out.stdout, old_string, new_string, replace_all) {
+                    Ok(res) => res,
+                    Err(e) => return (e, true),
+                };
+                let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, next_content.as_bytes());
+                let write_cmd = format!("printf %s {} | base64 -d > {}", shell_quote(&b64), shell_quote(path));
+                if let Err(e) = self.allow_command(&write_cmd, Some(&vps_id)) {
+                    return (format!("error: {e}"), true);
+                }
+                match run_vps_command(&self.db, &vps_id, &write_cmd).await {
+                    Ok(out) if out.exit_code == 0 => (
+                        format!("Successfully edited {path} ({count} occurrence(s) replaced)"),
+                        false,
+                    ),
+                    Ok(out) => (format!("error writing {path}: exit code {}\n{}", out.exit_code, out.stderr), true),
                     Err(e) => (format!("error: {e}"), true),
                 }
             }
@@ -415,6 +840,86 @@ impl McpSession {
                         format!("exit_code: {}\n{}", out.exit_code, out.stderr.trim()),
                         out.exit_code != 0,
                     ),
+                    Err(e) => (format!("error: {e}"), true),
+                }
+            }
+            "list_directory" => {
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                let vps_id = match self.resolve_vps(args) {
+                    Ok(id) => id,
+                    Err(e) => return (format!("error: {e}"), true),
+                };
+                if let Err(e) = self.allow_read(Some(&vps_id), path) {
+                    return (format!("error: {e}"), true);
+                }
+                let cmd = format!("ls -la --time-style=iso -- {}", shell_quote(path));
+                match run_vps_command(&self.db, &vps_id, &cmd).await {
+                    Ok(out) if out.exit_code == 0 => (truncate_output(&out.stdout), false),
+                    Ok(out) => (format!("exit_code: {}\nstderr:\n{}", out.exit_code, out.stderr), true),
+                    Err(e) => (format!("error: {e}"), true),
+                }
+            }
+            "grep_search" => {
+                let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
+                    Some(p) if !p.is_empty() => p,
+                    _ => return ("error: missing pattern".into(), true),
+                };
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                let case_sensitive = args.get("case_sensitive").and_then(|v| v.as_bool()).unwrap_or(true);
+                let max_results = args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(50).min(200);
+                let vps_id = match self.resolve_vps(args) {
+                    Ok(id) => id,
+                    Err(e) => return (format!("error: {e}"), true),
+                };
+                if let Err(e) = self.allow_read(Some(&vps_id), path) {
+                    return (format!("error: {e}"), true);
+                }
+                let case_flag = if case_sensitive { "" } else { "-i" };
+                let cmd = format!(
+                    "grep -rn {case_flag} -m {max_results} --exclude-dir='.git' --exclude-dir='node_modules' --exclude-dir='target' -- {} {} 2>/dev/null | head -n {max_results}",
+                    shell_quote(pattern),
+                    shell_quote(path)
+                );
+                match run_vps_command(&self.db, &vps_id, &cmd).await {
+                    Ok(out) => {
+                        let res = if out.stdout.trim().is_empty() {
+                            format!("(no matches found for '{pattern}' in '{path}')")
+                        } else {
+                            out.stdout
+                        };
+                        (truncate_output(&res), false)
+                    }
+                    Err(e) => (format!("error: {e}"), true),
+                }
+            }
+            "file_search" => {
+                let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
+                    Some(p) if !p.is_empty() => p,
+                    _ => return ("error: missing pattern".into(), true),
+                };
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                let max_depth = args.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(5);
+                let vps_id = match self.resolve_vps(args) {
+                    Ok(id) => id,
+                    Err(e) => return (format!("error: {e}"), true),
+                };
+                if let Err(e) = self.allow_read(Some(&vps_id), path) {
+                    return (format!("error: {e}"), true);
+                }
+                let cmd = format!(
+                    "find {} -maxdepth {max_depth} -name {} ! -path '*/.git/*' ! -path '*/node_modules/*' ! -path '*/target/*' 2>/dev/null | head -n 100",
+                    shell_quote(path),
+                    shell_quote(pattern)
+                );
+                match run_vps_command(&self.db, &vps_id, &cmd).await {
+                    Ok(out) => {
+                        let res = if out.stdout.trim().is_empty() {
+                            format!("(no files matched '{pattern}' in '{path}')")
+                        } else {
+                            out.stdout
+                        };
+                        (truncate_output(&res), false)
+                    }
                     Err(e) => (format!("error: {e}"), true),
                 }
             }
@@ -469,7 +974,6 @@ impl McpSession {
                 if entry.trim().is_empty() {
                     return ("error: missing entry".into(), true);
                 }
-                // Scope to the active workspace when there is one (else global memory).
                 let result = if self.workspace_id.is_empty() {
                     memory::append_memory(&self.home, entry).map(|_| ())
                 } else {
@@ -571,24 +1075,39 @@ impl McpSession {
 }
 
 const APPROVE_BLOCKED: &str =
-    "command blocked: xConsole safety is Approve mode; switch to Full or Allowlist for Cursor MCP";
+    "command blocked: xConsole safety is Approve mode; switch to Full or Allowlist in xConsole Settings";
 
-pub fn run_stdio_server() -> Result<(), String> {
+pub async fn run_stdio_server() -> Result<(), String> {
     let session = Arc::new(McpSession::from_env()?);
-    let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    let reader = BufReader::new(stdin.lock());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-    for line in reader.lines() {
-        let line = line.map_err(|e| e.to_string())?;
-        let line = line.trim();
+    // Dedicated asynchronous stdout response pump
+    tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        while let Some(msg) = rx.recv().await {
+            if stdout.write_all(msg.as_bytes()).await.is_err() {
+                break;
+            }
+            if stdout.write_all(b"\n").await.is_err() {
+                break;
+            }
+            if stdout.flush().await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let stdin = tokio::io::stdin();
+    let reader = BufReader::new(stdin);
+    let mut lines = reader.lines();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        let line = line.trim().to_string();
         if line.is_empty() {
             continue;
         }
-        // A malformed line must not kill the server: reply with a JSON-RPC
-        // parse error and keep serving (a fatal return here exits the process).
-        let msg: Value = match serde_json::from_str(line) {
+
+        let msg: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
                 let resp = json_response(
@@ -596,30 +1115,91 @@ pub fn run_stdio_server() -> Result<(), String> {
                     None,
                     Some(json!({ "code": -32700, "message": format!("parse error: {e}") })),
                 );
-                writeln!(stdout, "{}", resp).map_err(|e| e.to_string())?;
-                stdout.flush().map_err(|e| e.to_string())?;
+                let _ = tx.send(resp);
                 continue;
             }
         };
-        if let Some(resp) = handle_message(&session, &msg, &rt) {
-            writeln!(stdout, "{}", resp).map_err(|e| e.to_string())?;
-            stdout.flush().map_err(|e| e.to_string())?;
+
+        let method = match msg.get("method").and_then(|m| m.as_str()) {
+            Some(m) => m.to_string(),
+            None => continue,
+        };
+
+        // Client-driven cancellation
+        if method == "notifications/cancelled" {
+            if let Some(req_id) = msg
+                .get("params")
+                .and_then(|p| p.get("requestId"))
+                .map(|r| r.to_string())
+            {
+                if let Some((_, handle)) = session.abort_handles.remove(&req_id) {
+                    handle.abort();
+                }
+            }
+            continue;
         }
+
+        if method.starts_with("notifications/") {
+            continue;
+        }
+
+        let id = msg.get("id").cloned().unwrap_or(Value::Null);
+        let id_str = id.to_string();
+        let session_clone = session.clone();
+        let tx_clone = tx.clone();
+        let task_id = id_str.clone();
+
+        let join_handle = tokio::spawn(async move {
+            let resp = dispatch_message(&session_clone, &method, &id, &msg).await;
+            let _ = tx_clone.send(resp);
+            session_clone.abort_handles.remove(&task_id);
+        });
+
+        session
+            .abort_handles
+            .insert(id_str, join_handle.abort_handle());
     }
+
     Ok(())
 }
 
-fn handle_message(session: &Arc<McpSession>, msg: &Value, rt: &tokio::runtime::Runtime) -> Option<String> {
-    let method = msg.get("method")?.as_str()?;
-    if method.starts_with("notifications/") {
-        return None;
+async fn dispatch_message(
+    session: &Arc<McpSession>,
+    method: &str,
+    id: &Value,
+    msg: &Value,
+) -> String {
+    // Optional Bearer Token Auth verification (when configured for reverse tunnels)
+    if let Some(ref required_token) = session.token {
+        let header_token = msg
+            .get("params")
+            .and_then(|p| p.get("_meta"))
+            .and_then(|m| m.get("token"))
+            .and_then(|t| t.as_str())
+            .or_else(|| {
+                msg.get("params")
+                    .and_then(|p| p.get("token"))
+                    .and_then(|t| t.as_str())
+            });
+
+        if header_token != Some(required_token.as_str()) && method != "initialize" && method != "ping" {
+            return json_response(
+                id.clone(),
+                None,
+                Some(json!({ "code": -32001, "message": "unauthorized: invalid or missing xConsole session token" })),
+            );
+        }
     }
-    let id = msg.get("id").cloned().unwrap_or(Value::Null);
 
     let result = match method {
         "initialize" => json!({
             "protocolVersion": "2024-11-05",
-            "capabilities": { "tools": {} },
+            "capabilities": {
+                "tools": { "listChanged": false },
+                "resources": { "subscribe": false, "listChanged": false },
+                "prompts": { "listChanged": false },
+                "logging": {}
+            },
             "serverInfo": { "name": "xconsole", "version": env!("CARGO_PKG_VERSION") }
         }),
         "tools/list" => session.tool_list(),
@@ -630,23 +1210,58 @@ fn handle_message(session: &Arc<McpSession>, msg: &Value, rt: &tokio::runtime::R
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            let (text, is_error) = rt.block_on(session.tool_call(name, &args));
+            let (text, is_error) = session.tool_call(name, &args).await;
             json!({
                 "content": [{ "type": "text", "text": text }],
                 "isError": is_error
             })
         }
+        "resources/list" => session.resource_list(),
+        "resources/templates/list" => session.resource_templates(),
+        "resources/read" => {
+            let uri = msg
+                .get("params")
+                .and_then(|p| p.get("uri"))
+                .and_then(|u| u.as_str())
+                .unwrap_or("");
+            let (res, is_err) = session.resource_read(uri).await;
+            if is_err {
+                return json_response(
+                    id.clone(),
+                    None,
+                    Some(json!({ "code": -32602, "message": res.get("error").and_then(|e| e.as_str()).unwrap_or("resource read failed") })),
+                );
+            }
+            res
+        }
+        "prompts/list" => session.prompt_list(),
+        "prompts/get" => {
+            let params = msg.get("params").cloned().unwrap_or(json!({}));
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            match session.prompt_get(name, &args) {
+                Ok(p) => p,
+                Err(e) => {
+                    return json_response(
+                        id.clone(),
+                        None,
+                        Some(json!({ "code": -32602, "message": e })),
+                    );
+                }
+            }
+        }
+        "logging/setLevel" => json!({}),
         "ping" => json!({}),
         _ => {
-            return Some(json_response(
-                id,
+            return json_response(
+                id.clone(),
                 None,
                 Some(json!({ "code": -32601, "message": format!("method not found: {method}") })),
-            ));
+            );
         }
     };
 
-    Some(json_response(id, Some(result), None))
+    json_response(id.clone(), Some(result), None)
 }
 
 fn json_response(id: Value, result: Option<Value>, error: Option<Value>) -> String {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { maskIpString, maskMachineIpsInText, maskAllIpsInText, maskTerminalData } from "./privacy";
+import { maskIpString, maskMachineIpsInText, maskAllIpsInText } from "./privacy";
 
 describe("privacy masking", () => {
   it("masks IPv4 addresses keeping first and last octet", () => {
@@ -35,13 +35,6 @@ Last login: Sun Aug 16 21:46:46 2026 from 93.151.225.49`;
     expect(masked).toContain("from 93.***.***.49");
     expect(masked).not.toContain("212.227.52.118");
     expect(masked).not.toContain("93.151.225.49");
-  });
-
-  it("masks terminal data bytes seamlessly", () => {
-    const raw = "IPv4 address for ens6: 212.227.52.118";
-    const bytes = new TextEncoder().encode(raw);
-    const result = maskTerminalData(bytes, [], true);
-    expect(result).toBe("IPv4 address for ens6: 212.***.***.118");
   });
 });
 

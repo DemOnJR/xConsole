@@ -22,8 +22,7 @@ import { onOsDropHover, onOsFilesDropped } from "../hooks/useOsFileDrop";
 import { onInternalDrop, useDragStore } from "../stores/dragStore";
 import { bytesToB64 } from "../lib/tauri";
 import { GitBranchBadge, useGitBranch } from "../hooks/useGitBranch";
-import { useMaskHost, maskTerminalData } from "../lib/privacy";
-import { usePrivacyStore } from "../stores/privacyStore";
+import { useMaskHost } from "../lib/privacy";
 
 /** A file that was just put on the server, shown as a dismissible chip. */
 interface DroppedChip {
@@ -197,8 +196,8 @@ export const TerminalNode = memo(function TerminalNode({ id, data, selected, dra
       sessionIdRef.current = sessionId;
       sessionUnlisteners.push(
         await onSessionOutput(sessionId, (bytes) => {
+          term.write(bytes);
           const text = new TextDecoder().decode(bytes);
-          term.write(maskTerminalData(text));
           const cwd = extractCwdFromOutput(text);
           if (cwd) setInfo(id, { cwd });
         }),
@@ -221,7 +220,7 @@ export const TerminalNode = memo(function TerminalNode({ id, data, selected, dra
       try {
         if (!isReconnect) {
           // Reattach to a still-living background session (e.g. after a workspace
-          // switch) so a running process like htop survives.
+          // switch or F5 page reload) so running processes like btop / htop / claude survive.
           const existing = useSessionStore.getState().sessions[id];
           if (existing?.sessionId) {
             const replay = await api.sshReplay(existing.sessionId).catch(() => null);
@@ -229,9 +228,13 @@ export const TerminalNode = memo(function TerminalNode({ id, data, selected, dra
             if (replay !== null) {
               setInfo(id, { status: "connected", sessionId: existing.sessionId });
               await attach(existing.sessionId);
-              if (replay) term.write(maskTerminalData(b64ToBytes(replay)));
+              if (replay) term.write(b64ToBytes(replay));
+              safeFit();
               reconnectAttemptsRef.current = 0;
               return;
+            } else {
+              // The backend no longer has this session (e.g. app restart). Clear stale sid.
+              setInfo(id, { sessionId: undefined });
             }
           }
         }
@@ -248,7 +251,7 @@ export const TerminalNode = memo(function TerminalNode({ id, data, selected, dra
         });
         await attach(outcome.session_id);
         const replay = await api.sshReplay(outcome.session_id).catch(() => null);
-        if (replay) term.write(maskTerminalData(b64ToBytes(replay)));
+        if (replay) term.write(b64ToBytes(replay));
         if (isReconnect) term.writeln("\r\n\x1b[32m✓ reconnected\x1b[0m");
         reconnectAttemptsRef.current = 0;
         // Execute-button commands are delivered via the queue-consumption effect
@@ -316,23 +319,12 @@ export const TerminalNode = memo(function TerminalNode({ id, data, selected, dra
       }
     }
 
-    const unsubPrivacy = usePrivacyStore.subscribe(async (state, prevState) => {
-      if (state.maskIps !== prevState.maskIps && sessionIdRef.current && termRef.current) {
-        const replay = await api.sshReplay(sessionIdRef.current).catch(() => null);
-        if (replay && termRef.current) {
-          termRef.current.clear();
-          termRef.current.write(maskTerminalData(b64ToBytes(replay)));
-        }
-      }
-    });
-
     return () => {
       // Detach the UI but KEEP the backend session alive so switching workspaces
       // (which unmounts this node) doesn't kill a running process. The session is
       // only closed via the explicit close button (see `closeNode`).
       mounted = false;
       disposed = true;
-      unsubPrivacy();
       if (reconnectTimerRef.current != null) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;

@@ -10,6 +10,8 @@ import {
   parseVisionMode,
   visionLabel,
   imagesFromClipboardEvent,
+  filesFromClipboardEvent,
+  extractFilePathsFromClipboard,
   clipboardLooksLikeImage,
 } from "./vision";
 
@@ -68,17 +70,42 @@ describe("vision helpers", () => {
     );
   });
 
-  it("pulls image files off a paste DataTransfer", () => {
+  it("pulls image files and other files off a paste DataTransfer", () => {
     const png = new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
     const txt = new File([new Uint8Array([4])], "notes.txt", { type: "text/plain" });
+    const code = new File([new Uint8Array([5, 6])], "app.py", { type: "" });
     const dt = {
-      files: [png, txt],
+      files: [png, txt, code],
       items: [],
       types: ["Files"],
       getData: () => "",
     } as unknown as DataTransfer;
     expect(imagesFromClipboardEvent(dt).map((f) => f.name)).toEqual(["shot.png"]);
     expect(clipboardLooksLikeImage(dt)).toBe(true);
+    const { images, files } = filesFromClipboardEvent(dt);
+    expect(images.map((f) => f.name)).toEqual(["shot.png"]);
+    expect(files.map((f) => f.name)).toEqual(["notes.txt", "app.py"]);
+  });
+
+  it("extracts file paths from text/uri-list and text/plain", () => {
+    const dtUri = {
+      files: [],
+      items: [],
+      types: ["text/uri-list"],
+      getData: (type: string) =>
+        type === "text/uri-list" ? "file:///C:/Users/name/Documents/test.txt\r\nfile:///D:/images/shot.png" : "",
+    } as unknown as DataTransfer;
+    const pathsUri = extractFilePathsFromClipboard(dtUri);
+    expect(pathsUri).toEqual(["C:\\Users\\name\\Documents\\test.txt", "D:\\images\\shot.png"]);
+
+    const dtText = {
+      files: [],
+      items: [],
+      types: ["text/plain"],
+      getData: (type: string) => (type === "text/plain" ? "C:\\Users\\name\\Pictures\\photo.png" : ""),
+    } as unknown as DataTransfer;
+    expect(extractFilePathsFromClipboard(dtText)).toEqual(["C:\\Users\\name\\Pictures\\photo.png"]);
+    expect(clipboardLooksLikeImage(dtText)).toBe(true);
   });
 
   it("treats an image MIME type as a screenshot clipboard", () => {

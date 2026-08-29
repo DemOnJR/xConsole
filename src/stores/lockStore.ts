@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { api } from "../lib/tauri";
+import { useSessionStore } from "./sessionStore";
 
 // App-lock gate state. On launch the app asks the backend whether a lock is configured and
 // whether it's already unlocked (silently, from the OS keychain). If it's locked, the whole
@@ -55,9 +56,13 @@ export const useLockStore = create<LockState>((set) => ({
     }
   },
 
-  setLocked: () => set({ status: "locked", error: null, busy: false }),
+  setLocked: () => {
+    useSessionStore.getState().clear();
+    set({ status: "locked", error: null, busy: false });
+  },
 
   lockNow: async () => {
+    useSessionStore.getState().clear();
     try {
       await api.lockNow();
     } catch (e) {

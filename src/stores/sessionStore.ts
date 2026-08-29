@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { persist, createJSONStorage } from "zustand/middleware";
 
 export type ConnState =
   | "connecting"
@@ -27,21 +28,40 @@ interface SessionState {
   sessions: Record<string, SessionInfo>;
   setInfo: (nodeId: string, partial: Partial<SessionInfo>) => void;
   remove: (nodeId: string) => void;
+  clear: () => void;
 }
 
-export const useSessionStore = create<SessionState>((set) => ({
-  sessions: {},
-  setInfo: (nodeId, partial) =>
-    set((s) => {
-      const prev: SessionInfo = s.sessions[nodeId] ?? { status: "connecting" };
-      return {
-        sessions: { ...s.sessions, [nodeId]: { ...prev, ...partial } },
-      };
+export const useSessionStore = create<SessionState>()(
+  persist(
+    (set) => ({
+      sessions: {},
+      setInfo: (nodeId, partial) =>
+        set((s) => {
+          const prev: SessionInfo = s.sessions[nodeId] ?? { status: "connecting" };
+          return {
+            sessions: { ...s.sessions, [nodeId]: { ...prev, ...partial } },
+          };
+        }),
+      remove: (nodeId) =>
+        set((s) => {
+          const next = { ...s.sessions };
+          delete next[nodeId];
+          return { sessions: next };
+        }),
+      clear: () => set({ sessions: {} }),
     }),
-  remove: (nodeId) =>
-    set((s) => {
-      const next = { ...s.sessions };
-      delete next[nodeId];
-      return { sessions: next };
-    }),
-}));
+    {
+      name: "xconsole-sessions",
+      storage: createJSONStorage(() => ({
+        getItem: (name) =>
+          typeof localStorage !== "undefined" ? localStorage.getItem(name) : null,
+        setItem: (name, value) => {
+          if (typeof localStorage !== "undefined") localStorage.setItem(name, value);
+        },
+        removeItem: (name) => {
+          if (typeof localStorage !== "undefined") localStorage.removeItem(name);
+        },
+      })),
+    },
+  ),
+);

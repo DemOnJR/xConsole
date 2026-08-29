@@ -215,6 +215,9 @@ export function defaultContextLimit(kind?: string, model?: string): number {
   if (m.includes("deepseek") || m.includes("gemini")) {
     return 1_000_000;
   }
+  if (m.includes("kimi") || m.includes("moonshot")) {
+    return 256_000;
+  }
   if (k === "ollama") return 65_536;
   if (
     k === "anthropic" ||

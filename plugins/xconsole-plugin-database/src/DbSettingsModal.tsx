@@ -1,5 +1,6 @@
-﻿import { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { api, type DbSavedConnection } from "../../../src/lib/tauri";
+import { useMaskHost } from "../../../src/lib/privacy";
 import {
   CloseIcon,
   SettingsIcon,
@@ -80,6 +81,7 @@ export function DbSettingsModal({
   const [savedLogins, setSavedLogins] = useState<DbSavedConnection[]>([]);
   const [loadingLogins, setLoadingLogins] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const maskHost = useMaskHost();
 
   useEffect(() => {
     if (open) {
@@ -487,7 +489,7 @@ export function DbSettingsModal({
                         </div>
                         <div className="mt-0.5 truncate font-mono text-[10px] text-gray-500">
                           {saved.container ? `docker:${saved.container} · ` : ""}
-                          {saved.host}:{saved.port}
+                          {maskHost(saved.host)}:{saved.port}
                           {saved.database ? ` · db:${saved.database}` : ""}
                         </div>
                       </div>

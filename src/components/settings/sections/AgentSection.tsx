@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useSettingsStore } from "../../../stores/settingsStore";
 import { useVpsStore } from "../../../stores/vpsStore";
+import { useMaskHost } from "../../../lib/privacy";
 import { defaultVisionModel, isGeminiProvider, parseVisionMode } from "../../../lib/vision";
 import { Field, SectionHeader, Select, TextInput, SettingsGroup } from "../ui";
 import { SK } from "./GeneralSection";
@@ -29,6 +30,7 @@ export function AgentSection() {
   const providers = useSettingsStore((s) => s.providers);
   const vpsList = useVpsStore((s) => s.vpsList);
   const loadVps = useVpsStore((s) => s.load);
+  const maskHost = useMaskHost();
 
   useEffect(() => {
     loadVps();
@@ -152,7 +154,7 @@ export function AgentSection() {
                   className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[var(--surface)] p-2.5"
                 >
                   <span className="truncate text-xs font-mono text-gray-200">
-                    {v.name} ({v.host})
+                    {v.name} ({maskHost(v.host)})
                   </span>
                   <Select
                     value={value}

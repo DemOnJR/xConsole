@@ -24,6 +24,16 @@ describe("Command Code provider presets", () => {
     });
   });
 
+  it("defines the NVIDIA NIM preset", () => {
+    expect(PROVIDER_PRESETS.find((item) => item.id === "nvidia")).toEqual({
+      id: "nvidia",
+      label: "NVIDIA NIM",
+      kind: "openai",
+      base_url: "https://integrate.api.nvidia.com/v1",
+      model: "moonshotai/kimi-k3",
+    });
+  });
+
   it("defines the Antigravity CLI preset", () => {
     expect(PROVIDER_PRESETS.find((item) => item.id === "antigravity")).toEqual({
       id: "antigravity",

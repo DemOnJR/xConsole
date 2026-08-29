@@ -118,3 +118,27 @@ pub async fn open(
 
     Ok(Tunnel { local_port, remote, accept_loop })
 }
+
+/// A reverse SSH forward (binds on remote VPS loopback, tunnels back to local endpoint).
+pub struct ReverseTunnel {
+    pub remote_bind_addr: String,
+    pub remote_port: u32,
+}
+
+/// Request the remote SSH server to listen on `127.0.0.1:remote_port` and forward connections
+/// back through this SSH session. Zero public IPs, loopback only.
+pub async fn open_reverse_forward(
+    ssh: &russh::client::Handle<Handler>,
+    remote_port: u32,
+) -> Result<ReverseTunnel, String> {
+    let bound_port = ssh
+        .tcpip_forward("127.0.0.1", remote_port)
+        .await
+        .map_err(|e| format!("could not establish reverse SSH port forward: {e}"))?;
+
+    Ok(ReverseTunnel {
+        remote_bind_addr: "127.0.0.1".into(),
+        remote_port: if bound_port == 0 { remote_port } else { bound_port },
+    })
+}
+

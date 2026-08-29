@@ -220,9 +220,13 @@ impl SessionManager {
 
     /// Base64 of the session's recent output, for replay on re-focus / reconnect.
     pub fn replay(&self, session_id: &str) -> Option<String> {
-        self.map
-            .get(session_id)
-            .map(|h| base64::engine::general_purpose::STANDARD.encode(h.ring.lock().unwrap().snapshot()))
+        self.map.get(session_id).and_then(|h| {
+            let st = h.status.lock().unwrap().clone();
+            if st != SessionStatus::Connected {
+                return None;
+            }
+            Some(base64::engine::general_purpose::STANDARD.encode(h.ring.lock().unwrap().snapshot()))
+        })
     }
 
     #[allow(dead_code)]
