@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
 use crate::ai::infra_tools;
+use crate::ai::jobs;
 use crate::ai::web_tools;
 use crate::ai::provider::{emit, EventSink, StreamEvent, ToolCall, ToolDef, ActivityEvent};
 use crate::ai::interaction::{PromptRegistry, SessionState};
@@ -61,14 +62,62 @@ pub fn definitions(_home: &AgentHome) -> Vec<ToolDef> {
         ToolDef {
             name: "run_command".into(),
             description: "Run a shell command on one server over SSH. When multiple targets are \
-selected, vps_id is required (exact UUID from the target list).".into(),
+selected, vps_id is required (exact UUID from the target list). Commands run in the \
+foreground time out after 120s — for anything slower (builds, apt/dnf upgrades, docker \
+pulls, rsync, migrations) pass background:true instead of splitting the work up or asking \
+the user to run it. That returns a job_id immediately and the command keeps running on the \
+server; check it later with job_status.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "The shell command to run."},
-                    "vps_id": {"type": "string", "description": "Exact target UUID. Required when more than one VPS is selected."}
+                    "vps_id": {"type": "string", "description": "Exact target UUID. Required when more than one VPS is selected."},
+                    "background": {
+                        "type": "boolean",
+                        "description": "Run detached and return a job_id straight away. Use for anything that may take over ~2 minutes. The job survives this turn, the session, and an xConsole restart."
+                    }
                 },
                 "required": ["command"]
+            }),
+        },
+        ToolDef {
+            name: "job_status".into(),
+            description: "Check a background job started with run_command(background:true): \
+whether it is still running, its exit code once finished, and the tail of its output. \
+Poll this instead of waiting — do other useful work between checks.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "description": "The job_id returned when the job was started."},
+                    "tail_lines": {"type": "integer", "description": "Lines of output to return (default 40, max 500)."},
+                    "vps_id": {"type": "string", "description": "The server the job runs on. Required when more than one VPS is selected."}
+                },
+                "required": ["job_id"]
+            }),
+        },
+        ToolDef {
+            name: "job_list".into(),
+            description: "List background jobs on a server with their state and command. Use it \
+to pick up jobs started in an earlier session — jobs live on the server, not in this chat."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "vps_id": {"type": "string", "description": "Exact target UUID. Required when more than one VPS is selected."}
+                }
+            }),
+        },
+        ToolDef {
+            name: "job_kill".into(),
+            description: "Stop a background job (SIGTERM, then SIGKILL if it ignores that). \
+Signals the whole process group, so work the job spawned stops too.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "vps_id": {"type": "string", "description": "Exact target UUID. Required when more than one VPS is selected."}
+                },
+                "required": ["job_id"]
             }),
         },
         ToolDef {
@@ -139,9 +188,9 @@ replace_all is true.".into(),
         },
         ToolDef {
             name: "grep_search".into(),
-            description: "Search file contents on a server with a regex. Returns path:line:text. \
+            description: "Search file *contents* on a server with a regex. Returns path:line:text. \
 Use this FIRST on large trees instead of reading whole files; then read_file with offset/limit \
-around the matching line.".into(),
+around the matching line. To find files by *name* instead, use find_files.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -150,6 +199,23 @@ around the matching line.".into(),
                     "glob": {"type": "string", "description": "Optional filename glob, e.g. *.conf"},
                     "case_insensitive": {"type": "boolean"},
                     "head_limit": {"type": "integer", "description": "Max matches (default 40)."},
+                    "vps_id": {"type": "string"}
+                },
+                "required": ["pattern"]
+            }),
+        },
+        ToolDef {
+            name: "find_files".into(),
+            description: "Find files on a server by name pattern, newest first. Use this when you \
+know roughly what a file is called but not where it lives (nginx configs, *.service units, a \
+compose file, logs) — do not grep the whole disk for a filename.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Filename glob, e.g. *.conf, docker-compose.y*ml, *.service"},
+                    "path": {"type": "string", "description": "Directory to search under (default /)."},
+                    "type": {"type": "string", "enum": ["file", "dir", "any"], "description": "What to match (default file)."},
+                    "head_limit": {"type": "integer", "description": "Max results (default 40, max 200)."},
                     "vps_id": {"type": "string"}
                 },
                 "required": ["pattern"]
@@ -797,6 +863,12 @@ const OLLAMA_VPS_TOOLS: &[&str] = &[
     "write_file",
     "edit_file",
     "grep_search",
+    // A local model hits the 120s foreground timeout as often as a frontier one, and
+    // has less idea what to do about it. `find_files` also keeps it from grepping the
+    // whole disk when it only needs to locate a config by name.
+    "find_files",
+    "job_status",
+    "job_list",
     "todo_write",
     "upload_file",
     "download_file",
@@ -1016,12 +1088,16 @@ pub async fn dispatch_with_telemetry(
     } else {
         match call.name.as_str() {
         "run_command" => run_command(ctx, args, sink, &call.id).await,
+        "job_status" => job_status(ctx, args).await,
+        "job_list" => job_list(ctx, args).await,
+        "job_kill" => job_kill(ctx, args).await,
         "run_command_all" => run_command_all(ctx, args, sink, &call.id).await,
         "list_vps_targets" => list_vps_targets(ctx),
         "read_file" => read_file(ctx, args, sink, &call.id).await,
         "write_file" => write_file(ctx, args, sink, &call.id).await,
         "edit_file" => edit_file(ctx, args, sink, &call.id).await,
         "grep_search" => grep_search(ctx, args, sink, &call.id).await,
+        "find_files" => find_files(ctx, args, sink).await,
         "todo_write" => todo_write(ctx, args),
         "local_run_command" => local_run_command(ctx, args).await,
         "local_read_file" => local_read_file(ctx, args).await,
@@ -1209,8 +1285,26 @@ fn tool_activity_label(ctx: &ToolContext, call: &ToolCall) -> String {
                 .and_then(|v| v.as_str())
                 .unwrap_or("…");
             let vps = vps_label(ctx, args);
-            format!("Run on {vps}: {cmd}")
+            if args.get("background").and_then(|v| v.as_bool()).unwrap_or(false) {
+                format!("Start in background on {vps}: {cmd}")
+            } else {
+                format!("Run on {vps}: {cmd}")
+            }
         }
+        "find_files" => format!(
+            "Find {} on {}",
+            args.get("pattern").and_then(|v| v.as_str()).unwrap_or("files"),
+            vps_label(ctx, args)
+        ),
+        "job_status" => format!(
+            "Check background job {}",
+            args.get("job_id").and_then(|v| v.as_str()).unwrap_or("…")
+        ),
+        "job_list" => format!("List background jobs on {}", vps_label(ctx, args)),
+        "job_kill" => format!(
+            "Stop background job {}",
+            args.get("job_id").and_then(|v| v.as_str()).unwrap_or("…")
+        ),
         "run_command_all" => {
             let cmd = args
                 .get("command")
@@ -1423,11 +1517,23 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
         | "learn_skill" | "ask_user" | "present_plan" | "terminal_capture" | "canvas_open_terminal"
         | "canvas_open_sftp" | "canvas_open_preview" | "canvas_tile" | "canvas_close" | "canvas_refresh" | "vision"
         | "generate_svg" | "generate_image"
-        | "grep_search" | "local_grep_search" | "todo_write" | "rename_session" => false,
+        | "grep_search" | "local_grep_search" | "find_files" | "todo_write" | "rename_session" => false,
         // Typing into a live shell runs commands → mutating.
         "terminal_send" => true,
+        // Reading a job's state or log changes nothing on the host.
+        "job_status" | "job_list" => false,
+        // Signalling a process is a mutation, and plan mode must withhold it.
+        "job_kill" => true,
         // Shell tools: mutating only when the command isn't read-only.
         "run_command" | "run_command_all" | "local_run_command" => {
+            // Backgrounding is always a mutation, whatever the command does: it
+            // leaves a detached process and its pid/log files behind on the host
+            // and outlives the turn. Plan mode — where the user has said "don't do
+            // anything yet" — must not let a `tail -f` be launched into the
+            // background just because reading a log is read-only.
+            if args.get("background").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return true;
+            }
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
             !safety::is_read_only(cmd)
         }
@@ -1534,6 +1640,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn find_command_keeps_a_hostile_pattern_as_one_argument() {
+        // Patterns reach here from the model, i.e. from whatever it just read.
+        let cmd = find_command("/etc", "-type f", "x'; rm -rf / ;'", 10);
+        // POSIX close-escape-reopen: the whole thing stays one -name argument.
+        assert!(cmd.contains(r"'x'\''; rm -rf / ;'\'''"), "{cmd}");
+        assert!(!cmd.contains("-name x; rm"), "{cmd}");
+    }
+
+    #[test]
+    fn find_command_quotes_the_search_root() {
+        let cmd = find_command("/srv/a b; reboot", "-type f", "*.conf", 10);
+        assert!(cmd.contains("'/srv/a b; reboot'"), "{cmd}");
+    }
+
+    #[test]
+    fn find_command_prunes_the_expensive_trees_and_caps_results() {
+        let cmd = find_command("/", "-type f", "*.service", 25);
+        for pruned in ["/proc", "/sys", "/dev", "/run", "node_modules", ".git"] {
+            assert!(cmd.contains(pruned), "missing prune for {pruned}: {cmd}");
+        }
+        assert!(cmd.contains("-prune -o"), "{cmd}");
+        assert!(cmd.contains("head -n 25"), "{cmd}");
+        // Escaped for the shell, so `find` itself receives real parentheses.
+        assert!(cmd.contains(r"\("), "{cmd}");
+        assert!(cmd.contains(r"\)"), "{cmd}");
+    }
+
+    #[test]
+    fn find_command_can_look_for_directories() {
+        assert!(find_command("/opt", "-type d", "conf.d", 5).contains("-type d"));
+        // "any" passes no -type filter at all.
+        assert!(!find_command("/opt", "", "conf.d", 5).contains("-type"));
+    }
+
+    #[test]
     fn target_allowed_only_when_in_list() {
         let allowed = vec!["a".into(), "b".into()];
         assert!(is_target_allowed(&allowed, "a"));
@@ -1626,6 +1767,46 @@ pub fn emit_command_activity_public(
 
 pub fn emit_command_result_public(sink: &EventSink, activity_id: &str, output: &str) {
     emit_command_result(sink, activity_id, output);
+}
+
+/// Authorize `shown` with the safety gate, then run `script`.
+///
+/// Backgrounding wraps the user's command in setsid/redirect/pid-file scaffolding.
+/// Putting that wrapper in front of the user would make the approval prompt
+/// unreadable, and would make an allowlist decision about `mkdir` rather than about
+/// the command that actually runs — so the gate always sees the real command.
+async fn exec_authorized_as(
+    ctx: &ToolContext,
+    vps_id: &str,
+    shown: &str,
+    script: &str,
+) -> String {
+    let base = safety::effective_mode(&ctx.db, &ctx.safety, vps_id);
+    let mode = safety::resolve_session_mode(&ctx.session_state, &ctx.session_id, &base);
+    if let Err(e) = safety::authorize(
+        &ctx.app,
+        &ctx.db,
+        &ctx.approvals,
+        &mode,
+        &ctx.session_id,
+        Some(vps_id),
+        shown,
+    )
+    .await
+    {
+        return format!("error: {e}");
+    }
+    match ctx.sessions.run_command(vps_id, script).await {
+        Ok(out) => {
+            let text = out.stdout.trim();
+            if out.exit_code != 0 {
+                let err = out.stderr.trim();
+                return format!("error (exit {}): {}", out.exit_code, if err.is_empty() { text } else { err });
+            }
+            text.to_string()
+        }
+        Err(e) => format!("error: {e}"),
+    }
 }
 
 async fn exec_inner(ctx: &ToolContext, vps_id: &str, command: &str) -> String {
@@ -1756,11 +1937,117 @@ async fn run_command(ctx: &ToolContext, args: &Value, _sink: &EventSink, _id: &s
         Ok(id) => id,
         Err(e) => return format!("error: {e}"),
     };
+    if args.get("background").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return start_background_job(ctx, &vps_id, command).await;
+    }
     let mut result = exec_inner(ctx, &vps_id, command).await;
     result = crate::ai::vps_snapshot::annotate_command_output(command, &result);
     // The ToolResult is emitted once by the agent loop (run_command emits a
     // byte-identical one otherwise). Per-target/snapshot emits use distinct ids.
     result
+}
+
+/// Start `command` detached on the host and return its job id.
+///
+/// Goes through the same safety gate as a foreground command: backgrounding changes
+/// when the agent sees the result, not what it is allowed to run.
+async fn start_background_job(ctx: &ToolContext, vps_id: &str, command: &str) -> String {
+    let job_id = jobs::new_job_id();
+    let script = jobs::start_script(&job_id, command);
+    // Authorize the *user's* command, not the wrapper — the approval prompt has to
+    // show what will actually run, and an allowlist decision must be made about the
+    // real command rather than the mkdir/setsid scaffolding around it.
+    let out = exec_authorized_as(ctx, vps_id, command, &script).await;
+    if out.starts_with("error") {
+        return out;
+    }
+    format!(
+        "Started background job {job_id} on this server.\n\
+         The command keeps running after this turn; it is not affected by the 120s \
+         foreground timeout.\n\
+         Check progress with job_status(job_id: \"{job_id}\"). Do not wait idly — \
+         continue with other work and check back."
+    )
+}
+
+/// Resolve the job's target and validate its id. Shared by the three job tools,
+/// which all fail the same way.
+fn job_args(ctx: &ToolContext, args: &Value) -> Result<(String, String), String> {
+    let job_id = args
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !jobs::is_valid_job_id(&job_id) {
+        return Err(format!(
+            "invalid job_id {job_id:?} — use the id returned by run_command(background:true), or job_list to see them"
+        ));
+    }
+    let vps_id = resolve_target(ctx, args)?;
+    Ok((job_id, vps_id))
+}
+
+async fn job_status(ctx: &ToolContext, args: &Value) -> String {
+    let (job_id, vps_id) = match job_args(ctx, args) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {e}"),
+    };
+    let tail = args
+        .get("tail_lines")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(jobs::DEFAULT_TAIL_LINES as u64) as u32;
+    // Reading a log is read-only, so it does not need the approval gate the job
+    // itself already passed — asking again for every poll would defeat the point.
+    match ctx
+        .sessions
+        .run_command(&vps_id, &jobs::status_script(&job_id, tail))
+        .await
+    {
+        Ok(out) => {
+            let text = out.stdout.trim().to_string();
+            if text.contains("STATE=unknown") {
+                format!("No job {job_id} on this server (it may have been on another target, or /tmp was cleared). Use job_list.")
+            } else {
+                text
+            }
+        }
+        Err(e) => format!("error checking job {job_id}: {e}"),
+    }
+}
+
+async fn job_list(ctx: &ToolContext, args: &Value) -> String {
+    let vps_id = match resolve_target(ctx, args) {
+        Ok(id) => id,
+        Err(e) => return format!("error: {e}"),
+    };
+    match ctx.sessions.run_command(&vps_id, &jobs::list_script()).await {
+        Ok(out) => {
+            let text = out.stdout.trim();
+            if text.is_empty() || text.contains("(no jobs)") {
+                "No background jobs on this server.".into()
+            } else {
+                format!("Background jobs (newest first):\n{text}")
+            }
+        }
+        Err(e) => format!("error listing jobs: {e}"),
+    }
+}
+
+async fn job_kill(ctx: &ToolContext, args: &Value) -> String {
+    let (job_id, vps_id) = match job_args(ctx, args) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {e}"),
+    };
+    // Stopping a job the user's agent started is a mutation, so it goes through the
+    // safety gate like any other one.
+    exec_authorized_as(
+        ctx,
+        &vps_id,
+        &format!("stop background job {job_id}"),
+        &jobs::kill_script(&job_id),
+    )
+    .await
 }
 
 async fn run_command_all(ctx: &ToolContext, args: &Value, sink: &EventSink, id: &str) -> String {
@@ -2076,6 +2363,71 @@ async fn edit_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str)
         format!("updated {path} ({n} replacement{}).\n{result}", if n == 1 { "" } else { "s" })
     } else {
         result
+    }
+}
+
+/// Build the `find` invocation used by [`find_files`].
+///
+/// Split out so the quoting can be tested: `path` and `pattern` come from the model,
+/// which means they come from whatever the model has read — a filename on a server,
+/// a web page, a tool result. A pattern like `x; rm -rf /` has to stay one argument.
+///
+/// The prune list skips the pseudo-filesystems and dependency caches that otherwise
+/// dominate a walk from `/`: they are most of the cost and never hold the config or
+/// unit file being looked for.
+fn find_command(path: &str, kind: &str, pattern: &str, head: u64) -> String {
+    format!(
+        "find {path} \\( -path /proc -o -path /sys -o -path /dev -o -path /run \
+         -o -path '*/node_modules' -o -path '*/.git' \\) -prune -o \
+         {kind} -name {pat} -print 2>/dev/null | head -n {head}",
+        path = shell_quote(path),
+        pat = shell_quote(pattern),
+    )
+}
+
+/// Find files by name. The name-shaped counterpart to [`grep_search`].
+///
+/// Without this the only way to locate a file whose name is known but whose path is
+/// not was to grep the filesystem for its contents — slow on a real server, and it
+/// misses the file entirely when the name is the only thing known about it.
+async fn find_files(ctx: &ToolContext, args: &Value, sink: &EventSink) -> String {
+    let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p,
+        _ => return "error: missing 'pattern'".into(),
+    };
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("/");
+    let head = args
+        .get("head_limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(40)
+        .clamp(1, 200);
+    let kind = match args.get("type").and_then(|v| v.as_str()).unwrap_or("file") {
+        "dir" => "-type d",
+        "any" => "",
+        _ => "-type f",
+    };
+    let vps_id = match resolve_target(ctx, args) {
+        Ok(id) => id,
+        Err(e) => return format!("error: {e}"),
+    };
+    let cmd = find_command(path, kind, pattern, head);
+    let raw = exec(ctx, &vps_id, &cmd, Some(sink), true).await;
+    let body = stdout_body(&raw);
+    let body = body.trim_end();
+    if body.trim().is_empty() {
+        format!("no files matching {pattern:?} under {path}")
+    } else {
+        let n = body.lines().count();
+        let capped = if n as u64 >= head {
+            format!("\n(stopped at {head} results — narrow `path` or `pattern` for the rest)")
+        } else {
+            String::new()
+        };
+        format!("{n} match(es) for {pattern:?} under {path}:\n{body}{capped}")
     }
 }
 

@@ -189,6 +189,14 @@ Encoded PHP requires its matching loader extension (e.g. zend_extension) and com
 When encountering unfamiliar software, proprietary loaders, or unexpected errors, use web_search to find official \
 documentation and correct configuration before taking action. \
 WEBSITE & DOMAIN TASKS (CODE-FIRST BY DEFAULT): When the user mentions a domain or website (e.g. example.com or /sitemap.xml), ALWAYS check if the domain is hosted on the connected VPS target(s) FIRST. Inspect web server configs (/etc/nginx/, /etc/apache2/, /etc/caddy/, docker) to locate its document root / project directory (e.g. /var/www/, /root/...). Read, inspect, and modify the source code files directly on the server filesystem. Do NOT treat the website as an external black box or rely primarily on curl when you have direct server filesystem access. \
+LONG-RUNNING WORK: a foreground command is killed at 120s. For anything slower — builds, \
+apt/dnf/yum upgrades, docker pull/build, rsync, dumps, migrations, long test runs — call \
+run_command with background:true. It returns a job_id at once and keeps running on the server \
+even after this turn ends. Do NOT split a long job into smaller commands to dodge the timeout, \
+do NOT sit polling in a tight loop, and do NOT hand the task back to the user because it is \
+slow: start it, get on with the next independent step, then check job_status. job_list finds \
+jobs from an earlier session, job_kill stops one. \
+To locate a file by NAME use find_files; grep_search is for file CONTENTS. \
 Be cheap with tools: combine related checks into ONE command; do not re-read a file unless write_file \
 says it changed (mtime); do not call canvas_open_terminal if that host already has a canvas terminal — \
 drive it with terminal_send or use run_command for private one-offs. \
@@ -218,6 +226,14 @@ and PHP version with php -v, and use web_search when encountering unfamiliar err
 SSH lockout: never ban an IP on all ports; honeypot/fail2ban dest must be the decoy port only. \
 Do not reopen a canvas terminal that is already listed. Combine related checks into one command. \
 Use grep_search then read_file(offset,limit) then edit_file. For 3+ steps call todo_write. \
+LONG-RUNNING WORK: a foreground command is killed at 120s. For anything slower — builds, \
+apt/dnf/yum upgrades, docker pull/build, rsync, dumps, migrations, long test runs — call \
+run_command with background:true. It returns a job_id at once and keeps running on the server \
+even after this turn ends. Do NOT split a long job into smaller commands to dodge the timeout, \
+do NOT sit polling in a tight loop, and do NOT hand the task back to the user because it is \
+slow: start it, get on with the next independent step, then check job_status. job_list finds \
+jobs from an earlier session, job_kill stops one. \
+To locate a file by NAME use find_files; grep_search is for file CONTENTS. \
 For the user's OWN PC (they say 'my pc', 'locally', 'this machine', or ask about local software), use the \
 local_* tools instead of run_command. \
 When a request is ambiguous, call ask_user; for a large or destructive multi-step task, call present_plan \
