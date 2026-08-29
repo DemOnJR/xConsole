@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../api";
 import type { Vps } from "../types";
-import { useMaskHost } from "../../../../src/lib/privacy";
+import { useMaskHost } from "../privacy";
 import {
   CloudIcon,
   DatabaseIcon,
