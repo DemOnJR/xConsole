@@ -4,9 +4,11 @@ import { AreaChart } from "./AreaChart";
 import {
   CacheIcon,
   SearchIcon,
-  TrendingUpIcon,
   ZapIcon,
+} from "../../../../src/components/icons";
+import {
   AlertTriangleIcon,
+  TrendingUpIcon,
 } from "../icons";
 
 interface CacheTelemetryTabProps {

@@ -2,17 +2,19 @@ import { useEffect, useMemo, useState, useCallback, type ReactNode } from "react
 import { api } from "./api";
 import type { AgentAnalytics, ResourceSnapshot } from "./types";
 import {
-  ChartIcon,
   CacheIcon,
-  ToolIcon,
-  ChatIcon,
+  ChartIcon,
+  CloseIcon,
   CpuIcon,
-  ServerIcon,
   DownloadIcon,
-  RefreshIcon,
   PauseIcon,
   PlayIcon,
-  CloseIcon,
+  RefreshIcon,
+  ServerIcon,
+} from "../../../src/components/icons";
+import {
+  ChatIcon,
+  ToolIcon,
 } from "./icons";
 import { DashboardTab } from "./components/DashboardTab";
 import { CacheTelemetryTab } from "./components/CacheTelemetryTab";

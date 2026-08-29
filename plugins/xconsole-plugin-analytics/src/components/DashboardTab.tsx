@@ -3,13 +3,15 @@ import type { AgentAnalytics, ResourceSnapshot, CachePoint, ToolCount } from "..
 import { AreaChart } from "./AreaChart";
 import { Gauge } from "./Gauge";
 import {
-  CpuIcon,
-  RamIcon,
   CacheIcon,
-  ToolIcon,
-  ChatIcon,
-  TrendingUpIcon,
+  CpuIcon,
+} from "../../../../src/components/icons";
+import {
   ActivityIcon,
+  ChatIcon,
+  RamIcon,
+  ToolIcon,
+  TrendingUpIcon,
 } from "../icons";
 
 interface DashboardTabProps {

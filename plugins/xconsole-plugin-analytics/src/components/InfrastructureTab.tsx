@@ -3,10 +3,12 @@ import { api } from "../api";
 import type { Vps } from "../types";
 import { useMaskHost } from "../../../../src/lib/privacy";
 import {
-  ServerIcon,
-  FolderIcon,
-  DatabaseIcon,
   CloudIcon,
+  DatabaseIcon,
+  FolderIcon,
+  ServerIcon,
+} from "../../../../src/components/icons";
+import {
   CheckCircleIcon,
 } from "../icons";
 
