@@ -7,6 +7,7 @@ import {
   type WhatsAppStatus,
 } from "../../../lib/tauri";
 import { useVpsStore } from "../../../stores/vpsStore";
+import { RefreshIcon } from "../../icons";
 import { Button, Card, Field, SectionHeader, Select, TextInput, Toggle } from "../ui";
 
 /**
@@ -479,6 +480,7 @@ function TransportCard({
 function WhatsAppLink({ onReload }: { onReload: () => void }) {
   const [wa, setWa] = useState<WhatsAppStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const unlisten = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -489,44 +491,21 @@ function WhatsAppLink({ onReload }: { onReload: () => void }) {
     return () => unlisten.current?.();
   }, []);
 
-  // No helper, no QR — WhatsApp pairing runs in a separate binary. Saying only that
-  // leaves the user at a dead end, so offer the way out: `sidecar_path` already honours
-  // an explicit setting, it just had no UI to set it.
-  if (wa && !wa.available) {
-    return (
-      <div className="space-y-3">
-        <div className="border border-[var(--warning)]/40 bg-[var(--warning)]/10 px-3 py-2 text-[11px] text-[var(--warning)]">
-          The WhatsApp helper is not installed with this build, so there is no QR code to
-          scan yet. Discord and Telegram still work.
-        </div>
-        <div className="flex items-center gap-3">
-          <Button
-            disabled={busy}
-            onClick={async () => {
-              const path = await api.pickFile("Locate the WhatsApp helper").catch(() => null);
-              if (!path) return;
-              setBusy(true);
-              await api.setSetting(WHATSAPP_SIDECAR_SETTING, path).catch(() => {});
-              // Re-asks the backend rather than assuming: the path is only accepted if
-              // the file is actually there.
-              await api.whatsappStatus().then(setWa).catch(() => {});
-              setBusy(false);
-            }}
-          >
-            {busy ? "Checking…" : "Locate the helper…"}
-          </Button>
-          <span className="text-[11px] text-gray-500">
-            Build it from <span className="font-mono">src-tauri/sidecar/whatsapp</span> with{" "}
-            <span className="font-mono">./build.sh</span>, then point at the result.
-          </span>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-3">
-      {wa?.linked ? (
+      {wa?.building ? (
+        <div className="flex items-center gap-3 border border-[var(--accent)]/30 bg-[var(--accent-muted)]/10 px-3.5 py-3">
+          <RefreshIcon className="animate-spin text-[var(--accent)]" size={16} />
+          <div className="space-y-0.5">
+            <p className="text-[12px] font-medium text-gray-200">
+              {wa.build_step || "Preparing WhatsApp helper…"}
+            </p>
+            <p className="text-[11px] text-gray-400">
+              Setting up everything automatically. This only happens once.
+            </p>
+          </div>
+        </div>
+      ) : wa?.linked ? (
         <div className="flex items-center gap-3">
           <div className="text-[11px] text-gray-300">
             Linked{wa.phone ? ` as ${wa.phone}` : ""}
@@ -594,6 +573,36 @@ function WhatsAppLink({ onReload }: { onReload: () => void }) {
           {wa.error}
         </div>
       )}
+
+      <div className="pt-2">
+        <button
+          type="button"
+          onClick={() => setShowAdvanced(!showAdvanced)}
+          className="text-[10px] text-gray-500 hover:text-gray-400 transition underline underline-offset-2"
+        >
+          {showAdvanced ? "Hide custom binary path" : "Custom helper binary…"}
+        </button>
+        {showAdvanced && (
+          <div className="mt-2 flex items-center gap-3 border border-[var(--border)] bg-[var(--surface)] p-2.5">
+            <Button
+              disabled={busy}
+              onClick={async () => {
+                const path = await api.pickFile("Locate the WhatsApp helper").catch(() => null);
+                if (!path) return;
+                setBusy(true);
+                await api.setSetting(WHATSAPP_SIDECAR_SETTING, path).catch(() => {});
+                await api.whatsappStatus().then(setWa).catch(() => {});
+                setBusy(false);
+              }}
+            >
+              {busy ? "Checking…" : "Choose helper binary…"}
+            </Button>
+            <span className="text-[11px] text-gray-400">
+              Optional override. xConsole builds and manages the helper automatically.
+            </span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

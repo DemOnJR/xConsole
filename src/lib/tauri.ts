@@ -429,8 +429,12 @@ export interface RemoteStatus {
 
 /** Pairing state for the WhatsApp bridge. */
 export interface WhatsAppStatus {
-  /** The sidecar binary was found. False means WhatsApp cannot be offered at all. */
+  /** The sidecar binary was found. False means WhatsApp needs building or is not ready yet. */
   available: boolean;
+  /** Currently building/installing the helper binary or Go toolchain. */
+  building?: boolean;
+  /** Progress step message (e.g. "Downloading Go compiler...", "Building WhatsApp helper..."). */
+  build_step?: string | null;
   running: boolean;
   connected: boolean;
   /** A device is paired. Survives restarts — the session lives on disk. */
@@ -1259,10 +1263,11 @@ export const api = {
   testRemoteToken: (kind: RemoteKind) => invoke<string>("test_remote_token", { kind }),
 
   whatsappStatus: () => invoke<WhatsAppStatus>("whatsapp_status"),
-  /** Start pairing. Progress arrives on the `remote://whatsapp` event. */
+  /** Start pairing. Automatically builds the helper if needed. Progress arrives on `remote://whatsapp`. */
   whatsappLinkStart: () => invoke<WhatsAppStatus>("whatsapp_link_start"),
   whatsappLinkCancel: () => invoke<WhatsAppStatus>("whatsapp_link_cancel"),
   whatsappUnlink: () => invoke<WhatsAppStatus>("whatsapp_unlink"),
+  whatsappAutoInstall: () => invoke<WhatsAppStatus>("whatsapp_auto_install"),
 
   listPersonas: () => invoke<Persona[]>("list_personas"),
   savePersona: (input: PersonaInput) => invoke<Persona>("save_persona", { input }),

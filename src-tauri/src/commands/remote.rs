@@ -248,6 +248,11 @@ pub async fn whatsapp_unlink(app: AppHandle) -> Result<whatsapp::WhatsAppStatus,
     whatsapp::unlink(&app).await
 }
 
+#[tauri::command]
+pub async fn whatsapp_auto_install(app: AppHandle) -> Result<whatsapp::WhatsAppStatus, String> {
+    whatsapp::auto_install(&app).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -46,9 +46,12 @@ const LINK_WINDOW: std::time::Duration = std::time::Duration::from_secs(180);
 /// What the settings screen needs to know about the link.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct WhatsAppStatus {
-    /// The sidecar binary was found. False means WhatsApp cannot be offered at all,
-    /// and the UI says so rather than showing a spinner that will never resolve.
+    /// The sidecar binary was found or ready.
     pub available: bool,
+    /// Currently compiling or preparing the helper binary.
+    pub building: bool,
+    /// Progress step description (e.g. "Downloading Go compiler...", "Building WhatsApp helper...").
+    pub build_step: Option<String>,
     pub running: bool,
     pub connected: bool,
     /// A device is paired. Survives restarts — the session lives on disk, so re-arming
@@ -98,12 +101,37 @@ impl WhatsApp {
 // Locating the sidecar
 // ---------------------------------------------------------------------------
 
+const MAIN_GO: &str = include_str!("../../../sidecar/whatsapp/main.go");
+const GO_MOD: &str = include_str!("../../../sidecar/whatsapp/go.mod");
+const GO_SUM: &str = include_str!("../../../sidecar/whatsapp/go.sum");
+
+const GO_DL_URL_WIN: &str = "https://go.dev/dl/go1.24.0.windows-amd64.zip";
+
 fn binary_name() -> &'static str {
     if cfg!(windows) {
         "xconsole-whatsapp.exe"
     } else {
         "xconsole-whatsapp"
     }
+}
+
+fn extract_zip(bytes: &[u8], dest: &std::path::Path) -> Result<(), String> {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("zip open: {e}"))?;
+    for i in 0..zip.len() {
+        let mut f = zip.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
+        let Some(rel) = f.enclosed_name() else { continue };
+        let out = dest.join(rel);
+        if f.is_dir() {
+            let _ = std::fs::create_dir_all(&out);
+        } else {
+            if let Some(parent) = out.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let mut w = std::fs::File::create(&out).map_err(|e| format!("write {}: {e}", out.display()))?;
+            std::io::copy(&mut f, &mut w).map_err(|e| format!("extract: {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 /// Where the sidecar might be, in order of preference.
@@ -140,6 +168,15 @@ pub fn sidecar_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
             .join("whatsapp")
             .join(binary_name()),
     );
+    // Agent home & user data paths
+    let home = app.state::<crate::ai::AgentHome>().inner().0.clone();
+    candidates.push(home.join("sidecar").join(binary_name()));
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        let base = std::path::PathBuf::from(local_app_data).join("xConsole");
+        candidates.push(base.join("app").join(binary_name()));
+        candidates.push(base.join(r"src\src-tauri\sidecar\whatsapp").join(binary_name()));
+        candidates.push(base.join("tools").join("whatsapp").join(binary_name()));
+    }
     candidates.into_iter().find(|p| p.exists())
 }
 
@@ -175,6 +212,223 @@ async fn update_status(app: &tauri::AppHandle, f: impl FnOnce(&mut WhatsAppStatu
     let _ = app.emit(STATUS_EVENT, snapshot);
 }
 
+/// Locate or install the Go compiler toolchain.
+async fn locate_or_install_go(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    // 1. Check if `go` is on PATH and working.
+    if let Ok(out) = crate::proc::quiet_command("go").arg("version").output() {
+        if out.status.success() {
+            return Ok(std::path::PathBuf::from("go"));
+        }
+    }
+
+    // 2. Check candidate local paths (e.g. %LOCALAPPDATA%\xConsole\tools\go\bin\go.exe or AgentHome/tools/go/bin/go.exe).
+    let mut candidate_go_bins = Vec::new();
+    let home = app.state::<crate::ai::AgentHome>().inner().0.clone();
+    let home_go_bin = home
+        .join("tools")
+        .join("go")
+        .join("bin")
+        .join(if cfg!(windows) { "go.exe" } else { "go" });
+    candidate_go_bins.push(home_go_bin);
+
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        let p = std::path::PathBuf::from(local_app_data)
+            .join("xConsole")
+            .join("tools")
+            .join("go")
+            .join("bin")
+            .join(if cfg!(windows) { "go.exe" } else { "go" });
+        candidate_go_bins.push(p);
+    }
+
+    for bin in candidate_go_bins {
+        if bin.exists() {
+            if let Ok(out) = crate::proc::quiet_command(&bin).arg("version").output() {
+                if out.status.success() {
+                    return Ok(bin);
+                }
+            }
+        }
+    }
+
+    // 3. If Windows, auto-download portable Go into home.join("tools").
+    if cfg!(windows) {
+        update_status(app, |s| {
+            s.building = true;
+            s.build_step = Some("Downloading portable Go compiler (~80MB)…".into());
+        })
+        .await;
+
+        let tools_dir = home.join("tools");
+        let _ = std::fs::create_dir_all(&tools_dir);
+
+        let client = reqwest::Client::builder()
+            .user_agent("xConsole/1.0")
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .map_err(|e| format!("HTTP client error: {e}"))?;
+
+        let bytes = client
+            .get(GO_DL_URL_WIN)
+            .send()
+            .await
+            .map_err(|e| format!("failed to download Go toolchain: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("Go download returned error: {e}"))?
+            .bytes()
+            .await
+            .map_err(|e| format!("reading Go download stream: {e}"))?;
+
+        update_status(app, |s| {
+            s.build_step = Some("Extracting Go toolchain…".into());
+        })
+        .await;
+
+        extract_zip(&bytes, &tools_dir)?;
+
+        let downloaded_bin = tools_dir.join("go").join("bin").join("go.exe");
+        if downloaded_bin.exists() {
+            return Ok(downloaded_bin);
+        }
+    }
+
+    Err("Go compiler is not installed. Please install Go or check your internet connection.".into())
+}
+
+/// Automatically compiles and installs the WhatsApp sidecar binary.
+pub async fn ensure_sidecar_installed(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    if let Some(existing) = sidecar_path(app) {
+        return Ok(existing);
+    }
+
+    update_status(app, |s| {
+        s.building = true;
+        s.build_step = Some("Preparing Go compiler…".into());
+        s.error = None;
+    })
+    .await;
+
+    let go_bin = match locate_or_install_go(app).await {
+        Ok(b) => b,
+        Err(e) => {
+            update_status(app, |s| {
+                s.building = false;
+                s.build_step = None;
+                s.error = Some(e.clone());
+            })
+            .await;
+            return Err(e);
+        }
+    };
+
+    update_status(app, |s| {
+        s.build_step = Some("Preparing WhatsApp helper sources…".into());
+    })
+    .await;
+
+    let home = app.state::<crate::ai::AgentHome>().inner().0.clone();
+
+    // Choose source dir: dev repo if present, otherwise write embedded files into home/sidecar_src/whatsapp
+    let dev_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("sidecar")
+        .join("whatsapp");
+    let src_dir = if dev_src.join("main.go").exists() {
+        dev_src.clone()
+    } else {
+        let embedded_dir = home.join("sidecar_src").join("whatsapp");
+        let _ = std::fs::create_dir_all(&embedded_dir);
+        let _ = std::fs::write(embedded_dir.join("main.go"), MAIN_GO);
+        let _ = std::fs::write(embedded_dir.join("go.mod"), GO_MOD);
+        let _ = std::fs::write(embedded_dir.join("go.sum"), GO_SUM);
+        embedded_dir
+    };
+
+    // Target destination
+    let dest_dir = if src_dir == dev_src {
+        src_dir.clone()
+    } else {
+        let d = home.join("sidecar");
+        let _ = std::fs::create_dir_all(&d);
+        d
+    };
+    let out_bin = dest_dir.join(binary_name());
+
+    update_status(app, |s| {
+        s.build_step = Some("Compiling WhatsApp helper (xconsole-whatsapp)…".into());
+    })
+    .await;
+
+    let mut cmd = crate::proc::quiet_tokio(&go_bin);
+    cmd.current_dir(&src_dir);
+    cmd.arg("build")
+        .arg("-trimpath")
+        .arg("-ldflags=-s -w")
+        .arg("-o")
+        .arg(&out_bin)
+        .arg(".");
+
+    cmd.env("CGO_ENABLED", "0");
+    if cfg!(windows) {
+        cmd.env("GOOS", "windows");
+        cmd.env("GOARCH", "amd64");
+    } else if cfg!(target_os = "macos") {
+        cmd.env("GOOS", "darwin");
+        if cfg!(target_arch = "aarch64") {
+            cmd.env("GOARCH", "arm64");
+        } else {
+            cmd.env("GOARCH", "amd64");
+        }
+    } else {
+        cmd.env("GOOS", "linux");
+        cmd.env("GOARCH", "amd64");
+    }
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("failed to run go build: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let err_msg = format!("Go compilation failed: {}", stderr.trim());
+        update_status(app, |s| {
+            s.building = false;
+            s.build_step = None;
+            s.error = Some(err_msg.clone());
+        })
+        .await;
+        return Err(err_msg);
+    }
+
+    if !out_bin.exists() {
+        let err_msg = format!("Go build succeeded but {} was not created", out_bin.display());
+        update_status(app, |s| {
+            s.building = false;
+            s.build_step = None;
+            s.error = Some(err_msg.clone());
+        })
+        .await;
+        return Err(err_msg);
+    }
+
+    let db = app.state::<crate::storage::Db>();
+    let _ = db.set_setting(SETTING_SIDECAR, &out_bin.to_string_lossy());
+
+    update_status(app, |s| {
+        s.available = true;
+        s.building = false;
+        s.build_step = None;
+        s.error = None;
+    })
+    .await;
+
+    Ok(out_bin)
+}
+
+pub async fn auto_install(app: &tauri::AppHandle) -> Result<WhatsAppStatus, String> {
+    ensure_sidecar_installed(app).await?;
+    Ok(status(app).await)
+}
+
 /// Draw a pairing code as an SVG the webview can drop straight into the DOM.
 fn qr_svg(code: &str) -> Option<String> {
     use qrcode::render::svg;
@@ -202,9 +456,10 @@ pub async fn ensure_running(app: &tauri::AppHandle) -> Result<(), String> {
     if shared().child.lock().await.is_some() {
         return Ok(());
     }
-    let path = sidecar_path(app).ok_or(
-        "the WhatsApp helper is not installed — reinstall xConsole, or set a path in settings",
-    )?;
+    let path = match sidecar_path(app) {
+        Some(p) => p,
+        None => ensure_sidecar_installed(app).await?,
+    };
 
     let mut cmd = crate::proc::quiet_tokio(path);
     cmd.arg("--store")

@@ -530,6 +530,7 @@ pub fn run() {
             commands::remote::whatsapp_link_start,
             commands::remote::whatsapp_link_cancel,
             commands::remote::whatsapp_unlink,
+            commands::remote::whatsapp_auto_install,
             commands::persona::list_personas,
             commands::persona::save_persona,
             commands::persona::delete_persona,
