@@ -4,6 +4,7 @@ import { useVpsStore } from "../stores/vpsStore";
 import { useCanvasStore } from "../stores/canvasStore";
 import { usePluginStore } from "../stores/pluginStore";
 import { useUiStore } from "../stores/uiStore";
+import { useMaskHost } from "../lib/privacy";
 import {
   TerminalIcon,
   FolderIcon,
@@ -36,6 +37,7 @@ export function QuickOpenPalette() {
 
   const vpsList = useVpsStore((s) => s.vpsList);
   const plugins = usePluginStore((s) => s.plugins);
+  const maskHost = useMaskHost();
 
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -90,7 +92,7 @@ export function QuickOpenPalette() {
         id: `server-ssh-${targetServer.id}`,
         category: "Server Action",
         title: `SSH Terminal → ${targetServer.name}`,
-        subtitle: `${targetServer.username}@${targetServer.host}:${targetServer.port}`,
+        subtitle: `${targetServer.username}@${maskHost(targetServer.host)}:${targetServer.port}`,
         icon: <TerminalIcon size={18} />,
         keywords: ["ssh", "terminal", "connect", targetServer.name, targetServer.host, "bash"],
         action: () => {
@@ -104,7 +106,7 @@ export function QuickOpenPalette() {
           id: `server-sftp-${targetServer.id}`,
           category: "Server Action",
           title: `SFTP Remote Files → ${targetServer.name}`,
-          subtitle: `Explore filesystem over SSH (${targetServer.host})`,
+          subtitle: `Explore filesystem over SSH (${maskHost(targetServer.host)})`,
           icon: <FolderIcon size={18} />,
           keywords: ["sftp", "ftp", "files", "explorer", "upload", "download", targetServer.name],
           action: () => {
@@ -133,7 +135,7 @@ export function QuickOpenPalette() {
         id: `server-copy-${targetServer.id}`,
         category: "Server Action",
         title: `Copy Connection Info → ${targetServer.name}`,
-        subtitle: `${targetServer.username}@${targetServer.host}`,
+        subtitle: `${targetServer.username}@${maskHost(targetServer.host)}`,
         icon: <TerminalIcon size={18} />,
         keywords: ["copy", "ip", "host", targetServer.name, targetServer.host],
         action: () => {
@@ -152,7 +154,7 @@ export function QuickOpenPalette() {
         id: `ssh-${srv.id}`,
         category: "Servers",
         title: `SSH Terminal → ${srv.name}`,
-        subtitle: `${srv.username}@${srv.host}:${srv.port}`,
+        subtitle: `${srv.username}@${maskHost(srv.host)}:${srv.port}`,
         icon: <TerminalIcon size={18} />,
         keywords: ["ssh", "terminal", "connect", srv.name, srv.host, "shell", "bash"],
         action: () => {
@@ -167,7 +169,7 @@ export function QuickOpenPalette() {
           id: `sftp-${srv.id}`,
           category: "SFTP Files",
           title: `SFTP Explorer → ${srv.name}`,
-          subtitle: `Remote filesystem & editor (${srv.host})`,
+          subtitle: `Remote filesystem & editor (${maskHost(srv.host)})`,
           icon: <FolderIcon size={18} />,
           keywords: ["sftp", "ftp", "files", "remote", "editor", srv.name, srv.host],
           action: () => {

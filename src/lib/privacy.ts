@@ -101,20 +101,6 @@ export function getKnownHosts(): string[] {
   return Array.from(set);
 }
 
-/**
- * Masks raw terminal output (Uint8Array or string) for xterm / PTY streaming when privacy mode is on.
- */
-export function maskTerminalData(
-  data: Uint8Array | string,
-  machineHosts?: string[],
-  maskEnabled?: boolean,
-): string {
-  const isEnabled = maskEnabled ?? usePrivacyStore.getState().maskIps;
-  const text = typeof data === "string" ? data : new TextDecoder().decode(data);
-  if (!isEnabled) return text;
-  const hosts = machineHosts ?? getKnownHosts();
-  return maskMachineIpsInText(text, hosts, true);
-}
 
 /**
  * Hook to retrieve all unique machine hosts from VPS store and open Canvas nodes.

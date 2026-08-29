@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../api";
 import type { Vps } from "../types";
+import { useMaskHost } from "../../../../src/lib/privacy";
 import {
   ServerIcon,
   FolderIcon,
@@ -12,6 +13,7 @@ import {
 export const InfrastructureTab = React.memo(function InfrastructureTab() {
   const [vpsList, setVpsList] = useState<Vps[]>([]);
   const [loading, setLoading] = useState(true);
+  const maskHost = useMaskHost();
 
   useEffect(() => {
     let alive = true;
@@ -131,7 +133,7 @@ export const InfrastructureTab = React.memo(function InfrastructureTab() {
                 <div className="mt-3 flex flex-col gap-1 font-mono text-xs text-[var(--text-dim,#a1a1aa)]">
                   <div className="flex items-center justify-between">
                     <span className="text-[var(--text-faint,#71717a)]">Host:</span>
-                    <span className="text-[var(--text,#fafafa)]">{srv.host}</span>
+                    <span className="text-[var(--text,#fafafa)]">{maskHost(srv.host)}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-[var(--text-faint,#71717a)]">User:</span>
