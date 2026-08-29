@@ -3,6 +3,8 @@ import type { AgentAnalytics, ConversationStat, ToolCount } from "../types";
 import {
   ChevronRightIcon,
   SearchIcon,
+} from "../../../../src/components/icons";
+import {
   ActivityIcon,
   ChatIcon,
   ToolIcon,

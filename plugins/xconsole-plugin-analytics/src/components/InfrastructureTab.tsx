@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../api";
 import type { Vps } from "../types";
-import { useMaskHost } from "../privacy";
+import { useMaskHost } from "../../../../src/lib/privacy";
 import {
   CloudIcon,
   DatabaseIcon,
   FolderIcon,
   ServerIcon,
+} from "../../../../src/components/icons";
+import {
   CheckCircleIcon,
 } from "../icons";
 

@@ -4,6 +4,8 @@ import {
   LayersIcon,
   SearchIcon,
   ZapIcon,
+} from "../../../../src/components/icons";
+import {
   ToolIcon,
 } from "../icons";
 

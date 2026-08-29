@@ -5,7 +5,7 @@ import {
   CopyIcon,
   DownloadIcon,
   InfoIcon,
-} from "../icons";
+} from "../../../../src/components/icons";
 
 interface ExportReportsTabProps {
   data: AgentAnalytics;

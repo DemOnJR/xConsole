@@ -5,6 +5,8 @@ import { Gauge } from "./Gauge";
 import {
   CpuIcon,
   ServerIcon,
+} from "../../../../src/components/icons";
+import {
   GpuIcon,
   RamIcon,
 } from "../icons";
