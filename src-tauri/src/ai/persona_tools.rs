@@ -860,6 +860,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_declared_tool_is_recognised_and_dispatchable() {
+        // A tool the model can see but the router does not know produces "unknown tool"
+        // at runtime, which stays invisible until someone happens to ask for it.
+        for def in definitions() {
+            assert!(is_persona_tool(&def.name), "{} is not routed", def.name);
+        }
+    }
+
+    #[test]
     fn only_delegation_counts_as_mutating() {
         // Listing agents and reading a board change nothing, so plan mode can allow
         // them; starting real work on real servers it must not.
