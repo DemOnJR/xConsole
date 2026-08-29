@@ -60,7 +60,7 @@ import {
 } from "./agentCommands";
 import { notify } from "../../../src/lib/notify";
 import { catalogForProvider } from "../../../src/lib/providerCatalog";
-import { PaperclipIcon, ToolsIcon, RefreshIcon, CloseIcon } from "../../../src/components/icons";
+import { CloseIcon, ICON, PaperclipIcon, RefreshIcon, ToolsIcon } from "../../../src/components/icons";
 import { createChatSnippet, shouldCreateSnippet, type ChatSnippet } from "../../../src/lib/snippetDetect";
 import { SnippetPreviewModal } from "./SnippetPreviewModal";
 import { TrajectoryModal } from "./TrajectoryModal";
@@ -1697,7 +1697,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
         ) : null}
         {loopTask ? (
           <span className="flex items-center gap-1 rounded bg-cyan-500/20 px-1 text-[9px] text-cyan-300">
-            <RefreshIcon size={9} className="animate-spin" /> {loopCount}/{loopMax}
+            <RefreshIcon size={ICON.micro} className="animate-spin" /> {loopCount}/{loopMax}
           </span>
         ) : null}
         {ttsEnabled ? (
@@ -1711,7 +1711,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
             data-tooltip="Inspect trajectory & events (/trajectory)"
             className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-cyan-400 hover:bg-[var(--border)] hover:text-cyan-200 font-mono"
           >
-            <ToolsIcon size={11} /> trace
+            <ToolsIcon size={ICON.small} /> trace
           </button>
           <button
             type="button"
@@ -1738,7 +1738,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
             data-tooltip="Close agent window"
             className="rounded p-1 text-gray-400 hover:bg-[var(--border)] hover:text-gray-200 flex items-center justify-center"
           >
-            <CloseIcon size={11} />
+            <CloseIcon size={ICON.small} />
           </button>
         </span>
       </div>
@@ -2452,7 +2452,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
               onClick={() => fileInputRef.current?.click()}
               aria-label="Attach files or images"
             >
-              <PaperclipIcon size={14} />
+              <PaperclipIcon size={ICON.base} />
             </button>
           </div>
 

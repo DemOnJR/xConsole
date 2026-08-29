@@ -2,7 +2,7 @@
 import { useAgentStore } from "../../../src/stores/agentStore";
 import { api, type AgentPlanFull } from "../../../src/lib/tauri";
 import { computePlanDiff } from "../../../src/lib/planDiff";
-import { StopIcon } from "../../../src/components/icons";
+import { ICON, StopIcon } from "../../../src/components/icons";
 
 const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
   presented: { label: "Awaiting review", cls: "text-amber-300 border-amber-500/40 bg-amber-500/10" },
@@ -351,7 +351,7 @@ export function PlanModal() {
                       onClick={() => void stopPlanRevision()}
                       className="flex items-center justify-center gap-1.5 rounded bg-rose-600/90 hover:bg-rose-600 py-1.5 px-2.5 text-[11px] font-semibold text-white transition shadow-xs"
                     >
-                      <StopIcon size={12} />
+                      <StopIcon size={ICON.small} />
                       Stop Agent
                     </button>
                   </div>

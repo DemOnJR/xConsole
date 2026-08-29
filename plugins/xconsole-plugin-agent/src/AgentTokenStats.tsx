@@ -1,6 +1,6 @@
 ﻿import type { SessionCacheTotals, TokenStats } from "../../../src/lib/streamStats";
 import { cacheBreakdown, formatCacheTooltip } from "../../../src/lib/streamStats";
-import { CacheIcon } from "../../../src/components/icons";
+import { CacheIcon, ICON } from "../../../src/components/icons";
 
 /** Compact cache affordance for the composer. Full numbers live in the hover tooltip. */
 export function CacheMeter({
@@ -48,7 +48,7 @@ export function CacheMeter({
         style={pct != null ? { ["--xc-cache-pct" as string]: `${pct}%` } : undefined}
         aria-hidden
       />
-      <CacheIcon size={13} />
+      <CacheIcon size={ICON.base} />
     </button>
   );
 }

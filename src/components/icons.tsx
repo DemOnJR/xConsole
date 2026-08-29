@@ -2,6 +2,26 @@ import type { SVGProps } from "react";
 
 type IconProps = SVGProps<SVGSVGElement> & { size?: number };
 
+/**
+ * The sizes icons are drawn at.
+ *
+ * Every icon shares one 24x24 grid, so two icons at the same `size` are the same size.
+ * What broke that was the call sites: ad-hoc numbers accumulated until one row held a
+ * 9, an 11, a 12, a 13 and a 14, and icons meant to sit together visibly did not. Three
+ * steps, each tied to the text it sits beside, is enough — reach for a raw number only
+ * when none of them fits, and then ask whether the surrounding type is the odd one.
+ */
+export const ICON = {
+  /** Inline in a 9-10px badge or pill. */
+  micro: 10,
+  /** Inline with 11px text: metadata rows, chips, dense lists. */
+  small: 11,
+  /** Buttons, toolbars, anything the user clicks. */
+  base: 14,
+  /** Nav rail, empty states, modal headers. */
+  large: 18,
+} as const;
+
 function base({ size = 16, ...props }: IconProps) {
   return {
     width: size,
@@ -490,7 +510,13 @@ export function FilterIcon(props: IconProps) {
 export function RefreshIcon(props: IconProps) {
   return (
     <svg {...base(props)}>
-      <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+      {/* Both arrows, drawn inside the box. The previous path ended at x=26.4 — past
+          the 24-wide viewBox — so the tail of the arrow was simply clipped off, and
+          the icon rendered visibly smaller and lopsided next to its neighbours. */}
+      <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+      <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+      <path d="M16 16h5v5" />
     </svg>
   );
 }
@@ -514,8 +540,11 @@ export function SlidersIcon(props: IconProps) {
 export function KeyIcon(props: IconProps) {
   return (
     <svg {...base(props)}>
-      <path d="M21 2l-2 2m-1.5 1.5L14 9l-3-3-4 4 3 3-5 5a3.5 3.5 0 0 1-5-5l5-5 3 3 4-4-3-3 3.5-3.5z" />
-      <circle cx="7.5" cy="16.5" r="1.5" />
+      {/* Bow bottom-left, bit top-right, both inside 2..21.5 — the old path reached
+          x=0 while stopping at y=18, hanging the whole key off the top-right. */}
+      <path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4" />
+      <path d="m21 2-9.6 9.6" />
+      <circle cx="7.5" cy="15.5" r="5.5" />
     </svg>
   );
 }
@@ -782,7 +811,10 @@ export function ChartIcon(props: IconProps) {
 export function PuzzleIcon(props: IconProps) {
   return (
     <svg {...base(props)}>
-      <path d="M19.439 7.85c0-1.57.802-2.54 2.14-2.85v-2H16.5v2.14c-.31 1.338-1.28 2.14-2.85 2.14s-2.54-.802-2.85-2.14H5.72v5.08c1.338.31 2.14 1.28 2.14 2.85s-.802 2.54-2.14 2.85v5.08h5.08c.31-1.338 1.28-2.14 2.85-2.14s2.54.802 2.85 2.14H21.579v-5.08c-1.338-.31-2.14-1.28-2.14-2.85s.802-2.54 2.14-2.85V7.85h-2.14z" />
+      {/* Ink box 3..21 on both axes, so it sits at the same optical size as every
+          other icon here. The previous path ran 5.7..21.6 — a 5.7 gap on the left
+          against 2.4 on the right, which reads as a piece shoved off to one side. */}
+      <path d="M5 6h4a3 3 0 0 1 6 0h4a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2.5a3 3 0 0 0 0-6V8a2 2 0 0 1 2-2z" />
     </svg>
   );
 }

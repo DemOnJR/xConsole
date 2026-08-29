@@ -1,7 +1,7 @@
 ﻿import { memo, useMemo, type MouseEvent, type PointerEvent } from "react";
 import type { AiProvider } from "../../../src/lib/tauri";
 import type { ContextUsage, SessionCacheTotals, TokenStats } from "../../../src/lib/streamStats";
-import { BrainIcon, EyeIcon, PlanIcon, ServerIcon, ShieldIcon, SparkIcon } from "../../../src/components/icons";
+import { BrainIcon, EyeIcon, ICON, PlanIcon, ServerIcon, ShieldIcon, SparkIcon } from "../../../src/components/icons";
 import { ContextGauge } from "./ContextGauge";
 import { CacheMeter } from "./AgentTokenStats";
 import { useMaskHost } from "../../../src/lib/privacy";
@@ -125,7 +125,7 @@ export const InputBar = memo(function InputBar({
           aria-label="Target servers"
           data-tooltip={targetsTip}
         >
-          <ServerIcon size={14} />
+          <ServerIcon size={ICON.base} />
         </button>
       ) : null}
 
@@ -138,7 +138,7 @@ export const InputBar = memo(function InputBar({
         aria-label="Switch model"
         data-tooltip={`${modelTip}\nSwitch provider/model (/model)`}
       >
-        <SparkIcon size={14} />
+        <SparkIcon size={ICON.base} />
       </button>
 
       <button
@@ -150,7 +150,7 @@ export const InputBar = memo(function InputBar({
         aria-label={`Safety profile ${safety}`}
         data-tooltip={`Safety: ${safety}\nChoose permission level (/safety)`}
       >
-        <ShieldIcon size={14} />
+        <ShieldIcon size={ICON.base} />
       </button>
 
       <button
@@ -172,7 +172,7 @@ export const InputBar = memo(function InputBar({
         aria-label={`Runtime mode: ${agentMode || (planMode ? "plan" : "auto")}`}
         data-tooltip={`Mode: ${agentMode || (planMode ? "plan" : "auto")}\nChoose runtime mode:  Auto ·  Plan ·  Code ·  Standard ·  Minimal (/mode)`}
       >
-        <PlanIcon size={14} />
+        <PlanIcon size={ICON.base} />
       </button>
 
       {onPickVision ? (
@@ -185,7 +185,7 @@ export const InputBar = memo(function InputBar({
           aria-label="Vision model"
           data-tooltip={`${visionLabel || "vision"}\nImage vision — screenshots (/vision)`}
         >
-          <EyeIcon size={14} />
+          <EyeIcon size={ICON.base} />
         </button>
       ) : null}
 
@@ -199,7 +199,7 @@ export const InputBar = memo(function InputBar({
           aria-label={`Reasoning ${reasoning}`}
           data-tooltip={`Reasoning: ${reasoning}\nChoose reasoning effort (/reasoning)`}
         >
-          <BrainIcon size={14} />
+          <BrainIcon size={ICON.base} />
         </button>
       ) : null}
 
