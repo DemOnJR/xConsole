@@ -40,9 +40,13 @@ export function useWorkspaceAutosave() {
     if (restoredRef.current) return;
     restoredRef.current = true;
     void (async () => {
-      const id = await api.getSetting(ACTIVE_KEY).catch(() => null);
-      if (!id) return;
+      let id = await api.getSetting(ACTIVE_KEY).catch(() => null);
       await useWorkspaceStore.getState().load();
+      const wsList = useWorkspaceStore.getState().workspaces;
+      if (!id && wsList.length > 0) {
+        id = wsList[0].id;
+      }
+      if (!id) return;
       const res = await useWorkspaceStore.getState().restore(id);
       if (!res) return;
       const canvas = useCanvasStore.getState();
@@ -68,9 +72,19 @@ export function useWorkspaceAutosave() {
       workspacePersistKey(useCanvasStore.getState(), getViewport());
 
     const flush = async () => {
-      const { activeId, workspaces, save } = useWorkspaceStore.getState();
+      let { activeId, workspaces, save, createNew } = useWorkspaceStore.getState();
+      const canvasNodes = useCanvasStore.getState().nodes;
+      if (!activeId) {
+        if (canvasNodes.length === 0) return;
+        if (workspaces.length > 0) {
+          activeId = workspaces[0].id;
+        } else {
+          await createNew("Main");
+          activeId = useWorkspaceStore.getState().activeId;
+        }
+      }
       if (!activeId) return;
-      const ws = workspaces.find((w) => w.id === activeId);
+      const ws = useWorkspaceStore.getState().workspaces.find((w) => w.id === activeId);
       if (!ws) return;
       const key = persistKey();
       if (key === lastSavedRef.current) return;

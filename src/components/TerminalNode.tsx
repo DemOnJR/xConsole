@@ -220,7 +220,7 @@ export const TerminalNode = memo(function TerminalNode({ id, data, selected, dra
       try {
         if (!isReconnect) {
           // Reattach to a still-living background session (e.g. after a workspace
-          // switch) so a running process like htop survives.
+          // switch or F5 page reload) so running processes like btop / htop / claude survive.
           const existing = useSessionStore.getState().sessions[id];
           if (existing?.sessionId) {
             const replay = await api.sshReplay(existing.sessionId).catch(() => null);
@@ -229,8 +229,12 @@ export const TerminalNode = memo(function TerminalNode({ id, data, selected, dra
               setInfo(id, { status: "connected", sessionId: existing.sessionId });
               await attach(existing.sessionId);
               if (replay) term.write(b64ToBytes(replay));
+              safeFit();
               reconnectAttemptsRef.current = 0;
               return;
+            } else {
+              // The backend no longer has this session (e.g. app restart). Clear stale sid.
+              setInfo(id, { sessionId: undefined });
             }
           }
         }
