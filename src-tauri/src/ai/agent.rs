@@ -1138,6 +1138,33 @@ pub async fn run_turn(
     );
     tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
 
+    // Learn the *user*, not just the task. Reflection below learns from what went
+    // wrong; this reads the user's own standing instructions ("always use k3s",
+    // "never touch the db host") out of what they just said and records them in
+    // TASTE.md, which rides in the cached system prefix from the next turn on.
+    //
+    // Without it, a preference only stuck if the model remembered to call taste_save,
+    // which it mostly did not — so the same correction was made every week and the
+    // agent never appeared to know anyone. Pure pattern matching, no extra model
+    // call, so it costs nothing on the turn. Skipped for voice and casual turns,
+    // where the phrasing is loose enough to be a false-positive source.
+    let learn_user = tc
+        .db
+        .get_setting("agent.learn_preferences")
+        .ok()
+        .flatten()
+        .map(|v| v != "false")
+        .unwrap_or(true);
+    if learn_user && !conversation && !casual_turn && !last_user_msg.trim().is_empty() {
+        let saved = crate::ai::learn::capture_preferences(&tc.home, &last_user_msg);
+        for pref in &saved {
+            emit(
+                Some(sink),
+                StreamEvent::Status(format!("Noted your preference: {pref}")),
+            );
+        }
+    }
+
     // Self-improvement loop (ETAPA 29): before finishing, look at what went wrong this
     // turn (failed/retried tool calls, hitting the iteration cap), distill a short
     // lesson, and save it to memory — where it's injected into every future turn's

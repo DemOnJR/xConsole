@@ -25,6 +25,7 @@ pub mod host_memory;
 pub mod image_gen;
 pub mod infra_tools;
 pub mod interaction;
+pub mod learn;
 pub mod jobs;
 pub mod list_models;
 pub mod llama;
