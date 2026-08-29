@@ -5,9 +5,6 @@ import {
   SearchIcon,
   ZapIcon,
   ToolIcon,
-  ToolsIcon,
-  CheckCircleIcon,
-  AlertTriangleIcon,
 } from "../icons";
 
 interface ToolsTelemetryTabProps {
