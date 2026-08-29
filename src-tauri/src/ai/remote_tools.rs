@@ -80,6 +80,46 @@ pairs by QR code, so call remote_link_whatsapp for that instead."
             }),
         },
         ToolDef {
+            name: "remote_reply_on".into(),
+            description: "Move this conversation to another chat app: answer the current \
+message there instead of where it arrived. Use it when the user asks to carry on somewhere \
+else — \"continue on WhatsApp\", \"tell me on Telegram\". The thread is shared, so nothing is \
+lost in the move; just call this and answer normally, without narrating the move. Only for \
+where the answer goes — remote_configure is for changing the setup."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "platform": {
+                        "type": "string",
+                        "enum": ["whatsapp", "telegram", "discord"],
+                        "description": "Where to answer. Must already be set up and armed."
+                    }
+                },
+                "required": ["platform"]
+            }),
+        },
+        ToolDef {
+            name: "remote_notify".into(),
+            description: "Send the user a message on their phone, in whichever chat app they \
+last used. For telling them something they are not sitting there waiting for: a long job \
+finished, a deploy is done, something needs their attention. Not for answering a question \
+they just asked over chat — that reply is already going back to them."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "What to send. Short and plain — they are reading it on a phone."},
+                    "platform": {
+                        "type": "string",
+                        "enum": ["whatsapp", "telegram", "discord"],
+                        "description": "Force a particular app. Omit to use wherever they last spoke, which is almost always right."
+                    }
+                },
+                "required": ["text"]
+            }),
+        },
+        ToolDef {
             name: "remote_link_whatsapp".into(),
             description: "Start WhatsApp pairing and show the user a QR code to scan in \
 Settings > Remote control. Use this when the user wants WhatsApp remote control — it replaces \
@@ -92,13 +132,25 @@ agent, which is a separate decision from which phone is linked."
 }
 
 pub fn is_remote_tool(name: &str) -> bool {
-    matches!(name, "remote_status" | "remote_configure" | "remote_link_whatsapp")
+    matches!(
+        name,
+        "remote_status"
+            | "remote_configure"
+            | "remote_link_whatsapp"
+            | "remote_reply_on"
+            | "remote_notify"
+    )
 }
 
 /// Reading the configuration changes nothing. Everything else here alters who can reach
 /// the user's servers, so plan mode — where the user has said "not yet" — withholds it.
+///
+/// `remote_reply_on` and `remote_notify` are exceptions on the same principle: they only
+/// decide where an answer is delivered, to a chat already configured and allowlisted.
+/// Neither grants anyone new access, and blocking them in plan mode would mean "carry on
+/// over WhatsApp" silently failing while the user waits on the wrong phone app.
 pub fn tool_is_mutating(name: &str) -> bool {
-    !matches!(name, "remote_status")
+    !matches!(name, "remote_status" | "remote_reply_on" | "remote_notify")
 }
 
 pub async fn dispatch(ctx: &ToolContext, name: &str, args: &Value) -> String {
@@ -106,6 +158,8 @@ pub async fn dispatch(ctx: &ToolContext, name: &str, args: &Value) -> String {
         "remote_status" => status(ctx),
         "remote_configure" => configure(ctx, args).await,
         "remote_link_whatsapp" => link_whatsapp(ctx).await,
+        "remote_reply_on" => reply_on(ctx, args),
+        "remote_notify" => notify(ctx, args).await,
         _ => format!("error: unknown remote tool {name}"),
     }
 }
@@ -267,6 +321,87 @@ async fn configure(ctx: &ToolContext, args: &Value) -> String {
     }
 
     format!("Saved.\n\n{}", status(ctx))
+}
+
+/// Answer this turn somewhere else.
+///
+/// Unlike the rest of this file, this asks for no approval: it grants nobody anything, it
+/// only picks which of the user's own already-configured chats their answer lands in. It
+/// must not prompt, either — the caller is a remote turn, and nobody is at the desktop to
+/// say yes. That is the whole point of the tool.
+fn reply_on(ctx: &ToolContext, args: &Value) -> String {
+    let platform = args.get("platform").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let Some(kind) = Kind::parse(platform) else {
+        return format!("error: unknown platform {platform:?} — use whatsapp, telegram or discord");
+    };
+
+    // Only a remote turn has somewhere to redirect to. From the desktop this would set a
+    // flag nothing reads, and the user would be left waiting on a phone that never buzzes.
+    if ctx.session_id != remote::CONVERSATION_ID {
+        return "error: this is a desktop turn, not a remote one — there is no incoming \
+                message to redirect. Use remote_notify to send them something on their phone."
+            .to_string();
+    }
+
+    if !remote::load_config(&ctx.db, kind).is_usable() {
+        return format!(
+            "error: {} is not armed, so the answer cannot go there. Say so instead of moving.",
+            kind.as_str()
+        );
+    }
+    if remote::route_for(&ctx.db, kind).is_none() {
+        return format!(
+            "error: no {} chat is known yet — they have never written from there and no chat \
+             is configured. Say so instead of moving.",
+            kind.as_str()
+        );
+    }
+
+    ctx.session_state.set_reply_route(&ctx.session_id, kind.as_str());
+    format!(
+        "This answer will be delivered on {}. Reply normally; do not mention the move.",
+        kind.as_str()
+    )
+}
+
+/// Send something the user is not sitting there waiting for.
+///
+/// The destination is never free-form: it resolves to a chat the user configured or one
+/// they have written from, on an armed transport. So this cannot be talked into messaging
+/// a stranger — the worst it can do is write to the user's own phone.
+async fn notify(ctx: &ToolContext, args: &Value) -> String {
+    let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if text.is_empty() {
+        return "error: nothing to send".to_string();
+    }
+
+    let route = match args.get("platform").and_then(|v| v.as_str()).map(str::trim) {
+        Some(p) if !p.is_empty() => {
+            let Some(kind) = Kind::parse(p) else {
+                return format!("error: unknown platform {p:?} — use whatsapp, telegram or discord");
+            };
+            remote::route_for(&ctx.db, kind)
+        }
+        _ => remote::last_route(&ctx.db),
+    };
+
+    let Some(route) = route else {
+        return "error: nowhere to send — the user has not written from any chat app yet, and \
+                none has a chat configured."
+            .to_string();
+    };
+
+    if !remote::load_config(&ctx.db, route.kind).is_usable() {
+        return format!(
+            "error: {} is not armed, so nothing can be sent there.",
+            route.kind.as_str()
+        );
+    }
+
+    match remote::send_to(&route, text).await {
+        Ok(()) => format!("Sent on {}.", route.kind.as_str()),
+        Err(e) => format!("error: could not send on {}: {e}", route.kind.as_str()),
+    }
 }
 
 async fn link_whatsapp(ctx: &ToolContext) -> String {

@@ -165,6 +165,10 @@ struct SessionFlags {
     last_prefix: Option<RequestFingerprint>,
     /// Live working checklist for this chat (TodoWrite). Replaces as a whole.
     todos: Vec<TodoItem>,
+    /// Transport this turn's answer should go to instead of where the message came
+    /// from, set by `remote_reply_on` when the user asks to carry on somewhere else.
+    /// Stored as the transport's name; `ai::remote` owns what the names mean.
+    reply_route: Option<String>,
 }
 
 impl SessionState {
@@ -191,6 +195,19 @@ impl SessionState {
             .entry(session_id.to_string())
             .or_default()
             .plan_approved = true;
+    }
+
+    /// Answer this turn on another transport, because the user asked to move there.
+    pub fn set_reply_route(&self, session_id: &str, transport: &str) {
+        self.map
+            .entry(session_id.to_string())
+            .or_default()
+            .reply_route = Some(transport.to_string());
+    }
+
+    /// Where this turn was redirected, if it was.
+    pub fn reply_route(&self, session_id: &str) -> Option<String> {
+        self.map.get(session_id).and_then(|f| f.reply_route.clone())
     }
 
     /// Whether a plan has been approved for this session.

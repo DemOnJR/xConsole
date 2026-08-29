@@ -524,6 +524,7 @@ pub fn run() {
             commands::remote::get_remote_status,
             commands::remote::save_remote_config,
             commands::remote::clear_remote_token,
+            commands::remote::reset_remote_conversation,
             commands::remote::test_remote_token,
             commands::remote::whatsapp_status,
             commands::remote::whatsapp_link_start,

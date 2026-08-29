@@ -281,6 +281,25 @@ async fn send_command(cmd: serde_json::Value) -> Result<(), String> {
     stdin.flush().await.map_err(|e| e.to_string())
 }
 
+/// Write to one chat, from anywhere.
+///
+/// The driver is not the only sender any more: a conversation can be moved to WhatsApp
+/// from another transport, and the agent can report a finished job unprompted. Both need
+/// to reach a chat without owning the `Transport` the driver loop is holding. Requires a
+/// running sidecar, which an armed bridge already keeps up — an unarmed one says so
+/// rather than dropping the message.
+pub async fn send_message(chat_id: &str, text: &str) -> Result<(), String> {
+    for chunk in super::chunk_for(Kind::WhatsApp, text) {
+        send_command(serde_json::json!({
+            "type": "send",
+            "chat": chat_id,
+            "text": chunk,
+        }))
+        .await?;
+    }
+    Ok(())
+}
+
 /// Begin (or resume) pairing, and keep the sidecar up long enough to scan.
 pub async fn link_start(app: &tauri::AppHandle) -> Result<WhatsAppStatus, String> {
     *shared().linking.lock().await = Some(std::time::Instant::now());
@@ -452,15 +471,7 @@ impl Transport for WhatsApp {
     }
 
     async fn send(&mut self, _cfg: &Config, to: &IncomingMessage, text: &str) -> Result<(), String> {
-        for chunk in super::chunk_for(Kind::WhatsApp, text) {
-            send_command(serde_json::json!({
-                "type": "send",
-                "chat": to.chat_id,
-                "text": chunk,
-            }))
-            .await?;
-        }
-        Ok(())
+        send_message(&to.chat_id, text).await
     }
 
     fn reset(&mut self) {

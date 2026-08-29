@@ -39,6 +39,12 @@ pub struct RemoteStatus {
     pub transports: Vec<TransportStatus>,
     /// True when at least one transport is armed.
     pub usable: bool,
+    /// Which transport the shared conversation is currently on — where the user last
+    /// spoke, and where an unprompted message would go. `None` until someone writes.
+    pub last_route: Option<String>,
+    /// How many messages the shared thread is carrying. Surfaced so "start a new
+    /// conversation" is an informed choice rather than a button with unknown effect.
+    pub conversation_len: usize,
 }
 
 fn transport_status(db: &Db, kind: Kind) -> TransportStatus {
@@ -75,6 +81,8 @@ fn status(db: &Db) -> RemoteStatus {
         targets: remote::parse_id_list(&get(remote::SETTING_TARGETS)),
         usable: transports.iter().any(|t| t.usable),
         transports,
+        last_route: remote::last_route(db).map(|r| r.kind.as_str().to_string()),
+        conversation_len: remote::load_history(db).len(),
     }
 }
 
@@ -84,7 +92,12 @@ pub async fn get_remote_status(db: State<'_, Db>) -> Result<RemoteStatus, String
 }
 
 /// The settings shared by every transport.
+///
+/// The settings screen sends these fields camelCased. Tauri only maps the casing of a
+/// command's own argument names, never the fields inside them, so this rename is what
+/// makes `safetyMode` land in `safety_mode`.
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RemoteShared {
     pub enabled: bool,
     pub prefix: String,
@@ -96,6 +109,7 @@ pub struct RemoteShared {
 /// credential alone", so the UI can save other fields without re-entering something it
 /// is never shown.
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TransportInput {
     pub kind: String,
     pub enabled: bool,
@@ -165,6 +179,18 @@ pub async fn save_remote_config(
     Ok(status(&db))
 }
 
+/// Forget the shared remote thread.
+///
+/// The bridge keeps one conversation across all three transports, so it accumulates until
+/// something clears it. This is both the "start fresh" button and the way to get rid of a
+/// thread you would rather not have sitting in the database.
+#[tauri::command]
+pub async fn reset_remote_conversation(db: State<'_, Db>) -> Result<RemoteStatus, String> {
+    db.delete_agent_conversation(remote::CONVERSATION_ID)
+        .map_err(|e| e.to_string())?;
+    Ok(status(&db))
+}
+
 #[tauri::command]
 pub async fn clear_remote_token(db: State<'_, Db>, kind: String) -> Result<RemoteStatus, String> {
     let kind = Kind::parse(&kind).ok_or_else(|| format!("unknown transport {kind}"))?;
@@ -220,4 +246,35 @@ pub async fn whatsapp_link_cancel(app: AppHandle) -> Result<whatsapp::WhatsAppSt
 #[tauri::command]
 pub async fn whatsapp_unlink(app: AppHandle) -> Result<whatsapp::WhatsAppStatus, String> {
     whatsapp::unlink(&app).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The payload `api.saveRemoteConfig` sends, field for field.
+    ///
+    /// These two structs are the only place in the module where the webview's names have
+    /// to line up with Rust's, and nothing else checks it: Tauri renames a command's own
+    /// arguments but not the fields inside them, so a missing `rename_all` fails at the
+    /// IPC boundary with "missing field `safety_mode`" — or, for the fields carrying
+    /// `#[serde(default)]`, does not fail at all and quietly saves an empty allowlist.
+    #[test]
+    fn the_settings_screen_payload_deserializes() {
+        let shared: RemoteShared = serde_json::from_str(
+            r#"{"enabled":true,"prefix":"!x","safetyMode":"allowlist","targets":["vps-1"]}"#,
+        )
+        .expect("shared settings");
+        assert_eq!(shared.safety_mode, "allowlist");
+        assert_eq!(shared.targets, vec!["vps-1"]);
+
+        let t: TransportInput = serde_json::from_str(
+            r#"{"kind":"telegram","enabled":true,"chatId":"-100123",
+                "allowedUserIds":"@ada, +40712345678","token":null}"#,
+        )
+        .expect("transport settings");
+        assert_eq!(t.chat_id, "-100123");
+        assert_eq!(t.allowed_user_ids, "@ada, +40712345678");
+        assert!(t.token.is_none());
+    }
 }

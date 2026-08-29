@@ -26,6 +26,19 @@
 //!   tokens run out.
 //! - The safety mode still applies. Nobody can answer an approval prompt from a
 //!   phone, so a remote turn runs under its own mode and defaults to the strictest.
+//!
+//! # One conversation, many transports
+//!
+//! All three bridges run at once and share a single thread ([`CONVERSATION_ID`]), so a
+//! follow-up makes sense wherever it is typed: ask about nginx on Telegram, say "restart
+//! it" on WhatsApp, and "it" still refers to nginx. That is a deliberate loosening of the
+//! per-message isolation this used to have — everyone on an allowlist now shares context.
+//! It is a far smaller grant than the one they already hold, which is arbitrary commands
+//! on the user's servers; the allowlist remains the whole security boundary.
+//!
+//! Replies go back where the message came from. The exception is when the user asks to
+//! move — "carry on over WhatsApp" — which the agent performs by calling `remote_reply_on`
+//! rather than by any command syntax, so it reads as ordinary conversation.
 
 pub mod discord;
 pub mod telegram;
@@ -38,6 +51,21 @@ pub const SETTING_ENABLED: &str = "remote.enabled";
 pub const SETTING_PREFIX: &str = "remote.prefix";
 pub const SETTING_SAFETY: &str = "remote.safety_mode";
 pub const SETTING_TARGETS: &str = "remote.targets";
+
+/// The one thread every transport shares. A fixed id, so it survives restarts and is
+/// visible in the desktop conversation list like any other.
+pub const CONVERSATION_ID: &str = "remote:conversation";
+
+/// The chat the agent spoke in last, as `<kind>:<chat id>`. This is what "answer where we
+/// last talked" resolves to when nothing else says otherwise.
+pub const SETTING_LAST_ROUTE: &str = "remote.last_route";
+
+/// How many messages of history ride into a remote turn.
+///
+/// Enough that a conversation holds together over an afternoon, bounded so a thread left
+/// running for a month does not silently grow every request. Trimming from the front
+/// keeps the recent turns, which are the ones a follow-up refers to.
+const HISTORY_LIMIT: usize = 40;
 
 /// Legacy aliases, kept so the existing Discord configuration keeps working without a
 /// migration. New transports use the `chat_id` spelling.
@@ -108,6 +136,16 @@ impl Kind {
             Kind::Discord => SETTING_CHANNEL.to_string(),
             _ => format!("remote.{}.chat_id", self.as_str()),
         }
+    }
+
+    /// Setting key for the last chat we actually exchanged messages in on this
+    /// transport.
+    ///
+    /// Distinct from [`Kind::setting_chat`], which is the chat the user *restricted* the
+    /// bridge to and is often blank. Moving a conversation needs somewhere concrete to
+    /// write, and "wherever we last spoke on WhatsApp" is the honest answer.
+    pub fn setting_last_chat(self) -> String {
+        format!("remote.{}.last_chat", self.as_str())
     }
 
     /// Setting key for this transport's allowlist.
@@ -393,6 +431,111 @@ pub fn load_config(db: &crate::storage::Db, kind: Kind) -> Config {
 }
 
 /// Fetch a transport's credential, if it has one and it is set.
+/// Where a message can be sent: a transport and a chat on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Route {
+    pub kind: Kind,
+    pub chat_id: String,
+}
+
+impl Route {
+    /// `<kind>:<chat id>`. Decoding splits at the *first* colon only, so a chat id
+    /// containing one — a WhatsApp JID, say — survives the round trip intact.
+    pub fn encode(&self) -> String {
+        format!("{}:{}", self.kind.as_str(), self.chat_id)
+    }
+
+    pub fn decode(raw: &str) -> Option<Route> {
+        let (kind, chat_id) = raw.split_once(':')?;
+        let kind = Kind::parse(kind)?;
+        (!chat_id.is_empty()).then(|| Route {
+            kind,
+            chat_id: chat_id.to_string(),
+        })
+    }
+}
+
+/// Remember where we just spoke, both globally and for this transport.
+///
+/// Two records because they answer different questions: "where was the last thing said"
+/// (for an unprompted message) and "where do I write if the user asks to move to
+/// WhatsApp" (for a transport that may not be the most recent one).
+pub fn remember_route(db: &crate::storage::Db, route: &Route) {
+    let _ = db.set_setting(SETTING_LAST_ROUTE, &route.encode());
+    let _ = db.set_setting(&route.kind.setting_last_chat(), &route.chat_id);
+}
+
+/// The chat the agent spoke in last, if any.
+pub fn last_route(db: &crate::storage::Db) -> Option<Route> {
+    db.get_setting(SETTING_LAST_ROUTE)
+        .ok()
+        .flatten()
+        .as_deref()
+        .and_then(Route::decode)
+}
+
+/// Where to write on `kind`: the last chat we used there, else the one the bridge is
+/// restricted to. `None` when we have never spoken there and nothing is configured —
+/// which is a thing to say out loud, not to paper over by guessing.
+pub fn route_for(db: &crate::storage::Db, kind: Kind) -> Option<Route> {
+    let last = db
+        .get_setting(&kind.setting_last_chat())
+        .ok()
+        .flatten()
+        .filter(|c| !c.trim().is_empty());
+    let configured = || load_config(db, kind).chat_id;
+    let chat_id = last.or_else(|| {
+        let c = configured();
+        (!c.trim().is_empty()).then_some(c)
+    })?;
+    Some(Route { kind, chat_id })
+}
+
+/// Send to any transport without owning its driver.
+///
+/// The driver replies through the `Transport` it holds; this is for everything else — a
+/// conversation moved to another platform, and a message the agent sends unprompted.
+pub async fn send_to(route: &Route, text: &str) -> Result<(), String> {
+    match route.kind {
+        Kind::Discord => {
+            let token = load_token(Kind::Discord).ok_or("no Discord token saved")?;
+            discord::send_message(&token, &route.chat_id, text).await
+        }
+        Kind::Telegram => {
+            let token = load_token(Kind::Telegram).ok_or("no Telegram token saved")?;
+            telegram::send_message(&token, &route.chat_id, text).await
+        }
+        Kind::WhatsApp => whatsapp::send_message(&route.chat_id, text).await,
+    }
+}
+
+/// The shared thread, oldest first.
+pub fn load_history(db: &crate::storage::Db) -> Vec<crate::ai::provider::ChatMessage> {
+    db.get_agent_conversation(CONVERSATION_ID)
+        .ok()
+        .flatten()
+        .and_then(|c| serde_json::from_str(&c.messages_json).ok())
+        .unwrap_or_default()
+}
+
+/// Replace the shared thread, keeping only the tail that fits [`HISTORY_LIMIT`].
+pub fn save_history(db: &crate::storage::Db, messages: &[crate::ai::provider::ChatMessage]) {
+    let tail = if messages.len() > HISTORY_LIMIT {
+        &messages[messages.len() - HISTORY_LIMIT..]
+    } else {
+        messages
+    };
+    let Ok(messages_json) = serde_json::to_string(tail) else {
+        return;
+    };
+    let _ = db.upsert_agent_conversation(&crate::storage::models::AgentConversationInput {
+        id: CONVERSATION_ID.to_string(),
+        title: Some("Remote chat".to_string()),
+        targets: Vec::new(),
+        messages_json,
+    });
+}
+
 pub fn load_token(kind: Kind) -> Option<String> {
     let key = kind.secret_key()?;
     crate::secrets::get_secret(&key)
@@ -508,20 +651,56 @@ fn drive(app: tauri::AppHandle, mut transport: Box<dyn Transport>) {
                     kind.as_str(),
                     msg.author.display_name
                 ));
-                let reply = {
+                // Recorded before the turn, not after: a turn that takes a minute should
+                // not leave "where we last spoke" pointing at the previous platform.
+                let here = Route { kind, chat_id: msg.chat_id.clone() };
+                remember_route(&db, &here);
+
+                let (reply, redirect) = {
                     let _turn = TURN_LOCK.lock().await;
                     run_remote_turn(&app, &cfg, &ask).await
                 };
-                if let Err(e) = transport.send(&cfg, &msg, &reply).await {
-                    crate::diag(&format!("remote({}): could not reply: {e}", kind.as_str()));
+
+                // Answer where the message came from, unless the user asked to move.
+                let moved = redirect
+                    .filter(|k| *k != kind)
+                    .and_then(|k| route_for(&db, k));
+                match moved {
+                    Some(route) => {
+                        if let Err(e) = send_to(&route, &reply).await {
+                            // The move failed, so the answer still has to reach somebody:
+                            // fall back to the chat that asked for it rather than dropping
+                            // a reply the user is waiting for.
+                            crate::diag(&format!(
+                                "remote({}): could not move the reply to {}: {e}",
+                                kind.as_str(),
+                                route.kind.as_str()
+                            ));
+                            let _ = transport.send(&cfg, &msg, &reply).await;
+                        } else {
+                            remember_route(&db, &route);
+                        }
+                    }
+                    None => {
+                        if let Err(e) = transport.send(&cfg, &msg, &reply).await {
+                            crate::diag(&format!("remote({}): could not reply: {e}", kind.as_str()));
+                        }
+                    }
                 }
             }
         }
     });
 }
 
-/// Run one agent turn on behalf of a remote message and return what to send back.
-async fn run_remote_turn(app: &tauri::AppHandle, cfg: &Config, ask: &str) -> String {
+/// Run one agent turn on behalf of a remote message.
+///
+/// Returns what to send back, and the transport to send it to if the user asked to carry
+/// on elsewhere.
+async fn run_remote_turn(
+    app: &tauri::AppHandle,
+    cfg: &Config,
+    ask: &str,
+) -> (String, Option<Kind>) {
     use tauri::Manager;
     let db = app.state::<crate::storage::Db>().inner().clone();
     let hooks_cfg = if db.get_setting("agent.hooks_enabled").ok().flatten().as_deref()
@@ -543,9 +722,10 @@ async fn run_remote_turn(app: &tauri::AppHandle, cfg: &Config, ask: &str) -> Str
         // silently proceeding.
         prompts: crate::ai::interaction::PromptRegistry::new(),
         session_state: crate::ai::interaction::SessionState::new(),
-        // One session per remote request. A shared id would let a stranger's earlier
-        // message shape a later one's context.
-        session_id: format!("remote:{}", uuid::Uuid::new_v4()),
+        // One id for the whole bridge, so a follow-up typed on another platform lands in
+        // the same thread. Everyone on an allowlist therefore shares context — see the
+        // module docs, which weigh that against what an allowlist already grants.
+        session_id: CONVERSATION_ID.to_string(),
         targets: cfg.targets.clone(),
         safety: cfg.safety_mode.clone(),
         plan_mode: false,
@@ -561,29 +741,53 @@ async fn run_remote_turn(app: &tauri::AppHandle, cfg: &Config, ask: &str) -> Str
         "This request arrived over remote chat, not from the desktop app. The user is \
          on their phone: keep the reply short and plain-text (no wide tables, no long \
          file dumps). Nobody can answer an approval prompt right now, so if something \
-         needs one, say what you would do and stop rather than waiting.\n\n{ask}"
+         needs one, say what you would do and stop rather than waiting.\n\n\
+         You are on {arrived}, and earlier messages in this thread may have arrived on a \
+         different app — it is one conversation either way. If the user asks to carry on \
+         somewhere else, call remote_reply_on and answer normally; do not describe the \
+         move, just make it.\n\n{ask}",
+        arrived = cfg.kind.as_str(),
     );
+
+    // The thread so far. Trimmed on save, so this is already bounded.
+    let history = load_history(&db);
+    let mut request = history.clone();
+    request.push(crate::ai::provider::ChatMessage::user(prompt));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::ai::provider::StreamEvent>();
     // Nothing consumes the stream here — the reply is the final message — but the
     // sink has to be drained or the turn blocks on a full channel.
     let drain = tauri::async_runtime::spawn(async move { while rx.recv().await.is_some() {} });
 
-    let result = crate::ai::agent::run_turn(
-        &tc,
-        None,
-        vec![crate::ai::provider::ChatMessage::user(prompt)],
-        false,
-        &tx,
-    )
-    .await;
+    // `conversation: false` like every other non-desktop caller — the flag gates
+    // preference-learning and skill autopilot, not whether history is carried.
+    let result = crate::ai::agent::run_turn(&tc, None, request, false, &tx).await;
     drop(tx);
     let _ = drain.await;
 
-    match result {
-        Ok(msg) if !msg.content.trim().is_empty() => msg.content,
+    let redirect = tc
+        .session_state
+        .reply_route(&tc.session_id)
+        .as_deref()
+        .and_then(Kind::parse);
+
+    let reply = match result {
+        Ok(msg) if !msg.content.trim().is_empty() => {
+            // What the user actually typed goes into the thread, not the decorated
+            // request — otherwise every past turn carries another copy of the "you are
+            // talking to someone on their phone" preamble into the next one's context.
+            //
+            // Only a turn that produced an answer joins the thread at all. Recording a
+            // failure would teach the next turn that the last thing said was an error.
+            let mut thread = history;
+            thread.push(crate::ai::provider::ChatMessage::user(ask.to_string()));
+            thread.push(msg.clone());
+            save_history(&db, &thread);
+            msg.content
+        }
         Ok(_) => "(the agent finished without saying anything)".to_string(),
         Err(e) => format!("Failed: {e}"),
-    }
+    };
+    (reply, redirect)
 }
 
 #[cfg(test)]
@@ -614,6 +818,85 @@ mod tests {
             is_bot: false,
             content: "!x restart nginx".into(),
         }
+    }
+
+    fn db() -> crate::storage::Db {
+        crate::storage::Db::open(std::path::Path::new(":memory:")).unwrap()
+    }
+
+    #[test]
+    fn a_route_survives_the_round_trip_through_settings() {
+        for chat in ["chan-1", "40712345678@s.whatsapp.net", "a:b:c"] {
+            let r = Route { kind: Kind::WhatsApp, chat_id: chat.into() };
+            assert_eq!(Route::decode(&r.encode()), Some(r), "{chat}");
+        }
+    }
+
+    #[test]
+    fn a_route_with_no_chat_or_no_transport_is_not_a_route() {
+        // Empty settings read back as an empty string, so "telegram:" must not decode
+        // into a route that then sends a message to nowhere.
+        assert_eq!(Route::decode("telegram:"), None);
+        assert_eq!(Route::decode("carrier-pigeon:x"), None);
+        assert_eq!(Route::decode(""), None);
+    }
+
+    #[test]
+    fn moving_a_conversation_prefers_where_we_last_spoke() {
+        let d = db();
+        // Restricted to one channel, but the last exchange was somewhere else — that is
+        // where the user is actually reading, so that is where a move should land.
+        d.set_setting(&Kind::Discord.setting_chat(), "configured-chan").unwrap();
+        assert_eq!(
+            route_for(&d, Kind::Discord).map(|r| r.chat_id),
+            Some("configured-chan".into())
+        );
+
+        remember_route(&d, &Route { kind: Kind::Discord, chat_id: "live-chan".into() });
+        assert_eq!(
+            route_for(&d, Kind::Discord).map(|r| r.chat_id),
+            Some("live-chan".into())
+        );
+    }
+
+    #[test]
+    fn a_transport_never_used_and_never_configured_has_nowhere_to_go() {
+        // The honest answer is "I don't know where to write", not a guess. `remote_notify`
+        // and `remote_reply_on` both refuse on this.
+        assert!(route_for(&db(), Kind::Telegram).is_none());
+    }
+
+    #[test]
+    fn the_last_route_is_global_but_each_transport_keeps_its_own() {
+        let d = db();
+        remember_route(&d, &Route { kind: Kind::Telegram, chat_id: "tg-1".into() });
+        remember_route(&d, &Route { kind: Kind::WhatsApp, chat_id: "wa-1".into() });
+
+        // Most recent wins for "answer where we last spoke"...
+        assert_eq!(last_route(&d), Some(Route { kind: Kind::WhatsApp, chat_id: "wa-1".into() }));
+        // ...but Telegram is still reachable by name, which is what "go back to Telegram"
+        // needs.
+        assert_eq!(route_for(&d, Kind::Telegram).map(|r| r.chat_id), Some("tg-1".into()));
+    }
+
+    #[test]
+    fn the_shared_thread_keeps_its_tail_and_survives_a_reload() {
+        let d = db();
+        let long: Vec<crate::ai::provider::ChatMessage> = (0..HISTORY_LIMIT + 10)
+            .map(|i| crate::ai::provider::ChatMessage::user(format!("m{i}")))
+            .collect();
+        save_history(&d, &long);
+
+        let back = load_history(&d);
+        assert_eq!(back.len(), HISTORY_LIMIT, "history is bounded");
+        // Trimmed from the front: a follow-up refers to the most recent turns, so those
+        // are the ones that must survive.
+        assert_eq!(back.last().unwrap().content, format!("m{}", HISTORY_LIMIT + 9));
+    }
+
+    #[test]
+    fn an_empty_thread_reads_as_empty_rather_than_failing() {
+        assert!(load_history(&db()).is_empty());
     }
 
     #[test]

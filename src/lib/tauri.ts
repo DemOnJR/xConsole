@@ -420,6 +420,10 @@ export interface RemoteStatus {
   transports: TransportStatus[];
   /** True when at least one transport is armed. */
   usable: boolean;
+  /** Transport the shared conversation is on — where the user last spoke. */
+  last_route: string | null;
+  /** Messages in the shared thread. */
+  conversation_len: number;
 }
 
 /** Pairing state for the WhatsApp bridge. */
@@ -1248,6 +1252,8 @@ export const api = {
   ) => invoke<RemoteStatus>("save_remote_config", { shared, transports }),
   clearRemoteToken: (kind: RemoteKind) =>
     invoke<RemoteStatus>("clear_remote_token", { kind }),
+  /** Forget the thread every transport shares. */
+  resetRemoteConversation: () => invoke<RemoteStatus>("reset_remote_conversation"),
   /** Ask the platform who a saved token belongs to. Telegram only, so far. */
   testRemoteToken: (kind: RemoteKind) => invoke<string>("test_remote_token", { kind }),
 

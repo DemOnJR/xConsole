@@ -19,6 +19,12 @@ import { Button, Card, Field, SectionHeader, Select, TextInput, Toggle } from ".
  * The three are presented in order of how hard they are to set up, because that is the
  * question a user actually has when they arrive here. WhatsApp is a QR scan, Telegram
  * is one chat with BotFather, Discord is a developer-portal application.
+ *
+ * One at a time, behind tabs: three stacked cards is a long scroll of fields for two
+ * platforms you are not setting up. The tabs carry each transport's state as a dot, so
+ * hiding two of them does not hide whether they are armed — which is the one thing this
+ * screen exists to say. Every draft is kept mounted-or-not in `drafts`, so Save still
+ * saves all three; switching tabs is a view change, never an edit.
  */
 
 type Draft = {
@@ -79,6 +85,9 @@ const COPY: Record<
 /** Setup order, easiest first — the order someone choosing between them wants. */
 const ORDER: RemoteKind[] = ["whatsapp", "telegram", "discord"];
 
+/** Mirrors `SETTING_SIDECAR` in src-tauri/src/ai/remote/whatsapp.rs. */
+const WHATSAPP_SIDECAR_SETTING = "remote.whatsapp.sidecar_path";
+
 export function RemoteSection() {
   const [status, setStatus] = useState<RemoteStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -98,6 +107,7 @@ export function RemoteSection() {
     telegram: { ...BLANK },
     whatsapp: { ...BLANK },
   });
+  const [tab, setTab] = useState<RemoteKind>("whatsapp");
 
   const load = useCallback(async () => {
     const s = await api.getRemoteStatus().catch(() => null);
@@ -166,6 +176,9 @@ export function RemoteSection() {
     setDrafts((d) => ({ ...d, [kind]: { ...d[kind], ...p } }));
 
   const armed = status?.transports.filter((t) => t.usable) ?? [];
+  // Guarded rather than cast: the backend could name a transport this build has no copy
+  // for, and an undefined lookup would take the whole settings screen down.
+  const lastRoute = ORDER.find((k) => k === status?.last_route);
 
   return (
     <div className="space-y-6">
@@ -188,6 +201,13 @@ export function RemoteSection() {
             : !status.enabled
               ? "Not armed: remote control is off."
               : "Not armed: no transport is fully configured yet."}
+          {status.usable && lastRoute && (
+            <>
+              {" "}
+              The conversation is on {COPY[lastRoute].name}; ask it to carry on somewhere
+              else and it will answer there.
+            </>
+          )}
         </div>
       )}
 
@@ -197,16 +217,54 @@ export function RemoteSection() {
         </div>
       )}
 
-      {ORDER.map((kind) => (
-        <TransportCard
-          key={kind}
-          kind={kind}
-          draft={drafts[kind]}
-          status={status?.transports.find((t) => t.kind === kind)}
-          onChange={(p) => patch(kind, p)}
-          onReload={load}
-        />
-      ))}
+      <div>
+        <div className="flex border-b border-[var(--border)]">
+          {ORDER.map((kind) => {
+            const t = status?.transports.find((x) => x.kind === kind);
+            const active = tab === kind;
+            // Armed, switched on but not finished, or off. Colour only where it reports
+            // something: a grey dot is not a problem, an amber one is unfinished work.
+            const state = t?.usable
+              ? { colour: "bg-[var(--success)]", why: "armed" }
+              : drafts[kind].enabled
+                ? { colour: "bg-[var(--warning)]", why: "on, but not fully configured" }
+                : { colour: "bg-[var(--border-strong)]", why: "off" };
+            return (
+              <button
+                key={kind}
+                type="button"
+                onClick={() => setTab(kind)}
+                aria-selected={active}
+                className={`flex items-center gap-2 border-b-2 px-4 py-2.5 text-xs font-medium transition ${
+                  active
+                    ? "border-[var(--accent)] text-gray-100"
+                    : "border-transparent text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                {COPY[kind].name}
+                <span
+                  className={`h-1.5 w-1.5 shrink-0 ${state.colour}`}
+                  data-tooltip={`${COPY[kind].name}: ${state.why}`}
+                />
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Only the selected one is mounted; the other two keep their drafts in state
+            and are still written by Save. */}
+        <div className="pt-4">
+          <TransportCard
+            // Keyed, so a token-test result never survives into another platform's card.
+            key={tab}
+            kind={tab}
+            draft={drafts[tab]}
+            status={status?.transports.find((t) => t.kind === tab)}
+            onChange={(p) => patch(tab, p)}
+            onReload={load}
+          />
+        </div>
+      </div>
 
       <div className="grid gap-4 md:grid-cols-2">
         <Field
@@ -259,6 +317,33 @@ export function RemoteSection() {
             })}
           </div>
         )}
+      </Field>
+
+      {/* The thread is shared by every transport and outlives restarts, so it needs to be
+          visible and clearable — a persistent conversation nobody can see or reset is a
+          surprise, not a feature. */}
+      <Field
+        label="Conversation"
+        hint="All three apps share one thread, so a follow-up makes sense wherever you type it — ask about a server on Telegram, say “restart it” on WhatsApp. Everyone on an allowlist shares it."
+      >
+        <div className="flex items-center gap-3">
+          <span className="text-[11px] text-gray-400">
+            {status && status.conversation_len > 0
+              ? `${status.conversation_len} message${status.conversation_len === 1 ? "" : "s"}${
+                  lastRoute ? `, last on ${COPY[lastRoute].name}` : ""
+                }.`
+              : "Nothing yet."}
+          </span>
+          {status && status.conversation_len > 0 && (
+            <Button
+              onClick={async () => {
+                await api.resetRemoteConversation().then(setStatus).catch((e) => setError(String(e)));
+              }}
+            >
+              Start a new one
+            </Button>
+          )}
+        </div>
       </Field>
 
       <div className="flex items-center gap-3 border-t border-[var(--border)] pt-4">
@@ -404,11 +489,37 @@ function WhatsAppLink({ onReload }: { onReload: () => void }) {
     return () => unlisten.current?.();
   }, []);
 
+  // No helper, no QR — WhatsApp pairing runs in a separate binary. Saying only that
+  // leaves the user at a dead end, so offer the way out: `sidecar_path` already honours
+  // an explicit setting, it just had no UI to set it.
   if (wa && !wa.available) {
     return (
-      <div className="border border-[var(--warning)]/40 bg-[var(--warning)]/10 px-3 py-2 text-[11px] text-[var(--warning)]">
-        The WhatsApp helper is not installed with this build, so WhatsApp cannot be
-        linked. Discord and Telegram still work.
+      <div className="space-y-3">
+        <div className="border border-[var(--warning)]/40 bg-[var(--warning)]/10 px-3 py-2 text-[11px] text-[var(--warning)]">
+          The WhatsApp helper is not installed with this build, so there is no QR code to
+          scan yet. Discord and Telegram still work.
+        </div>
+        <div className="flex items-center gap-3">
+          <Button
+            disabled={busy}
+            onClick={async () => {
+              const path = await api.pickFile("Locate the WhatsApp helper").catch(() => null);
+              if (!path) return;
+              setBusy(true);
+              await api.setSetting(WHATSAPP_SIDECAR_SETTING, path).catch(() => {});
+              // Re-asks the backend rather than assuming: the path is only accepted if
+              // the file is actually there.
+              await api.whatsappStatus().then(setWa).catch(() => {});
+              setBusy(false);
+            }}
+          >
+            {busy ? "Checking…" : "Locate the helper…"}
+          </Button>
+          <span className="text-[11px] text-gray-500">
+            Build it from <span className="font-mono">src-tauri/sidecar/whatsapp</span> with{" "}
+            <span className="font-mono">./build.sh</span>, then point at the result.
+          </span>
+        </div>
       </div>
     );
   }
