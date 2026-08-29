@@ -4,9 +4,10 @@ import {
   LayersIcon,
   SearchIcon,
   ZapIcon,
-} from "../../../../src/components/icons";
-import {
   ToolIcon,
+  ToolsIcon,
+  CheckCircleIcon,
+  AlertTriangleIcon,
 } from "../icons";
 
 interface ToolsTelemetryTabProps {

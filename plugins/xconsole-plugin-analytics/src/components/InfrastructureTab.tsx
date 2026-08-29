@@ -7,8 +7,6 @@ import {
   DatabaseIcon,
   FolderIcon,
   ServerIcon,
-} from "../../../../src/components/icons";
-import {
   CheckCircleIcon,
 } from "../icons";
 

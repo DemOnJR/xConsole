@@ -5,8 +5,6 @@ import {
   CacheIcon,
   SearchIcon,
   ZapIcon,
-} from "../../../../src/components/icons";
-import {
   AlertTriangleIcon,
   TrendingUpIcon,
 } from "../icons";
