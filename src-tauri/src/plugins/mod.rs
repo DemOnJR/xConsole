@@ -307,6 +307,23 @@ where
     Ok(())
 }
 
+/// True when the plugin's own `plugin.json` marks it as shipping with the app.
+///
+/// Bundled plugins live in this repo and import host modules by relative path
+/// (`../../../src/components/icons`), so their standalone `tsc` script can only
+/// resolve inside the monorepo - the checkout under ~/.xconsole/plugins has no
+/// host `src/` above it and every host import fails with TS2307. That build is
+/// also pointless: `pluginStore.loadPlugins` only loads `<path>/dist/index.js`
+/// when no builtin definition exists for the id, and for these it always does.
+/// So install/update tracks the mirror repo but leaves deps and build alone.
+fn manifest_marks_builtin(manifest_path: &Path) -> bool {
+    fs::read_to_string(manifest_path)
+        .ok()
+        .and_then(|c| serde_json::from_str::<PluginManifest>(&c).ok())
+        .map(|m| m.is_builtin)
+        .unwrap_or(false)
+}
+
 /// 1-Command async installer: streams progress and logs to frontend, suppresses console windows
 pub async fn install_plugin_with_progress(
     app: &tauri::AppHandle,
@@ -416,8 +433,22 @@ pub async fn install_plugin_with_progress(
     }
 
     // Step 3: Install dependencies
+    let ships_with_app = manifest_marks_builtin(&manifest_path);
+    if ships_with_app {
+        emit_progress(
+            "Compilare omisă",
+            4,
+            5,
+            90,
+            Some("Plugin inclus în aplicație: bundle-ul vine din build-ul xConsole, deci instalarea dependințelor și build-ul local sunt omise.".to_string()),
+            false,
+            false,
+        );
+    }
+
     let pkg_json = target_dir.join("package.json");
-    if pkg_json.exists() {
+    let mut build_failed = false;
+    if pkg_json.exists() && !ships_with_app {
         emit_progress(
             "Instalare dependințe...",
             3,
@@ -477,6 +508,7 @@ pub async fn install_plugin_with_progress(
         if let Err(e_pnpm) = run_quiet_tokio_streaming("pnpm", &["run", "build"], Some(&target_dir), on_build_log.clone()).await {
             emit_progress("Compilare pachet...", 4, 5, 86, Some(format!("pnpm run build indisponibil ({e_pnpm}), se încearcă npm run build...")), false, false);
             if let Err(e_npm) = run_quiet_tokio_streaming("npm", &["run", "build"], Some(&target_dir), on_build_log).await {
+                build_failed = true;
                 emit_progress("Avertisment compilare", 4, 5, 90, Some(format!("npm run build avertisment: {e_npm}")), false, false);
             }
         }
@@ -501,11 +533,15 @@ pub async fn install_plugin_with_progress(
     }
 
     emit_progress(
-        "Finalizat cu succes!",
+        if build_failed { "Finalizat cu avertismente" } else { "Finalizat cu succes!" },
         5,
         5,
         100,
-        Some(format!("Pluginul '{}' (v{}) a fost instalat și activat cu succes!", manifest.name, manifest.version)),
+        Some(if build_failed {
+            format!("Pluginul '{}' (v{}) a fost instalat, dar comanda de build a eșuat - vezi erorile din log.", manifest.name, manifest.version)
+        } else {
+            format!("Pluginul '{}' (v{}) a fost instalat și activat cu succes!", manifest.name, manifest.version)
+        }),
         false,
         true,
     );
@@ -938,8 +974,23 @@ pub async fn update_plugin_with_progress(
     }
 
     // Step 3: Install dependencies
+    let manifest_path = plugin_dir.join("plugin.json");
+    let ships_with_app = manifest_marks_builtin(&manifest_path);
+    if ships_with_app {
+        emit_progress(
+            "Compilare omisă",
+            4,
+            5,
+            90,
+            Some("Plugin inclus în aplicație: bundle-ul vine din build-ul xConsole, deci actualizarea dependințelor și build-ul local sunt omise.".to_string()),
+            false,
+            false,
+        );
+    }
+
     let pkg_json = plugin_dir.join("package.json");
-    if pkg_json.exists() {
+    let mut build_failed = false;
+    if pkg_json.exists() && !ships_with_app {
         emit_progress(
             "Actualizare dependințe...",
             3,
@@ -997,6 +1048,7 @@ pub async fn update_plugin_with_progress(
 
         if let Err(e_pnpm) = run_quiet_tokio_streaming("pnpm", &["run", "build"], Some(plugin_dir), on_build_log.clone()).await {
             if let Err(e_npm) = run_quiet_tokio_streaming("npm", &["run", "build"], Some(plugin_dir), on_build_log).await {
+                build_failed = true;
                 emit_progress("Avertisment build", 4, 5, 90, Some(format!("npm build avertisment: {e_pnpm}; {e_npm}")), false, false);
             }
         }
@@ -1005,7 +1057,6 @@ pub async fn update_plugin_with_progress(
     // Step 5: Read & Validate Manifest
     emit_progress("Validare și repornire...", 5, 5, 95, Some("Reîncărcare date din plugin.json...".to_string()), false, false);
 
-    let manifest_path = plugin_dir.join("plugin.json");
     let content = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("Nu s-a putut citi plugin.json: {e}"))?;
     let mut manifest = serde_json::from_str::<PluginManifest>(&content)
@@ -1016,11 +1067,15 @@ pub async fn update_plugin_with_progress(
     manifest.is_builtin = false;
 
     emit_progress(
-        "Actualizat cu succes!",
+        if build_failed { "Actualizat cu avertismente" } else { "Actualizat cu succes!" },
         5,
         5,
         100,
-        Some(format!("Pluginul '{}' (v{}) a fost actualizat cu succes!", manifest.name, manifest.version)),
+        Some(if build_failed {
+            format!("Pluginul '{}' (v{}) a fost actualizat, dar comanda de build a eșuat - vezi erorile din log.", manifest.name, manifest.version)
+        } else {
+            format!("Pluginul '{}' (v{}) a fost actualizat cu succes!", manifest.name, manifest.version)
+        }),
         false,
         true,
     );
