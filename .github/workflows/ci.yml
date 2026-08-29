@@ -27,7 +27,15 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Typecheck + unit tests
+        # Covers src/ AND plugins/*/src (see tsconfig.json + vitest.config.ts).
+        # Both used to be excluded, so ~12k lines of plugin code — including the
+        # agent console — shipped with no typecheck and 33 tests that never ran.
         run: pnpm check
+      - name: Production build
+        # `pnpm check` is tsc --noEmit: it does not catch a broken Vite build
+        # (bad asset import, plugin glob, CSS pipeline). Catch that on PR, not
+        # in the release workflow.
+        run: pnpm build
       - name: Dependency audit
         run: pnpm audit --audit-level moderate
 
@@ -46,5 +54,7 @@ jobs:
           packages: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
           version: "1"
       - name: Unit tests
+        # Default (parallel) test threads on purpose: the tool_cache tests share
+        # one process-global CACHE and used to pass only by scheduling luck.
         working-directory: src-tauri
         run: cargo test --locked --lib

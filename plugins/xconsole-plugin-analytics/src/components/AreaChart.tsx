@@ -84,7 +84,7 @@ export const AreaChart = React.memo(function AreaChart({
     );
   }
 
-  const { min, max, avg, points, polylinePts, areaPath } = chartMetrics;
+  const { max, avg, points, polylinePts, areaPath } = chartMetrics;
   const format = valueFormatter || ((v: number) => `${v.toFixed(1)}${unit ? ` ${unit}` : ""}`);
   const activePoint = hoverIndex !== null ? points[hoverIndex] : null;
 

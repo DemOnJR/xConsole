@@ -31,7 +31,6 @@ import {
   fileBaseName,
   filesFromClipboardEvent,
   fileToChatImage,
-  imagesFromClipboardEvent,
   isGeminiProvider,
   isImagePath,
   parseVisionMode,
@@ -61,7 +60,7 @@ import {
 } from "./agentCommands";
 import { notify } from "../../../src/lib/notify";
 import { catalogForProvider } from "../../../src/lib/providerCatalog";
-import { PaperclipIcon, ImageIcon, ToolsIcon, RefreshIcon, CloseIcon } from "../../../src/components/icons";
+import { PaperclipIcon, ToolsIcon, RefreshIcon, CloseIcon } from "../../../src/components/icons";
 import { createChatSnippet, shouldCreateSnippet, type ChatSnippet } from "../../../src/lib/snippetDetect";
 import { SnippetPreviewModal } from "./SnippetPreviewModal";
 import { TrajectoryModal } from "./TrajectoryModal";
