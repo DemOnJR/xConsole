@@ -17,6 +17,7 @@ import { ThemeSection } from "./sections/ThemeSection";
 import { ModelsSection } from "./sections/ModelsSection";
 import { ProvidersSection } from "./sections/ProvidersSection";
 import { AgentSection } from "./sections/AgentSection";
+import { AgentsSection } from "./sections/AgentsSection";
 import { KnowledgeSection } from "./sections/KnowledgeSection";
 import { SecuritySection } from "./sections/SecuritySection";
 import { PluginsSection } from "./sections/PluginsSection";
@@ -37,6 +38,7 @@ const CATEGORIES: Category[] = [
   { id: "providers", label: "AI Providers", icon: PlugIcon, Component: ProvidersSection, group: "ai" },
   { id: "models", label: "Local Models", icon: BrainIcon, Component: ModelsSection, group: "ai" },
   { id: "agent", label: "Agent & Safety", icon: BotIcon, Component: AgentSection, group: "ai" },
+  { id: "agents", label: "Agents & Delegation", icon: BotIcon, Component: AgentsSection, group: "ai" },
   { id: "knowledge", label: "Knowledge Base", icon: SparkIcon, Component: KnowledgeSection, group: "ai" },
   { id: "security", label: "Security & Privacy", icon: ShieldIcon, Component: SecuritySection, group: "system" },
   { id: "advanced", label: "Advanced Tools", icon: ToolsIcon, Component: AdvancedSection, group: "system" },

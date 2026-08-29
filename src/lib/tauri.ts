@@ -390,6 +390,49 @@ export type ProviderKind =
   | "opencode_cli"
   | "antigravity_cli";
 
+
+/** A named background agent: an identity the autonomous goal loop runs under. */
+export interface Persona {
+  id: string;
+  name: string;
+  role: string;
+  instructions: string;
+  targets: string[];
+  safety_mode?: string | null;
+  provider_id?: string | null;
+  model?: string | null;
+  enabled: boolean;
+  /** Who this agent reports to. null = reports to you directly. */
+  reports_to?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface PersonaInput {
+  id?: string;
+  name: string;
+  role: string;
+  instructions: string;
+  targets: string[];
+  safety_mode?: string | null;
+  provider_id?: string | null;
+  model?: string | null;
+  enabled: boolean;
+  reports_to?: string | null;
+}
+
+/** One message between agents. `from_id`/`to_id` null means the user. */
+export interface AgentMessage {
+  id: string;
+  from_id?: string | null;
+  to_id?: string | null;
+  kind: string;
+  body: string;
+  goal_id?: string | null;
+  read_at?: string | null;
+  created_at?: string | null;
+}
+
 export interface AiProvider {
   id: string;
   name: string;
@@ -1111,6 +1154,16 @@ export const api = {
   deleteSetting: (key: string) => invoke<void>("delete_setting", { key }),
 
   listProviders: () => invoke<AiProvider[]>("list_providers"),
+  listPersonas: () => invoke<Persona[]>("list_personas"),
+  savePersona: (input: PersonaInput) => invoke<Persona>("save_persona", { input }),
+  deletePersona: (id: string) => invoke<void>("delete_persona", { id }),
+  personaOrgChart: () => invoke<string>("persona_org_chart"),
+  listAgentMessages: (goalId?: string | null, limit?: number) =>
+    invoke<AgentMessage[]>("list_agent_messages", { goalId: goalId ?? null, limit: limit ?? null }),
+  unreadUserMessages: () => invoke<AgentMessage[]>("unread_user_messages"),
+  markAgentMessagesRead: (ids: string[]) =>
+    invoke<void>("mark_agent_messages_read", { ids }),
+
   saveProvider: (input: AiProviderInput) =>
     invoke<AiProvider>("save_provider", { input }),
   deleteProvider: (id: string) => invoke<void>("delete_provider", { id }),
@@ -1648,6 +1701,13 @@ export function onSessionOutput(
   return listen<string>(`ssh://${sessionId}/output`, (e) => {
     cb(b64ToBytes(e.payload));
   });
+}
+
+/** Live feed of what the agents say to each other. */
+export function onAgentMessage(
+  cb: (msg: AgentMessage) => void,
+): Promise<UnlistenFn> {
+  return listen<AgentMessage>("agent://message", (e) => cb(e.payload));
 }
 
 /** Subscribe to a session's connection status changes. */

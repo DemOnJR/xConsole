@@ -4,6 +4,67 @@
 
 @import "highlight.js/styles/github-dark.min.css";
 
+/* ---------------------------------------------------------------------------
+ * Design system
+ *
+ * Tailwind v4 reads its scales from CSS variables, so overriding them here
+ * re-points every existing utility class at once. That matters: the app has
+ * ~880 `rounded-*` and ~1,280 colour utilities spread across 200 files, and
+ * restyling by editing those call sites would be a huge diff with no single
+ * place to change your mind later.
+ *
+ * Two rules, applied globally:
+ *
+ * 1. Square. Corners are structural, not decorative — panels, inputs and
+ *    buttons meet at near-right angles. A 2px softening keeps edges from
+ *    aliasing on a non-integer-scaled display without reading as "rounded".
+ *    Genuinely circular things (avatars, status dots, toggles) use
+ *    `rounded-full`, which is left alone.
+ *
+ * 2. One accent. Colour has to mean something, so the decorative accent
+ *    families — cyan, sky, blue, indigo, violet — all resolve to the theme's
+ *    `--accent`, which the theme picker actually controls. Before this they
+ *    were hardcoded, so switching theme left most of the UI unchanged and
+ *    four different "primary" blues appeared on the same screen.
+ *
+ * Semantic colour is deliberately untouched: red/amber/emerald still mean
+ * danger, warning and success, which is the one job colour should do here.
+ * ------------------------------------------------------------------------- */
+@theme {
+  --radius-xs: 2px;
+  --radius-sm: 2px;
+  --radius-md: 2px;
+  --radius-lg: 2px;
+  --radius-xl: 3px;
+  --radius-2xl: 3px;
+  --radius-3xl: 4px;
+
+  --color-cyan-300: color-mix(in srgb, var(--accent) 85%, white);
+  --color-cyan-400: var(--accent);
+  --color-cyan-500: var(--accent);
+  --color-cyan-600: var(--accent);
+  --color-cyan-700: color-mix(in srgb, var(--accent) 80%, black);
+
+  --color-sky-300: color-mix(in srgb, var(--accent) 85%, white);
+  --color-sky-400: var(--accent);
+  --color-sky-500: var(--accent);
+  --color-sky-600: var(--accent);
+
+  --color-blue-300: color-mix(in srgb, var(--accent) 85%, white);
+  --color-blue-400: var(--accent);
+  --color-blue-500: var(--accent);
+  --color-blue-600: var(--accent);
+
+  --color-indigo-400: var(--accent);
+  --color-indigo-500: var(--accent);
+  --color-indigo-600: var(--accent);
+
+  --color-violet-300: color-mix(in srgb, var(--accent) 85%, white);
+  --color-violet-400: var(--accent);
+  --color-violet-500: var(--accent);
+  --color-violet-600: var(--accent);
+}
+
 :root {
   color-scheme: dark;
   /* Theme tokens (defaults = CommandCode Minimal). Overridden at runtime by themeStore. */
@@ -25,9 +86,9 @@
   --info: #38bdf8;
 
   /* Layout / density (structural — not theme-swapped) */
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
+  --radius-sm: 2px;
+  --radius-md: 2px;
+  --radius-lg: 3px;
   --rail-w: 48px;
   --drawer-w: 280px;
   --titlebar-h: 36px;
@@ -36,6 +97,13 @@
   --font-mono: "Cascadia Code", "JetBrains Mono", "Fira Code", Consolas, ui-monospace, monospace;
   --shadow-panel: 0 8px 28px rgba(0, 0, 0, 0.35);
   --focus-ring: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* `rounded` (no suffix) is not theme-driven in Tailwind v4, so the @theme scale
+   above cannot reach it — and it is the most common radius class in the codebase.
+   Declared outside @layer, so it takes precedence over the utilities layer. */
+.rounded {
+  border-radius: var(--radius-md);
 }
 
 html,
@@ -222,7 +290,7 @@ body,
 /* Zoom / fit / lock controls — match the dark theme (default is white) */
 .react-flow__controls {
   border: 1px solid #1f2737;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
 }
@@ -262,7 +330,7 @@ body,
 }
 *::-webkit-scrollbar-thumb {
   background: #2a3344;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 *::-webkit-scrollbar-track {
   background: transparent;
