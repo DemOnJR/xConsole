@@ -3,8 +3,9 @@
 
 use crate::ai::AgentHome;
 
-/// Keep the injected memory block compact. Content beyond this is
-/// truncated in the prompt (the file keeps everything; the agent compacts it).
+/// Keep the injected memory block compact. The file keeps everything; the prompt
+/// carries the most recent entries up to this budget (see `text::keep_newest` — the
+/// newest facts are the point of a memory file, so they are what survives the cap).
 pub const MEMORY_MAX_CHARS: usize = 6000;
 
 pub fn load_memory(home: &AgentHome) -> String {
@@ -18,45 +19,16 @@ pub fn save_memory(home: &AgentHome, content: &str) -> Result<(), String> {
 /// Append a memory entry as one bullet per non-empty line, then return the new
 /// contents.
 pub fn append_memory(home: &AgentHome, entry: &str) -> Result<String, String> {
-    let lines: Vec<String> = entry
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(|l| strip_single_marker(l).to_string())
-        .collect();
-    if lines.is_empty() {
-        return Err("memory entry is empty".into());
-    }
-
-    let mut content = load_memory(home);
-    let mut added = false;
-    for line in lines {
-        if content.lines().any(|l| l.trim() == line) {
-            continue; // dedup exact lines only
-        }
-        if !content.is_empty() && !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push_str("- ");
-        content.push_str(&line);
-        content.push('\n');
-        added = true;
-    }
-    if added {
-        save_memory(home, &content)?;
-    }
-    Ok(content)
-}
-
-/// Strip a single leading bullet marker + space (never `--flag`'s dashes).
-fn strip_single_marker(line: &str) -> &str {
-    let l = line.trim_start();
-    for m in ["- ", "* ", "• ", "-", "*", "•"] {
-        if let Some(rest) = l.strip_prefix(m) {
-            return rest.trim_start();
+    use crate::ai::text::BulletAppend;
+    let existing = load_memory(home);
+    match crate::ai::text::append_bullets(&existing, entry) {
+        BulletAppend::Empty => Err("memory entry is empty".into()),
+        BulletAppend::Unchanged => Ok(existing),
+        BulletAppend::Updated(content) => {
+            save_memory(home, &content)?;
+            Ok(content)
         }
     }
-    l
 }
 
 /// One-time migration: fold any existing `USER.md` content into `TASTE.md`
@@ -98,22 +70,10 @@ pub fn format_for_prompt(home: &AgentHome) -> String {
     }
     format!(
         "# Persistent memory (MEMORY.md)\n{}",
-        truncate(&mem, MEMORY_MAX_CHARS)
+        crate::ai::text::keep_newest(&mem, MEMORY_MAX_CHARS)
     )
 }
 
 fn read(path: &std::path::Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.trim().to_string()
-    } else {
-        let mut cut = max;
-        while !s.is_char_boundary(cut) && cut > 0 {
-            cut -= 1;
-        }
-        format!("{}\n…(truncated)", s[..cut].trim())
-    }
 }

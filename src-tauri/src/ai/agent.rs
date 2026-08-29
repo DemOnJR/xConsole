@@ -768,6 +768,49 @@ pub async fn run_turn(
     // Repair history from a previous stop/cap so DeepSeek/OpenAI accept this turn.
     crate::ai::provider::close_unanswered_tool_calls(&mut messages);
 
+    // Request settings, read once for the whole turn.
+    //
+    // These used to be four `get_setting` calls inside the loop below, so a turn that
+    // ran 30 tool rounds took the global DB mutex 120 times to re-read values that had
+    // already been decided — competing with the SSH sessions, conversation persistence
+    // and the encryption persister that need the same lock. Reading them once also
+    // makes the turn self-consistent: every round now uses the model, token cap and
+    // reasoning level the turn started with, instead of silently switching mid-turn if
+    // a setting changed underneath it.
+    let turn_max_tokens: u32 = tc
+        .db
+        .get_setting("agent.max_tokens")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse().ok())
+        .filter(|n: &u32| *n >= 256)
+        .unwrap_or(16_384);
+    // Opt-in extended cache TTL (1h) when the user enables it — 2x write price
+    // but the prefix survives idle gaps that would evict the 5-min cache.
+    let turn_cache_retention = tc
+        .db
+        .get_setting("agent.cache_retention")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    // Reasoning effort capability control: off|low|medium|high.
+    let turn_reasoning = tc
+        .db
+        .get_setting("agent.reasoning_level")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    // Per-chat model override (set via /model); empty falls back to the provider's
+    // configured model.
+    let turn_model = tc
+        .db
+        .get_setting("agent.active_model")
+        .ok()
+        .flatten()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| resolved.model.clone());
+
     let mut iter: usize = 0;
     let mut execution_nudge = false;
     let mut truncate_continues: u8 = 0;
@@ -778,50 +821,23 @@ pub async fn run_turn(
             crate::ai::provider::close_unanswered_tool_calls(&mut messages);
             tc.session_state.store_request_messages(
                 &tc.session_id,
-                crate::ai::vision::strip_all_images(messages.clone()),
+                crate::ai::vision::without_images(&messages),
             );
             tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
             break;
         }
         iters_used = iter + 1;
         crate::ai::output_compress::age_historical_tool_results(&mut messages, 4, 1500);
-        let mut req = ChatRequest::new(&resolved.model);
+        let mut req = ChatRequest::new(&turn_model);
         req.system = system.clone();
         req.messages = messages.clone();
         req.tools = tool_defs_for_turn.clone();
-        req.max_tokens = tc
-            .db
-            .get_setting("agent.max_tokens")
-            .ok()
-            .flatten()
-            .and_then(|s| s.parse().ok())
-            .filter(|n: &u32| *n >= 256)
-            .unwrap_or(16_384);
+        req.max_tokens = turn_max_tokens;
         req.xconsole = xconsole_exec.clone();
-        // Opt-in extended cache TTL (1h) when the user enables it — 2× write price
-        // but the prefix survives idle gaps that would evict the 5-min cache.
-        req.cache_retention = tc
-            .db
-            .get_setting("agent.cache_retention")
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        req.cache_retention = turn_cache_retention.clone();
         // Stable per-session id for provider cache routing (OpenAI prompt_cache_key).
         req.session_id = tc.session_id.clone();
-        // Per-chat model override (set via /model): empty falls back to the
-        // provider's configured model.
-        if let Ok(Some(model)) = tc.db.get_setting("agent.active_model") {
-            if !model.trim().is_empty() {
-                req.model = model.trim().to_string();
-            }
-        }
-        // Reasoning effort capability control: off|low|medium|high.
-        req.reasoning = tc
-            .db
-            .get_setting("agent.reasoning_level")
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        req.reasoning = turn_reasoning.clone();
         // Let the provider's stream loop abort the moment the user presses Stop.
         req.cancel = Some(tc.session_state.cancel_flag(&tc.session_id));
 
@@ -854,7 +870,7 @@ pub async fn run_turn(
                 crate::ai::provider::close_unanswered_tool_calls(&mut messages);
                 tc.session_state.store_request_messages(
                     &tc.session_id,
-                    crate::ai::vision::strip_all_images(messages.clone()),
+                    crate::ai::vision::without_images(&messages),
                 );
                 tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
                 emit(Some(sink), StreamEvent::Error(e.clone()));
@@ -902,7 +918,7 @@ pub async fn run_turn(
         // after every tool made a long session a multi-MB/s writer.
         tc.session_state.store_request_messages(
             &tc.session_id,
-            crate::ai::vision::strip_all_images(messages.clone()),
+            crate::ai::vision::without_images(&messages),
         );
 
         // No tools to run, or an autonomous CLI that does its own tool use.
@@ -1110,7 +1126,7 @@ pub async fn run_turn(
 
         tc.session_state.store_request_messages(
             &tc.session_id,
-            crate::ai::vision::strip_all_images(messages.clone()),
+            crate::ai::vision::without_images(&messages),
         );
 
         iter += 1;
@@ -1118,7 +1134,7 @@ pub async fn run_turn(
     crate::ai::provider::close_unanswered_tool_calls(&mut messages);
     tc.session_state.store_request_messages(
         &tc.session_id,
-        crate::ai::vision::strip_all_images(messages.clone()),
+        crate::ai::vision::without_images(&messages),
     );
     tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
 

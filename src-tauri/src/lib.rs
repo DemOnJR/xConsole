@@ -308,17 +308,36 @@ pub fn run() {
                 let app_handle = app.handle().clone();
                 let queue_dir = dir.join("canvas-queue");
                 tauri::async_runtime::spawn(async move {
+                    // Adaptive backoff. Most users never run the Cursor MCP, so this
+                    // directory usually does not exist — a flat 500 ms poll was a
+                    // `read_dir` syscall twice a second, forever, for nothing.
+                    //
+                    // Poll quickly while requests are arriving (a burst of canvas
+                    // commands is one interaction, so the follow-ups are already
+                    // queued), then back off toward a slow idle tick. First request
+                    // after an idle stretch waits up to IDLE_MAX; after that the queue
+                    // drains at FAST, which is quicker than the old fixed interval.
+                    const FAST: std::time::Duration = std::time::Duration::from_millis(250);
+                    const IDLE_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+                    let mut delay = FAST;
                     loop {
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        let rd = match std::fs::read_dir(&queue_dir) {
-                            Ok(r) => r,
-                            Err(_) => continue, // dir doesn't exist yet — nothing queued
+                        tokio::time::sleep(delay).await;
+                        let Ok(rd) = std::fs::read_dir(&queue_dir) else {
+                            // Directory doesn't exist yet — nothing is queued and
+                            // nothing will be until an MCP client creates it.
+                            delay = IDLE_MAX;
+                            continue;
                         };
                         let mut paths: Vec<std::path::PathBuf> = rd
                             .flatten()
                             .map(|e| e.path())
                             .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
                             .collect();
+                        if paths.is_empty() {
+                            delay = (delay * 2).min(IDLE_MAX);
+                            continue;
+                        }
+                        delay = FAST;
                         paths.sort();
                         for path in paths {
                             if let Ok(bytes) = std::fs::read(&path) {
