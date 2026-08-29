@@ -9,3 +9,10 @@
 - `xConsole` is a minimal microkernel host.
 - Core features (`sftp`, `database`, `agent`, `cloudflare`) live 100% in their standalone repositories under `plugins/` and are pushed to their dedicated GitHub repos (`xconsole-plugin-*`).
 - Core communicates with plugins via `@xconsole/sdk` (`src/sdk/index.ts`) and dynamic React Flow nodes (`DynamicPluginNode`).
+
+## 3. Git Workflow Rules
+- **First Pull, Then Edit, Then Push**:
+  - Always run `git pull` before making any edits in the core repo or any plugin repository (`plugins/*`).
+  - Verify changes with appropriate builds and tests (`pnpm run build` / `tsc` / `vitest`).
+  - Commit and `git push` all verified changes back to their respective remote repositories.
+
