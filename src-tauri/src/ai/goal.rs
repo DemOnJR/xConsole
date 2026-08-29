@@ -185,7 +185,9 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
             let all = ctx.db.list_personas().unwrap_or_default();
             let mut block = crate::ai::persona::prompt_block(p);
             block.push_str(&crate::ai::persona::hierarchy_block(&all, p));
-            if let Ok(unread) = ctx.db.unread_agent_messages(Some(&p.id)) {
+            if let Ok(unread) =
+                ctx.db.unread_agent_messages(Some(&p.id), goal.workspace_id.as_deref())
+            {
                 if !unread.is_empty() {
                     block.push_str("\n\nNew messages for you:\n");
                     for m in &unread {
@@ -266,7 +268,11 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
         // that one may only look" — which means nothing unless the loop honours it.
         safety: crate::ai::persona::safety_mode(&ctx.db, persona.as_ref()),
         plan_mode: false,
-        workspace_id: None,
+        // The project this task belongs to. Without it a delegated agent runs blind:
+        // no project brief, no workspace memory, no CLAUDE.md — it is handed an
+        // objective with no idea which codebase it is about, and everything it says
+        // lands in one undifferentiated pool with every other project's chatter.
+        workspace_id: goal.workspace_id.clone(),
         canvas: Vec::new(),
         edits: crate::ai::edits::EditJournal::with_db(ctx.db.clone()),
         hooks: hooks_cfg,

@@ -12,6 +12,15 @@ pub async fn list_personas(db: State<'_, Db>) -> Result<Vec<Persona>, String> {
 
 #[tauri::command]
 pub async fn save_persona(db: State<'_, Db>, input: PersonaInput) -> Result<Persona, String> {
+    save_persona_checked(&db, input)
+}
+
+/// Validate and store a persona.
+///
+/// Split out from the command so the agent's `agent_hire` tool goes through exactly the
+/// same refusals. A second, laxer path is how a duplicate name or a reporting loop gets
+/// in — and a loop means an escalation that never reaches the user.
+pub fn save_persona_checked(db: &Db, input: PersonaInput) -> Result<Persona, String> {
     if input.name.trim().is_empty() {
         return Err("a persona needs a name".into());
     }
@@ -50,9 +59,11 @@ pub async fn persona_org_chart(db: State<'_, Db>) -> Result<String, String> {
 pub async fn list_agent_messages(
     db: State<'_, Db>,
     goal_id: Option<String>,
+    // `workspace_id`: limit to one project. Omit to read across all of them.
+    workspace_id: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<crate::storage::models::AgentMessage>, String> {
-    db.list_agent_messages(goal_id.as_deref(), limit.unwrap_or(200))
+    db.list_agent_messages(goal_id.as_deref(), workspace_id.as_deref(), limit.unwrap_or(200))
         .map_err(|e| e.to_string())
 }
 
@@ -60,8 +71,9 @@ pub async fn list_agent_messages(
 #[tauri::command]
 pub async fn unread_user_messages(
     db: State<'_, Db>,
+    workspace_id: Option<String>,
 ) -> Result<Vec<crate::storage::models::AgentMessage>, String> {
-    db.unread_agent_messages(None).map_err(|e| e.to_string())
+    db.unread_agent_messages(None, workspace_id.as_deref()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

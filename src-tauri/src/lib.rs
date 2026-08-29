@@ -534,6 +534,7 @@ pub fn run() {
             commands::persona::delete_persona,
             commands::persona::persona_org_chart,
             commands::persona::list_agent_messages,
+            commands::project::project_history,
             commands::persona::unread_user_messages,
             commands::persona::mark_agent_messages_read,
             commands::goal::start_goal,

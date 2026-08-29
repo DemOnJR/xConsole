@@ -5,8 +5,10 @@ import {
   type AgentMessage,
   type Persona,
   type PersonaInput,
+  type ProjectHistory,
 } from "../../../lib/tauri";
 import { useVpsStore } from "../../../stores/vpsStore";
+import { useWorkspaceStore } from "../../../stores/workspaceStore";
 import { useSettingsStore } from "../../../stores/settingsStore";
 import { Button, Field, SectionHeader, Select, TextArea, TextInput, Toggle } from "../ui";
 import { BotIcon, CloseIcon, PlusIcon, TrashIcon } from "../../icons";
@@ -75,15 +77,26 @@ export function AgentsSection() {
   const [saving, setSaving] = useState(false);
   const vps = useVpsStore((s) => s.vpsList);
   const providers = useSettingsStore((s) => s.providers);
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  const activeWorkspace = useWorkspaceStore((s) => s.activeId);
+  // Defaults to the project that is open, because that is almost always what the
+  // question is about. "" means all of them, which is only useful for a survey.
+  const [project, setProject] = useState<string>(activeWorkspace ?? "");
+  const [history, setHistory] = useState<ProjectHistory | null>(null);
 
   const load = useCallback(async () => {
     const [list, msgs] = await Promise.all([
       api.listPersonas().catch(() => [] as Persona[]),
-      api.listAgentMessages(null, 200).catch(() => [] as AgentMessage[]),
+      api
+        .listAgentMessages(null, project || null, 200)
+        .catch(() => [] as AgentMessage[]),
     ]);
     setPersonas(list);
     setMessages(msgs);
-  }, []);
+    setHistory(
+      project ? await api.projectHistory(project, 200).catch(() => null) : null,
+    );
+  }, [project]);
 
   useEffect(() => {
     void load();
@@ -92,11 +105,16 @@ export function AgentsSection() {
   // Watching agents talk is the point, so the feed is live rather than a snapshot
   // the user has to remember to refresh.
   useEffect(() => {
-    const un = onAgentMessage((msg) => setMessages((prev) => [...prev, msg]));
+    const un = onAgentMessage((msg) => {
+      // A live message from another project must not appear in a filtered view — that
+      // is the mixing this filter exists to stop.
+      if (project && msg.workspace_id !== project) return;
+      setMessages((prev) => [...prev, msg]);
+    });
     return () => {
       void un.then((f) => f());
     };
-  }, []);
+  }, [project]);
 
   const nameOf = useMemo(() => {
     const map = new Map(personas.map((p) => [p.id, p.name]));
@@ -205,10 +223,29 @@ export function AgentsSection() {
             </div>
           )}
 
-          <h3 className="pt-4 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
-            What they said to each other
-          </h3>
+          <div className="flex items-center gap-2 pt-4">
+            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+              What they said to each other
+            </h3>
+            <div className="ml-auto w-44">
+              <Select value={project} onChange={(e) => setProject(e.target.value)}>
+                <option value="">All projects</option>
+                {workspaces.map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.name}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          </div>
+          {!project && (
+            <p className="text-[11px] text-gray-500">
+              Showing every project at once. Pick one to read its thread on its own,
+              alongside what was delegated, changed and committed.
+            </p>
+          )}
           <ConversationFeed messages={messages} nameOf={nameOf} />
+          {history && <ProjectRecord history={history} nameOf={nameOf} />}
         </div>
 
         <div>
@@ -233,6 +270,109 @@ export function AgentsSection() {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * One project's record beside its conversation.
+ *
+ * The conversation alone answers "what did they say"; this answers "and what came of
+ * it". Keeping the four together is the point — reading them as separate screens means
+ * correlating tasks, edits and commits by timestamp, which is the work the user was
+ * doing by hand before there was a project to file them under.
+ */
+function ProjectRecord({
+  history,
+  nameOf,
+}: {
+  history: ProjectHistory;
+  nameOf: (id?: string | null) => string;
+}) {
+  return (
+    <div className="mt-4 space-y-4">
+      <div className="flex items-baseline gap-2">
+        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+          {history.name}
+        </h3>
+        {history.branch && (
+          <span className="font-mono text-[10px] text-gray-500">{history.branch}</span>
+        )}
+        {history.location && (
+          <span className="truncate font-mono text-[10px] text-gray-600">
+            {history.location}
+          </span>
+        )}
+      </div>
+
+      <RecordList
+        title="Delegated"
+        empty="Nothing has been delegated on this project."
+        rows={history.tasks.slice(0, 12).map((t) => ({
+          key: t.id,
+          // Status is the one thing here worth scanning for, so it leads.
+          lead: t.status,
+          text: t.title,
+          tail: `${t.cycles} cycles${t.persona_id ? ` · ${nameOf(t.persona_id)}` : ""}`,
+        }))}
+      />
+
+      <RecordList
+        title="Files changed"
+        empty="No files changed on this project yet."
+        rows={history.changes.slice(0, 12).map((c) => ({
+          key: c.id,
+          lead: c.is_new ? "new" : "edit",
+          text: c.path,
+          tail: c.label,
+        }))}
+      />
+
+      <RecordList
+        title="Commits"
+        empty={history.git_note ?? "No commits yet."}
+        rows={history.commits.slice(0, 12).map((c) => ({
+          key: c.sha,
+          lead: c.sha,
+          text: c.subject,
+          tail: c.author,
+        }))}
+      />
+    </div>
+  );
+}
+
+function RecordList({
+  title,
+  empty,
+  rows,
+}: {
+  title: string;
+  empty: string;
+  rows: { key: string; lead: string; text: string; tail: string }[];
+}) {
+  return (
+    <div className="space-y-1.5">
+      <h4 className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+        {title}
+      </h4>
+      {rows.length === 0 ? (
+        <p className="border border-dashed border-[var(--border)] px-3 py-3 text-center text-[11px] text-gray-500">
+          {empty}
+        </p>
+      ) : (
+        <div className="divide-y divide-[var(--border)] border border-[var(--border)] bg-[var(--surface-2)]">
+          {rows.map((r) => (
+            <div key={r.key} className="flex items-baseline gap-2 px-3 py-1.5">
+              <span className="shrink-0 font-mono text-[10px] text-gray-500">{r.lead}</span>
+              <span className="min-w-0 flex-1 truncate text-[11px] text-gray-300">{r.text}</span>
+              <span className="shrink-0 truncate font-mono text-[10px] text-gray-600">
+                {r.tail}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -476,8 +476,37 @@ export interface AgentMessage {
   kind: string;
   body: string;
   goal_id?: string | null;
+  /** The project this was said about. Null for anything genuinely cross-project. */
+  workspace_id?: string | null;
   read_at?: string | null;
   created_at?: string | null;
+}
+
+/** One commit in a project's repository. */
+export interface Commit {
+  sha: string;
+  author: string;
+  date: string;
+  subject: string;
+}
+
+/**
+ * Everything one project has to show for itself.
+ *
+ * Four sources assembled per project — tasks, conversation, file changes, commits —
+ * rather than four screens the user has to correlate by timestamp.
+ */
+export interface ProjectHistory {
+  workspace_id: string;
+  name: string;
+  location?: string | null;
+  tasks: GoalSession[];
+  messages: AgentMessage[];
+  changes: FileChange[];
+  branch?: string | null;
+  commits: Commit[];
+  /** Why the git half is empty, when it is. */
+  git_note?: string | null;
 }
 
 export interface AiProvider {
@@ -632,6 +661,10 @@ export interface GoalSession {
   created_at?: string | null;
   updated_at?: string | null;
   finished_at?: string | null;
+  /** The named agent running this task. Null = the default agent. */
+  persona_id?: string | null;
+  /** The project this task belongs to. */
+  workspace_id?: string | null;
 }
 
 /** The locked-in definition of "done" for a goal. */
@@ -1228,9 +1261,22 @@ export const api = {
   savePersona: (input: PersonaInput) => invoke<Persona>("save_persona", { input }),
   deletePersona: (id: string) => invoke<void>("delete_persona", { id }),
   personaOrgChart: () => invoke<string>("persona_org_chart"),
-  listAgentMessages: (goalId?: string | null, limit?: number) =>
-    invoke<AgentMessage[]>("list_agent_messages", { goalId: goalId ?? null, limit: limit ?? null }),
-  unreadUserMessages: () => invoke<AgentMessage[]>("unread_user_messages"),
+  listAgentMessages: (
+    goalId?: string | null,
+    /** Limit to one project. Null reads across all of them. */
+    workspaceId?: string | null,
+    limit?: number,
+  ) =>
+    invoke<AgentMessage[]>("list_agent_messages", {
+      goalId: goalId ?? null,
+      workspaceId: workspaceId ?? null,
+      limit: limit ?? null,
+    }),
+  unreadUserMessages: (workspaceId?: string | null) =>
+    invoke<AgentMessage[]>("unread_user_messages", { workspaceId: workspaceId ?? null }),
+  /** One project's record: tasks, conversation, file changes and commits. */
+  projectHistory: (workspaceId: string, limit?: number) =>
+    invoke<ProjectHistory>("project_history", { workspaceId, limit: limit ?? null }),
   markAgentMessagesRead: (ids: string[]) =>
     invoke<void>("mark_agent_messages_read", { ids }),
 
@@ -1426,7 +1472,8 @@ export const api = {
   deleteCronJob: (id: string) => invoke<void>("delete_cron_job", { id }),
   runCronJob: (id: string) => invoke<void>("run_cron_job", { id }),
 
-  startGoal: (text: string) => invoke<string>("start_goal", { text }),
+  startGoal: (text: string, workspaceId?: string | null) =>
+    invoke<string>("start_goal", { text, workspaceId: workspaceId ?? null }),
   confirmGoal: (id: string, targets?: string[]) =>
     invoke<void>("confirm_goal", { id, targets: targets ?? [] }),
   pauseGoal: (id: string) => invoke<void>("pause_goal", { id }),

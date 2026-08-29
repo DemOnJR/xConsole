@@ -497,6 +497,9 @@ impl Db {
                 body         TEXT NOT NULL,
                 -- The delegated task this concerns, when there is one.
                 goal_id      TEXT,
+                -- The project this was said about. NULL for messages from before
+                -- projects existed, and for anything genuinely cross-project.
+                workspace_id TEXT,
                 -- Set once the recipient has been shown it.
                 read_at      TEXT,
                 created_at   TEXT NOT NULL DEFAULT (datetime('now'))
@@ -642,6 +645,17 @@ impl Db {
         // every goal created before personas existed was.
         let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN persona_id TEXT", []);
         let _ = conn.execute("ALTER TABLE persona ADD COLUMN reports_to TEXT", []);
+        // Scope the council to a project. Existing rows keep NULL: they were said
+        // before there was a project to say them about, and guessing one retroactively
+        // would file real history under a workspace it may have nothing to do with.
+        let _ = conn.execute("ALTER TABLE agent_message ADD COLUMN workspace_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN workspace_id TEXT", []);
+        // The inbox and the per-project history are both read on every agent cycle.
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_message_workspace
+             ON agent_message (workspace_id, created_at)",
+            [],
+        );
         let _ = conn.execute("ALTER TABLE infra_project ADD COLUMN backend TEXT DEFAULT 'vps'", []);
         let _ = conn.execute("ALTER TABLE infra_project ADD COLUMN cloud_account_id TEXT", []);
         let _ = conn.execute("ALTER TABLE infra_project ADD COLUMN config_json TEXT", []);
@@ -1188,6 +1202,7 @@ impl Db {
             updated_at: r.get(10)?,
             finished_at: r.get(11)?,
             persona_id: r.get(12)?,
+            workspace_id: r.get(13)?,
         })
     }
 
@@ -1195,7 +1210,8 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
-                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id
+                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
+                    workspace_id
              FROM goal_sessions ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], Self::row_to_goal)?;
@@ -1206,7 +1222,8 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
-                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id
+                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
+                    workspace_id
              FROM goal_sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query([id])?;
@@ -1221,8 +1238,8 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO goal_sessions
-               (id, title, raw_request, spec_json, status, kanban_json, memory_json, next_check_at, cycles, persona_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+               (id, title, raw_request, spec_json, status, kanban_json, memory_json, next_check_at, cycles, persona_id, workspace_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 goal.id,
                 goal.title,
@@ -1234,6 +1251,7 @@ impl Db {
                 goal.next_check_at,
                 goal.cycles,
                 goal.persona_id,
+                goal.workspace_id,
             ],
         )?;
         Ok(())
@@ -1391,13 +1409,14 @@ impl Db {
             kind: r.get(3)?,
             body: r.get(4)?,
             goal_id: r.get(5)?,
-            read_at: r.get(6)?,
-            created_at: r.get(7)?,
+            workspace_id: r.get(6)?,
+            read_at: r.get(7)?,
+            created_at: r.get(8)?,
         })
     }
 
     const AGENT_MESSAGE_COLS: &'static str =
-        "id, from_id, to_id, kind, body, goal_id, read_at, created_at";
+        "id, from_id, to_id, kind, body, goal_id, workspace_id, read_at, created_at";
 
     pub fn insert_agent_message(
         &self,
@@ -1405,24 +1424,31 @@ impl Db {
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO agent_message (id, from_id, to_id, kind, body, goal_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO agent_message (id, from_id, to_id, kind, body, goal_id, workspace_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 msg.id,
                 msg.from_id,
                 msg.to_id,
                 msg.kind,
                 msg.body,
-                msg.goal_id
+                msg.goal_id,
+                msg.workspace_id
             ],
         )?;
         Ok(())
     }
 
     /// Unread messages addressed to `to_id` (None = the user's own inbox).
+    ///
+    /// `workspace` of `Some(id)` returns only what was said about that project. This is
+    /// the difference between an agent reading its own project's thread and reading
+    /// every project at once, which is unusable the moment there are two. `None` means
+    /// no project is selected, and everything is in scope.
     pub fn unread_agent_messages(
         &self,
         to_id: Option<&str>,
+        workspace: Option<&str>,
     ) -> Result<Vec<crate::storage::models::AgentMessage>> {
         let conn = self.conn.lock().unwrap();
         // `to_id IS ?1` rather than `=`, so NULL (the user) matches instead of
@@ -1430,51 +1456,79 @@ impl Db {
         let sql = format!(
             "SELECT {} FROM agent_message
              WHERE to_id IS ?1 AND read_at IS NULL
+               AND (?2 IS NULL OR workspace_id = ?2)
              ORDER BY created_at",
             Self::AGENT_MESSAGE_COLS
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![to_id], Self::row_to_agent_message)?;
+        let rows = stmt.query_map(params![to_id, workspace], Self::row_to_agent_message)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// How many unread messages are waiting for `to_id` in *other* projects.
+    ///
+    /// Scoping an inbox to one project means messages about the others stop appearing,
+    /// which is right — but silently. Reporting the count turns "my message vanished"
+    /// into "there are two waiting in another project", which the user can act on.
+    pub fn unread_agent_messages_elsewhere(
+        &self,
+        to_id: Option<&str>,
+        workspace: Option<&str>,
+    ) -> Result<i64> {
+        let Some(workspace) = workspace else { return Ok(0) };
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM agent_message
+             WHERE to_id IS ?1 AND read_at IS NULL
+               AND (workspace_id IS NULL OR workspace_id <> ?2)",
+            params![to_id, workspace],
+            |r| r.get(0),
+        )?;
+        Ok(count)
+    }
+
     /// The whole exchange, oldest first, so the UI can show it as one conversation.
-    /// `goal_id` narrows it to a single delegated task.
+    ///
+    /// `goal_id` narrows it to a single delegated task; `workspace` narrows it to one
+    /// project. Both are `NULL`-tolerant in SQL rather than branching in Rust, which is
+    /// how the previous version grew two near-identical query paths.
     pub fn list_agent_messages(
         &self,
         goal_id: Option<&str>,
+        workspace: Option<&str>,
         limit: i64,
     ) -> Result<Vec<crate::storage::models::AgentMessage>> {
         let conn = self.conn.lock().unwrap();
         let limit = limit.clamp(1, 1000);
-        let (sql, has_goal) = match goal_id {
-            Some(_) => (
-                format!(
-                    "SELECT {} FROM agent_message WHERE goal_id = ?1
-                     ORDER BY created_at DESC LIMIT ?2",
-                    Self::AGENT_MESSAGE_COLS
-                ),
-                true,
-            ),
-            None => (
-                format!(
-                    "SELECT {} FROM agent_message ORDER BY created_at DESC LIMIT ?1",
-                    Self::AGENT_MESSAGE_COLS
-                ),
-                false,
-            ),
-        };
+        let sql = format!(
+            "SELECT {} FROM agent_message
+             WHERE (?1 IS NULL OR goal_id = ?1)
+               AND (?2 IS NULL OR workspace_id = ?2)
+             ORDER BY created_at DESC LIMIT ?3",
+            Self::AGENT_MESSAGE_COLS
+        );
         let mut stmt = conn.prepare(&sql)?;
-        let rows = if has_goal {
-            stmt.query_map(params![goal_id, limit], Self::row_to_agent_message)?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        } else {
-            stmt.query_map(params![limit], Self::row_to_agent_message)?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        };
+        let rows = stmt
+            .query_map(params![goal_id, workspace, limit], Self::row_to_agent_message)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         // Newest-first in SQL so LIMIT keeps the *recent* end; reversed here so the
         // caller reads it as a conversation.
         Ok(rows.into_iter().rev().collect())
+    }
+
+    /// Delegated tasks belonging to one project, newest first.
+    pub fn list_goals_for_workspace(&self, workspace: Option<&str>) -> Result<Vec<GoalSession>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
+                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
+                    workspace_id
+             FROM goal_sessions
+             WHERE (?1 IS NULL OR workspace_id = ?1)
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![workspace], Self::row_to_goal)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn mark_agent_messages_read(&self, ids: &[String]) -> Result<()> {
@@ -1498,7 +1552,8 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
-                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id
+                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
+                    workspace_id
              FROM goal_sessions
              WHERE status = 'waiting' AND next_check_at IS NOT NULL
                AND next_check_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now')

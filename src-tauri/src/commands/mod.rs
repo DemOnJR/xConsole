@@ -7,6 +7,7 @@ pub mod goal;
 pub mod infra;
 pub mod lock;
 pub mod persona;
+pub mod project;
 pub mod remote;
 pub mod plugin;
 pub mod remote_file;

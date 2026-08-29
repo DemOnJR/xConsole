@@ -253,6 +253,10 @@ pub struct GoalSession {
     /// The persona running this goal. None = the default agent.
     #[serde(default)]
     pub persona_id: Option<String>,
+    /// The project this task belongs to, so a delegated agent knows what it is working
+    /// on and the user can see one project's work without the others in the way.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
@@ -323,6 +327,14 @@ pub struct AgentMessage {
     /// The delegated task this concerns, when there is one.
     #[serde(default)]
     pub goal_id: Option<String>,
+    /// The project this was said about.
+    ///
+    /// Without it every agent's messages land in one pool, and "what did the reviewer
+    /// say" returns three answers from three unrelated codebases with no way to tell
+    /// which is which. None means genuinely un-scoped: messages predating projects, or
+    /// an exchange that belongs to no single one.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
     #[serde(default)]
     pub read_at: Option<String>,
     #[serde(default)]
