@@ -66,6 +66,8 @@ type Event struct {
 	ID             string `json:"id,omitempty"`
 	Chat           string `json:"chat,omitempty"`
 	SenderID       string `json:"sender_id,omitempty"`
+	SenderPhone    string `json:"sender_phone,omitempty"`
+	SenderLID      string `json:"sender_lid,omitempty"`
 	SenderUsername string `json:"sender_username,omitempty"`
 	FromMe         bool   `json:"from_me,omitempty"`
 	IsOurEcho      bool   `json:"is_our_echo,omitempty"`
@@ -158,7 +160,7 @@ func main() {
 	store.DeviceProps.Os = proto.String("xConsole")
 
 	client := whatsmeow.NewClient(device, stderrLog{module: "wa"})
-	b := &bridge{client: client, usernames: map[string]string{}}
+	b := &bridge{client: client, container: container, usernames: map[string]string{}}
 	client.AddEventHandler(b.handle)
 
 	if client.Store.ID == nil {
@@ -210,7 +212,8 @@ func main() {
 }
 
 type bridge struct {
-	client *whatsmeow.Client
+	client    *whatsmeow.Client
+	container *sqlstore.Container
 
 	// Usernames are resolved over the network and rarely change, so they are cached
 	// for the life of the process. Without this, every inbound message would cost an
@@ -218,6 +221,31 @@ type bridge struct {
 	mu        sync.Mutex
 	usernames map[string]string
 	sentIDs   map[string]time.Time
+}
+
+func (b *bridge) resolveSenderPhone(info *types.MessageInfo) string {
+	if info == nil {
+		return ""
+	}
+	if info.Sender.Server == types.DefaultUserServer && info.Sender.User != "" {
+		return info.Sender.User
+	}
+	if info.SenderAlt.Server == types.DefaultUserServer && info.SenderAlt.User != "" {
+		return info.SenderAlt.User
+	}
+	if info.IsFromMe && b.client.Store.ID != nil && b.client.Store.ID.User != "" {
+		return b.client.Store.ID.User
+	}
+	if b.container != nil && b.container.LIDMap != nil && info.Sender.Server == types.HiddenUserServer {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if pn, err := b.container.LIDMap.GetPNForLID(ctx, info.Sender); err == nil && !pn.IsEmpty() {
+			if pn.Server == types.DefaultUserServer && pn.User != "" {
+				return pn.User
+			}
+		}
+	}
+	return ""
 }
 
 func (b *bridge) readCommands(ctx context.Context) {
@@ -322,11 +350,19 @@ func (b *bridge) onMessage(evt *events.Message) {
 	b.mu.Unlock()
 
 	sender := evt.Info.Sender
+	senderPhone := b.resolveSenderPhone(&evt.Info)
+	senderLID := ""
+	if sender.Server == types.HiddenUserServer {
+		senderLID = sender.User
+	}
+
 	emit(Event{
 		Type:           "message",
 		ID:             evt.Info.ID,
 		Chat:           evt.Info.Chat.String(),
 		SenderID:       sender.String(),
+		SenderPhone:    senderPhone,
+		SenderLID:      senderLID,
 		// Best effort: an unresolvable username simply means the allowlist has to name
 		// the number instead. It must never fall back to the push name, which is a
 		// display name anyone can set to anything.

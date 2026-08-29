@@ -695,21 +695,32 @@ fn parse_message(ev: &serde_json::Value) -> Option<IncomingMessage> {
     if text.trim().is_empty() {
         return None;
     }
-    let sender = ev.get("sender_id").and_then(|s| s.as_str()).unwrap_or("").trim();
-    if sender.is_empty() {
+    let sender_id = ev.get("sender_id").and_then(|s| s.as_str()).unwrap_or("").trim();
+    let sender_phone = ev.get("sender_phone").and_then(|s| s.as_str()).unwrap_or("").trim();
+    let sender_lid = ev.get("sender_lid").and_then(|s| s.as_str()).unwrap_or("").trim();
+
+    let author_id = if !sender_phone.is_empty() {
+        sender_phone.to_string()
+    } else if !sender_lid.is_empty() {
+        sender_lid.to_string()
+    } else if !sender_id.is_empty() {
+        jid_user(sender_id)
+    } else {
+        return None;
+    };
+
+    let chat = ev.get("chat").and_then(|c| c.as_str()).unwrap_or("").trim();
+    if chat.is_empty() {
         return None;
     }
-    let chat = ev.get("chat").and_then(|c| c.as_str()).unwrap_or("").trim();
-    // An echo is a message that xConsole itself sent (via its own SendMessage call).
-    // Messages the user types from their own phone on the same paired account have from_me=true
-    // but is_our_echo=false, and MUST be allowed to drive commands.
+
     let is_bot = ev.get("is_our_echo").and_then(|f| f.as_bool()).unwrap_or(false);
 
     Some(IncomingMessage {
         id: ev.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
-        chat_id: jid_user(chat),
+        chat_id: chat.to_string(),
         author: Author {
-            id: jid_user(sender),
+            id: author_id,
             username: ev
                 .get("sender_username")
                 .and_then(|u| u.as_str())

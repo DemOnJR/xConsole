@@ -326,8 +326,16 @@ pub fn authorize(cfg: &Config, msg: &IncomingMessage) -> Result<String, Rejected
     }
     // An unset chat id is only reachable on platforms where the allowlist is the whole
     // boundary; `is_usable` has already refused it everywhere else.
-    if !cfg.chat_id.trim().is_empty() && msg.chat_id != cfg.chat_id.trim() {
-        return Err(Rejected::WrongChannel);
+    if !cfg.chat_id.trim().is_empty() {
+        let want = cfg.chat_id.trim();
+        let got = msg.chat_id.trim();
+        let matches_chat = got == want
+            || got.strip_suffix("@g.us").unwrap_or(got) == want.strip_suffix("@g.us").unwrap_or(want)
+            || got.strip_suffix("@s.whatsapp.net").unwrap_or(got) == want.strip_suffix("@s.whatsapp.net").unwrap_or(want)
+            || got.strip_suffix("@lid").unwrap_or(got) == want.strip_suffix("@lid").unwrap_or(want);
+        if !matches_chat {
+            return Err(Rejected::WrongChannel);
+        }
     }
     // Covers our own replies, so the agent cannot end up in a conversation with
     // itself.
