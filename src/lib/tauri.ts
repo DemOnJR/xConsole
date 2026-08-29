@@ -388,7 +388,8 @@ export type ProviderKind =
   | "cursor"
   | "codex_cli"
   | "opencode_cli"
-  | "antigravity_cli";
+  | "antigravity_cli"
+  | "claude_code";
 
 
 

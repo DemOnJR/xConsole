@@ -357,7 +357,7 @@ async fn run_prompt_job(
     };
 
     let messages = vec![ChatMessage::user(job.payload.clone())];
-    let result = agent::run_turn(&tc, None, messages, false, &tx).await.map(|_| ());
+    let result = agent::run_turn(&tc, crate::ai::registry::ModelChoice::active(), messages, false, &tx).await.map(|_| ());
     // Drop the SENDER (not tc, which doesn't own it) to close the channel so the
     // forwarder drains and returns instead of hanging.
     drop(tx);

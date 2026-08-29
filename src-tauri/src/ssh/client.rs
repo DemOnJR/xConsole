@@ -45,6 +45,15 @@ pub enum ConnectError {
     Other(String),
 }
 
+/// Where channels opened by the *server* should be piped, as a loopback port on this
+/// machine.
+///
+/// Shared with the caller rather than fixed at connect time: a reverse forward is set up
+/// long after the connection is authenticated, and only for the runs that need one.
+/// `None` means the session has asked for no forward, so an unexpected forwarded channel
+/// is refused instead of being wired to whatever port happens to be listening.
+pub type ForwardTarget = Arc<Mutex<Option<u16>>>;
+
 /// russh client handler. Performs trust-on-first-use host key verification and
 /// records the verdict so the caller can surface "pinned on first use" to the UI.
 pub struct Handler {
@@ -52,10 +61,41 @@ pub struct Handler {
     host: String,
     port: u16,
     verdict: Arc<Mutex<Option<HostKeyVerdict>>>,
+    forward_target: ForwardTarget,
 }
 
 impl client::Handler for Handler {
     type Error = russh::Error;
+
+    /// A connection the remote side accepted on a reverse forward.
+    ///
+    /// Only ever expected while a remote agent run is in flight, which is the only time
+    /// `forward_target` is set. Anything arriving outside that window is dropped: the
+    /// channel is closed and nothing on this machine is contacted.
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<russh::client::Msg>,
+        _connected_address: &str,
+        _connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let Some(port) = *self.forward_target.lock().unwrap() else {
+            // Nothing asked for this. Dropping the channel closes it.
+            return Ok(());
+        };
+
+        tokio::spawn(async move {
+            let Ok(mut local) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await else {
+                return;
+            };
+            let mut remote = channel.into_stream();
+            // Either side closing is the normal end of a forwarded connection.
+            let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
+        });
+        Ok(())
+    }
 
     async fn check_server_key(
         &mut self,
@@ -83,6 +123,9 @@ impl client::Handler for Handler {
 pub struct Connected {
     pub handle: Handle<Handler>,
     pub verdict: HostKeyVerdict,
+    /// Set this to a loopback port to accept the channels a reverse forward opens.
+    /// See [`ForwardTarget`].
+    pub forward_target: ForwardTarget,
 }
 
 /// Connect to a VPS and authenticate. The private key path, auth type, and any
@@ -95,11 +138,13 @@ pub async fn connect(
     db: Db,
 ) -> Result<Connected, ConnectError> {
     let verdict_slot: Arc<Mutex<Option<HostKeyVerdict>>> = Arc::new(Mutex::new(None));
+    let forward_target: ForwardTarget = Arc::new(Mutex::new(None));
     let handler = Handler {
         db,
         host: host.to_string(),
         port,
         verdict: verdict_slot.clone(),
+        forward_target: forward_target.clone(),
     };
 
     let config = Arc::new(client::Config {
@@ -180,7 +225,7 @@ pub async fn connect(
         .clone()
         .unwrap_or(HostKeyVerdict::Match);
 
-    Ok(Connected { handle, verdict })
+    Ok(Connected { handle, verdict, forward_target })
 }
 
 /// How many info-request rounds a keyboard-interactive exchange may take.

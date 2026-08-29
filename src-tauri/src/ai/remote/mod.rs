@@ -760,7 +760,7 @@ async fn run_remote_turn(
 
     // `conversation: false` like every other non-desktop caller — the flag gates
     // preference-learning and skill autopilot, not whether history is carried.
-    let result = crate::ai::agent::run_turn(&tc, None, request, false, &tx).await;
+    let result = crate::ai::agent::run_turn(&tc, crate::ai::registry::ModelChoice::active(), request, false, &tx).await;
     drop(tx);
     let _ = drain.await;
 

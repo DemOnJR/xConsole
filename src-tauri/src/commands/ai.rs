@@ -200,7 +200,7 @@ pub async fn ai_chat(
     apply_chat_plan_decision(&tc, &mut messages);
     let result = agent::run_turn(
         &tc,
-        provider_id.filter(|s| !s.is_empty()),
+        crate::ai::registry::ModelChoice::provider(provider_id.filter(|s| !s.is_empty())),
         messages,
         conversation.unwrap_or(false),
         &tx,

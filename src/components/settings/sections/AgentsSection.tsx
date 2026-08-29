@@ -451,7 +451,7 @@ function PersonaEditor({
   draft: PersonaInput;
   personas: Persona[];
   vps: { id: string; name: string }[];
-  providers: { id: string; name: string }[];
+  providers: { id: string; name: string; model?: string | null }[];
   saving: boolean;
   onChange: (next: PersonaInput) => void;
   onSave: () => void;
@@ -459,6 +459,10 @@ function PersonaEditor({
 }) {
   const set = <K extends keyof PersonaInput>(key: K, value: PersonaInput[K]) =>
     onChange({ ...draft, [key]: value });
+
+  // What an empty Model box actually means, named rather than left to be guessed.
+  const providerModel =
+    providers.find((p) => p.id === draft.provider_id)?.model?.trim() || "";
 
   const toggleTarget = (id: string) =>
     set(
@@ -571,7 +575,7 @@ function PersonaEditor({
             <option value="full">Run anything</option>
           </Select>
         </Field>
-        <Field label="Model" hint="Routine work need not use your best model.">
+        <Field label="Provider" hint="Which account or CLI this one runs through.">
           <Select
             value={draft.provider_id ?? ""}
             onChange={(e) => set("provider_id", e.target.value || null)}
@@ -583,6 +587,21 @@ function PersonaEditor({
               </option>
             ))}
           </Select>
+        </Field>
+        {/* Separate from the provider on purpose: two agents can share one account and
+            still run on different models — the big one for whoever plans, a cheap one
+            for whoever answers routine questions. */}
+        <Field
+          label="Model"
+          hint={`Blank uses whatever the provider is set to${
+            providerModel ? ` (${providerModel})` : ""
+          }. Routine work need not use your best model.`}
+        >
+          <TextInput
+            value={draft.model ?? ""}
+            onChange={(e) => set("model", e.target.value || null)}
+            placeholder={providerModel || "provider default"}
+          />
         </Field>
       </div>
 

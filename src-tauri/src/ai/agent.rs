@@ -56,7 +56,7 @@ fn log_prompt_cache(
 /// assistant message (with any tool calls it issued).
 pub async fn run_turn(
     tc: &ToolContext,
-    provider_id: Option<String>,
+    choice: registry::ModelChoice,
     messages: Vec<ChatMessage>,
     conversation: bool,
     sink: &EventSink,
@@ -92,8 +92,9 @@ pub async fn run_turn(
     };
     emit_ws(if tc.plan_mode { "planning" } else { "working" });
 
-    let preferred_id = registry::active_provider_id(&tc.db, provider_id.as_deref())?;
-    let (resolved, fallback_note) = registry::resolve_for_turn(&tc.db, &preferred_id)?;
+    let preferred_id = registry::active_provider_id(&tc.db, choice.provider_id.as_deref())?;
+    let (resolved, fallback_note) =
+        registry::resolve_for_turn(&tc.db, &preferred_id, choice.model.as_deref())?;
     if let Some(note) = &fallback_note {
         emit(Some(sink), StreamEvent::Status(note.clone()));
     }

@@ -281,10 +281,14 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
     };
 
     let messages = vec![ChatMessage::user(prompt)];
-    // A persona can pin its own provider, so routine triage need not run on the model
-    // reserved for architectural judgement.
-    let provider_override = persona.as_ref().and_then(|p| p.provider_id.clone());
-    let result = agent::run_turn(&tc, provider_override, messages, false, &tx).await;
+    // A persona can pin its own provider *and* its own model, so routine triage need not
+    // run on the model reserved for architectural judgement — and two personas can share
+    // one provider while running on different models on it.
+    let choice = crate::ai::registry::ModelChoice {
+        provider_id: persona.as_ref().and_then(|p| p.provider_id.clone()),
+        model: persona.as_ref().and_then(|p| p.model.clone()),
+    };
+    let result = agent::run_turn(&tc, choice, messages, false, &tx).await;
     drop(tx);
     let _ = forward.await;
 
