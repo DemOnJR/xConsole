@@ -391,6 +391,20 @@ export type ProviderKind =
   | "antigravity_cli";
 
 
+
+/** Remote-control (Discord) status. The bot token is never returned. */
+export interface RemoteStatus {
+  enabled: boolean;
+  channel_id: string;
+  allowed_user_ids: string;
+  prefix: string;
+  safety_mode: string;
+  targets: string[];
+  has_token: boolean;
+  /** False when the config would refuse to run, so the UI can say why. */
+  usable: boolean;
+}
+
 /** A named background agent: an identity the autonomous goal loop runs under. */
 export interface Persona {
   id: string;
@@ -1154,6 +1168,18 @@ export const api = {
   deleteSetting: (key: string) => invoke<void>("delete_setting", { key }),
 
   listProviders: () => invoke<AiProvider[]>("list_providers"),
+  getRemoteStatus: () => invoke<RemoteStatus>("get_remote_status"),
+  saveRemoteConfig: (input: {
+    enabled: boolean;
+    channelId: string;
+    allowedUserIds: string;
+    prefix: string;
+    safetyMode: string;
+    targets: string[];
+    token?: string | null;
+  }) => invoke<RemoteStatus>("save_remote_config", input),
+  clearRemoteToken: () => invoke<void>("clear_remote_token"),
+
   listPersonas: () => invoke<Persona[]>("list_personas"),
   savePersona: (input: PersonaInput) => invoke<Persona>("save_persona", { input }),
   deletePersona: (id: string) => invoke<void>("delete_persona", { id }),

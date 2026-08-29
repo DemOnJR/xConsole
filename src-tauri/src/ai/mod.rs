@@ -37,6 +37,7 @@ pub mod redaction;
 pub mod vps_snapshot;
 pub mod reflection;
 pub mod registry;
+pub mod remote;
 pub mod safety;
 pub mod skill_install;
 pub mod skill_scan;

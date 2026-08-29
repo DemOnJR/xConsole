@@ -301,6 +301,11 @@ pub fn run() {
                 });
             }
 
+            // Remote control (Discord). Polls outbound only when the user has enabled
+            // and configured it, so this costs nothing otherwise — and xConsole never
+            // opens a port, which is the security promise the README makes.
+            ai::remote::spawn(app.handle().clone());
+
             // The Cursor MCP runs as a SEPARATE process (Cursor spawns it) and can't
             // emit Tauri events, so its canvas tools drop request files in this shared
             // queue dir. Watch it and forward each request to the live canvas.
@@ -516,6 +521,9 @@ pub fn run() {
             commands::ai::save_cron_job,
             commands::ai::delete_cron_job,
             commands::ai::run_cron_job,
+            commands::remote::get_remote_status,
+            commands::remote::save_remote_config,
+            commands::remote::clear_remote_token,
             commands::persona::list_personas,
             commands::persona::save_persona,
             commands::persona::delete_persona,
