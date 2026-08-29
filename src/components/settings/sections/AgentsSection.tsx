@@ -163,112 +163,185 @@ export function AgentsSection() {
         </div>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        <div className="space-y-2">
+      {/* Agents & Org Chart Area */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
           <h3 className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">
-            Org chart
+            Org chart & Team
           </h3>
-          {rows.length === 0 ? (
+          {draft && (
+            <span className="text-[11px] text-[var(--accent)] font-medium">
+              {draft.id ? `Editing: ${draft.name || "agent"}` : "Creating new agent"}
+            </span>
+          )}
+        </div>
+
+        {draft ? (
+          <div className="grid gap-4 lg:grid-cols-[240px_minmax(0,1fr)]">
+            {/* Compact list when editor is open */}
+            <div className="space-y-1 max-h-[500px] overflow-y-auto pr-1">
+              <div className="text-[10px] uppercase font-mono tracking-wider text-gray-500 pb-1">
+                Select Agent
+              </div>
+              {rows.map(({ persona, depth }) => {
+                const isSelected = draft.id === persona.id;
+                return (
+                  <div
+                    key={persona.id}
+                    onClick={() => setDraft(toInput(persona))}
+                    className={`group flex items-center gap-2 border px-2.5 py-2 transition text-left cursor-pointer ${
+                      isSelected
+                        ? "border-[var(--accent)] bg-[var(--accent-muted)]/20"
+                        : "border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--surface-hover)]"
+                    }`}
+                    style={{ paddingLeft: 8 + depth * 12 }}
+                  >
+                    <BotIcon
+                      size={13}
+                      className={persona.enabled ? "text-cyan-400 shrink-0" : "text-gray-600 shrink-0"}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p
+                        className={`truncate text-xs font-semibold ${
+                          persona.enabled ? "text-gray-200" : "text-gray-500 line-through"
+                        }`}
+                      >
+                        {persona.name}
+                      </p>
+                      {persona.role && (
+                        <p className="truncate text-[10px] text-gray-400">{persona.role}</p>
+                      )}
+                    </div>
+                    {!persona.reports_to && (
+                      <span className="shrink-0 text-[8px] font-mono uppercase text-cyan-400 bg-cyan-500/10 px-1 py-0.5 border border-cyan-500/20">
+                        you
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Persona Editor */}
+            <div className="min-w-0">
+              <PersonaEditor
+                draft={draft}
+                personas={personas}
+                vps={vps}
+                providers={providers}
+                saving={saving}
+                onChange={setDraft}
+                onSave={save}
+                onCancel={() => {
+                  setDraft(null);
+                  setError(null);
+                }}
+              />
+            </div>
+          </div>
+        ) : (
+          /* Full width org chart rows when not editing */
+          rows.length === 0 ? (
             <p className="border border-dashed border-[var(--border)] px-3 py-6 text-center text-[11px] text-gray-500">
               No agents yet. Create one and the main agent can hand work to it.
             </p>
           ) : (
-            <div className="divide-y divide-[var(--border)] border border-[var(--border)]">
+            <div className="divide-y divide-[var(--border)] border border-[var(--border)] bg-[var(--surface)] overflow-hidden">
               {rows.map(({ persona, depth }) => (
                 <div
                   key={persona.id}
-                  className="group flex items-center gap-2 bg-[var(--surface)] px-3 py-2 hover:bg-[var(--surface-hover)]"
-                  style={{ paddingLeft: 12 + depth * 16 }}
+                  className="group flex items-center gap-3 px-3.5 py-2.5 hover:bg-[var(--surface-hover)] transition"
+                  style={{ paddingLeft: 14 + depth * 18 }}
                 >
-                  <BotIcon
-                    size={13}
-                    className={persona.enabled ? "text-[var(--text-dim)]" : "text-[var(--text-faint)]"}
-                  />
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-[var(--border)] bg-[var(--surface-2)]">
+                    <BotIcon
+                      size={14}
+                      className={persona.enabled ? "text-cyan-400" : "text-gray-600"}
+                    />
+                  </div>
                   <button
                     type="button"
                     onClick={() => setDraft(toInput(persona))}
-                    className="min-w-0 flex-1 text-left"
+                    className="flex min-w-0 flex-1 items-baseline gap-2.5 text-left"
                   >
                     <span
-                      className={`text-xs font-medium ${
+                      className={`shrink-0 text-xs font-semibold ${
                         persona.enabled ? "text-gray-200" : "text-gray-500 line-through"
                       }`}
                     >
                       {persona.name}
                     </span>
                     {persona.role && (
-                      <span className="ml-2 truncate text-[11px] text-gray-500">
+                      <span className="min-w-0 truncate text-[11px] text-gray-400">
                         {persona.role}
                       </span>
                     )}
                   </button>
-                  {!persona.reports_to && (
+                  {!persona.reports_to ? (
                     <span
-                      className="shrink-0 border border-[var(--border-strong)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-400"
+                      className="shrink-0 border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-mono uppercase tracking-wide text-cyan-400"
                       title="Reports to you — this agent can message you directly"
                     >
                       reports to you
                     </span>
+                  ) : (
+                    <span
+                      className="shrink-0 border border-[var(--border)] bg-[var(--surface-2)] px-2 py-0.5 text-[10px] font-mono text-gray-400"
+                      title={`Reports to ${nameOf(persona.reports_to)}`}
+                    >
+                      escalates to {nameOf(persona.reports_to)}
+                    </span>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => void remove(persona)}
-                    title={`Delete ${persona.name}`}
-                    className="shrink-0 p-1 text-[var(--text-faint)] opacity-0 transition group-hover:opacity-100 hover:text-red-400"
-                  >
-                    <TrashIcon size={13} />
-                  </button>
+                  <div className="flex items-center gap-2 opacity-0 transition group-hover:opacity-100">
+                    <button
+                      type="button"
+                      onClick={() => setDraft(toInput(persona))}
+                      className="rounded px-2 py-0.5 text-[11px] font-medium text-gray-300 hover:bg-[var(--surface-2)] hover:text-white border border-[var(--border)]"
+                      title={`Edit ${persona.name}`}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void remove(persona)}
+                      title={`Delete ${persona.name}`}
+                      className="p-1 text-[var(--text-faint)] hover:text-red-400 transition"
+                    >
+                      <TrashIcon size={13} />
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
-          )}
+          )
+        )}
+      </div>
 
-          <div className="flex items-center gap-2 pt-4">
-            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">
-              What they said to each other
-            </h3>
-            <div className="ml-auto w-44">
-              <Select value={project} onChange={(e) => setProject(e.target.value)}>
-                <option value="">All projects</option>
-                {workspaces.map((w) => (
-                  <option key={w.id} value={w.id}>
-                    {w.name}
-                  </option>
-                ))}
-              </Select>
-            </div>
+      {/* Activity & Conversation Section */}
+      <div className="space-y-3 border-t border-[var(--border)] pt-5">
+        <div className="flex items-center justify-between">
+          <h3 className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+            What they said to each other
+          </h3>
+          <div className="w-52">
+            <Select value={project} onChange={(e) => setProject(e.target.value)}>
+              <option value="">All projects</option>
+              {workspaces.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))}
+            </Select>
           </div>
-          {!project && (
-            <p className="text-[11px] text-gray-500">
-              Showing every project at once. Pick one to read its thread on its own,
-              alongside what was delegated, changed and committed.
-            </p>
-          )}
-          <ConversationFeed messages={messages} nameOf={nameOf} />
-          {history && <ProjectRecord history={history} nameOf={nameOf} />}
         </div>
-
-        <div>
-          {draft ? (
-            <PersonaEditor
-              draft={draft}
-              personas={personas}
-              vps={vps}
-              providers={providers}
-              saving={saving}
-              onChange={setDraft}
-              onSave={save}
-              onCancel={() => {
-                setDraft(null);
-                setError(null);
-              }}
-            />
-          ) : (
-            <p className="border border-dashed border-[var(--border)] px-3 py-6 text-center text-[11px] text-gray-500">
-              Select an agent to edit it, or create one.
-            </p>
-          )}
-        </div>
+        {!project && (
+          <p className="text-[11px] text-gray-500">
+            Showing every project at once. Pick one to read its thread on its own,
+            alongside what was delegated, changed and committed.
+          </p>
+        )}
+        <ConversationFeed messages={messages} nameOf={nameOf} />
+        {history && <ProjectRecord history={history} nameOf={nameOf} />}
       </div>
     </div>
   );
