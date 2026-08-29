@@ -621,6 +621,7 @@ async fn handle_event(app: &tauri::AppHandle, ev: serde_json::Value) {
         }
         "paired" | "connected" => {
             let jid = ev.get("jid").and_then(|j| j.as_str()).unwrap_or("").to_string();
+            let lid = ev.get("sender_lid").and_then(|j| j.as_str()).unwrap_or("").to_string();
             let push = ev.get("push_name").and_then(|j| j.as_str()).map(str::to_string);
             *shared().linking.lock().await = None;
             let phone = if !jid.is_empty() {
@@ -631,6 +632,11 @@ async fn handle_event(app: &tauri::AppHandle, ev: serde_json::Value) {
             } else {
                 None
             };
+            if !lid.is_empty() {
+                let l = jid_user(&lid);
+                let db = app.state::<crate::storage::Db>();
+                let _ = db.set_setting("remote.whatsapp.paired_lid", &l);
+            }
             update_status(app, |s| {
                 s.linked = true;
                 s.connected = true;
@@ -656,6 +662,7 @@ async fn handle_event(app: &tauri::AppHandle, ev: serde_json::Value) {
             // alternative is a bridge that is armed in settings and silently deaf.
             let db = app.state::<crate::storage::Db>();
             let _ = db.set_setting("remote.whatsapp.paired_phone", "");
+            let _ = db.set_setting("remote.whatsapp.paired_lid", "");
             update_status(app, |s| {
                 s.linked = false;
                 s.connected = false;

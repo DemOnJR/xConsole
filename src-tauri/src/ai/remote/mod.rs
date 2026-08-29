@@ -423,11 +423,16 @@ pub fn load_config(db: &crate::storage::Db, kind: Kind) -> Config {
     };
     let mut allowed = parse_id_list(&get(&kind.setting_allowed()));
     // For WhatsApp, if the user paired a phone by QR scan but left the allowlist blank,
-    // the paired phone itself is the hardware-authenticated device owner.
+    // the paired phone and paired LID are the hardware-authenticated device owner.
     if kind == Kind::WhatsApp && allowed.is_empty() {
         if let Ok(Some(phone)) = db.get_setting("remote.whatsapp.paired_phone") {
             if !phone.trim().is_empty() {
                 allowed.push(phone.trim().to_string());
+            }
+        }
+        if let Ok(Some(lid)) = db.get_setting("remote.whatsapp.paired_lid") {
+            if !lid.trim().is_empty() {
+                allowed.push(lid.trim().to_string());
             }
         }
     }

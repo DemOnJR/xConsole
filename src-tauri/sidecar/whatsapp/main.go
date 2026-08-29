@@ -326,9 +326,17 @@ func (b *bridge) handle(rawEvt any) {
 		if b.client.Store.ID != nil {
 			jid = b.client.Store.ID.String()
 		}
-		emit(Event{Type: "connected", JID: jid, PushName: b.client.Store.PushName})
+		lid := ""
+		if !b.client.Store.LID.IsEmpty() {
+			lid = b.client.Store.LID.String()
+		}
+		emit(Event{Type: "connected", JID: jid, SenderLID: lid, PushName: b.client.Store.PushName})
 	case *events.PairSuccess:
-		emit(Event{Type: "paired", JID: evt.ID.String(), PushName: b.client.Store.PushName})
+		lid := ""
+		if !b.client.Store.LID.IsEmpty() {
+			lid = b.client.Store.LID.String()
+		}
+		emit(Event{Type: "paired", JID: evt.ID.String(), SenderLID: lid, PushName: b.client.Store.PushName})
 	case *events.Disconnected:
 		emit(Event{Type: "disconnected"})
 	case *events.LoggedOut:
