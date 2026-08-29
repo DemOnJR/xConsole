@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../api";
 import type { Vps } from "../types";
-import { useMaskHost } from "../../../../src/lib/privacy";
 import {
   CloudIcon,
   DatabaseIcon,
@@ -11,11 +10,23 @@ import {
 import {
   CheckCircleIcon,
 } from "../icons";
+function maskHost(host: string): string {
+  if (typeof localStorage !== "undefined" && localStorage.getItem("xconsole-mask-ips") === "1" && host) {
+    const trimmed = host.trim();
+    const ipv4 = trimmed.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(:\d+)?$/);
+    if (ipv4) return `${ipv4[1]}.***.***.${ipv4[4]}${ipv4[5] ?? ""}`;
+    if (trimmed.includes(".")) {
+      const parts = trimmed.split(".");
+      if (parts.length >= 2) return `${parts[0]}.***.${parts[parts.length - 1]}`;
+    }
+    return trimmed.length > 3 ? `${trimmed.slice(0, 2)}***` : "***";
+  }
+  return host;
+}
 
 export const InfrastructureTab = React.memo(function InfrastructureTab() {
   const [vpsList, setVpsList] = useState<Vps[]>([]);
   const [loading, setLoading] = useState(true);
-  const maskHost = useMaskHost();
 
   useEffect(() => {
     let alive = true;
