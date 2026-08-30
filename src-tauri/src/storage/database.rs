@@ -2449,15 +2449,6 @@ impl Db {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    pub fn delete_metric_source(&self, workspace_id: &str, name: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM metric_source WHERE workspace_id = ?1 AND name = ?2",
-            params![workspace_id, name.trim().to_lowercase()],
-        )?;
-        Ok(())
-    }
-
     /// Record one figure for one day, correcting it if that day is already recorded.
     pub fn upsert_metric(
         &self,
