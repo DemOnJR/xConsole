@@ -159,6 +159,10 @@ pub async fn run_turn(
 
     let effective_intent = vps_snapshot::effective_user_intent(&messages);
     let casual_turn = vps_snapshot::is_casual_chat(&last_user_msg);
+    // Narrower: only a real greeting may swap the system prompt for "reply briefly".
+    // A question about which model this is is cheap in the same way, but it is still a
+    // question and has to be answered.
+    let small_talk = vps_snapshot::is_small_talk(&last_user_msg);
     let needs_live = vps_snapshot::needs_live_data(&messages);
     let targeted_check = vps_snapshot::is_targeted_check(&effective_intent);
     let wants_snapshot = vps_snapshot::should_collect_snapshot(&effective_intent);
@@ -353,6 +357,7 @@ pub async fn run_turn(
             ollama_num_ctx,
             target_ids: &tc.targets,
             casual_turn,
+            small_talk,
             target_selection_note: target_selection_note.clone(),
             force_minimal_prompt: force_minimal,
             plan_mode: tc.plan_mode,
@@ -549,6 +554,7 @@ pub async fn run_turn(
             ollama_num_ctx,
             target_ids: &tc.targets,
             casual_turn,
+            small_talk,
             target_selection_note: target_selection_note.clone(),
             force_minimal_prompt: false,
             plan_mode: tc.plan_mode,
@@ -589,6 +595,7 @@ pub async fn run_turn(
                 ollama_num_ctx,
                 target_ids: &tc.targets,
                 casual_turn,
+            small_talk,
                 target_selection_note: target_selection_note.clone(),
                 force_minimal_prompt: true,
                 plan_mode: tc.plan_mode,

@@ -89,7 +89,11 @@ const PACKAGE_NAMES: &[&str] = &[
 ];
 
 /// Casual chat that should not trigger SSH prefetch or heavy tool schemas.
-pub fn is_casual_chat(message: &str) -> bool {
+/// A greeting or pleasantry, where a short warm reply *is* the whole answer.
+///
+/// This is the only thing that may swap the system prompt for [`CASUAL_GUIDANCE`], so
+/// it must stay narrow: anything that is actually a question belongs elsewhere.
+pub fn is_small_talk(message: &str) -> bool {
     let lower = message.trim().to_lowercase();
     if lower.is_empty() {
         return true;
@@ -147,10 +151,32 @@ pub fn is_casual_chat(message: &str) -> bool {
         "how do you do",
     ];
     PHRASES.iter().any(|p| lower.contains(p))
-        || lower.contains("what model")
+}
+
+/// A question about the assistant itself: which model, which provider, who it is.
+///
+/// Cheap in the same way a greeting is — it needs no server state prefetched — but it
+/// is emphatically *not* a greeting, and the two were conflated. Being "casual" swapped
+/// the whole system prompt for one line beginning "The user sent a greeting", so asking
+/// "what model are you?" got a warm offer to help instead of an answer. The model and
+/// provider are already in the prompt; it just had to be allowed to read the question.
+pub fn is_about_the_assistant(message: &str) -> bool {
+    let lower = message.trim().to_lowercase();
+    lower.contains("what model")
+        || lower.contains("which model")
         || lower.contains("what llm")
         || lower.contains("who are you")
-        || lower.contains("are you sure")
+}
+
+/// Greetings, pleasantries, and questions about the assistant — turns that need no live
+/// server state.
+///
+/// `are you sure` used to be here and no longer is. It is the user challenging
+/// something the agent claimed, and that claim is usually about a server: skipping the
+/// prefetch, and on a local model stripping the SSH tools too, left the agent unable to
+/// go and check the very thing it was being doubted on.
+pub fn is_casual_chat(message: &str) -> bool {
+    is_small_talk(message) || is_about_the_assistant(message)
 }
 
 /// Coding help in chat — no VPS prefetch unless they mention a server.
@@ -728,6 +754,44 @@ mod tests {
         assert!(!should_collect("hi again"));
         assert!(!should_collect("how are you"));
         assert!(!should_collect("Hey, how's it going?"));
+    }
+
+    #[test]
+    fn asking_what_model_it_is_gets_answered_not_greeted() {
+        // The reported bug: "what model are you?" was answered with "Anything you want
+        // to tackle?" — because being casual replaced the system prompt with one line
+        // telling the model it had received a greeting. It is a question; only the
+        // prefetch is skipped now, not the answering.
+        for q in [
+            "what model are you?",
+            "i want to know what model llm you are",
+            "which model is this",
+            "who are you",
+        ] {
+            assert!(is_about_the_assistant(q), "{q:?} is a question about the assistant");
+            assert!(!is_small_talk(q), "{q:?} must not be treated as a greeting");
+            // Still cheap: no server state is needed to say what model you are.
+            assert!(!should_collect(q), "{q:?} should not prefetch server state");
+        }
+    }
+
+    #[test]
+    fn doubting_the_agent_sends_it_back_to_check() {
+        // "are you sure?" is the user challenging a claim, and the claim is usually
+        // about a server. Treating it as casual skipped the prefetch and — on a local
+        // model — stripped the SSH tools, so the agent could not go and verify the one
+        // thing it was being doubted on.
+        assert!(!is_small_talk("are you sure?"));
+        assert!(!is_casual_chat("are you sure the service is running?"));
+        assert!(should_collect("are you sure nginx is up on the vps?"));
+    }
+
+    #[test]
+    fn greetings_are_still_greetings() {
+        for q in ["hi", "hey again", "thanks", "how's it going?", "good morning"] {
+            assert!(is_small_talk(q), "{q:?} is small talk");
+        }
+        assert!(is_casual_chat("hi"));
     }
 
     #[test]

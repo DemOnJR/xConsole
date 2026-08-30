@@ -129,8 +129,16 @@ pub struct PromptContext<'a> {
     pub ollama_num_ctx: Option<u32>,
     /// Selected VPS ids for this turn (exact values for run_command).
     pub target_ids: &'a [String],
-    /// Greeting / small talk — do not pitch server checks.
+    /// Greeting / small talk or a question about the assistant — cheap turns that need
+    /// no live server state. Suppresses VPS blocks and the prefetch.
     pub casual_turn: bool,
+    /// A greeting specifically, where a short warm reply *is* the whole answer.
+    ///
+    /// Narrower than `casual_turn` on purpose, because this one replaces the entire
+    /// system prompt with [`CASUAL_GUIDANCE`]. When the two were the same flag, "what
+    /// model are you?" was answered as if it were "hi" — the model was told it had
+    /// received a greeting, and greeted back.
+    pub small_talk: bool,
     /// When user says "both/all" but selection differs — injected into volatile tier.
     pub target_selection_note: Option<String>,
     /// Ponytail-minimal tiers when context is tight (Hermes auto-compact).
@@ -523,7 +531,7 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
     }
     let minimal = is_minimal_prompt(ctx);
 
-    let soul = if ctx.casual_turn && ctx.vps_tools_only {
+    let soul = if ctx.small_talk && ctx.vps_tools_only {
         CASUAL_GUIDANCE.to_string()
     } else {
         soul::load(ctx.home)
@@ -785,7 +793,7 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
     }
 
     let mut volatile: Vec<String> = Vec::new();
-    if ctx.casual_turn && ctx.vps_tools_only {
+    if ctx.small_talk && ctx.vps_tools_only {
         volatile.push(CASUAL_GUIDANCE.to_string());
     }
     if ctx.plan_mode {
@@ -911,6 +919,7 @@ mod tests {
             ollama_num_ctx: None,
             target_ids: &[],
             casual_turn: false,
+            small_talk: false,
             target_selection_note: None,
             force_minimal_prompt: false,
             plan_mode: false,
