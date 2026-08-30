@@ -1498,10 +1498,19 @@ impl Db {
     /// the difference between an agent reading its own project's thread and reading
     /// every project at once, which is unusable the moment there are two. `None` means
     /// no project is selected, and everything is in scope.
+    /// Unread messages addressed to `to_id` (None = the user's own inbox).
+    ///
+    /// Everything addressed to you is delivered, whichever project it is about. Scoping
+    /// this the way the *thread* is scoped looked right and was not: a lead writing to
+    /// another project's lead had the message stamped with their own project, so it
+    /// never appeared in the recipient's inbox and the two could not talk at all.
+    ///
+    /// The original complaint about mixed projects was not knowing which was which, so
+    /// the answer is a label rather than a filter — see `agent_inbox`. Nothing addressed
+    /// to somebody should be silently withheld from them.
     pub fn unread_agent_messages(
         &self,
         to_id: Option<&str>,
-        workspace: Option<&str>,
     ) -> Result<Vec<crate::storage::models::AgentMessage>> {
         let conn = self.conn.lock().unwrap();
         // `to_id IS ?1` rather than `=`, so NULL (the user) matches instead of
@@ -1509,35 +1518,12 @@ impl Db {
         let sql = format!(
             "SELECT {} FROM agent_message
              WHERE to_id IS ?1 AND read_at IS NULL
-               AND (?2 IS NULL OR workspace_id = ?2)
              ORDER BY created_at",
             Self::AGENT_MESSAGE_COLS
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![to_id, workspace], Self::row_to_agent_message)?;
+        let rows = stmt.query_map(params![to_id], Self::row_to_agent_message)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-
-    /// How many unread messages are waiting for `to_id` in *other* projects.
-    ///
-    /// Scoping an inbox to one project means messages about the others stop appearing,
-    /// which is right — but silently. Reporting the count turns "my message vanished"
-    /// into "there are two waiting in another project", which the user can act on.
-    pub fn unread_agent_messages_elsewhere(
-        &self,
-        to_id: Option<&str>,
-        workspace: Option<&str>,
-    ) -> Result<i64> {
-        let Some(workspace) = workspace else { return Ok(0) };
-        let conn = self.conn.lock().unwrap();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM agent_message
-             WHERE to_id IS ?1 AND read_at IS NULL
-               AND (workspace_id IS NULL OR workspace_id <> ?2)",
-            params![to_id, workspace],
-            |r| r.get(0),
-        )?;
-        Ok(count)
     }
 
     /// The whole exchange, oldest first, so the UI can show it as one conversation.

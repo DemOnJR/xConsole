@@ -71,9 +71,8 @@ pub async fn list_agent_messages(
 #[tauri::command]
 pub async fn unread_user_messages(
     db: State<'_, Db>,
-    workspace_id: Option<String>,
 ) -> Result<Vec<crate::storage::models::AgentMessage>, String> {
-    db.unread_agent_messages(None, workspace_id.as_deref()).map_err(|e| e.to_string())
+    db.unread_agent_messages(None).map_err(|e| e.to_string())
 }
 
 /// One agent's record over a window, for the panel that shows what it has been doing.

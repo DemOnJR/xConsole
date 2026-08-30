@@ -597,7 +597,7 @@ fn agent_send(ctx: &ToolContext, args: &Value) -> String {
     let Some(recipient) = crate::ai::persona::resolve(&ctx.db, to) else {
         let known = team(ctx);
         return format!(
-            "error: no agent named {to:?} on this project.\n{}",
+            "error: no agent named {to:?}.\n{}",
             crate::ai::persona::format_catalog(&known)
         );
     };
@@ -653,34 +653,41 @@ fn agent_report(ctx: &ToolContext, args: &Value) -> String {
 fn agent_inbox(ctx: &ToolContext) -> String {
     let me = current_persona(ctx);
     let my_id = me.as_ref().map(|p| p.id.clone());
-    let ws = ctx.workspace_id.as_deref().filter(|s| !s.is_empty());
-    let msgs = match ctx.db.unread_agent_messages(my_id.as_deref(), ws) {
+    let msgs = match ctx.db.unread_agent_messages(my_id.as_deref()) {
         Ok(m) => m,
         Err(e) => return format!("error reading inbox: {e}"),
     };
-    // Scoping the inbox to one project means the others stop appearing, which is the
-    // point — but silently. Saying how many are waiting elsewhere is what keeps that
-    // from reading as "my message vanished".
-    let elsewhere = ctx
-        .db
-        .unread_agent_messages_elsewhere(my_id.as_deref(), ws)
-        .unwrap_or(0);
-    let footer = match elsewhere {
-        0 => String::new(),
-        n => format!(
-            "\n\n({n} more unread in other projects — switch project to read them.)"
-        ),
-    };
     if msgs.is_empty() {
-        return format!("No new messages in this project.{footer}");
+        return "No new messages.".into();
     }
+
+    // Every message says which project it is about. Filtering by project instead was
+    // the wrong fix for the right complaint: the problem was never that other projects'
+    // messages arrived, it was not knowing which was which — and filtering meant a lead
+    // writing to another project's lead was never heard at all.
+    let here = ctx.workspace_id.as_deref().filter(|s| !s.is_empty());
+    let project_of = |id: Option<&str>| -> String {
+        match id {
+            Some(id) if Some(id) == here => String::new(),
+            Some(id) => ctx
+                .db
+                .get_workspace(id)
+                .ok()
+                .flatten()
+                .map(|w| format!(" (about {})", w.name))
+                .unwrap_or_default(),
+            None => String::new(),
+        }
+    };
+
     let lines: Vec<String> = msgs
         .iter()
         .map(|m| {
             format!(
-                "[{}] from {}: {}",
+                "[{}] from {}{}: {}",
                 m.kind,
                 display_name(ctx, m.from_id.as_deref()),
+                project_of(m.workspace_id.as_deref()),
                 m.body
             )
         })
@@ -691,7 +698,13 @@ fn agent_inbox(ctx: &ToolContext) -> String {
     if let Err(e) = ctx.db.mark_agent_messages_read(&ids) {
         crate::diag(&format!("agent inbox: could not mark read: {e}"));
     }
-    format!("{} new message(s):\n{}{footer}", msgs.len(), lines.join("\n"))
+    format!(
+        "{} new message(s):\n{}\n\nAnything marked \"about <project>\" concerns a \
+         different project from the one you are working on — answer it, but do the work \
+         in that project's context, not this one.",
+        msgs.len(),
+        lines.join("\n")
+    )
 }
 
 fn agent_thread(ctx: &ToolContext, args: &Value) -> String {

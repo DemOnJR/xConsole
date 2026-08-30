@@ -1339,8 +1339,8 @@ export const api = {
       workspaceId: workspaceId ?? null,
       limit: limit ?? null,
     }),
-  unreadUserMessages: (workspaceId?: string | null) =>
-    invoke<AgentMessage[]>("unread_user_messages", { workspaceId: workspaceId ?? null }),
+  /** Messages waiting for you, from any project — each carries the project it concerns. */
+  unreadUserMessages: () => invoke<AgentMessage[]>("unread_user_messages"),
   /** What one agent has done lately: tasks and outcomes, files changed, what it said. */
   agentActivity: (personaId: string, days?: number) =>
     invoke<AgentActivity>("agent_activity", { personaId, days: days ?? null }),

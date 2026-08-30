@@ -186,7 +186,7 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
             let mut block = crate::ai::persona::prompt_block(p);
             block.push_str(&crate::ai::persona::hierarchy_block(&all, p));
             if let Ok(unread) =
-                ctx.db.unread_agent_messages(Some(&p.id), goal.workspace_id.as_deref())
+                ctx.db.unread_agent_messages(Some(&p.id))
             {
                 if !unread.is_empty() {
                     block.push_str("\n\nNew messages for you:\n");
