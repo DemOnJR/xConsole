@@ -1326,6 +1326,8 @@ export const api = {
   whatsappUnlink: () => invoke<WhatsAppStatus>("whatsapp_unlink"),
   /** Chats the WhatsApp bridge can be restricted to: your own chat, and your groups. */
   whatsappChats: () => invoke<WhatsAppChat[]>("whatsapp_chats"),
+  /** Rebuild the WhatsApp helper from source. An app rebuild does not touch it. */
+  whatsappRebuildHelper: () => invoke<string>("whatsapp_rebuild_helper"),
   whatsappAutoInstall: () => invoke<WhatsAppStatus>("whatsapp_auto_install"),
 
   listPersonas: () => invoke<Persona[]>("list_personas"),

@@ -197,6 +197,111 @@ pub fn sidecar_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
+/// Where the helper's Go sources are, if this install has them.
+///
+/// The installer keeps a checkout beside the application (`<base>/src`, with the app in
+/// `<base>/app`), and a development tree has them next to Cargo.toml. Without sources
+/// there is nothing to rebuild and the user has to reinstall — worth saying rather than
+/// failing vaguely.
+fn sidecar_source_dir() -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        // <base>/app/xConsole.exe -> <base>/src/src-tauri/sidecar/whatsapp
+        if let Some(base) = exe.parent().and_then(|p| p.parent()) {
+            candidates.push(base.join("src").join("src-tauri").join("sidecar").join("whatsapp"));
+        }
+    }
+    candidates.push(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("sidecar")
+            .join("whatsapp"),
+    );
+    candidates.into_iter().find(|p| p.join("main.go").exists())
+}
+
+/// The Go toolchain: the portable one the installer downloads, else whatever is on PATH.
+fn go_binary() -> Option<std::path::PathBuf> {
+    let exe_name = if cfg!(windows) { "go.exe" } else { "go" };
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(base) = exe.parent().and_then(|p| p.parent()) {
+            let portable = base.join("tools").join("go").join("bin").join(exe_name);
+            if portable.exists() {
+                return Some(portable);
+            }
+        }
+    }
+    // On PATH. Checked by running it, because a name on PATH that does not execute is
+    // the same as not having it.
+    crate::proc::quiet_command(exe_name)
+        .arg("version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|_| std::path::PathBuf::from(exe_name))
+}
+
+/// Rebuild the helper from source and put it where the app looks for it.
+///
+/// An app rebuild does not touch the helper — it is a separate Go binary — so a build
+/// that is otherwise up to date can be driving a helper that predates half its
+/// features. The symptom is a feature that looks broken rather than out of date, and
+/// the fix was "go and run a shell script", which is not a fix a person should have to
+/// find.
+pub async fn rebuild_helper(app: &tauri::AppHandle) -> Result<String, String> {
+    let src = sidecar_source_dir().ok_or(
+        "this install has no helper sources to build from — run the xConsole installer again",
+    )?;
+    let go = go_binary().ok_or(
+        "Go is not installed, and this install has no bundled copy. Install Go, or run the \
+         xConsole installer again — it fetches Go itself.",
+    )?;
+
+    let out_name = binary_name();
+    let built = src.join(out_name);
+    let output = crate::proc::quiet_command(&go)
+        .current_dir(&src)
+        .args(["build", "-trimpath", "-ldflags=-s -w", "-o", out_name, "."])
+        // Pure-Go SQLite, so no C toolchain is needed. Matches build.sh.
+        .env("CGO_ENABLED", "0")
+        .output()
+        .map_err(|e| format!("could not run go: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "go build failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim().chars().take(500).collect::<String>()
+        ));
+    }
+    if !built.exists() {
+        return Err("go build reported success but produced no binary".into());
+    }
+
+    // Stop the old one first: on Windows a running executable cannot be replaced, and
+    // on any platform the point is to be running the new one afterwards.
+    stop().await;
+
+    let mut installed = built.clone();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let target = dir.join(out_name);
+            match std::fs::copy(&built, &target) {
+                Ok(_) => installed = target,
+                // Not fatal: `sidecar_path` also looks in the source tree, so a
+                // read-only install directory still ends up running the new binary.
+                Err(e) => crate::diag(&format!(
+                    "whatsapp: built the helper but could not copy it beside the app: {e}"
+                )),
+            }
+        }
+    }
+
+    let size = std::fs::metadata(&installed).map(|m| m.len()).unwrap_or(0);
+    update_status(app, |s| s.error = None).await;
+    Ok(format!(
+        "Rebuilt the WhatsApp helper ({:.1} MB). It will start again on the next use.",
+        size as f64 / (1024.0 * 1024.0)
+    ))
+}
+
 /// Where the paired session is kept.
 ///
 /// Under the agent home rather than beside the binary, so an app update that replaces

@@ -272,6 +272,16 @@ pub async fn whatsapp_chats(app: AppHandle) -> Result<Vec<whatsapp::Chat>, Strin
     whatsapp::chats(&app).await
 }
 
+/// Rebuild the WhatsApp helper from source.
+///
+/// An app rebuild leaves the helper alone — it is a separate Go binary — so one that
+/// predates a feature makes that feature look broken rather than out of date. This is
+/// the button that says otherwise.
+#[tauri::command]
+pub async fn whatsapp_rebuild_helper(app: AppHandle) -> Result<String, String> {
+    whatsapp::rebuild_helper(&app).await
+}
+
 #[tauri::command]
 pub async fn whatsapp_unlink(app: AppHandle) -> Result<whatsapp::WhatsAppStatus, String> {
     whatsapp::unlink(&app).await

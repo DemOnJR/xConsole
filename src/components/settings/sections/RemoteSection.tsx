@@ -613,7 +613,31 @@ function WhatsAppChatPicker({
           least one — send yourself a message on WhatsApp, then load again.
         </p>
       )}
-      {error && <p className="text-[11px] text-red-300">{error}</p>}
+      {error && (
+        <div className="space-y-2">
+          <p className="text-[11px] text-red-300">{error}</p>
+          {/* The helper is a separate binary that an app rebuild does not touch, so
+              "go and run a shell script" was the fix — which is not a fix a person
+              should have to find. */}
+          <Button
+            disabled={loading}
+            onClick={async () => {
+              setLoading(true);
+              setError(null);
+              try {
+                setError(await api.whatsappRebuildHelper());
+                setChats(await api.whatsappChats());
+              } catch (e) {
+                setError(String(e));
+              } finally {
+                setLoading(false);
+              }
+            }}
+          >
+            Rebuild the helper
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
