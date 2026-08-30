@@ -50,6 +50,8 @@ pub async fn start_goal(
         // attached by `agent_delegate`.
         persona_id: None,
         workspace_id: workspace_id.filter(|s| !s.is_empty()),
+        // Written when it finishes, by the agent that finishes it.
+        outcome: None,
     };
     db.insert_goal(&goal).map_err(|e| e.to_string())?;
     let _ = app.emit(&crate::ai::goal::goal_event(&id), crate::ai::provider::StreamEvent::Status("intake".into()));

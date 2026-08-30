@@ -155,6 +155,22 @@ staging box\"). Naming an existing agent updates it instead of creating a second
             parameters: json!({"type": "object", "properties": {}}),
         },
         ToolDef {
+            name: "agent_activity".into(),
+            description: "What one agent has actually done over the last N days: the tasks it \
+was given and how each ended, the files it changed, and what it said to the rest of the team. \
+Use it to answer \"what has X been doing?\", to review a team member before changing their \
+remit, and when deciding whether the work is producing results."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string", "description": "Agent name or id."},
+                    "days": {"type": "integer", "description": "How far back to look (default 7)."}
+                },
+                "required": ["agent"]
+            }),
+        },
+        ToolDef {
             name: "teams_overview".into(),
             description: "Every project, the team on it, and what each team is working on \
 right now. This is how you answer \"what is happening?\" across everything without opening \
@@ -203,6 +219,7 @@ pub fn is_persona_tool(name: &str) -> bool {
             | "agent_dismiss"
             | "agent_org"
             | "teams_overview"
+            | "agent_activity"
             | "project_history"
     )
 }
@@ -231,6 +248,7 @@ pub async fn dispatch(ctx: &ToolContext, name: &str, args: &Value) -> String {
         "agent_dismiss" => agent_dismiss(ctx, args).await,
         "agent_org" => agent_org(ctx),
         "teams_overview" => teams_overview(ctx),
+        "agent_activity" => agent_activity(ctx, args),
         "project_history" => project_history(ctx, args).await,
         _ => format!("error: unknown persona tool {name}"),
     }
@@ -398,6 +416,8 @@ fn agent_delegate(ctx: &ToolContext, args: &Value) -> String {
         // it does not see this conversation, and an objective without a project is a
         // guess.
         workspace_id: project.clone(),
+        // Written when it finishes, by the agent that finishes it.
+        outcome: None,
     };
     if let Err(e) = ctx.db.insert_goal(&goal) {
         return format!("error creating delegated task: {e}");
@@ -847,6 +867,95 @@ fn agent_org(ctx: &ToolContext) -> String {
         return "There are no named agents yet. Use agent_hire to create one.".into();
     }
     crate::ai::persona::format_org_chart(&all)
+}
+
+/// One agent's record over a window: what it was asked, what came of it, what it
+/// changed, and what it said.
+///
+/// Assembled rather than logged separately, because a second log would be a second
+/// thing to keep true. The pieces already exist — tasks carry a persona and an outcome,
+/// file changes carry the session id its runs use, messages carry both ends — and what
+/// was missing was somewhere to read them together, per agent, over a period.
+fn agent_activity(ctx: &ToolContext, args: &Value) -> String {
+    let who = args.get("agent").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let Some(p) = crate::ai::persona::resolve(&ctx.db, who) else {
+        return format!(
+            "error: no agent named {who:?}.\n{}",
+            crate::ai::persona::format_catalog(&team(ctx))
+        );
+    };
+    let days = args.get("days").and_then(|v| v.as_i64()).unwrap_or(7).clamp(1, 90);
+    let since = chrono::Utc::now() - chrono::Duration::days(days);
+    let since_rfc = since.to_rfc3339();
+    // The edit journal stores epoch milliseconds, not RFC 3339.
+    let since_ms = since.timestamp_millis();
+
+    let tasks = ctx.db.agent_tasks_since(&p.id, &since_rfc).unwrap_or_default();
+    let changes = ctx
+        .db
+        .agent_file_changes_since(&p.id, since_ms, 200)
+        .unwrap_or_default();
+    let messages = ctx.db.agent_messages_since(&p.id, &since_rfc, 100).unwrap_or_default();
+
+    let mut out = format!("{} — last {days} day(s)", p.name);
+    if let Some(ws) = p
+        .workspace_id
+        .as_deref()
+        .and_then(|id| ctx.db.get_workspace(id).ok().flatten())
+    {
+        out.push_str(&format!(" on {}", ws.name));
+    }
+    out.push_str("\n");
+
+    if tasks.is_empty() && changes.is_empty() && messages.is_empty() {
+        // Said plainly: an agent that did nothing is a finding, not an empty report.
+        out.push_str("\nNothing in this period — no tasks, no changes, nothing said.\n");
+        return out;
+    }
+
+    out.push_str(&format!("\nTasks ({}):\n", tasks.len()));
+    for t in tasks.iter().take(25) {
+        out.push_str(&format!("- [{}] {}", t.status, t.title));
+        if let Some(o) = t.outcome.as_deref().filter(|o| !o.trim().is_empty()) {
+            out.push_str(&format!("\n    result: {}", o.trim().lines().next().unwrap_or("")));
+        }
+        out.push('\n');
+    }
+    if tasks.is_empty() {
+        out.push_str("- (none)\n");
+    }
+
+    out.push_str(&format!("\nFiles changed ({}):\n", changes.len()));
+    for c in changes.iter().take(25) {
+        out.push_str(&format!(
+            "- {} {} ({})\n",
+            if c.is_new { "created" } else { "edited" },
+            c.path,
+            c.label
+        ));
+    }
+    if changes.is_empty() {
+        out.push_str("- (none)\n");
+    }
+
+    out.push_str(&format!("\nSaid ({}):\n", messages.len()));
+    for m in messages.iter().take(20) {
+        let dir = if m.from_id.as_deref() == Some(p.id.as_str()) { "→" } else { "←" };
+        let other = if m.from_id.as_deref() == Some(p.id.as_str()) {
+            display_name(ctx, m.to_id.as_deref())
+        } else {
+            display_name(ctx, m.from_id.as_deref())
+        };
+        out.push_str(&format!(
+            "- {dir} {other} [{}]: {}\n",
+            m.kind,
+            m.body.lines().next().unwrap_or("").chars().take(140).collect::<String>()
+        ));
+    }
+    if messages.is_empty() {
+        out.push_str("- (none)\n");
+    }
+    out
 }
 
 /// Every project, its team, and what that team is doing.

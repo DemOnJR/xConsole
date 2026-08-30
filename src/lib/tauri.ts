@@ -691,6 +691,8 @@ export interface GoalSession {
   persona_id?: string | null;
   /** The project this task belongs to. */
   workspace_id?: string | null;
+  /** What came of it, in the agent's own words. Null while it is still running. */
+  outcome?: string | null;
 }
 
 /** The locked-in definition of "done" for a goal. */

@@ -260,6 +260,14 @@ pub struct GoalSession {
     /// on and the user can see one project's work without the others in the way.
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// What actually came of it, in the agent's own words.
+    ///
+    /// The evidence it cites when it declares the goal met, or why it stopped when it
+    /// did not. Without this a finished task is a title and a status — enough to say
+    /// something happened, not enough to say whether it worked, which is the only
+    /// question worth asking a week later.
+    #[serde(default)]
+    pub outcome: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]

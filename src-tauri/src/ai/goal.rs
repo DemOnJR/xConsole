@@ -371,6 +371,9 @@ pub async fn run_loop(ctx: &GoalContext, goal_id: &str) {
             if cycles >= max {
                 goal.status = "blocked".to_string();
                 goal.finished_at = Some(Utc::now().to_rfc3339());
+                goal.outcome = Some(format!(
+                    "Stopped after {cycles} cycles without meeting the criteria."
+                ));
                 let _ = save_goal(ctx, &goal);
                 notify_user(&ctx.app, "Goal blocked", &format!("{} reached max cycles", goal.title));
                 return;

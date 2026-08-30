@@ -3918,6 +3918,12 @@ async fn goal_check_criteria(ctx: &ToolContext, args: &Value) -> String {
         "met" => {
             goal.status = "done".to_string();
             goal.finished_at = Some(chrono::Utc::now().to_rfc3339());
+            // The evidence was already being asked for and then thrown away. Kept, it
+            // is the difference between "this task ended" and "here is what came of
+            // it" — the only version of the record worth reading a week later.
+            if !evidence.trim().is_empty() {
+                goal.outcome = Some(evidence.trim().to_string());
+            }
             if let Err(e) = ctx.db.update_goal(&goal) {
                 return format!("error: {e}");
             }

@@ -654,6 +654,8 @@ impl Db {
         // acquiring a home would change who routing picks.
         let _ = conn.execute("ALTER TABLE persona ADD COLUMN workspace_id TEXT", []);
         let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN workspace_id TEXT", []);
+        // What came of the task, not just that it ended.
+        let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN outcome TEXT", []);
         // The inbox and the per-project history are both read on every agent cycle.
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_message_workspace
@@ -1207,6 +1209,7 @@ impl Db {
             finished_at: r.get(11)?,
             persona_id: r.get(12)?,
             workspace_id: r.get(13)?,
+            outcome: r.get(14)?,
         })
     }
 
@@ -1215,7 +1218,7 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
                     next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
-                    workspace_id
+                    workspace_id, outcome
              FROM goal_sessions ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], Self::row_to_goal)?;
@@ -1227,7 +1230,7 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
                     next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
-                    workspace_id
+                    workspace_id, outcome
              FROM goal_sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query([id])?;
@@ -1267,7 +1270,7 @@ impl Db {
             "UPDATE goal_sessions SET
                 title = ?2, raw_request = ?3, spec_json = ?4, status = ?5,
                 kanban_json = ?6, memory_json = ?7, next_check_at = ?8, cycles = ?9,
-                updated_at = datetime('now'), finished_at = ?10
+                updated_at = datetime('now'), finished_at = ?10, outcome = ?11
              WHERE id = ?1",
             params![
                 goal.id,
@@ -1280,6 +1283,7 @@ impl Db {
                 goal.next_check_at,
                 goal.cycles,
                 goal.finished_at,
+                goal.outcome,
             ],
         )?;
         Ok(())
@@ -1529,7 +1533,7 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
                     next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
-                    workspace_id
+                    workspace_id, outcome
              FROM goal_sessions
              WHERE (?1 IS NULL OR workspace_id = ?1)
              ORDER BY created_at DESC",
@@ -1560,7 +1564,7 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
                     next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
-                    workspace_id
+                    workspace_id, outcome
              FROM goal_sessions
              WHERE status = 'waiting' AND next_check_at IS NOT NULL
                AND next_check_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now')
@@ -2336,6 +2340,90 @@ impl Db {
             ],
         )?;
         Ok(())
+    }
+
+    /// What one agent did over a window, assembled from what was already recorded.
+    ///
+    /// Three tables answer three halves of "what has it been doing": the tasks it was
+    /// given (`goal_sessions.persona_id`), the files it changed while running them
+    /// (`agent_file_change`, joined through the `goal:<id>` session id its runs use),
+    /// and what it said (`agent_message`). Kept as one query per source rather than one
+    /// join, because a task with no edits and an edit outside any task are both normal
+    /// and a join would quietly drop one of them.
+    pub fn agent_tasks_since(
+        &self,
+        persona_id: &str,
+        since_rfc3339: &str,
+    ) -> Result<Vec<GoalSession>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
+                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
+                    workspace_id, outcome
+             FROM goal_sessions
+             WHERE persona_id = ?1
+               AND COALESCE(finished_at, updated_at, created_at) >= ?2
+             ORDER BY COALESCE(finished_at, updated_at, created_at) DESC",
+        )?;
+        let rows = stmt.query_map(params![persona_id, since_rfc3339], Self::row_to_goal)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Files an agent changed over a window, found through the goal sessions it ran.
+    pub fn agent_file_changes_since(
+        &self,
+        persona_id: &str,
+        since_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<EditRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.session_id, c.workspace_id, c.scope, c.vps_id, c.label, c.path,
+                    c.before, c.after, c.is_new, c.reverted, c.ts
+             FROM agent_file_change c
+             JOIN goal_sessions g ON c.session_id = 'goal:' || g.id
+             WHERE g.persona_id = ?1 AND c.ts >= ?2
+             ORDER BY c.ts DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![persona_id, since_ms, limit], |r| {
+            Ok(EditRecord {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                workspace_id: r.get(2)?,
+                scope: r.get(3)?,
+                vps_id: r.get(4)?,
+                label: r.get(5)?,
+                path: r.get(6)?,
+                before: r.get(7)?,
+                after: r.get(8)?,
+                is_new: r.get::<_, i64>(9)? != 0,
+                reverted: r.get::<_, i64>(10)? != 0,
+                ts: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// What an agent said, and what was said to it, over a window.
+    pub fn agent_messages_since(
+        &self,
+        persona_id: &str,
+        since_rfc3339: &str,
+        limit: i64,
+    ) -> Result<Vec<crate::storage::models::AgentMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {} FROM agent_message
+             WHERE (from_id = ?1 OR to_id = ?1) AND created_at >= ?2
+             ORDER BY created_at DESC LIMIT ?3",
+            Self::AGENT_MESSAGE_COLS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![persona_id, since_rfc3339, limit],
+            Self::row_to_agent_message,
+        )?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn list_file_changes(
