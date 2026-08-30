@@ -36,6 +36,10 @@ pub struct RemoteStatus {
     pub prefix: String,
     pub safety_mode: String,
     pub targets: Vec<String>,
+    /// The named agent that answers, if one is set.
+    pub persona_id: Option<String>,
+    /// Its name, so the UI can say who is answering without a second lookup.
+    pub persona_name: Option<String>,
     pub transports: Vec<TransportStatus>,
     /// True when at least one transport is armed.
     pub usable: bool,
@@ -74,11 +78,19 @@ fn transport_status(db: &Db, kind: Kind) -> TransportStatus {
 fn status(db: &Db) -> RemoteStatus {
     let get = |k: &str| db.get_setting(k).ok().flatten().unwrap_or_default();
     let transports: Vec<TransportStatus> = Kind::ALL.iter().map(|k| transport_status(db, *k)).collect();
+    let persona = Some(get(remote::SETTING_PERSONA))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     RemoteStatus {
         enabled: get(remote::SETTING_ENABLED) == "true",
         prefix: get(remote::SETTING_PREFIX),
         safety_mode: remote::load_config(db, Kind::Discord).safety_mode,
         targets: remote::parse_id_list(&get(remote::SETTING_TARGETS)),
+        persona_name: persona
+            .as_ref()
+            .and_then(|id| db.get_persona(id).ok().flatten())
+            .map(|p| p.name),
+        persona_id: persona,
         usable: transports.iter().any(|t| t.usable),
         transports,
         last_route: remote::last_route(db).map(|r| r.kind.as_str().to_string()),
@@ -103,6 +115,9 @@ pub struct RemoteShared {
     pub prefix: String,
     pub safety_mode: String,
     pub targets: Vec<String>,
+    /// Which named agent answers. `None` or empty = the unnamed main agent.
+    #[serde(default)]
+    pub persona_id: Option<String>,
 }
 
 /// One transport's settings. `token` of `None` or `""` means "leave the stored
@@ -163,7 +178,11 @@ pub fn apply_shared(db: &Db, shared: &RemoteShared) -> Result<(), String> {
     set(remote::SETTING_ENABLED, if shared.enabled { "true" } else { "false" })?;
     set(remote::SETTING_PREFIX, shared.prefix.trim())?;
     set(remote::SETTING_SAFETY, shared.safety_mode.trim())?;
-    set(remote::SETTING_TARGETS, &shared.targets.join(","))
+    set(remote::SETTING_TARGETS, &shared.targets.join(","))?;
+    set(
+        remote::SETTING_PERSONA,
+        shared.persona_id.as_deref().unwrap_or("").trim(),
+    )
 }
 
 #[tauri::command]

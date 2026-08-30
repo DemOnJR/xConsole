@@ -425,6 +425,13 @@ fn agent_check(ctx: &ToolContext, args: &Value) -> String {
 /// `agent_report` could not tell who is reporting to whom, and the main chat agent
 /// (which has no persona) would appear to be a nameless employee of someone.
 fn current_persona(ctx: &ToolContext) -> Option<crate::storage::models::Persona> {
+    // Set directly when the turn *is* an agent without being a goal — a message
+    // arriving over remote chat, answered by the agent the user put in charge.
+    if let Some(id) = ctx.persona_id.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(p) = ctx.db.get_persona(id).ok().flatten() {
+            return Some(p);
+        }
+    }
     let goal_id = ctx.goal_id.clone().or_else(|| {
         ctx.session_id
             .strip_prefix("goal:")

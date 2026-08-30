@@ -418,6 +418,10 @@ export interface RemoteStatus {
   prefix: string;
   safety_mode: string;
   targets: string[];
+  /** The named agent that answers, if one is set. */
+  persona_id: string | null;
+  /** Its name, so the UI can say who is answering without a second lookup. */
+  persona_name: string | null;
   transports: TransportStatus[];
   /** True when at least one transport is armed. */
   usable: boolean;
@@ -1245,7 +1249,14 @@ export const api = {
   listProviders: () => invoke<AiProvider[]>("list_providers"),
   getRemoteStatus: () => invoke<RemoteStatus>("get_remote_status"),
   saveRemoteConfig: (
-    shared: { enabled: boolean; prefix: string; safetyMode: string; targets: string[] },
+    shared: {
+      enabled: boolean;
+      prefix: string;
+      safetyMode: string;
+      targets: string[];
+      /** Which named agent answers. Null or "" = the unnamed main agent. */
+      personaId?: string | null;
+    },
     transports: {
       kind: RemoteKind;
       enabled: boolean;

@@ -354,6 +354,8 @@ async fn run_prompt_job(
         hooks: hooks_cfg,
         turn_images: Vec::new(),
         goal_id: None,
+        // A scheduled run is the main agent unless a goal gives it a persona.
+        persona_id: None,
     };
 
     let messages = vec![ChatMessage::user(job.payload.clone())];

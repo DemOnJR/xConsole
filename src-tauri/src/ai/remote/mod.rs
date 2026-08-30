@@ -51,6 +51,8 @@ pub const SETTING_ENABLED: &str = "remote.enabled";
 pub const SETTING_PREFIX: &str = "remote.prefix";
 pub const SETTING_SAFETY: &str = "remote.safety_mode";
 pub const SETTING_TARGETS: &str = "remote.targets";
+/// Which named agent answers. Empty = the unnamed main agent.
+pub const SETTING_PERSONA: &str = "remote.persona_id";
 
 /// The one thread every transport shares. A fixed id, so it survives restarts and is
 /// visible in the desktop conversation list like any other.
@@ -190,6 +192,12 @@ pub struct Config {
     pub safety_mode: String,
     /// VPS ids a remote turn may act on.
     pub targets: Vec<String>,
+    /// The named agent that answers, if any.
+    ///
+    /// Without one, a message from a phone runs as the unnamed main agent — which then
+    /// relays to whichever named agent the work belongs to, so the person on WhatsApp is
+    /// talking to a middleman rather than to the agent they set up to lead the team.
+    pub persona_id: Option<String>,
 }
 
 impl Default for Config {
@@ -202,6 +210,7 @@ impl Default for Config {
             prefix: String::new(),
             safety_mode: "allowlist".into(),
             targets: Vec::new(),
+            persona_id: None,
         }
     }
 }
@@ -451,6 +460,7 @@ pub fn load_config(db: &crate::storage::Db, kind: Kind) -> Config {
             _ => "allowlist".to_string(),
         },
         targets: parse_id_list(&get(SETTING_TARGETS)),
+        persona_id: Some(get(SETTING_PERSONA)).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
     }
 }
 
@@ -797,6 +807,16 @@ async fn run_remote_turn(
         crate::ai::hooks::HooksConfig::load(&app.state::<crate::ai::AgentHome>().inner().clone())
     };
 
+    // Who is answering. A configured agent runs *as* itself — its standing
+    // instructions, its servers, its trust level, its model — rather than the main
+    // agent relaying to it, which is what put a middleman between the user and the
+    // agent they set up to lead the team.
+    let persona = cfg
+        .persona_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(|id| crate::ai::persona::resolve(&db, id));
+
     let tc = crate::ai::tools::ToolContext {
         app: app.clone(),
         db: db.clone(),
@@ -812,8 +832,15 @@ async fn run_remote_turn(
         // the same thread. Everyone on an allowlist therefore shares context — see the
         // module docs, which weigh that against what an allowlist already grants.
         session_id: CONVERSATION_ID.to_string(),
-        targets: cfg.targets.clone(),
-        safety: cfg.safety_mode.clone(),
+        // The agent's own servers when it has them, so a remote turn is not quietly
+        // broader than the same agent doing the same work from the desktop.
+        targets: crate::ai::persona::effective_targets(persona.as_ref(), &cfg.targets),
+        // A persona's trust level wins. It is how the user said "this one may restart
+        // services unattended", and a remote turn is exactly the unattended case.
+        safety: match persona.as_ref().and_then(|p| p.safety_mode.clone()) {
+            Some(mode) if !mode.trim().is_empty() => mode,
+            _ => cfg.safety_mode.clone(),
+        },
         plan_mode: false,
         workspace_id: None,
         canvas: Vec::new(),
@@ -821,10 +848,30 @@ async fn run_remote_turn(
         hooks: hooks_cfg,
         turn_images: Vec::new(),
         goal_id: None,
+        persona_id: persona.as_ref().map(|p| p.id.clone()),
+    };
+
+    // Who it is, who reports to it, and what its colleagues have said to it since last
+    // time. Delivered in the prompt rather than left to be fetched: a message nobody
+    // thought to check for is a message that never arrived.
+    let persona_block = match persona.as_ref() {
+        Some(p) => {
+            let all = db.list_personas().unwrap_or_default();
+            let mut block = crate::ai::persona::prompt_block(p);
+            block.push_str(&crate::ai::persona::hierarchy_block(&all, p));
+            block.push_str(
+                "\n\nYou are answering the user directly over chat. Do not hand this \
+                 conversation to another agent just to have it answered — delegate only \
+                 work that genuinely belongs to a colleague, and reply yourself either \
+                 way.\n\n",
+            );
+            block
+        }
+        None => String::new(),
     };
 
     let prompt = format!(
-        "This request arrived over remote chat, not from the desktop app. The user is \
+        "{persona_block}This request arrived over remote chat, not from the desktop app. The user is \
          on their phone: keep the reply short and plain-text (no wide tables, no long \
          file dumps). Nobody can answer an approval prompt right now, so if something \
          needs one, say what you would do and stop rather than waiting.\n\n\
@@ -833,6 +880,7 @@ async fn run_remote_turn(
          somewhere else, call remote_reply_on and answer normally; do not describe the \
          move, just make it.\n\n{ask}",
         arrived = cfg.kind.as_str(),
+        persona_block = persona_block,
     );
 
     // The thread so far. Trimmed on save, so this is already bounded.
@@ -846,7 +894,16 @@ async fn run_remote_turn(
 
     // `conversation: false` like every other non-desktop caller — the flag gates
     // preference-learning and skill autopilot, not whether history is carried.
-    let result = crate::ai::agent::run_turn(&tc, crate::ai::registry::ModelChoice::active(), request, false, &tx).await;
+    // A persona can pin its own provider and model, and that has to hold here too, or
+    // the same agent answers on a different model depending on where it was asked.
+    let choice = match persona.as_ref() {
+        Some(p) => crate::ai::registry::ModelChoice {
+            provider_id: p.provider_id.clone(),
+            model: p.model.clone(),
+        },
+        None => crate::ai::registry::ModelChoice::active(),
+    };
+    let result = crate::ai::agent::run_turn(&tc, choice, request, false, &tx).await;
     drop(tx);
     let _ = drain.await;
 
@@ -889,6 +946,7 @@ mod tests {
             prefix: "!x".into(),
             safety_mode: "approve".into(),
             targets: vec![],
+            persona_id: None,
         }
     }
 

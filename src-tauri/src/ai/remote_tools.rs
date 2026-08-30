@@ -74,6 +74,10 @@ pairs by QR code, so call remote_link_whatsapp for that instead."
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Servers remote commands may act on."
+                    },
+                    "answer_as": {
+                        "type": "string",
+                        "description": "Name of the agent that should answer chat messages itself, e.g. \"Atlas\". Without it the unnamed main agent answers and relays to whoever the work belongs to, so the user ends up talking to a middleman. Pass an empty string to go back to the main agent."
                     }
                 },
                 "required": ["platform"]
@@ -230,10 +234,18 @@ fn status(ctx: &ToolContext) -> String {
     }
     let cfg = remote::load_config(&ctx.db, Kind::Discord);
     out.push_str(&format!(
-        "\nShared: prefix {:?}, trust {}, servers [{}]\n",
+        "\nShared: prefix {:?}, trust {}, servers [{}]\n\
+         Answered by: {}\n",
         cfg.prefix,
         cfg.safety_mode,
-        cfg.targets.join(", ")
+        cfg.targets.join(", "),
+        cfg.persona_id
+            .as_deref()
+            .and_then(|id| ctx.db.get_persona(id).ok().flatten())
+            .map(|p| p.name)
+            // Worth stating rather than leaving blank: it is the difference between the
+            // user talking to their lead agent and talking to a relay.
+            .unwrap_or_else(|| "the main agent (no named agent set)".into()),
     ));
     out
 }
@@ -264,6 +276,22 @@ async fn configure(ctx: &ToolContext, args: &Value) -> String {
             .to_string();
     }
 
+    // Absent means unchanged; an explicit empty string means "back to the main agent".
+    let persona_id = match str_arg("answer_as") {
+        None => current.persona_id.clone(),
+        Some("") => None,
+        Some(name) => match crate::ai::persona::resolve(&ctx.db, name) {
+            Some(p) => Some(p.id),
+            None => {
+                let known = ctx.db.list_personas().unwrap_or_default();
+                return format!(
+                    "error: no agent named {name:?} to answer as.\n{}",
+                    crate::ai::persona::format_catalog(&known)
+                );
+            }
+        },
+    };
+
     let master_enabled = args
         .get("master_enabled")
         .and_then(|v| v.as_bool())
@@ -285,12 +313,18 @@ async fn configure(ctx: &ToolContext, args: &Value) -> String {
         "Remote control: {} {} for {}.\n\
          Allowed to command the agent: {}\n\
          Chat: {}\n\
+         Answered by: {}\n\
          Trust: {}   Prefix: {:?}   Servers: [{}]{}",
         if enabled && master_enabled { "ARM" } else { "configure" },
         kind.as_str(),
         if enabled { "use" } else { "no use (off)" },
         if allowed_list.is_empty() { "nobody".into() } else { allowed_list.join(", ") },
         if chat_id.is_empty() { "any (from an allowed person)".into() } else { chat_id.clone() },
+        persona_id
+            .as_deref()
+            .and_then(|id| ctx.db.get_persona(id).ok().flatten())
+            .map(|p| p.name)
+            .unwrap_or_else(|| "the main agent".into()),
         safety_mode,
         prefix,
         targets.join(", "),
@@ -315,7 +349,7 @@ async fn configure(ctx: &ToolContext, args: &Value) -> String {
     }
     if let Err(e) = crate::commands::remote::apply_shared(
         &ctx.db,
-        &RemoteShared { enabled: master_enabled, prefix, safety_mode, targets },
+        &RemoteShared { enabled: master_enabled, prefix, safety_mode, targets, persona_id },
     ) {
         return format!("error: {e}");
     }
@@ -449,6 +483,19 @@ mod tests {
         assert!(!tool_is_mutating("remote_status"));
         assert!(tool_is_mutating("remote_configure"));
         assert!(tool_is_mutating("remote_link_whatsapp"));
+    }
+
+    #[test]
+    fn configuring_who_answers_is_part_of_the_tool() {
+        // The whole point of the setting: without it the main agent answers and relays,
+        // so the person on WhatsApp talks to a middleman rather than to the agent they
+        // put in charge.
+        let configure = definitions()
+            .into_iter()
+            .find(|d| d.name == "remote_configure")
+            .expect("remote_configure is declared");
+        let props = configure.parameters.get("properties").expect("has properties");
+        assert!(props.get("answer_as").is_some(), "no way to say who answers");
     }
 
     #[test]

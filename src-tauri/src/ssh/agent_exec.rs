@@ -43,6 +43,28 @@ pub struct McpBridge {
     pub token: String,
 }
 
+/// PATH additions for a non-interactive SSH command.
+///
+/// `channel.exec` runs the command in a non-interactive, non-login shell, and every
+/// distro's `.bashrc` opens with a guard that returns immediately for exactly that case.
+/// So the PATH a person sees when they SSH in by hand is *not* the PATH this gets — and
+/// agent CLIs install into precisely the directories that guard skips. The symptom is
+/// `claude: command not found` on a server where `which claude` answers fine, which
+/// reads as "it is not installed" and is not.
+///
+/// Prepending rather than replacing, and only where the directory is not already
+/// present, so a server that does export a good PATH keeps its own ordering.
+const PATH_PRELUDE: &str = r#"for d in "$HOME/.local/bin" "$HOME/bin" "$HOME/.npm-global/bin" "$HOME/.bun/bin" "$HOME/.deno/bin" /usr/local/bin "$HOME"/.nvm/versions/node/*/bin "$HOME"/.volta/bin; do case ":$PATH:" in *":$d:"*) ;; *) [ -d "$d" ] && PATH="$d:$PATH";; esac; done; export PATH; "#;
+
+/// Whether a failure is the shell not finding the binary at all.
+///
+/// Worth telling apart from every other non-zero exit: it is the one failure the user
+/// fixes in the provider settings rather than on the server.
+pub fn is_command_not_found(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("command not found") || s.contains("no such file or directory")
+}
+
 /// Run one command on `vps_id`, streaming stdout line by line.
 ///
 /// `command_with_mcp` receives the remote loopback URL for the MCP bridge and returns the
@@ -83,7 +105,7 @@ pub async fn run_agent(
         None => None,
     };
 
-    let command = command_with_mcp(mcp_url.as_deref());
+    let command = format!("{PATH_PRELUDE}{}", command_with_mcp(mcp_url.as_deref()));
 
     let mut channel = connected
         .handle
@@ -198,5 +220,34 @@ mod tests {
         assert!(arg.contains("'\\''"), "single quote must be escaped: {arg}");
         // Exactly one opening and one closing quote survive as delimiters.
         assert!(arg.starts_with('\'') && arg.ends_with('\''));
+    }
+
+    #[test]
+    fn a_missing_binary_is_told_apart_from_a_failed_run() {
+        // It is the only failure fixed in xConsole's settings rather than on the
+        // server, so it earns its own message.
+        assert!(is_command_not_found("bash: line 1: claude: command not found"));
+        assert!(is_command_not_found("sh: 1: claude: not found\nNo such file or directory"));
+        assert!(!is_command_not_found("Invalid API key · Run /login"));
+        assert!(!is_command_not_found(""));
+    }
+
+    #[test]
+    fn the_path_prelude_only_prepends_directories_that_exist() {
+        // Verified by running it: without this, `claude` installed in ~/.local/bin is
+        // not found by an SSH command, which is the bug it exists for. The `-d` guard
+        // is what keeps an unmatched glob (`~/.nvm/versions/node/*/bin` on a box with
+        // no nvm) from being pushed into PATH as a literal.
+        assert!(PATH_PRELUDE.contains("[ -d \"$d\" ]"));
+        // Prepend-if-absent, so a server that exports a good PATH keeps its ordering
+        // and a repeated run cannot grow PATH without bound.
+        assert!(PATH_PRELUDE.contains("case \":$PATH:\" in *\":$d:\"*"));
+        assert!(PATH_PRELUDE.contains("export PATH"));
+        // Ends with a separator, or it would glue itself onto the command that follows.
+        assert!(PATH_PRELUDE.ends_with("; ") || PATH_PRELUDE.ends_with(" "));
+        // The directories agent CLIs actually install into.
+        for dir in ["$HOME/.local/bin", ".npm-global", ".nvm/versions/node"] {
+            assert!(PATH_PRELUDE.contains(dir), "prelude is missing {dir}");
+        }
     }
 }

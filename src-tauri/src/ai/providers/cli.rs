@@ -197,6 +197,19 @@ impl CliProvider {
                          signed in there (`claude setup-token`).",
                         run.exit_code, remote.vps_id
                     )
+                } else if crate::ssh::agent_exec::is_command_not_found(detail) {
+                    // The one failure the user fixes in xConsole rather than on the
+                    // server, and the raw shell error points the wrong way: it reads as
+                    // "not installed" on a box where `which claude` answers fine, because
+                    // an SSH command runs in a shell that never sourced the profile that
+                    // sets PATH.
+                    format!(
+                        "'{}' was not found on {}. Run `which claude` on that server and \
+                         put the full path (e.g. /root/.local/bin/claude) in this \
+                         provider's Binary path — an SSH command does not get the PATH \
+                         you see when you log in by hand.",
+                        self.bin, remote.vps_id
+                    )
                 } else {
                     format!("Claude Code failed on {}: {detail}", remote.vps_id)
                 });

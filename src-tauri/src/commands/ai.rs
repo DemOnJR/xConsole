@@ -113,6 +113,8 @@ pub async fn ai_chat(
         hooks: hooks_cfg,
         turn_images,
         goal_id: goal_id.filter(|s| !s.is_empty()),
+        // A desktop turn is the user talking to the main agent, not to a named one.
+        persona_id: None,
     };
 
     // If the chosen provider runs a local server, make sure it's up first so the

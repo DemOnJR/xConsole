@@ -278,6 +278,8 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
         hooks: hooks_cfg,
         turn_images: Vec::new(),
         goal_id: Some(goal.id.clone()),
+        // The goal row already carries it; `current_persona` reads that.
+        persona_id: None,
     };
 
     let messages = vec![ChatMessage::user(prompt)];

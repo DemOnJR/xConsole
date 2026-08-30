@@ -54,6 +54,13 @@ pub struct ToolContext {
     /// Intake goal id for a normal chat turn (`/goal`). Loop cycles use `goal:<id>`
     /// as the session id instead.
     pub goal_id: Option<String>,
+    /// Which named agent this turn *is*.
+    ///
+    /// A goal carries its persona on the goal row, but a turn that is not a goal had no
+    /// way to be anybody — so a message arriving over remote chat always ran as the
+    /// unnamed main agent, which then had to relay to the lead agent. The user asked a
+    /// question on WhatsApp and got an answer from a middleman.
+    pub persona_id: Option<String>,
 }
 
 /// Tool schemas advertised to the model.

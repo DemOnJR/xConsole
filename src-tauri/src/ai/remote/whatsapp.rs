@@ -819,21 +819,37 @@ mod tests {
     }
 
     #[test]
-    fn our_own_replies_come_back_marked_so_the_loop_guard_catches_them() {
-        // WhatsApp echoes outgoing messages to linked devices. Without this the agent's
-        // own reply would be read as the next command.
-        let m = parse_message(&serde_json::json!({
+    fn our_own_replies_are_ignored_but_the_owners_are_not() {
+        // WhatsApp echoes outgoing messages to linked devices, so the agent's own reply
+        // comes back and would be read as the next command — the agent talking to itself
+        // until the tokens run out.
+        //
+        // But `from_me` is not the test for that. A message the *user* types on their own
+        // phone is also from the linked account, so treating every `from_me` as an echo
+        // would ignore the owner commanding their own bridge. Only what this bridge sent
+        // is marked, and only that is dropped.
+        let ours = parse_message(&serde_json::json!({
             "id": "A1",
             "chat": "40712345678@s.whatsapp.net",
             "sender_id": "40799999999:2@s.whatsapp.net",
             "push_name": "Ada",
-            "from_me": true,
+            "is_our_echo": true,
             "text": "done"
         }))
         .unwrap();
-        assert!(m.is_bot);
-        assert_eq!(m.author.id, "40799999999");
-        assert_eq!(m.chat_id, "40712345678");
+        assert!(ours.is_bot, "our own reply must not drive the next turn");
+
+        let theirs = parse_message(&serde_json::json!({
+            "id": "A2",
+            "chat": "40712345678@s.whatsapp.net",
+            "sender_id": "40799999999:2@s.whatsapp.net",
+            "sender_phone": "40799999999",
+            "push_name": "Ada",
+            "text": "!x uptime"
+        }))
+        .unwrap();
+        assert!(!theirs.is_bot, "the owner's own message must still be heard");
+        assert_eq!(theirs.author.id, "40799999999");
     }
 
     #[test]
@@ -850,10 +866,40 @@ mod tests {
         // Absent or blank usernames stay absent rather than becoming an empty string
         // that an allowlist entry of `@` could match.
         let m2 = parse_message(&serde_json::json!({
-            "sender_id": "1@s.whatsapp.net", "sender_username": "  ", "text": "hi"
+            "chat": "1@s.whatsapp.net",
+            "sender_id": "1@s.whatsapp.net",
+            "sender_username": "  ",
+            "text": "hi"
         }))
         .unwrap();
         assert_eq!(m2.author.username, None);
+    }
+
+    #[test]
+    fn a_message_from_no_chat_is_dropped() {
+        // The chat is where the reply goes. Without one there is nowhere to answer, and
+        // an allowlist entry restricting the bridge to a single chat could not be
+        // checked against anything.
+        assert!(parse_message(&serde_json::json!({
+            "sender_id": "1@s.whatsapp.net", "text": "hi"
+        }))
+        .is_none());
+    }
+
+    #[test]
+    fn the_phone_number_is_preferred_over_the_lid() {
+        // WhatsApp addresses newer accounts by an opaque LID. The allowlist is typed
+        // from a contacts app, so the number is what has to be matched when it is known;
+        // the LID is the fallback, not the other way round.
+        let m = parse_message(&serde_json::json!({
+            "chat": "1@s.whatsapp.net",
+            "sender_id": "99887766@lid",
+            "sender_lid": "99887766",
+            "sender_phone": "40712345678",
+            "text": "hi"
+        }))
+        .unwrap();
+        assert_eq!(m.author.id, "40712345678");
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
+  type Persona,
   type RemoteKind,
   type RemoteStatus,
   type WhatsAppStatus,
@@ -97,12 +98,14 @@ export function RemoteSection() {
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [activities, setActivities] = useState<RemoteActivityItem[]>([]);
   const vpsList = useVpsStore((s) => s.vpsList);
+  const [personas, setPersonas] = useState<Persona[]>([]);
 
   // Local drafts so the form does not fight the round trip on every keystroke.
   const [shared, setShared] = useState({
     enabled: false,
     prefix: "!x",
     safetyMode: "allowlist",
+    personaId: "" as string,
     targets: [] as string[],
   });
   const [drafts, setDrafts] = useState<Record<RemoteKind, Draft>>({
@@ -113,6 +116,7 @@ export function RemoteSection() {
   const [tab, setTab] = useState<RemoteKind>("whatsapp");
 
   const load = useCallback(async () => {
+    setPersonas(await api.listPersonas().catch(() => [] as Persona[]));
     const s = await api.getRemoteStatus().catch(() => null);
     if (!s) return;
     setStatus(s);
@@ -120,6 +124,7 @@ export function RemoteSection() {
       enabled: s.enabled,
       prefix: s.prefix,
       safetyMode: s.safety_mode,
+      personaId: s.persona_id ?? "",
       targets: s.targets,
     });
     setDrafts((prev) => {
@@ -155,7 +160,7 @@ export function RemoteSection() {
     setError(null);
     try {
       const next = await api.saveRemoteConfig(
-        shared,
+        { ...shared, personaId: shared.personaId || null },
         ORDER.map((kind) => ({
           kind,
           enabled: drafts[kind].enabled,
@@ -207,7 +212,9 @@ export function RemoteSection() {
           }`}
         >
           {status.usable
-            ? `Armed on ${armed.map((t) => COPY[t.kind].name).join(", ")} — an allowed person can command the agent.`
+            ? `Armed on ${armed.map((t) => COPY[t.kind].name).join(", ")} — an allowed person is answered by ${
+                status.persona_name ?? "the main agent"
+              }.`
             : !status.enabled
               ? "Not armed: remote control master toggle is off (see bottom of this section)."
               : "Not armed: configure and enable a transport above."}
@@ -300,7 +307,27 @@ export function RemoteSection() {
         </Field>
       </div>
 
-      <Field label="Servers it may touch" hint="Remote commands are limited to these.">
+      <Field
+        label="Who answers"
+        hint="Pick a named agent and it replies itself, using its own instructions, servers, trust level and model. Leave it on the main agent and every message is answered by an unnamed relay that hands the work on — so the reply comes from a middleman rather than from the agent you put in charge."
+      >
+        <Select
+          value={shared.personaId}
+          onChange={(e) => setShared((s) => ({ ...s, personaId: e.target.value }))}
+        >
+          <option value="">The main agent (relays to your team)</option>
+          {personas
+            .filter((p) => p.enabled)
+            .map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+                {p.role ? ` — ${p.role}` : ""}
+              </option>
+            ))}
+        </Select>
+      </Field>
+
+      <Field label="Servers it may touch" hint="Remote commands are limited to these. An agent with its own servers uses those instead.">
         {vpsList.length === 0 ? (
           <p className="text-[11px] text-gray-500">No servers configured yet.</p>
         ) : (
