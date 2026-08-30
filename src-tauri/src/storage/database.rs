@@ -486,6 +486,35 @@ impl Db {
             -- Kept as rows rather than buried in each goal's transcript so the whole
             -- exchange can be read as one conversation: who asked whom for what, who
             -- reported back, and what finally reached the user.
+            -- What a project is actually producing.
+            --
+            -- The teams exist to make the projects earn, and without figures that is
+            -- unmeasurable: an agent can report that it shipped three fixes and still
+            -- have no idea whether anything got better. One row is one number for one
+            -- day, so periods can be compared — which is the only way "sales are down"
+            -- becomes a fact rather than a feeling.
+            CREATE TABLE IF NOT EXISTS project_metric (
+                id           TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                -- 'revenue', 'orders', 'signups', 'refunds' — whatever the project has.
+                name         TEXT NOT NULL,
+                -- The day the figure is *about*, not when it was written: a number
+                -- recorded late still belongs to its own day.
+                period       TEXT NOT NULL,
+                value        REAL NOT NULL,
+                unit         TEXT,
+                note         TEXT,
+                -- Persona that recorded it. NULL = the user.
+                source_id    TEXT,
+                created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                -- Re-recording a day corrects it instead of double-counting. Agents
+                -- re-read the same source, and a duplicated day would quietly invent
+                -- revenue.
+                UNIQUE(workspace_id, name, period)
+            );
+            CREATE INDEX IF NOT EXISTS idx_project_metric_lookup
+                ON project_metric (workspace_id, name, period);
+
             CREATE TABLE IF NOT EXISTS agent_message (
                 id           TEXT PRIMARY KEY,
                 -- Sender. NULL = the user.
@@ -2350,6 +2379,87 @@ impl Db {
     /// and what it said (`agent_message`). Kept as one query per source rather than one
     /// join, because a task with no edits and an edit outside any task are both normal
     /// and a join would quietly drop one of them.
+    /// Record one figure for one day, correcting it if that day is already recorded.
+    pub fn upsert_metric(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        period: &str,
+        value: f64,
+        unit: Option<&str>,
+        note: Option<&str>,
+        source_id: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO project_metric (id, workspace_id, name, period, value, unit, note, source_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(workspace_id, name, period) DO UPDATE SET
+               value = excluded.value,
+               unit = COALESCE(excluded.unit, project_metric.unit),
+               note = excluded.note,
+               source_id = excluded.source_id,
+               created_at = datetime('now')",
+            params![
+                Uuid::new_v4().to_string(),
+                workspace_id,
+                name.trim().to_lowercase(),
+                period,
+                value,
+                unit,
+                note,
+                source_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Which metrics a project has figures for.
+    pub fn metric_names(&self, workspace_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT name FROM project_metric WHERE workspace_id = ?1 ORDER BY name")?;
+        let rows = stmt.query_map(params![workspace_id], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Daily figures for one metric, newest first.
+    pub fn metric_series(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        since_period: &str,
+    ) -> Result<Vec<(String, f64, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT period, value, unit FROM project_metric
+             WHERE workspace_id = ?1 AND name = ?2 AND period >= ?3
+             ORDER BY period DESC",
+        )?;
+        let rows = stmt.query_map(params![workspace_id, name.trim().to_lowercase(), since_period], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Total for one metric over a closed period, for comparing one window to the last.
+    pub fn metric_total(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        from_period: &str,
+        to_period: &str,
+    ) -> Result<(f64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn.query_row(
+            "SELECT COALESCE(SUM(value), 0), COUNT(*) FROM project_metric
+             WHERE workspace_id = ?1 AND name = ?2 AND period >= ?3 AND period < ?4",
+            params![workspace_id, name.trim().to_lowercase(), from_period, to_period],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(row)
+    }
+
     pub fn agent_tasks_since(
         &self,
         persona_id: &str,
