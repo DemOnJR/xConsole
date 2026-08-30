@@ -934,11 +934,13 @@ fn review_prompt(project: &str, focus: Option<&str>) -> String {
     let mut p = format!(
         "This is the recurring review of {project}. Nobody asked for it — it is your \
          standing job to keep this project healthy.\n\n\
-         Call project_review to get the briefing: how the numbers moved, what the team \
+         First call metric_collect, so the numbers are today's rather than whenever \
+         somebody last looked. Then call project_review to get the briefing: how the numbers moved, what the team \
          did and what came of it, what changed, and what is still open. Then decide, and \
          act:\n\
-         - If the numbers are missing, get them and record them with metric_record. \
-         Nothing here is answerable without them.\n\
+         - If there are no numbers at all, that is the first thing to fix: set up a \
+         source with metric_source_set so they collect themselves. Nothing here is \
+         answerable without them.\n\
          - If they fell while the team was busy, say what you think the real cause is and \
          delegate work that would test it — not more of what was already not working.\n\
          - If they rose, say which change you think did it, so it can be repeated.\n\

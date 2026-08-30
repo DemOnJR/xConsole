@@ -515,6 +515,29 @@ impl Db {
             CREATE INDEX IF NOT EXISTS idx_project_metric_lookup
                 ON project_metric (workspace_id, name, period);
 
+            -- How to fetch a number, so it does not have to be fetched by hand.
+            --
+            -- A figure nobody records is a figure nobody has, and asking a person to
+            -- type in yesterday's revenue every morning means it stops happening by
+            -- Thursday. One command per metric per project, defined once, run on a
+            -- schedule: whatever prints the number — a SQL query, a log count, an API
+            -- call — is the same shape from here.
+            CREATE TABLE IF NOT EXISTS metric_source (
+                id           TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                name         TEXT NOT NULL,
+                -- Server it runs on.
+                vps_id       TEXT NOT NULL,
+                -- Must print one number on stdout. Refused unless read-only: this runs
+                -- unattended forever after one approval, and a metric that changes
+                -- something is not a measurement.
+                command      TEXT NOT NULL,
+                unit         TEXT,
+                enabled      INTEGER NOT NULL DEFAULT 1,
+                created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(workspace_id, name)
+            );
+
             CREATE TABLE IF NOT EXISTS agent_message (
                 id           TEXT PRIMARY KEY,
                 -- Sender. NULL = the user.
@@ -2378,6 +2401,63 @@ impl Db {
     /// and what it said (`agent_message`). Kept as one query per source rather than one
     /// join, because a task with no edits and an edit outside any task are both normal
     /// and a join would quietly drop one of them.
+    /// Define (or redefine) how one of a project's numbers is fetched.
+    pub fn upsert_metric_source(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        vps_id: &str,
+        command: &str,
+        unit: Option<&str>,
+        enabled: bool,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO metric_source (id, workspace_id, name, vps_id, command, unit, enabled)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(workspace_id, name) DO UPDATE SET
+               vps_id = excluded.vps_id,
+               command = excluded.command,
+               unit = COALESCE(excluded.unit, metric_source.unit),
+               enabled = excluded.enabled",
+            params![
+                Uuid::new_v4().to_string(),
+                workspace_id,
+                name.trim().to_lowercase(),
+                vps_id,
+                command.trim(),
+                unit,
+                enabled as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every way this project knows to fetch a number. `(name, vps_id, command, unit, enabled)`.
+    pub fn list_metric_sources(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<(String, String, String, Option<String>, bool)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT name, vps_id, command, unit, enabled FROM metric_source
+             WHERE workspace_id = ?1 ORDER BY name",
+        )?;
+        let rows = stmt.query_map(params![workspace_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)? != 0))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn delete_metric_source(&self, workspace_id: &str, name: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM metric_source WHERE workspace_id = ?1 AND name = ?2",
+            params![workspace_id, name.trim().to_lowercase()],
+        )?;
+        Ok(())
+    }
+
     /// Record one figure for one day, correcting it if that day is already recorded.
     pub fn upsert_metric(
         &self,
