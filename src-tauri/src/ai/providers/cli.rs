@@ -228,6 +228,29 @@ impl CliProvider {
             );
         }
 
+        // Exit 0 with nothing to show is the case that has been hardest to explain: the
+        // run "worked", so no error is raised, and the caller can only report that the
+        // agent said nothing. Whatever the far side did print is the only account of
+        // why, so it is written down here rather than discarded.
+        if run.exit_code == 0 && out.content.trim().is_empty() {
+            crate::diag(&format!(
+                "cli(remote): {} exited 0 with no answer. stderr: {:?}",
+                remote.vps_id,
+                run.stderr.trim().chars().take(1000).collect::<String>()
+            ));
+            emit(
+                sink,
+                StreamEvent::Status(format!(
+                    "Claude Code on {} finished without answering{}",
+                    remote.vps_id,
+                    match run.stderr.trim() {
+                        "" => " and printed nothing — check xconsole.log for the command it ran".to_string(),
+                        e => format!(": {}", e.chars().take(200).collect::<String>()),
+                    }
+                )),
+            );
+        }
+
         if run.exit_code != 0 {
             // A failed run's session id is not worth resuming into.
             remove_cli_conversation(&req.session_id);

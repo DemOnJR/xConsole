@@ -8,6 +8,7 @@ import {
   type WhatsAppChat,
   type WhatsAppStatus,
 } from "../../../lib/tauri";
+import { isHelperTooOld } from "../../../lib/remoteHelper";
 import { useVpsStore } from "../../../stores/vpsStore";
 import { RefreshIcon } from "../../icons";
 import { Button, Card, Field, SectionHeader, Select, TextInput, Toggle } from "../ui";
@@ -616,28 +617,50 @@ function WhatsAppChatPicker({
       {error && (
         <div className="space-y-2">
           <p className="text-[11px] text-red-300">{error}</p>
-          {/* The helper is a separate binary that an app rebuild does not touch, so
-              "go and run a shell script" was the fix — which is not a fix a person
-              should have to find. */}
-          <Button
-            disabled={loading}
-            onClick={async () => {
-              setLoading(true);
-              setError(null);
-              try {
-                setError(await api.whatsappRebuildHelper());
-                setChats(await api.whatsappChats());
-              } catch (e) {
-                setError(String(e));
-              } finally {
-                setLoading(false);
-              }
-            }}
-          >
-            Rebuild the helper
-          </Button>
+          {isHelperTooOld(error) && (
+            <RebuildHelperButton
+              onDone={async () => {
+                setError(null);
+                setChats(await api.whatsappChats().catch(() => null));
+              }}
+            />
+          )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Rebuild the helper, offered wherever it said it was out of date.
+ *
+ * One component rather than a copy per error surface, so it cannot be offered in one
+ * place and forgotten in the other.
+ */
+function RebuildHelperButton({ onDone }: { onDone?: () => void | Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2">
+      <Button
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          setResult(null);
+          try {
+            setResult(await api.whatsappRebuildHelper());
+            await onDone?.();
+          } catch (e) {
+            setResult(String(e));
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        {busy ? "Rebuilding…" : "Rebuild the helper"}
+      </Button>
+      {result && <span className="text-[11px] text-gray-400">{result}</span>}
     </div>
   );
 }
@@ -736,6 +759,9 @@ function WhatsAppLink({ onReload }: { onReload: () => void }) {
       {wa?.error && (
         <div className="border border-[var(--warning)]/40 bg-[var(--warning)]/10 px-3 py-2 text-[11px] text-[var(--warning)]">
           {wa.error}
+          {isHelperTooOld(wa.error) && (
+            <RebuildHelperButton onDone={async () => setWa(await api.whatsappStatus())} />
+          )}
         </div>
       )}
 
