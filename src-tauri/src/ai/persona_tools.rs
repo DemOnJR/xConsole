@@ -16,13 +16,16 @@ use crate::ai::provider::ToolDef;
 use crate::ai::tools::ToolContext;
 use crate::storage::models::{GoalSession, GoalSpec};
 
-/// Ceiling on cycles for a delegated task when the caller names none.
-///
-/// Unbounded autonomy is the point, but an unbounded *loop* is how a stuck persona
-/// burns tokens all night against a goal it can never satisfy. The user can raise it
-/// per task, and a persona that hits the cap stops as "blocked" and says so rather
-/// than failing silently.
-const DEFAULT_MAX_CYCLES: i64 = 40;
+// A delegated task has no cycle ceiling by default.
+//
+// It used to be 40, and a count turned out to be the wrong measure entirely: forty
+// cycles that each changed something is a long piece of work finishing, and four that
+// changed nothing is an agent stuck. Stopping the first while letting the second run on
+// is exactly backwards, and the "reached max cycles" message sent people to raise a
+// number that was never the problem.
+//
+// The loop stops on lack of progress instead (`goal::STALL_LIMIT`). A ceiling is still
+// available per task for anyone who wants a hard budget.
 
 pub fn definitions() -> Vec<ToolDef> {
     vec![
@@ -57,7 +60,7 @@ task be routed to whoever fits."
                         "items": {"type": "string"},
                         "description": "Servers to work on. Defaults to the persona's own servers."
                     },
-                    "max_cycles": {"type": "integer", "description": "Cycle ceiling before it stops as blocked (default 40)."},
+                    "max_cycles": {"type": "integer", "description": "Optional hard budget of plan/act/verify cycles. Leave it out: there is no default ceiling, and the loop already stops on its own when several cycles in a row change nothing. Only set it when you specifically want to cap what a task may spend."},
                     "project": {
                         "type": "string",
                         "description": "Which project this is about, by name. Defaults to the one currently open. Give it when the user asks about a project that is not open — that is how one conversation reaches every team. Use teams_overview to see the names."
@@ -462,11 +465,11 @@ fn agent_delegate(ctx: &ToolContext, args: &Value) -> String {
         })
         .unwrap_or_default();
 
-    let max_cycles = args
+    // None unless the caller asked for a budget.
+    let max_cycles: Option<i64> = args
         .get("max_cycles")
         .and_then(|v| v.as_i64())
-        .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_MAX_CYCLES);
+        .filter(|n| *n > 0);
 
     let spec = GoalSpec {
         objective: task.to_string(),
@@ -474,7 +477,7 @@ fn agent_delegate(ctx: &ToolContext, args: &Value) -> String {
         check_method: "Verify with tools against the servers before claiming done.".into(),
         check_tooling: vec![],
         hard_constraints: vec![],
-        max_cycles: Some(max_cycles),
+        max_cycles,
         vps_targets: targets.clone(),
     };
     let id = uuid::Uuid::new_v4().to_string();
@@ -518,12 +521,15 @@ fn agent_delegate(ctx: &ToolContext, args: &Value) -> String {
         String::new()
     };
     format!(
-        "Delegated to {name}{how} (task_id {id}, {where_}, up to {max_cycles} cycles).\n\
+        "Delegated to {name}{how} (task_id {id}, {where_}{budget}).\n\
          {name} is working on it in the background now and the user is notified when it \
          finishes. Do not wait for it — carry on with what the user asked. Use \
          agent_check(task_id: \"{id}\") to see progress.",
         name = persona.name,
         how = how,
+        budget = max_cycles
+            .map(|n| format!(", capped at {n} cycles"))
+            .unwrap_or_default(),
     )
 }
 

@@ -327,6 +327,10 @@ pub async fn run_loop(ctx: &GoalContext, goal_id: &str) {
 
     ctx.session_state.clear_cancel(&format!("goal:{goal_id}"));
 
+    // Progress, not iterations. See `STALL_LIMIT`.
+    let mut last_fingerprint: Option<u64> = None;
+    let mut stalled: i64 = 0;
+
     loop {
         if ctx.session_state.is_cancelled(&format!("goal:{goal_id}")) {
             return;
@@ -372,13 +376,47 @@ pub async fn run_loop(ctx: &GoalContext, goal_id: &str) {
 
         let cycles = goal.cycles + 1;
         goal.cycles = cycles;
+
+        // Did that cycle do anything?
+        let fingerprint = progress_fingerprint(ctx, &goal);
+        if Some(fingerprint) == last_fingerprint {
+            stalled += 1;
+        } else {
+            stalled = 0;
+            last_fingerprint = Some(fingerprint);
+        }
+        if stalled >= STALL_LIMIT {
+            goal.status = "blocked".to_string();
+            goal.finished_at = Some(Utc::now().to_rfc3339());
+            // Says what it did not do, because "reached max cycles" sent the user to
+            // raise a number when the number was never the problem — and a higher one
+            // buys nothing but more empty iterations.
+            goal.outcome = Some(format!(
+                "Stopped after {STALL_LIMIT} cycles in a row that changed nothing: no file \
+                 edited, no board card moved, no finding recorded. It ran {cycles} cycles in \
+                 total. Raising a cycle limit will not help — read what it actually did \
+                 (session_read, task_audit); most often the success criteria cannot be \
+                 checked with the tools it has, so it can never conclude."
+            ));
+            let _ = save_goal(ctx, &goal);
+            notify_user(
+                &ctx.app,
+                "Goal stalled",
+                &format!("{} stopped making progress", goal.title),
+            );
+            return;
+        }
+
+        // An explicit ceiling, only when the user asked for one. There is no default:
+        // a task that keeps producing work is a task that should keep running.
         let spec = parse_spec(&goal);
         if let Some(max) = spec.as_ref().and_then(|s| s.max_cycles) {
             if cycles >= max {
                 goal.status = "blocked".to_string();
                 goal.finished_at = Some(Utc::now().to_rfc3339());
                 goal.outcome = Some(format!(
-                    "Stopped after {cycles} cycles without meeting the criteria."
+                    "Stopped at the {max}-cycle limit set for this task. It was still making \
+                     progress, so raise or remove the limit if the work is worth finishing."
                 ));
                 let _ = save_goal(ctx, &goal);
                 notify_user(&ctx.app, "Goal blocked", &format!("{} reached max cycles", goal.title));
@@ -388,6 +426,40 @@ pub async fn run_loop(ctx: &GoalContext, goal_id: &str) {
         let _ = save_goal(ctx, &goal);
         tokio::time::sleep(CYCLE_GAP).await;
     }
+}
+
+/// How many cycles in a row may produce nothing before the loop gives up.
+///
+/// Not a budget — a stall detector. A cycle that changed a file, moved a card, recorded
+/// a finding or sent a message has done something, and there is no ceiling on how many
+/// of those a task may take: a migration that needs two hundred is a migration that
+/// needs two hundred.
+///
+/// What this catches is the spiral that an agent does *not* notice, because every step
+/// feels new: "that did not work, let me try a slightly different approach", forever.
+/// No single iteration looks like repetition, and nothing accumulates. Five in a row
+/// with nothing recorded is not a busy agent, it is a stuck one.
+const STALL_LIMIT: i64 = 5;
+
+/// A fingerprint of everything a cycle could visibly accomplish.
+///
+/// Deliberately coarse: it is not asking whether the work was *good*, only whether
+/// anything happened at all. Two identical fingerprints across a cycle mean the agent
+/// moved no card, recorded no finding, and changed no file — with tools available and a
+/// goal unmet, there is nothing left that would count.
+fn progress_fingerprint(ctx: &GoalContext, goal: &GoalSession) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    goal.kanban_json.hash(&mut h);
+    goal.memory_json.hash(&mut h);
+    // Files it actually changed. The strongest signal, and the one an agent cannot
+    // produce by writing a hopeful summary.
+    ctx.db
+        .list_file_changes(Some(&format!("goal:{}", goal.id)), None, 500)
+        .map(|c| c.len())
+        .unwrap_or(0)
+        .hash(&mut h);
+    h.finish()
 }
 
 /// Make sure a finished run did not leave work in one place only.
@@ -500,4 +572,43 @@ pub fn spawn_tick(ctx: GoalContext) {
             resume_due_goals(&ctx).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stall_is_measured_in_cycles_that_changed_nothing() {
+        // The rule the loop applies, stated on its own: progress resets the counter,
+        // and only consecutive nothing counts. A task that produces something every
+        // few cycles is working, however long it takes.
+        let mut stalled = 0i64;
+        let mut last: Option<u64> = None;
+        // Six cycles: work, work, nothing, nothing, work, nothing.
+        for fp in [1u64, 2, 2, 2, 3, 3] {
+            if Some(fp) == last {
+                stalled += 1;
+            } else {
+                stalled = 0;
+                last = Some(fp);
+            }
+        }
+        // Two runs of nothing, neither long enough, and the middle one was reset by
+        // real work — so it keeps going.
+        assert!(stalled < STALL_LIMIT, "stalled={stalled}");
+
+        // Five in a row with nothing recorded is a stuck agent, not a busy one.
+        let mut stalled = 0i64;
+        let mut last: Option<u64> = None;
+        for fp in [7u64, 7, 7, 7, 7, 7] {
+            if Some(fp) == last {
+                stalled += 1;
+            } else {
+                stalled = 0;
+                last = Some(fp);
+            }
+        }
+        assert!(stalled >= STALL_LIMIT, "stalled={stalled}");
+    }
 }
