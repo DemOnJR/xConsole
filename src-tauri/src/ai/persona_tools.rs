@@ -209,6 +209,22 @@ anyone's remit, and on a schedule so a project is reviewed even when nobody asks
             }),
         },
         ToolDef {
+            name: "task_audit".into(),
+            description: "Check a finished task's report against what actually happened: the \
+commands its session ran, the files it changed, and whether the work was committed. Use it \
+before believing a result you are going to build on, and on anything a team member reports as \
+done. It flags the combinations that do not add up — 'done' with nothing changed, or a claim of \
+testing with no test having run."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "The delegated task to audit."}
+                },
+                "required": ["task_id"]
+            }),
+        },
+        ToolDef {
             name: "agent_activity".into(),
             description: "What one agent has actually done over the last N days: the tasks it \
 was given and how each ended, the files it changed, and what it said to the rest of the team. \
@@ -275,6 +291,7 @@ pub fn is_persona_tool(name: &str) -> bool {
             | "agent_org"
             | "teams_overview"
             | "agent_activity"
+            | "task_audit"
             | "project_review"
             | "review_schedule"
             | "project_history"
@@ -313,6 +330,7 @@ pub async fn dispatch(ctx: &ToolContext, name: &str, args: &Value) -> String {
         "agent_org" => agent_org(ctx),
         "teams_overview" => teams_overview(ctx),
         "agent_activity" => agent_activity(ctx, args),
+        "task_audit" => task_audit(ctx, args).await,
         "project_review" => project_review(ctx, args).await,
         "review_schedule" => review_schedule(ctx, args).await,
         "project_history" => project_history(ctx, args).await,
@@ -1198,6 +1216,8 @@ fn review_prompt(project: &str, focus: Option<&str>) -> String {
          - If they rose, say which change you think did it, so it can be repeated.\n\
          - If someone on the team did nothing, either give them work or say their remit \
          is wrong.\n\
+         - Before you believe a \"done\" you are going to build on, run task_audit on it. \
+         A report is a claim, and an unchecked one gets built on.\n\
          - A stale pull request is not a small thing: left open, the code around it moves \
          until merging it is a rewrite of work already paid for. Get it rebased and \
          merged, or closed with a reason. Never leave it.\n\n\
@@ -1477,6 +1497,140 @@ async fn project_review(ctx: &ToolContext, args: &Value) -> String {
          is missing a skill, agent_dismiss or agent_hire (same name) to change a remit \
          that is not paying off. Report what you decided upward with agent_report.\n",
     );
+    out
+}
+
+/// Whether a finished task's report matches what the machine recorded.
+///
+/// An agent reports its own work, so every "done" is a claim. Most are true, but "most"
+/// is not something to build on when the work happened unattended — and the failure is
+/// quiet: a task marked done, a summary that reads well, and nothing behind it.
+///
+/// None of these facts come from the agent making the claim. The commands are in the
+/// CLI's own transcript, the files are in the edit journal, the commits are in git. Put
+/// side by side, the combinations that cannot both be true become obvious, and this
+/// names them rather than leaving a reader to spot them.
+async fn task_audit(ctx: &ToolContext, args: &Value) -> String {
+    let task_id = args.get("task_id").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let Some(goal) = ctx.db.get_goal(task_id).ok().flatten() else {
+        return format!("error: no task {task_id}");
+    };
+    let who = goal
+        .persona_id
+        .as_deref()
+        .map(|id| display_name(ctx, Some(id)))
+        .unwrap_or_else(|| "the main agent".into());
+
+    // What was claimed.
+    let claim = goal
+        .outcome
+        .as_deref()
+        .map(str::trim)
+        .filter(|o| !o.is_empty())
+        .unwrap_or("(nothing was recorded about the result)");
+
+    // What was recorded, by things the agent does not write.
+    let changes = ctx
+        .db
+        .list_file_changes(Some(&format!("goal:{task_id}")), None, 500)
+        .unwrap_or_default();
+    let commands_run = match crate::ai::providers::cli::get_cli_conversation(&format!("goal:{task_id}")) {
+        Some(session) => {
+            let cmd = crate::ai::transcript::read_command(&session);
+            let out = match ctx.targets.first() {
+                Some(v) => ctx.sessions.run_command(v, &cmd).await.map(|o| o.stdout).unwrap_or_default(),
+                None => crate::proc::quiet_command("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                    .unwrap_or_default(),
+            };
+            if out.trim().starts_with("NOT_FOUND") || out.trim().is_empty() {
+                None
+            } else {
+                let body = out.split_once('\n').map(|(_, r)| r).unwrap_or(&out);
+                Some(crate::ai::transcript::parse(body))
+            }
+        }
+        None => None,
+    };
+
+    let mut out = format!(
+        "Audit of \"{}\" ({}), run by {who}, status {}\n\nWhat it reported:\n{claim}\n",
+        goal.title, task_id, goal.status
+    );
+
+    out.push_str(&format!("\nWhat was recorded:\n- {} file change(s)\n", changes.len()));
+    for c in changes.iter().take(10) {
+        out.push_str(&format!("  · {} {}\n", if c.is_new { "created" } else { "edited" }, c.path));
+    }
+    let cmd_count = match &commands_run {
+        Some(entries) => {
+            let cmds = crate::ai::transcript::commands(entries);
+            out.push_str(&format!("- {} command(s) run\n", cmds.len()));
+            for c in cmds.iter().rev().take(10).rev() {
+                out.push_str(&format!("  · {c}\n"));
+            }
+            Some(cmds.len())
+        }
+        None => {
+            // Absence of a transcript is not evidence of absence of work, and reporting
+            // it as "0 commands" would accuse an agent of doing nothing on the strength
+            // of a cleaned-up log file.
+            out.push_str("- commands: no transcript available (the CLI cleans them up, and \
+                          not every provider keeps one) — this is unknown, not zero\n");
+            None
+        }
+    };
+
+    // The combinations that cannot both be true.
+    let mut flags: Vec<String> = Vec::new();
+    if goal.status == "done" {
+        if changes.is_empty() && cmd_count == Some(0) {
+            flags.push(
+                "reported done, but nothing was changed and no command was run. Either the \
+                 work was already done — in which case the report should say so — or it was \
+                 not done."
+                    .into(),
+            );
+        }
+        let claim_lower = claim.to_lowercase();
+        if claim_lower.contains("test") && cmd_count == Some(0) {
+            flags.push("claims testing, but the session ran no commands.".into());
+        }
+        if (claim_lower.contains("deploy") || claim_lower.contains("push"))
+            && changes.is_empty()
+            && cmd_count == Some(0)
+        {
+            flags.push("claims a deploy or push with nothing recorded behind it.".into());
+        }
+        if goal.cycles <= 1 && changes.is_empty() && cmd_count.unwrap_or(0) <= 1 {
+            flags.push(
+                "finished in one cycle with almost nothing recorded — worth reading the \
+                 transcript with session_read before relying on it."
+                    .into(),
+            );
+        }
+    }
+
+    if flags.is_empty() {
+        out.push_str(
+            "\nNothing contradicts the report. That is not proof it is right — read the \
+             commands above against what it claims, because only you can tell whether they \
+             do what it says they did.\n",
+        );
+    } else {
+        out.push_str("\nDoes not add up:\n");
+        for f in &flags {
+            out.push_str(&format!("- {f}\n"));
+        }
+        out.push_str(
+            "\nOpen it with session_read before accepting this. If the report is wrong, say \
+             so to whoever wrote it and to the user — a false report that goes uncorrected is \
+             built on.\n",
+        );
+    }
     out
 }
 

@@ -304,6 +304,43 @@ fn is_minimal_prompt(ctx: &PromptContext) -> bool {
 const OLLAMA_COMPACT_CTX: u32 = 65_536;
 
 /// Guidance for the built-in memory tool.
+/// What may be claimed, and what has to be true first.
+///
+/// Not "be honest" — a model cannot be made truthful by being asked. What works is
+/// making claims cheap to check and saying so: every one of these is enforced somewhere
+/// (`session_read` opens the transcript, `agent_activity` lists what changed,
+/// `repo_status` says what was committed), so an agent that reports something it did not
+/// do is not getting away with it, it is producing a discrepancy somebody will read.
+pub const TRUTH_GUIDANCE: &str = "Reporting what you did:\n\
+- Say only what you actually did, and only what you actually verified. Everything you \
+claim is checkable: your session transcript records every command you ran, the edit \
+journal records every file you changed, and anyone can read both with session_read and \
+agent_activity. A report that does not match them is worse than no report, because work \
+gets built on it.\n\
+- \"I ran X and it returned Y\" is a claim about a command you ran. If you did not run \
+it, do not write it. If it failed, say it failed.\n\
+- Verify before you say something is done. Not 'the change looks right' — run the thing, \
+read the output, and cite it. If you could not verify it, say that instead, plainly: \
+\"changed, not yet tested\" is a useful report and \"done\" would be a false one.\n\
+- If you are unsure, say you are unsure. If you are stuck, say you are stuck. Neither \
+costs you anything; a confident wrong answer costs the user a day.\n\
+- Never pad a report to look productive. Work that did not need doing is worse than no \
+work: it has to be reviewed, maintained and eventually undone.";
+
+/// Nothing reaches production without having been run somewhere it cannot hurt.
+pub const RELEASE_GUIDANCE: &str = "Before anything reaches production:\n\
+- Run it somewhere it cannot hurt first. A staging host, a copy of the database, a \
+container, a scratch directory, `--dry-run`, a transaction you roll back — whatever that \
+system offers. \"It should work\" is not a test.\n\
+- Anything that deletes or overwrites gets looked at before it runs: count the rows, list \
+the files, check the path resolves to what you think. A wrong path looks exactly like a \
+right one, and there is no undo.\n\
+- Take a backup before a destructive change to data, and say where you put it.\n\
+- Do not ship on a red build. If tests exist, run them; if they fail on what you touched, \
+that is your work. If none exist for what you changed, write one — that is how the next \
+person finds out you broke it instead of the user finding out.\n\
+- Deploy in a way you can reverse, and say how to reverse it.";
+
 /// How to work in a repository somebody else is also working in.
 ///
 /// Every rule here is one way autonomous work quietly destroys value rather than
@@ -603,6 +640,8 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
         if ctx.has_tools {
             rules.push(REPO_GUIDANCE.to_string());
             rules.push(CODE_GUIDANCE.to_string());
+            rules.push(TRUTH_GUIDANCE.to_string());
+            rules.push(RELEASE_GUIDANCE.to_string());
         }
         if ctx.plan_mode {
             rules.push(PLAN_MODE_GUIDANCE.to_string());

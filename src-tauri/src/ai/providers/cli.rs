@@ -26,7 +26,11 @@ fn bridge_token(bridge: &Option<crate::ssh::agent_exec::McpBridge>) -> String {
 static CLI_SESSIONS: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn get_cli_conversation(session_id: &str) -> Option<String> {
+/// The CLI's own session id for one xConsole session, when there is one.
+///
+/// Public so a session can be read back: an agent's report is a claim, and the CLI's
+/// transcript is the record it can be checked against.
+pub fn get_cli_conversation(session_id: &str) -> Option<String> {
     if session_id.is_empty() {
         return None;
     }

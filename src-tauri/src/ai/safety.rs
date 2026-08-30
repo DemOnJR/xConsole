@@ -403,11 +403,17 @@ pub async fn authorize(
         return Err(format!("blocked (SSH lockout risk): {why}"));
     }
 
-    let needs_approval = match safety {
-        "full" => false,
-        "allowlist" => !is_allowlisted(command),
-        _ => true, // "approve" and any unknown value: safest path
-    };
+    // Something that cannot be undone is approved by a person, whatever the mode says.
+    // "Run anything" is the user saying they trust the agent's judgement about ordinary
+    // work; it is not them agreeing in advance to a delete that turns out to have named
+    // the wrong path. And an unattended run has nobody to ask, so it stops instead.
+    let destroys = crate::ai::irreversible::classify(command);
+    let needs_approval = destroys.is_some()
+        || match safety {
+            "full" => false,
+            "allowlist" => !is_allowlisted(command),
+            _ => true, // "approve" and any unknown value: safest path
+        };
 
     if !needs_approval {
         return Ok(());
@@ -416,7 +422,31 @@ pub async fn authorize(
     // Masked before it is persisted, emitted to the UI, or put in an error string. The
     // user still sees the whole command and which variables it sets — just not their
     // values, which they did not need to read in order to approve it.
-    let shown = redact_secrets(command);
+    let mut shown = redact_secrets(command);
+
+    // Measure the damage before asking. "Delete /srv/app" tells a reader nothing;
+    // "delete /srv/app — 41,203 files, 12 GB, last written four minutes ago" is a
+    // different decision, and it is the one that catches a path with a typo in it.
+    if let Some(d) = &destroys {
+        let mut note = format!("\n\nTHIS CANNOT BE UNDONE — it would {}.\n{}", d.what, d.why);
+        if !d.preview.is_empty() {
+            match vps_id {
+                Some(vps) => match crate::ssh::command::run_vps_command(db, vps, &d.preview).await {
+                    Ok(o) if !o.stdout.trim().is_empty() => note.push_str(&format!(
+                        "\n\nWhat is there right now:\n{}",
+                        o.stdout.trim().chars().take(1200).collect::<String>()
+                    )),
+                    // Said plainly. "We could not look" and "there is nothing there" are
+                    // opposite conclusions, and confusing them is how an empty preview
+                    // becomes a reason to approve.
+                    Ok(_) => note.push_str("\n\nThe preview returned nothing — check by hand before approving."),
+                    Err(e) => note.push_str(&format!("\n\nCould not preview it ({e}) — check by hand.")),
+                },
+                None => note.push_str("\n\nNo server to preview against — check by hand."),
+            }
+        }
+        shown.push_str(&note);
+    }
 
     let approval = db
         .create_approval(session_id, vps_id, &shown)
@@ -448,6 +478,22 @@ pub async fn authorize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn something_irreversible_is_approved_by_a_person_whatever_the_mode_says() {
+        // "Run anything" is the user trusting the agent's judgement about ordinary work.
+        // It is not them agreeing in advance to a delete that named the wrong path, and
+        // those are the two things a single trust setting would otherwise conflate.
+        //
+        // Asserted through the classifier the gate consults, because the gate itself
+        // needs an app handle and a database to run.
+        assert!(crate::ai::irreversible::classify("rm -rf /srv/app").is_some());
+        assert!(crate::ai::irreversible::classify("DROP DATABASE orders").is_some());
+        // And ordinary work still runs unattended under "full" — a guard that stops
+        // everything is one the user turns off.
+        assert!(crate::ai::irreversible::classify("systemctl restart nginx").is_none());
+        assert!(crate::ai::irreversible::classify("git push origin dev").is_none());
+    }
 
     #[test]
     fn read_only_simple_commands() {
