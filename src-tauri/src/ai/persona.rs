@@ -147,6 +147,24 @@ pub fn effective_targets(persona: Option<&Persona>, requested: &[String]) -> Vec
 }
 
 /// One line per persona, for a picker or for the agent to choose from.
+/// The agents in play for one project: its own team, plus the company-wide ones.
+///
+/// With several projects running, every agent being visible everywhere makes "the
+/// reviewer" ambiguous and gives routing nothing to route on. An agent with no project
+/// is deliberately company-wide — that is what the one the user talks to is.
+pub fn team_for<'a>(all: &'a [Persona], workspace_id: Option<&str>) -> Vec<&'a Persona> {
+    all.iter()
+        .filter(|p| match (p.workspace_id.as_deref(), workspace_id) {
+            // Company-wide agents are in play everywhere, including with no project open.
+            (None, _) => true,
+            // A project's own team, only while that project is the one being worked on.
+            (Some(home), Some(here)) => home == here,
+            // No project open: another project's team is not addressable by accident.
+            (Some(_), None) => false,
+        })
+        .collect()
+}
+
 pub fn format_catalog(personas: &[Persona]) -> String {
     if personas.is_empty() {
         return "(no personas defined — create one in Settings → Agents)".into();
@@ -340,7 +358,13 @@ pub fn best_match<'a>(all: &'a [Persona], task: &str) -> Option<&'a Persona> {
         // Naming an agent outright is decisive — "ask Ada to…" must reach Ada even if
         // another agent's description happens to overlap the rest of the sentence.
         let named = task_words.iter().any(|w| w.eq_ignore_ascii_case(&p.name.to_lowercase()));
-        let score = hits as f32 / (remit_words.len() as f32).sqrt() + if named { 10.0 } else { 0.0 };
+        // A project's own team wins a tie against a company-wide agent whose description
+        // happens to overlap. "Fix the checkout" on the CSB project means CSB's engineer,
+        // not whoever else has the word "fix" in their remit.
+        let homed = if p.workspace_id.is_some() { 0.5 } else { 0.0 };
+        let score = hits as f32 / (remit_words.len() as f32).sqrt()
+            + if named { 10.0 } else { 0.0 }
+            + homed;
         if best.map(|(_, b)| score > b).unwrap_or(true) {
             best = Some((p, score));
         }
@@ -358,6 +382,7 @@ mod tests {
             name: name.into(),
             role: String::new(),
             instructions: String::new(),
+            workspace_id: None,
             targets: vec![],
             safety_mode: None,
             provider_id: None,
@@ -602,6 +627,48 @@ mod tests {
             vec!["default-a".to_string()]
         );
         assert!(effective_targets(None, &[]).is_empty());
+    }
+
+    fn on_project(name: &str, ws: Option<&str>) -> Persona {
+        let mut p = persona(name);
+        p.workspace_id = ws.map(str::to_string);
+        p
+    }
+
+    #[test]
+    fn a_project_sees_its_own_team_and_the_company_wide_agents() {
+        // One team per project. Another project's engineer must not be addressable by
+        // accident: with several projects running, "ask the engineer" would otherwise
+        // reach whichever one the database returned first.
+        let all = vec![
+            on_project("Atlas", None),
+            on_project("CsbEngineer", Some("ws-csb")),
+            on_project("GqEngineer", Some("ws-gq")),
+        ];
+        let names = |ws| {
+            team_for(&all, ws)
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(Some("ws-csb")), vec!["Atlas", "CsbEngineer"]);
+        assert_eq!(names(Some("ws-gq")), vec!["Atlas", "GqEngineer"]);
+        // With no project open only the company-wide agents answer — the ones that are
+        // meant to, rather than every team at once.
+        assert_eq!(names(None), vec!["Atlas"]);
+    }
+
+    #[test]
+    fn the_projects_own_agent_wins_a_tie_against_a_company_wide_one() {
+        // Both remits match the words; the one that lives on this project is the one
+        // that knows the codebase.
+        let mut house = on_project("Fixer", None);
+        house.role = "fixes checkout bugs".into();
+        let mut mine = on_project("CsbFixer", Some("ws-csb"));
+        mine.role = "fixes checkout bugs".into();
+        let all = vec![house, mine];
+        let team: Vec<Persona> = team_for(&all, Some("ws-csb")).into_iter().cloned().collect();
+        assert_eq!(best_match(&team, "fixes checkout bugs").map(|p| p.name.as_str()), Some("CsbFixer"));
     }
 
     #[test]

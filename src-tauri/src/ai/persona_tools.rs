@@ -57,7 +57,11 @@ task be routed to whoever fits."
                         "items": {"type": "string"},
                         "description": "Servers to work on. Defaults to the persona's own servers."
                     },
-                    "max_cycles": {"type": "integer", "description": "Cycle ceiling before it stops as blocked (default 40)."}
+                    "max_cycles": {"type": "integer", "description": "Cycle ceiling before it stops as blocked (default 40)."},
+                    "project": {
+                        "type": "string",
+                        "description": "Which project this is about, by name. Defaults to the one currently open. Give it when the user asks about a project that is not open — that is how one conversation reaches every team. Use teams_overview to see the names."
+                    }
                 },
                 "required": ["task"]
             }),
@@ -151,6 +155,15 @@ staging box\"). Naming an existing agent updates it instead of creating a second
             parameters: json!({"type": "object", "properties": {}}),
         },
         ToolDef {
+            name: "teams_overview".into(),
+            description: "Every project, the team on it, and what each team is working on \
+right now. This is how you answer \"what is happening?\" across everything without opening \
+each project in turn, and how you decide which team a request belongs to. Call it before \
+delegating something that is not about the project currently open."
+                .into(),
+            parameters: json!({"type": "object", "properties": {}}),
+        },
+        ToolDef {
             name: "project_history".into(),
             description: "Everything this project has to show for itself: the tasks that were delegated, what the agents said to each other, the files that changed, and the commits that came out of it. Use it to catch up on a project rather than asking the user what happened. It covers the project currently open — other projects' work is deliberately not included."
                 .into(),
@@ -189,6 +202,7 @@ pub fn is_persona_tool(name: &str) -> bool {
             | "agent_hire"
             | "agent_dismiss"
             | "agent_org"
+            | "teams_overview"
             | "project_history"
     )
 }
@@ -216,19 +230,40 @@ pub async fn dispatch(ctx: &ToolContext, name: &str, args: &Value) -> String {
         "agent_hire" => agent_hire(ctx, args).await,
         "agent_dismiss" => agent_dismiss(ctx, args).await,
         "agent_org" => agent_org(ctx),
+        "teams_overview" => teams_overview(ctx),
         "project_history" => project_history(ctx, args).await,
         _ => format!("error: unknown persona tool {name}"),
     }
 }
 
+/// Everyone addressable right now: this project's team plus the company-wide agents.
+fn team(ctx: &ToolContext) -> Vec<crate::storage::models::Persona> {
+    let all = ctx.db.list_personas().unwrap_or_default();
+    let here = ctx.workspace_id.as_deref().filter(|s| !s.is_empty());
+    crate::ai::persona::team_for(&all, here)
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
 fn agent_list(ctx: &ToolContext) -> String {
-    match ctx.db.list_personas() {
-        Ok(list) => format!(
-            "Named agents you can delegate to:\n{}",
-            crate::ai::persona::format_catalog(&list)
-        ),
-        Err(e) => format!("error listing agents: {e}"),
-    }
+    let list = team(ctx);
+    let scope = match ctx.workspace_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(ws) => ctx
+            .db
+            .get_workspace(ws)
+            .ok()
+            .flatten()
+            .map(|w| format!(" on {}", w.name))
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+    format!(
+        "Agents you can delegate to{scope} (this project's team, plus company-wide \
+         agents):\n{}\n\nAgents on other projects are deliberately not listed — open \
+         that project to reach them, or ask their manager.",
+        crate::ai::persona::format_catalog(&list)
+    )
 }
 
 fn agent_delegate(ctx: &ToolContext, args: &Value) -> String {
@@ -237,7 +272,34 @@ fn agent_delegate(ctx: &ToolContext, args: &Value) -> String {
         return "error: missing 'task'".into();
     }
     let requested = args.get("agent").and_then(|v| v.as_str()).unwrap_or("").trim();
-    let known = ctx.db.list_personas().unwrap_or_default();
+
+    // Which project this task belongs to. Naming one is how the single conversation the
+    // user has reaches a team whose project is not the one open in front of them.
+    let project = match args.get("project").and_then(|v| v.as_str()).map(str::trim) {
+        Some(name) if !name.is_empty() => {
+            let all = ctx.db.list_workspaces().unwrap_or_default();
+            match all
+                .iter()
+                .find(|w| w.name.eq_ignore_ascii_case(name) || w.id == name)
+            {
+                Some(w) => Some(w.id.clone()),
+                None => {
+                    return format!(
+                        "error: no project called {name:?}. Known projects: {}",
+                        all.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")
+                    )
+                }
+            }
+        }
+        _ => ctx.workspace_id.clone().filter(|s| !s.is_empty()),
+    };
+
+    let all = ctx.db.list_personas().unwrap_or_default();
+    let known: Vec<crate::storage::models::Persona> =
+        crate::ai::persona::team_for(&all, project.as_deref())
+            .into_iter()
+            .cloned()
+            .collect();
 
     // Named agent wins; otherwise route on remit, the way an agent that hits something
     // outside its scope forwards to whoever's description fits. Declining beats
@@ -331,10 +393,11 @@ fn agent_delegate(ctx: &ToolContext, args: &Value) -> String {
         updated_at: None,
         finished_at: None,
         persona_id: Some(persona.id.clone()),
-        // The delegated agent inherits the project it was delegated from. It is the
-        // only way it can know which codebase the objective is about — it does not see
-        // this conversation, and an objective without a project is a guess.
-        workspace_id: ctx.workspace_id.clone(),
+        // The project the work is about — the one named, or the one open. It is the
+        // only way the delegated agent can know which codebase the objective concerns:
+        // it does not see this conversation, and an objective without a project is a
+        // guess.
+        workspace_id: project.clone(),
     };
     if let Err(e) = ctx.db.insert_goal(&goal) {
         return format!("error creating delegated task: {e}");
@@ -495,9 +558,9 @@ fn agent_send(ctx: &ToolContext, args: &Value) -> String {
         return "error: agent_send needs both 'to' and 'body'".into();
     }
     let Some(recipient) = crate::ai::persona::resolve(&ctx.db, to) else {
-        let known = ctx.db.list_personas().unwrap_or_default();
+        let known = team(ctx);
         return format!(
-            "error: no agent named {to:?}.\n{}",
+            "error: no agent named {to:?} on this project.\n{}",
             crate::ai::persona::format_catalog(&known)
         );
     };
@@ -698,6 +761,13 @@ async fn agent_hire(ctx: &ToolContext, args: &Value) -> String {
             .and_then(|v| v.as_bool())
             .unwrap_or_else(|| existing.as_ref().map(|p| p.enabled).unwrap_or(true)),
         reports_to,
+        // A new agent joins the team for the project being worked on. Company-wide is
+        // the exception — the agent the user talks to — and is set deliberately, not by
+        // hiring someone with no project open.
+        workspace_id: existing
+            .as_ref()
+            .and_then(|p| p.workspace_id.clone())
+            .or_else(|| ctx.workspace_id.clone().filter(|s| !s.is_empty())),
     };
 
     let manager_name = input
@@ -777,6 +847,74 @@ fn agent_org(ctx: &ToolContext) -> String {
         return "There are no named agents yet. Use agent_hire to create one.".into();
     }
     crate::ai::persona::format_org_chart(&all)
+}
+
+/// Every project, its team, and what that team is doing.
+///
+/// The point of a single person to talk to is that they can answer for everything. With
+/// one team per project, an agent that could only see the project in front of it would
+/// have to be asked about each one in turn — which is the thing having a chief of staff
+/// is supposed to remove.
+fn teams_overview(ctx: &ToolContext) -> String {
+    let workspaces = ctx.db.list_workspaces().unwrap_or_default();
+    let all = ctx.db.list_personas().unwrap_or_default();
+    if workspaces.is_empty() {
+        return "There are no projects yet. Create one on the canvas, then agents can be \
+                assigned to it."
+            .into();
+    }
+
+    let mut out = String::from("Projects and their teams:\n");
+    for ws in &workspaces {
+        let team: Vec<&crate::storage::models::Persona> = all
+            .iter()
+            .filter(|p| p.workspace_id.as_deref() == Some(ws.id.as_str()) && p.enabled)
+            .collect();
+        let tasks = ctx.db.list_goals_for_workspace(Some(&ws.id)).unwrap_or_default();
+        let running = tasks
+            .iter()
+            .filter(|t| matches!(t.status.as_str(), "active" | "waiting" | "intake"))
+            .count();
+
+        out.push_str(&format!("\n## {}\n", ws.name));
+        if team.is_empty() {
+            // Worth saying rather than showing an empty line: a project with no team is
+            // one nobody is looking after, which is exactly what this is for surfacing.
+            out.push_str("  team: nobody assigned — work here has to be done by a company-wide agent\n");
+        } else {
+            for p in &team {
+                let manager = p
+                    .reports_to
+                    .as_deref()
+                    .map(|id| display_name(ctx, Some(id)))
+                    .unwrap_or_else(|| "the user".into());
+                out.push_str(&format!(
+                    "  - {}{} → reports to {manager}\n",
+                    p.name,
+                    if p.role.trim().is_empty() { String::new() } else { format!(" ({})", p.role.trim()) }
+                ));
+            }
+        }
+        out.push_str(&format!(
+            "  tasks: {running} in flight, {} finished\n",
+            tasks.len().saturating_sub(running)
+        ));
+        for t in tasks.iter().filter(|t| t.status == "active").take(3) {
+            out.push_str(&format!("    · {}\n", t.title));
+        }
+    }
+
+    let house: Vec<&str> = all
+        .iter()
+        .filter(|p| p.workspace_id.is_none() && p.enabled)
+        .map(|p| p.name.as_str())
+        .collect();
+    out.push_str(&format!(
+        "\nCompany-wide (answer on any project): {}\n\nTo hand work to another \
+         project's team, call agent_delegate with `project` set to that project's name.\n",
+        if house.is_empty() { "none".into() } else { house.join(", ") }
+    ));
+    out
 }
 
 /// One project's record, for an agent catching up rather than asking the user.

@@ -225,6 +225,9 @@ pub struct CronJobInput {
     pub enabled: bool,
     #[serde(default)]
     pub reports_to: Option<String>,
+    /// Project this agent belongs to. `None` = company-wide.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 /// A persistent goal session (the /goal autonomous mode). The loop controller in
@@ -300,6 +303,15 @@ pub struct Persona {
     /// The persona this one reports to. None = reports to the user directly.
     #[serde(default)]
     pub reports_to: Option<String>,
+    /// The project this agent works on. `None` makes it company-wide.
+    ///
+    /// One team per project is the whole shape of this: with several projects running,
+    /// "the reviewer" is ambiguous until you say whose reviewer, routing has nothing to
+    /// route on, and a per-team record of what was done cannot be assembled. The
+    /// exception is the handful of agents that answer across everything — the one the
+    /// user actually talks to, above all — which stay unassigned deliberately.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
@@ -364,6 +376,15 @@ pub struct PersonaInput {
     /// The persona this one reports to. None = reports to the user directly.
     #[serde(default)]
     pub reports_to: Option<String>,
+    /// The project this agent works on. `None` makes it company-wide.
+    ///
+    /// One team per project is the whole shape of this: with several projects running,
+    /// "the reviewer" is ambiguous until you say whose reviewer, routing has nothing to
+    /// route on, and a per-team record of what was done cannot be assembled. The
+    /// exception is the handful of agents that answer across everything — the one the
+    /// user actually talks to, above all — which stay unassigned deliberately.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 /// The locked-in definition of "done" for a goal session.

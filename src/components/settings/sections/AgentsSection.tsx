@@ -347,6 +347,7 @@ export function AgentsSection() {
                 personas={personas}
                 vps={vps}
                 providers={providers}
+                workspaces={workspaces}
                 onChange={edit}
               />
             </>
@@ -575,12 +576,14 @@ function PersonaEditor({
   personas,
   vps,
   providers,
+  workspaces,
   onChange,
 }: {
   draft: PersonaInput;
   personas: Persona[];
   vps: { id: string; name: string }[];
   providers: { id: string; name: string; model?: string | null }[];
+  workspaces: { id: string; name: string }[];
   onChange: (next: PersonaInput) => void;
 }) {
   const set = <K extends keyof PersonaInput>(key: K, value: PersonaInput[K]) =>
@@ -639,6 +642,23 @@ function PersonaEditor({
           {managerOptions.map((p) => (
             <option key={p.id} value={p.id}>
               {p.name}
+            </option>
+          ))}
+        </Select>
+      </Field>
+
+      <Field
+        label="Project"
+        hint="One team per project. An agent on a project is only reachable while that project is open, and its work is filed there. Company-wide is for the few that answer about everything — the one you actually talk to."
+      >
+        <Select
+          value={draft.workspace_id ?? ""}
+          onChange={(e) => set("workspace_id", e.target.value || null)}
+        >
+          <option value="">Company-wide (any project)</option>
+          {workspaces.map((w) => (
+            <option key={w.id} value={w.id}>
+              {w.name}
             </option>
           ))}
         </Select>

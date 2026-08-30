@@ -649,6 +649,10 @@ impl Db {
         // before there was a project to say them about, and guessing one retroactively
         // would file real history under a workspace it may have nothing to do with.
         let _ = conn.execute("ALTER TABLE agent_message ADD COLUMN workspace_id TEXT", []);
+        // One team per project. Existing agents stay company-wide (NULL) rather than
+        // being assigned to whichever project happens to be open — an agent silently
+        // acquiring a home would change who routing picks.
+        let _ = conn.execute("ALTER TABLE persona ADD COLUMN workspace_id TEXT", []);
         let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN workspace_id TEXT", []);
         // The inbox and the per-project history are both read on every agent cycle.
         let _ = conn.execute(
@@ -1300,12 +1304,13 @@ impl Db {
             reports_to: r.get(9)?,
             created_at: r.get(10)?,
             updated_at: r.get(11)?,
+            workspace_id: r.get(12)?,
         })
     }
 
     const PERSONA_COLS: &'static str =
         "id, name, role, instructions, targets_json, safety_mode, provider_id, model,
-         enabled, reports_to, created_at, updated_at";
+         enabled, reports_to, created_at, updated_at, workspace_id";
 
     pub fn list_personas(&self) -> Result<Vec<crate::storage::models::Persona>> {
         let conn = self.conn.lock().unwrap();
@@ -1359,8 +1364,8 @@ impl Db {
             let conn = self.conn.lock().unwrap();
             conn.execute(
                 "INSERT INTO persona
-                   (id, name, role, instructions, targets_json, safety_mode, provider_id, model, enabled, reports_to)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                   (id, name, role, instructions, targets_json, safety_mode, provider_id, model, enabled, reports_to, workspace_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                  ON CONFLICT(id) DO UPDATE SET
                    name = excluded.name,
                    role = excluded.role,
@@ -1371,6 +1376,7 @@ impl Db {
                    model = excluded.model,
                    enabled = excluded.enabled,
                    reports_to = excluded.reports_to,
+                   workspace_id = excluded.workspace_id,
                    updated_at = datetime('now')",
                 params![
                     id,
@@ -1383,6 +1389,7 @@ impl Db {
                     input.model,
                     input.enabled as i64,
                     input.reports_to,
+                    input.workspace_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
                 ],
             )?;
         }

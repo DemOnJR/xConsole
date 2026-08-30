@@ -473,6 +473,8 @@ export interface Persona {
   enabled: boolean;
   /** Who this agent reports to. null = reports to you directly. */
   reports_to?: string | null;
+  /** The project this agent works on. Null = company-wide, answers on any project. */
+  workspace_id?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -488,6 +490,8 @@ export interface PersonaInput {
   model?: string | null;
   enabled: boolean;
   reports_to?: string | null;
+  /** The project this agent works on. Null = company-wide, answers on any project. */
+  workspace_id?: string | null;
 }
 
 /** One message between agents. `from_id`/`to_id` null means the user. */
