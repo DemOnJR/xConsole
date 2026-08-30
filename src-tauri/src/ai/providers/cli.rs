@@ -73,6 +73,18 @@ pub struct CliProvider {
     remote: Option<RemoteTarget>,
 }
 
+/// Whether a failure is the CLI refusing to resume a conversation it no longer has.
+///
+/// Worth telling apart from every other non-zero exit: the thread is gone whatever
+/// happens next, so the only useful response is to start a new one rather than to hand
+/// somebody on a phone an error they cannot act on.
+fn is_missing_conversation(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("no conversation found")
+        || s.contains("session not found")
+        || (s.contains("conversation") && s.contains("not found"))
+}
+
 impl CliProvider {
     pub fn new(
         kind: String,
@@ -221,6 +233,30 @@ impl CliProvider {
             remove_cli_conversation(&req.session_id);
             if out.content.trim().is_empty() {
                 let detail = run.stderr.trim();
+                // The conversation this was resuming into is gone — the server was
+                // rebuilt, or the CLI expired it. That is not a failure to report to
+                // somebody on a phone: the thread is lost either way, and the only
+                // useful thing is to answer them. Retried once, fresh, and only once,
+                // because a second identical failure is a real problem.
+                if is_missing_conversation(detail) && existing.is_some() {
+                    crate::diag(&format!(
+                        "cli(remote): the conversation on {} is gone; starting a new one",
+                        remote.vps_id
+                    ));
+                    emit(
+                        sink,
+                        StreamEvent::Status(
+                            "The previous conversation is gone on that server — starting a \
+                             new one."
+                                .into(),
+                        ),
+                    );
+                    let mut fresh = req.clone();
+                    // A fresh CLI session has none of the thread, so the whole prompt has
+                    // to be rebuilt rather than reduced to the last message.
+                    fresh.session_id = String::new();
+                    return Box::pin(self.chat_remote(&fresh, sink, remote)).await;
+                }
                 return Err(if detail.is_empty() {
                     format!(
                         "Claude Code exited with code {} on {}. Check it is installed and \
@@ -2296,6 +2332,22 @@ mod build_prompt_tests {
         ChatMessage::user(format!(
             "{RUNTIME_MARKER}\nDate: Saturday\nDisk /: 600G / 698G — 87%"
         ))
+    }
+
+    #[test]
+    fn a_vanished_conversation_is_told_apart_from_a_real_failure() {
+        // Verified against the real CLI: resuming an id it no longer has exits 1 and
+        // prints this on stderr, with no answer on stdout. The thread is gone either
+        // way, so the only useful response is a fresh one — not an error handed to
+        // somebody on a phone who cannot act on it.
+        assert!(is_missing_conversation(
+            "No conversation found with session ID: 00000000-1111-2222-3333-444444444444"
+        ));
+        assert!(is_missing_conversation("Session not found"));
+        // Everything else is a real failure and must still be reported.
+        assert!(!is_missing_conversation("Invalid API key"));
+        assert!(!is_missing_conversation("bash: line 1: claude: command not found"));
+        assert!(!is_missing_conversation(""));
     }
 
     #[test]

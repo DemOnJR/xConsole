@@ -79,7 +79,7 @@ pub async fn fetch_messages(
 
 /// Post a reply, split into platform-sized messages.
 pub async fn send_message(token: &str, channel_id: &str, text: &str) -> Result<(), String> {
-    for chunk in super::chunk_for(Kind::Discord, text) {
+    for chunk in super::agent_chunks(Kind::Discord, text) {
         let resp = client()
             .post(format!("{DISCORD_API}/channels/{channel_id}/messages"))
             .header("Authorization", format!("Bot {token}"))
@@ -116,6 +116,26 @@ impl Transport for Discord {
     async fn send(&mut self, _cfg: &Config, to: &IncomingMessage, text: &str) -> Result<(), String> {
         let token = super::load_token(Kind::Discord).ok_or("no discord token saved")?;
         send_message(&token, &to.chat_id, text).await
+    }
+
+    /// Discord's typing endpoint. Lasts about ten seconds and cannot be cancelled, so
+    /// `on == false` has nothing to do — and a turn that dies leaves nothing stuck.
+    async fn set_typing(&mut self, to: &IncomingMessage, on: bool) -> Result<(), String> {
+        if !on {
+            return Ok(());
+        }
+        let token = super::load_token(Kind::Discord).ok_or("no discord token saved")?;
+        let resp = client()
+            .post(format!("{DISCORD_API}/channels/{}/typing", to.chat_id))
+            .header("Authorization", format!("Bot {token}"))
+            .header("Content-Length", "0")
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        resp.status()
+            .is_success()
+            .then_some(())
+            .ok_or_else(|| format!("discord refused the typing indicator: {}", resp.status()))
     }
 
     fn reset(&mut self) {

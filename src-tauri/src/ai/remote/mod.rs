@@ -367,6 +367,27 @@ pub fn authorize(cfg: &Config, msg: &IncomingMessage) -> Result<String, Rejected
     Ok(body.to_string())
 }
 
+/// Marks a message as the agent's rather than a person's.
+///
+/// On WhatsApp especially, the bridge replies from the user's *own* account, so its
+/// messages sit in the same column, in the same bubble colour, as everything they typed
+/// themselves. Scrolling back, there is nothing to tell "restart nginx" from the answer
+/// to it. A prefix is the only thing that survives every client, every notification
+/// preview and every quoted reply.
+pub const AGENT_PREFIX: &str = "[xConsole]";
+
+/// Put the marker on a reply, once.
+///
+/// Idempotent because a reply can be re-sent — moved to another platform, retried after
+/// a failed send — and two prefixes read as a bug.
+pub fn mark_as_agent(text: &str) -> String {
+    let text = text.trim_start();
+    if text.starts_with(AGENT_PREFIX) {
+        return text.to_string();
+    }
+    format!("{AGENT_PREFIX} {text}")
+}
+
 /// Split a reply into platform-sized chunks, preferring line boundaries.
 ///
 /// Discord rejects anything over 2000 characters outright, so an un-split reply is
@@ -410,9 +431,22 @@ pub fn chunk_reply(text: &str, max: usize) -> Vec<String> {
         .collect()
 }
 
-/// Chunk a reply for one platform's message limit.
-pub fn chunk_for(kind: Kind, text: &str) -> Vec<String> {
-    chunk_reply(text, kind.max_chars())
+/// Chunk a reply and mark every part as the agent's.
+///
+/// Every part, not only the first. A long answer arrives as several messages, and on
+/// WhatsApp they all come from the user's own account — so the second and third would be
+/// indistinguishable from something the user typed, which is exactly the confusion the
+/// marker exists to remove.
+///
+/// The prefix comes out of the budget rather than being added afterwards: Discord
+/// rejects anything over its limit outright, so a chunk that fits and then grows by
+/// eleven characters is a message that never arrives.
+pub fn agent_chunks(kind: Kind, text: &str) -> Vec<String> {
+    let budget = kind.max_chars().saturating_sub(AGENT_PREFIX.len() + 1).max(1);
+    chunk_reply(text, budget)
+        .into_iter()
+        .map(|c| mark_as_agent(&c))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -618,6 +652,16 @@ pub trait Transport: Send {
     /// no configured chat still has to answer somebody.
     async fn send(&mut self, cfg: &Config, to: &IncomingMessage, text: &str) -> Result<(), String>;
 
+    /// Show the platform's "typing…" while a turn runs.
+    ///
+    /// A turn can take a minute, and until it answers there is nothing at all to say it
+    /// heard you — on a phone that is indistinguishable from a bridge that is down. Best
+    /// effort by design: a failed indicator must never stop the reply, and every
+    /// platform expires it on its own, so a crash mid-turn leaves nothing stuck on.
+    async fn set_typing(&mut self, _to: &IncomingMessage, _on: bool) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Drop cursors and connections; the bridge is off or unconfigured.
     fn reset(&mut self) {}
 }
@@ -735,10 +779,17 @@ fn drive(app: tauri::AppHandle, mut transport: Box<dyn Transport>) {
                 let here = Route { kind, chat_id: msg.chat_id.clone() };
                 remember_route(&db, &here);
 
+                // Shown before the lock, so somebody waiting behind another turn still
+                // sees that their message landed. Failures are ignored on purpose: an
+                // indicator is a courtesy, and none of them is worth losing a reply over.
+                let _ = transport.set_typing(&msg, true).await;
                 let (reply, redirect) = {
                     let _turn = TURN_LOCK.lock().await;
                     run_remote_turn(&app, &cfg, &ask).await
                 };
+                let _ = transport.set_typing(&msg, false).await;
+
+
 
                 crate::diag(&format!(
                     "remote({}): turn finished, sending reply: {:?}",
@@ -888,9 +939,31 @@ async fn run_remote_turn(
     let mut request = history.clone();
     request.push(crate::ai::provider::ChatMessage::user(prompt));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::ai::provider::StreamEvent>();
-    // Nothing consumes the stream here — the reply is the final message — but the
-    // sink has to be drained or the turn blocks on a full channel.
-    let drain = tauri::async_runtime::spawn(async move { while rx.recv().await.is_some() {} });
+    // The reply is the final message, so nothing here needs the stream — except when
+    // there is no final message. Draining it into the void meant a turn that produced
+    // nothing could only be reported as "(the agent finished without saying anything)",
+    // which says neither what went wrong nor where to look. The errors and the last few
+    // status lines are exactly the missing explanation, so they are kept.
+    let trace = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let trace_sink = trace.clone();
+    let drain = tauri::async_runtime::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            let line = match ev {
+                crate::ai::provider::StreamEvent::Error(e) => Some(format!("error: {e}")),
+                crate::ai::provider::StreamEvent::Status(s) => Some(s),
+                _ => None,
+            };
+            if let Some(line) = line {
+                let mut t = trace_sink.lock().unwrap();
+                // A cap, because a long tool-using turn emits hundreds of these and only
+                // the end of it explains an empty answer.
+                if t.len() >= 12 {
+                    t.remove(0);
+                }
+                t.push(line);
+            }
+        }
+    });
 
     // `conversation: false` like every other non-desktop caller — the flag gates
     // preference-learning and skill autopilot, not whether history is carried.
@@ -927,7 +1000,24 @@ async fn run_remote_turn(
             save_history(&db, &thread);
             msg.content
         }
-        Ok(_) => "(the agent finished without saying anything)".to_string(),
+        Ok(_) => {
+            // Empty is not an answer, and "it said nothing" is not a diagnosis. Whatever
+            // the run did emit is the only account of why, so it goes to the log in full
+            // and to the phone in short.
+            let trace = trace.lock().unwrap().clone();
+            crate::diag(&format!(
+                "remote: turn produced no text. Trace:\n{}",
+                if trace.is_empty() { "(nothing was emitted either)".into() } else { trace.join("\n") }
+            ));
+            match trace.iter().rev().find(|l| l.starts_with("error: ")) {
+                Some(e) => format!("The agent could not answer. {}", e.trim_start_matches("error: ")),
+                None => format!(
+                    "The agent ran but produced no answer{}. Check Settings > Remote \
+                     control for the full trace.",
+                    trace.last().map(|l| format!(" (last step: {l})")).unwrap_or_default()
+                ),
+            }
+        }
         Err(e) => format!("Failed: {e}"),
     };
     (reply, redirect)
@@ -1244,6 +1334,57 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_says_it_came_from_the_agent() {
+        // On WhatsApp the bridge replies from the user's own account, so its messages
+        // sit in the same column and the same colour as everything they typed. Without
+        // a marker there is nothing at all to tell them apart when scrolling back.
+        assert_eq!(mark_as_agent("all good"), "[xConsole] all good");
+        assert!(mark_as_agent("done").starts_with(AGENT_PREFIX));
+    }
+
+    #[test]
+    fn marking_twice_does_not_stack() {
+        // A reply can be sent more than once — moved to another app, retried after a
+        // failed send — and two prefixes read as a bug.
+        let once = mark_as_agent("uptime is 16 days");
+        assert_eq!(mark_as_agent(&once), once);
+        assert_eq!(once.matches(AGENT_PREFIX).count(), 1);
+    }
+
+    #[test]
+    fn every_part_of_a_long_answer_is_marked_not_just_the_first() {
+        // A long answer arrives as several messages, and on WhatsApp they all come from
+        // the user's own account. An unmarked second message is indistinguishable from
+        // something they typed themselves.
+        let chunks = agent_chunks(Kind::Discord, &(0..400).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n"));
+        assert!(chunks.len() > 1, "needs to actually split");
+        for c in &chunks {
+            assert!(c.starts_with(AGENT_PREFIX), "unmarked part: {c}");
+        }
+    }
+
+    #[test]
+    fn marking_never_pushes_a_chunk_over_the_platform_limit() {
+        // Discord rejects an over-long message outright rather than truncating it, so a
+        // chunk that fit before the prefix and not after is a message that never
+        // arrives. The prefix comes out of the budget, not on top of it.
+        for kind in Kind::ALL {
+            let chunks = agent_chunks(kind, &"y".repeat(9000));
+            assert!(
+                chunks.iter().all(|c| c.len() <= kind.max_chars()),
+                "{} produced an over-long chunk",
+                kind.as_str()
+            );
+            // Nothing is dropped in the process.
+            let body: String = chunks
+                .iter()
+                .map(|c| c.trim_start_matches(AGENT_PREFIX).trim_start())
+                .collect();
+            assert_eq!(body.len(), 9000, "{} lost content", kind.as_str());
+        }
+    }
+
+    #[test]
     fn short_replies_are_sent_whole() {
         assert_eq!(chunk_reply("all good", 2000), vec!["all good"]);
         assert!(chunk_reply("   ", 2000).is_empty());
@@ -1280,15 +1421,6 @@ mod tests {
         let chunks = chunk_reply(&text, 999);
         assert!(chunks.len() >= 2);
         assert_eq!(chunks.concat().chars().count(), 1000);
-    }
-
-    #[test]
-    fn every_platform_gets_chunks_it_will_accept() {
-        for kind in Kind::ALL {
-            let chunks = chunk_for(kind, &"y".repeat(9000));
-            assert!(chunks.iter().all(|c| c.len() <= kind.max_chars()));
-            assert_eq!(chunks.concat().len(), 9000);
-        }
     }
 
     #[test]

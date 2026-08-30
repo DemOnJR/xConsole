@@ -130,7 +130,7 @@ pub async fn fetch_updates(
 
 /// Post a reply, split into platform-sized messages.
 pub async fn send_message(token: &str, chat_id: &str, text: &str) -> Result<(), String> {
-    for chunk in super::chunk_for(Kind::Telegram, text) {
+    for chunk in super::agent_chunks(Kind::Telegram, text) {
         let resp = client()
             .post(api(token, "sendMessage"))
             // Deliberately not `parse_mode`: command output is full of underscores and
@@ -182,6 +182,26 @@ impl Transport for Telegram {
     async fn send(&mut self, _cfg: &Config, to: &IncomingMessage, text: &str) -> Result<(), String> {
         let token = super::load_token(Kind::Telegram).ok_or("no telegram token saved")?;
         send_message(&token, &to.chat_id, text).await
+    }
+
+    /// Telegram's `sendChatAction`. It expires after about five seconds by itself, so
+    /// there is nothing to clear and nothing left stuck if the turn dies mid-flight —
+    /// hence no work at all for `on == false`.
+    async fn set_typing(&mut self, to: &IncomingMessage, on: bool) -> Result<(), String> {
+        if !on {
+            return Ok(());
+        }
+        let token = super::load_token(Kind::Telegram).ok_or("no telegram token saved")?;
+        let resp = client()
+            .post(api(&token, "sendChatAction"))
+            .json(&serde_json::json!({ "chat_id": to.chat_id, "action": "typing" }))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        resp.status()
+            .is_success()
+            .then_some(())
+            .ok_or_else(|| format!("telegram refused the typing indicator: {}", resp.status()))
     }
 
     fn reset(&mut self) {

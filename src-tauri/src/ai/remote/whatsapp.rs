@@ -666,7 +666,7 @@ async fn send_command(cmd: serde_json::Value) -> Result<(), String> {
 /// running sidecar, which an armed bridge already keeps up — an unarmed one says so
 /// rather than dropping the message.
 pub async fn send_message(chat_id: &str, text: &str) -> Result<(), String> {
-    for chunk in super::chunk_for(Kind::WhatsApp, text) {
+    for chunk in super::agent_chunks(Kind::WhatsApp, text) {
         send_command(serde_json::json!({
             "type": "send",
             "chat": chat_id,
@@ -942,6 +942,18 @@ impl Transport for WhatsApp {
 
     async fn send(&mut self, _cfg: &Config, to: &IncomingMessage, text: &str) -> Result<(), String> {
         send_message(&to.chat_id, text).await
+    }
+
+    /// WhatsApp's composing state, unlike Telegram's and Discord's, does not expire on
+    /// its own — so it is cleared explicitly, or the user is left watching an indicator
+    /// for an agent that already answered.
+    async fn set_typing(&mut self, to: &IncomingMessage, on: bool) -> Result<(), String> {
+        send_command(serde_json::json!({
+            "type": "presence",
+            "chat": to.chat_id,
+            "on": on,
+        }))
+        .await
     }
 
     fn reset(&mut self) {

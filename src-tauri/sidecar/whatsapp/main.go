@@ -100,6 +100,8 @@ type Command struct {
 	Type string `json:"type"`
 	Chat string `json:"chat"`
 	Text string `json:"text"`
+	// For "presence": true while the agent is composing.
+	On bool `json:"on"`
 }
 
 var (
@@ -282,6 +284,8 @@ func (b *bridge) readCommands(ctx context.Context) {
 		switch cmd.Type {
 		case "send":
 			b.send(ctx, cmd)
+		case "presence":
+			b.presence(ctx, cmd)
 		case "list_chats":
 			b.listChats(ctx)
 		case "logout":
@@ -434,6 +438,29 @@ func extractText(msg *waE2E.Message) string {
 		return extractText(p.GetEditedMessage())
 	}
 	return ""
+}
+
+// presence shows or clears WhatsApp's "typing..." in a chat.
+//
+// Unlike Telegram and Discord, WhatsApp's composing state does not expire on its own,
+// so it has to be cleared explicitly — otherwise a turn that dies leaves the user
+// watching an indicator for an agent that is not coming back.
+//
+// Failures are logged, never emitted as errors: an indicator is a courtesy, and the
+// host must not treat a missing one as a failed turn.
+func (b *bridge) presence(ctx context.Context, cmd Command) {
+	jid, err := parseChatJID(cmd.Chat)
+	if err != nil {
+		logf("presence: %v", err)
+		return
+	}
+	state := types.ChatPresencePaused
+	if cmd.On {
+		state = types.ChatPresenceComposing
+	}
+	if err := b.client.SendChatPresence(ctx, jid, state, types.ChatPresenceMediaText); err != nil {
+		logf("presence: %v", err)
+	}
 }
 
 // listChats reports the chats the bridge can be restricted to: the account's own
