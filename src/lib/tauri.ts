@@ -1331,6 +1331,13 @@ export const api = {
   listPersonas: () => invoke<Persona[]>("list_personas"),
   savePersona: (input: PersonaInput) => invoke<Persona>("save_persona", { input }),
   deletePersona: (id: string) => invoke<void>("delete_persona", { id }),
+  /** Create a standard team for a project: a lead that answers to you, and its reports. */
+  createTeam: (workspaceId: string, roles?: string[], about?: string) =>
+    invoke<Persona[]>("create_team", {
+      workspaceId,
+      roles: roles ?? null,
+      about: about ?? null,
+    }),
   personaOrgChart: () => invoke<string>("persona_org_chart"),
   listAgentMessages: (
     goalId?: string | null,

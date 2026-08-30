@@ -126,6 +126,35 @@ pub async fn agent_activity(
     })
 }
 
+/// Create a standard team for a project.
+///
+/// The same planning and creation the agent's `team_create` tool uses, so a team built
+/// from the button and one built by asking come out identical. No approval prompt here:
+/// the click is the approval.
+#[tauri::command]
+pub async fn create_team(
+    db: State<'_, Db>,
+    workspace_id: String,
+    roles: Option<Vec<String>>,
+    about: Option<String>,
+) -> Result<Vec<Persona>, String> {
+    let ws = db
+        .get_workspace(&workspace_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("no such project")?;
+    let roles = roles.filter(|r| !r.is_empty()).unwrap_or_else(|| {
+        crate::ai::persona_tools::DEFAULT_ROLES.iter().map(|r| r.to_string()).collect()
+    });
+    let planned = crate::ai::persona_tools::plan_team(&db, &ws.name, &roles, about.as_deref());
+    let (_made, failed) = crate::ai::persona_tools::create_team(&db, &ws.id, &planned);
+    if !failed.is_empty() {
+        // Partial success is still worth reporting as a failure: a team missing its
+        // reviewer is not the team that was asked for.
+        return Err(failed.join("; "));
+    }
+    db.list_personas().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn mark_agent_messages_read(db: State<'_, Db>, ids: Vec<String>) -> Result<(), String> {
     db.mark_agent_messages_read(&ids).map_err(|e| e.to_string())

@@ -232,10 +232,25 @@ export function AgentsSection() {
         title="Agents"
         description="Named agents that take work in the background and report back. Give one a manager and it escalates to them instead of interrupting you — only an agent that reports to you can reach you directly."
         action={
-          <Button variant="primary" onClick={() => open(blankPersona(), `new-${Date.now()}`)}>
-            <PlusIcon size={13} />
-            New agent
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* Building a team one agent at a time is where people give up, so the
+                whole thing is one click when a project has nobody on it. */}
+            {project && !personas.some((p) => p.workspace_id === project) && (
+              <Button
+                onClick={async () => {
+                  await api.createTeam(project).catch((e) => setError(String(e)));
+                  await load();
+                }}
+              >
+                <PlusIcon size={13} />
+                Create a team for this project
+              </Button>
+            )}
+            <Button variant="primary" onClick={() => open(blankPersona(), `new-${Date.now()}`)}>
+              <PlusIcon size={13} />
+              New agent
+            </Button>
+          </div>
         }
       />
 

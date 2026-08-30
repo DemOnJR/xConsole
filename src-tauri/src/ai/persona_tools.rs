@@ -137,6 +137,27 @@ staging box\"). Naming an existing agent updates it instead of creating a second
             }),
         },
         ToolDef {
+            name: "team_create".into(),
+            description: "Set up a whole team for a project in one go, with the reporting line \
+already right: a lead that answers to the user, and the rest answering to the lead. Use it when \
+a project has nobody on it — building a team one agent at a time is where people give up. \
+Names are prefixed with the project, so several projects can each have a lead. Agents that \
+already exist are left alone."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Project name. Defaults to the one currently open."},
+                    "roles": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Roles to create, e.g. [\"lead\", \"engineer\", \"reviewer\", \"ops\"]. Defaults to lead, engineer and reviewer. The first one is the lead and answers to the user."
+                    },
+                    "about": {"type": "string", "description": "One line on what the project is, put into every member's instructions so they know what they are working on."}
+                }
+            }),
+        },
+        ToolDef {
             name: "agent_dismiss".into(),
             description: "Delete a named agent. Its finished work and the conversation it took part in are kept — only the agent itself goes. Ask the user first; this is not something to do on your own initiative."
                 .into(),
@@ -249,6 +270,7 @@ pub fn is_persona_tool(name: &str) -> bool {
             | "agent_inbox"
             | "agent_thread"
             | "agent_hire"
+            | "team_create"
             | "agent_dismiss"
             | "agent_org"
             | "teams_overview"
@@ -270,6 +292,7 @@ pub fn tool_is_mutating(name: &str) -> bool {
             | "agent_send"
             | "agent_report"
             | "agent_hire"
+            | "team_create"
             | "agent_dismiss"
             | "review_schedule"
     )
@@ -285,6 +308,7 @@ pub async fn dispatch(ctx: &ToolContext, name: &str, args: &Value) -> String {
         "agent_inbox" => agent_inbox(ctx),
         "agent_thread" => agent_thread(ctx, args),
         "agent_hire" => agent_hire(ctx, args).await,
+        "team_create" => team_create(ctx, args).await,
         "agent_dismiss" => agent_dismiss(ctx, args).await,
         "agent_org" => agent_org(ctx),
         "teams_overview" => teams_overview(ctx),
@@ -880,6 +904,228 @@ async fn agent_hire(ctx: &ToolContext, args: &Value) -> String {
     }
 }
 
+/// What each default role is for, and how much it is trusted.
+///
+/// Trust is the part worth getting right up front. A reviewer that can change things is
+/// not a reviewer, and an engineer that can do anything unattended is a much bigger
+/// decision than "add an engineer" sounds like — so the defaults are narrow and the
+/// user widens them deliberately.
+pub fn role_defaults(role: &str) -> (&'static str, &'static str, Option<&'static str>) {
+    match role.trim().to_lowercase().as_str() {
+        "lead" | "ceo" | "manager" => (
+            "leads this project and answers to the user",
+            "You lead this project. Route work to your team rather than doing it all \
+             yourself, keep an eye on the project's numbers, and report upward: what \
+             changed, what you decided, what you need. Be brief — it is often read on a \
+             phone.",
+            None,
+        ),
+        "engineer" | "dev" | "developer" => (
+            "implements changes on this project",
+            "You implement changes on this project. Read before you write, make the \
+             smallest change that does the job, and verify it worked before saying it is \
+             done. Report what you actually changed, not what you intended to.",
+            Some("allowlist"),
+        ),
+        "reviewer" | "qa" => (
+            "reviews and verifies, read-only",
+            "You verify. You do not change anything — you check that what was claimed \
+             actually happened, and say plainly when it did not. Cite what you looked at.",
+            Some("approve"),
+        ),
+        "ops" | "sysadmin" | "sre" => (
+            "keeps this project's servers healthy",
+            "You keep this project's servers healthy: disk, memory, services, backups, \
+             certificates. Diagnose before acting, and never restart something without \
+             saying why it needed it.",
+            Some("allowlist"),
+        ),
+        _ => (
+            "works on this project",
+            "You work on this project. Say what you did and what came of it.",
+            Some("approve"),
+        ),
+    }
+}
+
+/// "csb" + "lead" -> "CSB Lead". Names are unique across every project, so the project
+/// has to be in them: five projects cannot each have an agent called "Lead", and
+/// `agent_send "Lead"` would be a coin toss if they could.
+pub fn team_member_name(project: &str, role: &str) -> String {
+    let short: String = project.split_whitespace().next().unwrap_or(project).chars().take(18).collect();
+    let mut role_title = role.trim().to_lowercase();
+    if let Some(first) = role_title.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    format!("{} {}", short.trim_end_matches(['.', '-', '_']), role_title)
+}
+
+/// The roles a team gets when nobody says otherwise.
+pub const DEFAULT_ROLES: [&str; 3] = ["lead", "engineer", "reviewer"];
+
+/// One agent a team would gain, before anything is written.
+pub struct PlannedMember {
+    pub name: String,
+    pub blurb: &'static str,
+    pub instructions: String,
+    pub trust: Option<&'static str>,
+    /// An agent by this name is already there, so it is left alone.
+    pub exists: bool,
+}
+
+/// Work out the team without creating it, so it can be shown before it is agreed to.
+pub fn plan_team(
+    db: &crate::storage::Db,
+    project_name: &str,
+    roles: &[String],
+    about: Option<&str>,
+) -> Vec<PlannedMember> {
+    let existing = db.list_personas().unwrap_or_default();
+    roles
+        .iter()
+        .map(|role| {
+            let name = team_member_name(project_name, role);
+            let (blurb, instr, trust) = role_defaults(role);
+            let mut instructions = instr.to_string();
+            if let Some(a) = about.map(str::trim).filter(|a| !a.is_empty()) {
+                instructions.push_str(&format!("\n\nThe project: {a}"));
+            }
+            PlannedMember {
+                exists: existing.iter().any(|p| p.name.eq_ignore_ascii_case(&name)),
+                name,
+                blurb,
+                instructions,
+                trust,
+            }
+        })
+        .collect()
+}
+
+/// Create the planned members that do not exist yet. Returns `(created, failed)`.
+///
+/// The first role is the lead and answers to the user; the rest answer to it, so the
+/// lead has to be written first — everyone else needs its id.
+pub fn create_team(
+    db: &crate::storage::Db,
+    workspace_id: &str,
+    planned: &[PlannedMember],
+) -> (Vec<String>, Vec<String>) {
+    let existing = db.list_personas().unwrap_or_default();
+    // If the lead was already there, the rest still report to it.
+    let mut lead_id = planned.first().filter(|p| p.exists).and_then(|p| {
+        existing
+            .iter()
+            .find(|e| e.name.eq_ignore_ascii_case(&p.name))
+            .map(|e| e.id.clone())
+    });
+    let (mut made, mut failed) = (Vec::new(), Vec::new());
+
+    for (i, m) in planned.iter().enumerate() {
+        if m.exists {
+            continue;
+        }
+        let is_lead = i == 0;
+        let input = crate::storage::models::PersonaInput {
+            id: None,
+            name: m.name.clone(),
+            role: m.blurb.to_string(),
+            instructions: m.instructions.clone(),
+            targets: Vec::new(),
+            safety_mode: m.trust.map(str::to_string),
+            provider_id: None,
+            model: None,
+            enabled: true,
+            reports_to: if is_lead { None } else { lead_id.clone() },
+            workspace_id: Some(workspace_id.to_string()),
+        };
+        match crate::commands::persona::save_persona_checked(db, input) {
+            Ok(p) => {
+                if is_lead {
+                    lead_id = Some(p.id.clone());
+                }
+                made.push(p.name);
+            }
+            Err(e) => failed.push(format!("{}: {e}", m.name)),
+        }
+    }
+    (made, failed)
+}
+
+async fn team_create(ctx: &ToolContext, args: &Value) -> String {
+    let all_ws = ctx.db.list_workspaces().unwrap_or_default();
+    let named = args.get("project").and_then(|v| v.as_str()).map(str::trim);
+    let ws = match named.filter(|n| !n.is_empty()) {
+        Some(n) => match all_ws.iter().find(|w| w.name.eq_ignore_ascii_case(n) || w.id == n) {
+            Some(w) => w.clone(),
+            None => {
+                return format!(
+                    "error: no project called {n:?}. Known: {}",
+                    all_ws.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")
+                )
+            }
+        },
+        None => match ctx.workspace_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(id) => match all_ws.iter().find(|w| w.id == id) {
+                Some(w) => w.clone(),
+                None => return "error: the open project no longer exists".into(),
+            },
+            None => return "error: no project is open, so name one with `project`".into(),
+        },
+    };
+
+    let roles: Vec<String> = args
+        .get("roles")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::trim))
+                .filter(|r| !r.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .filter(|v: &Vec<String>| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_ROLES.iter().map(|r| r.to_string()).collect());
+    let about = args.get("about").and_then(|v| v.as_str());
+
+    let planned = plan_team(&ctx.db, &ws.name, &roles, about);
+    let to_make: Vec<&PlannedMember> = planned.iter().filter(|p| !p.exists).collect();
+    if to_make.is_empty() {
+        return format!(
+            "{} already has all of those: {}. Nothing to do.",
+            ws.name,
+            planned.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
+
+    let summary = format!(
+        "Create a team for {}:\n{}\n\nThe first answers to you; the rest answer to it. \
+         All are limited to {}, and their trust levels start narrow — widen them yourself \
+         once you have seen what they do.",
+        ws.name,
+        to_make
+            .iter()
+            .map(|m| format!("  - {} — {} [{}]", m.name, m.blurb, m.trust.unwrap_or("global default")))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        ws.name
+    );
+    if let Err(e) = confirm(ctx, &summary).await {
+        return format!("not created: {e}");
+    }
+
+    let (made, failed) = create_team(&ctx.db, &ws.id, &planned);
+    let mut out = format!("{} now has: {}.\n", ws.name, made.join(", "));
+    for f in &failed {
+        out.push_str(&format!("- could not create {f}\n"));
+    }
+    out.push_str(
+        "\nNothing is delegated yet — they have no work until you or a lead gives them \
+         some. Consider review_schedule so the project is looked at even when nobody \
+         asks.\n",
+    );
+    out
+}
+
 async fn agent_dismiss(ctx: &ToolContext, args: &Value) -> String {
     let who = args.get("agent").and_then(|v| v.as_str()).unwrap_or("").trim();
     let Some(p) = crate::ai::persona::resolve(&ctx.db, who) else {
@@ -1441,6 +1687,42 @@ fn title_for(persona: &str, task: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn team_names_carry_the_project_so_several_leads_can_exist() {
+        // Names are unique across every project, so "Lead" on its own can only ever
+        // belong to one of them — and `agent_send "Lead"` would be a coin toss.
+        assert_eq!(team_member_name("CSB", "lead"), "CSB Lead");
+        assert_eq!(team_member_name("GameQuery", "engineer"), "GameQuery Engineer");
+        assert_ne!(
+            team_member_name("CSB", "lead"),
+            team_member_name("GameQuery", "lead")
+        );
+    }
+
+    #[test]
+    fn a_long_or_multiword_project_still_gives_a_usable_name() {
+        // The name is typed by a person addressing the agent, so it has to stay short
+        // enough to say.
+        let n = team_member_name("counter-strike-boost.com production", "ops");
+        assert!(n.ends_with(" Ops"), "{n}");
+        assert!(n.len() < 30, "{n}");
+    }
+
+    #[test]
+    fn a_reviewer_cannot_be_given_the_run_of_the_place_by_default() {
+        // A reviewer that can change things is not a reviewer, and an engineer that can
+        // do anything unattended is a much bigger decision than "add an engineer"
+        // sounds like. Defaults start narrow; the user widens them deliberately.
+        assert_eq!(role_defaults("reviewer").2, Some("approve"));
+        assert_eq!(role_defaults("qa").2, Some("approve"));
+        assert_eq!(role_defaults("engineer").2, Some("allowlist"));
+        // An unrecognised role is the most cautious of all — nobody said what it does.
+        assert_eq!(role_defaults("wizard").2, Some("approve"));
+        // The lead inherits the global setting rather than being pinned narrow: it is
+        // the one the user actually converses with.
+        assert_eq!(role_defaults("lead").2, None);
+    }
 
     #[test]
     fn every_declared_tool_is_recognised_and_dispatchable() {
