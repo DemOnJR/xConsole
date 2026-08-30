@@ -78,7 +78,12 @@ struct Shared {
     /// sidecar down underneath a QR code the bridge is not yet armed to use.
     linking: Mutex<Option<std::time::Instant>>,
     /// Chats the bridge can be restricted to, as last reported by the sidecar.
-    chats: Mutex<Vec<Chat>>,
+    ///
+    /// `None` means the question has been asked and not answered. Distinguishing that
+    /// from an answered-but-empty list is the whole point: a helper too old to know the
+    /// command says nothing, and an empty dropdown reads as "you have no chats" rather
+    /// than "this binary is out of date".
+    chats: Mutex<Option<Vec<Chat>>>,
 }
 
 /// One chat the bridge can be restricted to.
@@ -581,18 +586,22 @@ pub async fn link_start(app: &tauri::AppHandle) -> Result<WhatsAppStatus, String
 /// asking for an 18-digit group id.
 pub async fn chats(app: &tauri::AppHandle) -> Result<Vec<Chat>, String> {
     ensure_running(app).await?;
+    // Cleared first, so what comes back is an answer to *this* question and not a
+    // leftover from the last one.
+    *shared().chats.lock().await = None;
     send_command(serde_json::json!({ "type": "list_chats" })).await?;
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let before = shared().chats.lock().await.clone();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while std::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let now = shared().chats.lock().await.clone();
-        if now != before && !now.is_empty() {
-            return Ok(now);
+        if let Some(list) = shared().chats.lock().await.clone() {
+            return Ok(list);
         }
     }
-    Ok(shared().chats.lock().await.clone())
+    Err("the WhatsApp helper did not answer. It is probably an older build that does not \
+         know how to list chats — rebuild it (src-tauri/sidecar/whatsapp/build.sh) or run \
+         the installer again, then reopen this screen."
+        .into())
 }
 
 /// Cancel a pairing attempt the user walked away from.
@@ -734,7 +743,7 @@ async fn handle_event(app: &tauri::AppHandle, ev: serde_json::Value) {
                         .collect()
                 })
                 .unwrap_or_default();
-            *shared().chats.lock().await = list;
+            *shared().chats.lock().await = Some(list);
         }
         "error" => {
             let msg = ev.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");

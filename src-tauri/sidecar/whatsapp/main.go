@@ -74,7 +74,10 @@ type Event struct {
 	IsGroup        bool   `json:"is_group,omitempty"`
 	Text           string `json:"text,omitempty"`
 
-	Chats []Chat `json:"chats,omitempty"`
+	// A pointer so an empty list still serialises as `[]` while every other event
+	// omits the field entirely. That distinction is the point: the host tells "you
+	// have no chats" from "the helper never answered" by whether this arrives.
+	Chats *[]Chat `json:"chats,omitempty"`
 }
 
 // Chat is one place the bridge could be restricted to.
@@ -287,7 +290,17 @@ func (b *bridge) readCommands(ctx context.Context) {
 			}
 			return
 		default:
-			logf("unknown command %q", cmd.Type)
+			// Surfaced, not just logged. A helper older than the xConsole that spawned
+			// it fails by staying silent, and silence is indistinguishable from "there
+			// is nothing to report" — which is how a stale binary turns into a feature
+			// that looks broken rather than out of date.
+			emit(Event{
+				Type: "error",
+				Message: fmt.Sprintf(
+					"this WhatsApp helper does not understand %q — it is older than the "+
+						"xConsole running it. Rebuild it with sidecar/whatsapp/build.sh, "+
+						"or reinstall.", cmd.Type),
+			})
 		}
 	}
 }
@@ -461,7 +474,7 @@ func (b *bridge) listChats(ctx context.Context) {
 		}
 		chats = append(chats, Chat{ID: g.JID.String(), Name: name, Kind: "group"})
 	}
-	emit(Event{Type: "chats", Chats: chats})
+	emit(Event{Type: "chats", Chats: &chats})
 }
 
 // username resolves a sender's WhatsApp username (the `@handle` form), or "".

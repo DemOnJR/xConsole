@@ -605,6 +605,14 @@ function WhatsAppChatPicker({
           Every chat is being read. Pick one to narrow it.
         </p>
       )}
+      {chats?.length === 0 && !error && (
+        // An answered-but-empty list is a different thing from a helper that never
+        // replied, and the dropdown looks the same either way.
+        <p className="text-[11px] text-gray-500">
+          Your phone reported no groups, and no chat of your own. Restricting needs at
+          least one — send yourself a message on WhatsApp, then load again.
+        </p>
+      )}
       {error && <p className="text-[11px] text-red-300">{error}</p>}
     </div>
   );
