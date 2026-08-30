@@ -916,21 +916,27 @@ pub fn role_defaults(role: &str) -> (&'static str, &'static str, Option<&'static
             "leads this project and answers to the user",
             "You lead this project. Route work to your team rather than doing it all \
              yourself, keep an eye on the project's numbers, and report upward: what \
-             changed, what you decided, what you need. Be brief — it is often read on a \
-             phone.",
+             changed, what you decided, what you need. Nothing your team does may end \
+             with uncommitted work or a pull request left to rot — check repo_status. Be \
+             brief: it is often read on a phone.",
             None,
         ),
         "engineer" | "dev" | "developer" => (
             "implements changes on this project",
             "You implement changes on this project. Read before you write, make the \
              smallest change that does the job, and verify it worked before saying it is \
-             done. Report what you actually changed, not what you intended to.",
+             done. Reuse what already exists rather than writing a second copy of it. \
+             Commit and push before you stop — never leave work in a working tree. \
+             Report what you actually changed, not what you intended to.",
             Some("allowlist"),
         ),
         "reviewer" | "qa" => (
             "reviews and verifies, read-only",
             "You verify. You do not change anything — you check that what was claimed \
-             actually happened, and say plainly when it did not. Cite what you looked at.",
+             actually happened, and say plainly when it did not. Cite what you looked at. \
+             Look for the things nobody notices one at a time: logic duplicated instead \
+             of reused, code nothing calls any more, a function doing three jobs, and \
+             pull requests left open long enough to go stale.",
             Some("approve"),
         ),
         "ops" | "sysadmin" | "sre" => (
@@ -1191,7 +1197,10 @@ fn review_prompt(project: &str, focus: Option<&str>) -> String {
          delegate work that would test it — not more of what was already not working.\n\
          - If they rose, say which change you think did it, so it can be repeated.\n\
          - If someone on the team did nothing, either give them work or say their remit \
-         is wrong.\n\n\
+         is wrong.\n\
+         - A stale pull request is not a small thing: left open, the code around it moves \
+         until merging it is a rewrite of work already paid for. Get it rebased and \
+         merged, or closed with a reason. Never leave it.\n\n\
          Finish with agent_report so it reaches the user: what changed, what you decided, \
          and what you need from them. Keep it short — it is read on a phone."
     );
@@ -1398,7 +1407,34 @@ async fn project_review(ctx: &ToolContext, args: &Value) -> String {
         }
     }
 
-    // 3. What actually changed, and what is still open.
+    // 3. The repository, before anything else about the work: a stale pull request and
+    // an uncommitted tree are the two ways a period's work quietly stops counting.
+    out.push_str("\n## Repository\n");
+    match crate::ai::repo::status_of(&ctx.db, &ctx.sessions, &ws.id).await {
+        Ok(st) => {
+            out.push_str(&format!("{}\n", st.summary()));
+            if st.work_at_risk() {
+                out.push_str(
+                    "Work exists in one place only — commit and push it (repo_save) before \
+                     anything else.\n",
+                );
+            }
+        }
+        Err(e) => out.push_str(&format!("(could not read: {e})\n")),
+    }
+    let prs = crate::ai::repo::pull_requests(&ctx.db, &ctx.sessions, &ws.id).await;
+    let stale: Vec<_> = prs.iter().filter(|p| p.is_stale()).collect();
+    out.push_str(&format!("Open pull requests: {}", prs.len()));
+    if stale.is_empty() {
+        out.push_str("\n");
+    } else {
+        out.push_str(&format!(", {} stale:\n", stale.len()));
+        for p in stale.iter().take(8) {
+            out.push_str(&format!("- {}\n", p.line()));
+        }
+    }
+
+    // 4. What actually changed, and what is still open.
     match crate::commands::project::history(&ctx.db, &ctx.sessions, &ws.id, 100).await {
         Ok(h) => {
             out.push_str(&format!(

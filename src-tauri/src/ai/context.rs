@@ -304,6 +304,49 @@ fn is_minimal_prompt(ctx: &PromptContext) -> bool {
 const OLLAMA_COMPACT_CTX: u32 = 65_536;
 
 /// Guidance for the built-in memory tool.
+/// How to work in a repository somebody else is also working in.
+///
+/// Every rule here is one way autonomous work quietly destroys value rather than
+/// adding it, and none of them is visible from inside the turn that causes it: work
+/// that is never committed is gone at the next checkout; a pull request left open long
+/// enough has to be rewritten rather than reviewed; and the same logic pasted into a
+/// fifth file means the next fix lands in one of them.
+pub const REPO_GUIDANCE: &str = "Working in a git repository, especially one other agents \
+and people also work in:\n\
+- NEVER stop, hand over, or wait with uncommitted work. Before you finish a turn, before \
+you report, before you wait on anything: commit and push (repo_save). Work that exists \
+only in a working tree is gone at the next checkout, and nobody will know what was lost.\n\
+- Check repo_status before you start, so you build on what is current rather than on top \
+of somebody's half-finished tree.\n\
+- Push to the branch you are on. It is the one the user set up. Do not move work to a \
+branch of your own invention, do not force-push, and do not rewrite history somebody may \
+already have pulled.\n\
+- Do not leave a pull request open and idle. If it is yours and it is ready, get it \
+merged; if it is stale, rebase it and get it moving, or close it and say why. An open \
+pull request nobody finishes becomes a conflict, and then a rewrite of work already paid \
+for.\n\
+- If CI is red on what you touched, that is your work, not somebody else's. Finish it or \
+say plainly that you could not.";
+
+/// What separates a change that helps from one that adds to the pile.
+///
+/// Stated as rules rather than taste because the failure is cumulative: nobody notices
+/// the third copy of a function, and by the hundredth file the logic exists in a dozen
+/// slightly different versions and a fix lands in one of them.
+pub const CODE_GUIDANCE: &str = "Writing code:\n\
+- Reuse before you write. If the logic you need already exists somewhere in this \
+project, call it. If it exists in two places, that is a bug: extract it into one \
+function and make both call that. The same behaviour implemented separately in many \
+files means a fix reaches one of them.\n\
+- Before adding a helper, look for one that already does it. A new function that \
+duplicates an old one is worse than no function.\n\
+- Delete code that nothing calls. Dead code is read, maintained and trusted by people \
+who do not know it is dead.\n\
+- A function that does several things should be several functions. Long is not the \
+problem; doing more than one job is, because it cannot be reused or tested.\n\
+- Match the surrounding code. A file with one function written in a different style is \
+harder to read than one written badly but consistently.";
+
 const MEMORY_GUIDANCE: &str = "You have a persistent memory. Save durable, \
 reusable facts (server roles, conventions, credentials locations, recurring \
 fixes) with the memory tool; keep entries terse. Do not store secrets verbatim.";
@@ -555,6 +598,12 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
             rules.push(LEARN_GUIDANCE.to_string());
         }
         rules.push(safety_guidance(ctx.safety).to_string());
+        // Only where the agent can actually change files. On a read-only turn these are
+        // two paragraphs of prompt that can never apply.
+        if ctx.has_tools {
+            rules.push(REPO_GUIDANCE.to_string());
+            rules.push(CODE_GUIDANCE.to_string());
+        }
         if ctx.plan_mode {
             rules.push(PLAN_MODE_GUIDANCE.to_string());
         }

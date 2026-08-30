@@ -862,6 +862,7 @@ the xConsole canvas flow. Use this to demonstrate web components, designs, dashb
     defs.extend(crate::ai::persona_tools::definitions());
     defs.extend(crate::ai::remote_tools::definitions());
     defs.extend(crate::ai::metrics_tools::definitions());
+    defs.extend(crate::ai::repo::definitions());
     defs
 }
 
@@ -1188,6 +1189,7 @@ pub async fn dispatch_with_telemetry(
         n if crate::ai::metrics_tools::is_metric_tool(n) => {
             crate::ai::metrics_tools::dispatch(ctx, n, args).await
         }
+        n if crate::ai::repo::is_repo_tool(n) => crate::ai::repo::dispatch(ctx, n, args).await,
         other => format!("error: unknown tool '{other}'"),
         }
     };
@@ -1582,6 +1584,7 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
         n if crate::ai::metrics_tools::is_metric_tool(n) => {
             crate::ai::metrics_tools::tool_is_mutating(n)
         }
+        n if crate::ai::repo::is_repo_tool(n) => crate::ai::repo::tool_is_mutating(n),
         // Infra tools: allow read-only verbs, treat the rest (apply/destroy/import) as mutating.
         n if n.starts_with("terraform_")
             || n.starts_with("cloud_")

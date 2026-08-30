@@ -341,6 +341,12 @@ pub async fn run_loop(ctx: &GoalContext, goal_id: &str) {
                         StreamEvent::Status(format!("waiting until {at}")),
                     );
                 }
+            } else if matches!(goal.status.as_str(), "done" | "blocked" | "stopped") {
+                // The run is over, whichever way it ended. Anything it wrote and did not
+                // commit is about to be forgotten, and "stopped" and "blocked" are the
+                // cases most likely to leave a half-finished tree behind.
+                secure_work(ctx, &mut goal).await;
+                let _ = save_goal(ctx, &goal);
             }
             return;
         }
@@ -381,6 +387,65 @@ pub async fn run_loop(ctx: &GoalContext, goal_id: &str) {
         }
         let _ = save_goal(ctx, &goal);
         tokio::time::sleep(CYCLE_GAP).await;
+    }
+}
+
+/// Make sure a finished run did not leave work in one place only.
+///
+/// This is mechanical on purpose. An agent that has just declared a goal met has no
+/// reason to go and look at `git status`, and the failure is invisible until the next
+/// checkout throws the work away — which may be weeks later, by which time nobody knows
+/// what was lost. Hoping the model remembers is not a guarantee; checking is.
+///
+/// Committing first and pushing second matters: when the remote or the network is the
+/// broken thing, the work is still recoverable from the machine it was done on.
+async fn secure_work(ctx: &GoalContext, goal: &mut GoalSession) {
+    let Some(ws) = goal.workspace_id.as_deref().filter(|s| !s.is_empty()) else { return };
+    let status = match crate::ai::repo::status_of(&ctx.db, &ctx.sessions, ws).await {
+        Ok(s) => s,
+        // Could not look. Said out loud rather than assumed fine — "we did not check"
+        // and "there is nothing to save" are not the same answer.
+        Err(e) => {
+            crate::diag(&format!("goal {}: could not check the repository: {e}", goal.id));
+            return;
+        }
+    };
+    if !status.is_repo || !status.is_readable() || !status.work_at_risk() {
+        return;
+    }
+
+    let message = format!(
+        "wip({}): {}\n\nCommitted automatically when the task finished, so the work is \
+         not left only on this machine.",
+        goal.persona_id.as_deref().unwrap_or("agent"),
+        goal.title
+    );
+    match crate::ai::repo::save(&ctx.db, &ctx.sessions, ws, &message).await {
+        Ok(out) => {
+            crate::diag(&format!("goal {}: secured work — {}", goal.id, out.trim()));
+            let note = format!("Uncommitted work was committed and pushed on finishing ({}).", status.summary());
+            goal.outcome = Some(match goal.outcome.take() {
+                Some(o) => format!("{o}\n{note}"),
+                None => note,
+            });
+        }
+        Err(e) => {
+            // The one case that must not be reported as success: the task claims to be
+            // done and its changes exist nowhere but a disk nobody is watching.
+            crate::diag(&format!("goal {}: COULD NOT SECURE WORK: {e}", goal.id));
+            goal.status = "blocked".to_string();
+            goal.outcome = Some(format!(
+                "Finished, but the work could not be committed or pushed ({}): {e}. It \
+                 exists only where it was done — deal with this before anything else \
+                 touches that checkout.",
+                status.summary()
+            ));
+            notify_user(
+                &ctx.app,
+                "Work at risk",
+                &format!("{} finished with work that could not be pushed", goal.title),
+            );
+        }
     }
 }
 
