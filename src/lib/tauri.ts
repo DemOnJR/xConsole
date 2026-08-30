@@ -698,6 +698,10 @@ export interface CronJobInput {
   payload: string;
   targets_json?: string | null;
   enabled: boolean;
+  /** Project this job is about. The run gets that project's brief and files work there. */
+  workspace_id?: string | null;
+  /** The named agent it runs as. Null = the main agent. */
+  persona_id?: string | null;
 }
 
 /** A persistent autonomous goal session (/goal). */
