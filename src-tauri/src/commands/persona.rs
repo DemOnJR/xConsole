@@ -76,6 +76,57 @@ pub async fn unread_user_messages(
     db.unread_agent_messages(None, workspace_id.as_deref()).map_err(|e| e.to_string())
 }
 
+/// One agent's record over a window, for the panel that shows what it has been doing.
+#[derive(serde::Serialize)]
+pub struct AgentActivity {
+    pub persona_id: String,
+    pub name: String,
+    /// The project it belongs to, if any.
+    pub project: Option<String>,
+    pub days: i64,
+    pub tasks: Vec<crate::storage::models::GoalSession>,
+    pub changes: Vec<crate::ai::edits::EditRecord>,
+    pub messages: Vec<crate::storage::models::AgentMessage>,
+}
+
+/// What one agent has done lately.
+///
+/// The same three sources the agent's own `agent_activity` tool reads, so the panel and
+/// the answer the agent gives cannot disagree about what happened.
+#[tauri::command]
+pub async fn agent_activity(
+    db: State<'_, Db>,
+    persona_id: String,
+    days: Option<i64>,
+) -> Result<AgentActivity, String> {
+    let p = db
+        .get_persona(&persona_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("no such agent")?;
+    let days = days.unwrap_or(7).clamp(1, 90);
+    let since = chrono::Utc::now() - chrono::Duration::days(days);
+
+    Ok(AgentActivity {
+        project: p
+            .workspace_id
+            .as_deref()
+            .and_then(|id| db.get_workspace(id).ok().flatten())
+            .map(|w| w.name),
+        tasks: db
+            .agent_tasks_since(&p.id, &since.to_rfc3339())
+            .map_err(|e| e.to_string())?,
+        changes: db
+            .agent_file_changes_since(&p.id, since.timestamp_millis(), 200)
+            .map_err(|e| e.to_string())?,
+        messages: db
+            .agent_messages_since(&p.id, &since.to_rfc3339(), 100)
+            .map_err(|e| e.to_string())?,
+        persona_id: p.id,
+        name: p.name,
+        days,
+    })
+}
+
 #[tauri::command]
 pub async fn mark_agent_messages_read(db: State<'_, Db>, ids: Vec<String>) -> Result<(), String> {
     db.mark_agent_messages_read(&ids).map_err(|e| e.to_string())

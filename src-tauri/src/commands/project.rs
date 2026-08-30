@@ -118,6 +118,54 @@ async fn read_git(
     (branch, commits, note)
 }
 
+/// One metric's movement between two adjacent windows, for the project panel.
+#[derive(serde::Serialize)]
+pub struct MetricMovement {
+    pub name: String,
+    pub current: f64,
+    pub previous: f64,
+    /// `None` when the previous period was zero — a first sale is not a percentage.
+    pub change_pct: Option<f64>,
+    pub unit: Option<String>,
+    pub days_with_data: i64,
+}
+
+/// How a project's numbers moved: this period against the one before it.
+#[tauri::command]
+pub async fn project_metrics(
+    db: State<'_, Db>,
+    workspace_id: String,
+    days: Option<i64>,
+) -> Result<Vec<MetricMovement>, String> {
+    let days = days.unwrap_or(7).clamp(1, 365);
+    // Half-open windows, so a day belongs to exactly one of them.
+    let today = chrono::Local::now().date_naive();
+    let fmt = |d: chrono::NaiveDate| d.format("%Y-%m-%d").to_string();
+    let end = fmt(today + chrono::Duration::days(1));
+    let mid = fmt(today + chrono::Duration::days(1) - chrono::Duration::days(days));
+    let start = fmt(today + chrono::Duration::days(1) - chrono::Duration::days(days * 2));
+
+    let mut out = Vec::new();
+    for name in db.metric_names(&workspace_id).map_err(|e| e.to_string())? {
+        let (current, days_with_data) =
+            db.metric_total(&workspace_id, &name, &mid, &end).unwrap_or((0.0, 0));
+        let (previous, _) = db.metric_total(&workspace_id, &name, &start, &mid).unwrap_or((0.0, 0));
+        out.push(MetricMovement {
+            change_pct: (previous.abs() > f64::EPSILON)
+                .then(|| (current - previous) / previous * 100.0),
+            unit: db
+                .metric_series(&workspace_id, &name, &start)
+                .ok()
+                .and_then(|s| s.into_iter().find_map(|(_, _, u)| u)),
+            name,
+            current,
+            previous,
+            days_with_data,
+        });
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 pub async fn project_history(
     db: State<'_, Db>,

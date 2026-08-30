@@ -5,6 +5,8 @@ import {
   type AgentMessage,
   type Persona,
   type PersonaInput,
+  type AgentActivity,
+  type MetricMovement,
   type ProjectHistory,
 } from "../../../lib/tauri";
 import { useVpsStore } from "../../../stores/vpsStore";
@@ -97,6 +99,7 @@ export function AgentsSection() {
   // question is about. "" means all of them, which is only useful for a survey.
   const [project, setProject] = useState<string>(activeWorkspace ?? "");
   const [history, setHistory] = useState<ProjectHistory | null>(null);
+  const [metrics, setMetrics] = useState<MetricMovement[]>([]);
 
   const load = useCallback(async () => {
     const [list, msgs] = await Promise.all([
@@ -110,6 +113,7 @@ export function AgentsSection() {
     setHistory(
       project ? await api.projectHistory(project, 200).catch(() => null) : null,
     );
+    setMetrics(project ? await api.projectMetrics(project, 7).catch(() => []) : []);
   }, [project]);
 
   useEffect(() => {
@@ -383,7 +387,8 @@ export function AgentsSection() {
           </p>
         )}
         <ConversationFeed messages={messages} nameOf={nameOf} />
-        {history && <ProjectRecord history={history} nameOf={nameOf} />}
+        {history && <ProjectRecord history={history} metrics={metrics} nameOf={nameOf} />}
+        {draft?.id && <AgentRecord personaId={draft.id} nameOf={nameOf} />}
       </div>
     </div>
   );
@@ -397,11 +402,119 @@ export function AgentsSection() {
  * correlating tasks, edits and commits by timestamp, which is the work the user was
  * doing by hand before there was a project to file them under.
  */
+/**
+ * What one agent has been doing lately.
+ *
+ * The teams run while nobody is watching, so the only way to know whether an agent is
+ * earning its place is to be able to look afterwards — tasks and how each ended, files
+ * it touched, what it said. Shown beside the editor because those are the two things
+ * that go together: you change a remit *because* of what the record shows.
+ */
+function AgentRecord({
+  personaId,
+  nameOf,
+}: {
+  personaId: string;
+  nameOf: (id?: string | null) => string;
+}) {
+  const [data, setData] = useState<AgentActivity | null>(null);
+  const [days, setDays] = useState(7);
+
+  useEffect(() => {
+    let live = true;
+    void api
+      .agentActivity(personaId, days)
+      .then((d) => live && setData(d))
+      .catch(() => live && setData(null));
+    return () => {
+      live = false;
+    };
+  }, [personaId, days]);
+
+  if (!data) return null;
+  const quiet =
+    data.tasks.length === 0 && data.changes.length === 0 && data.messages.length === 0;
+
+  return (
+    <div className="mt-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <h4 className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+          {data.name} — last {data.days} days
+          {data.project ? ` on ${data.project}` : ""}
+        </h4>
+        <div className="ml-auto flex gap-1">
+          {[7, 30].map((d) => (
+            <button
+              key={d}
+              type="button"
+              onClick={() => setDays(d)}
+              className={`border px-1.5 py-0.5 font-mono text-[10px] transition ${
+                days === d
+                  ? "border-[var(--accent)] bg-[var(--accent-muted)] text-gray-100"
+                  : "border-[var(--border)] text-gray-400 hover:border-[var(--border-strong)]"
+              }`}
+            >
+              {d}d
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {quiet ? (
+        // An idle agent is a finding, not an empty panel: either nobody is giving it
+        // work, or its remit does not match anything that comes up.
+        <p className="border border-dashed border-[var(--border)] px-3 py-3 text-center text-[11px] text-gray-500">
+          Nothing in this period — no tasks, no changes, nothing said.
+        </p>
+      ) : (
+        <>
+          <RecordList
+            title="Tasks"
+            empty="No tasks in this period."
+            rows={data.tasks.slice(0, 10).map((t) => ({
+              key: t.id,
+              lead: t.status,
+              text: t.title,
+              // The outcome is the point — "it ended" is not an answer.
+              tail: t.outcome?.split("\n")[0]?.slice(0, 60) ?? `${t.cycles} cycles`,
+            }))}
+          />
+          <RecordList
+            title="Files changed"
+            empty="No files changed."
+            rows={data.changes.slice(0, 10).map((c) => ({
+              key: c.id,
+              lead: c.is_new ? "new" : "edit",
+              text: c.path,
+              tail: c.label,
+            }))}
+          />
+          <RecordList
+            title="Said"
+            empty="Nothing said to the team."
+            rows={data.messages.slice(0, 10).map((m) => ({
+              key: m.id,
+              lead: m.kind,
+              text: m.body.split("\n")[0] ?? "",
+              tail:
+                m.from_id === personaId
+                  ? `to ${nameOf(m.to_id)}`
+                  : `from ${nameOf(m.from_id)}`,
+            }))}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
 function ProjectRecord({
   history,
+  metrics,
   nameOf,
 }: {
   history: ProjectHistory;
+  metrics: MetricMovement[];
   nameOf: (id?: string | null) => string;
 }) {
   return (
@@ -417,6 +530,51 @@ function ProjectRecord({
           <span className="truncate font-mono text-[10px] text-gray-600">
             {history.location}
           </span>
+        )}
+      </div>
+
+      {/* First, because it is what all the rest is for. */}
+      <div className="space-y-1.5">
+        <h4 className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+          Numbers — last 7 days vs the 7 before
+        </h4>
+        {metrics.length === 0 ? (
+          <p className="border border-dashed border-[var(--border)] px-3 py-3 text-center text-[11px] text-gray-500">
+            No figures recorded. Until there are, there is no way to tell whether any of
+            the work below is helping.
+          </p>
+        ) : (
+          <div className="divide-y divide-[var(--border)] border border-[var(--border)] bg-[var(--surface-2)]">
+            {metrics.map((m) => {
+              // Colour only where it reports something to act on.
+              const tone =
+                m.change_pct == null
+                  ? "text-gray-500"
+                  : m.change_pct < -0.5
+                    ? "text-[var(--warning)]"
+                    : m.change_pct > 0.5
+                      ? "text-emerald-400"
+                      : "text-gray-500";
+              return (
+                <div key={m.name} className="flex items-baseline gap-2 px-3 py-1.5">
+                  <span className="min-w-0 flex-1 truncate text-[11px] text-gray-300">
+                    {m.name}
+                  </span>
+                  <span className="shrink-0 font-mono text-[11px] text-gray-300">
+                    {m.current.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                    {m.unit ? ` ${m.unit}` : ""}
+                  </span>
+                  <span className={`shrink-0 font-mono text-[10px] ${tone}`}>
+                    {m.change_pct == null
+                      ? m.current > 0
+                        ? "new"
+                        : "no data"
+                      : `${m.change_pct > 0 ? "+" : ""}${m.change_pct.toFixed(1)}%`}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
 

@@ -508,6 +508,29 @@ export interface AgentMessage {
   created_at?: string | null;
 }
 
+/** One agent's record over a window. */
+export interface AgentActivity {
+  persona_id: string;
+  name: string;
+  /** The project it belongs to, if any. */
+  project?: string | null;
+  days: number;
+  tasks: GoalSession[];
+  changes: FileChange[];
+  messages: AgentMessage[];
+}
+
+/** How one of a project's numbers moved against the period before. */
+export interface MetricMovement {
+  name: string;
+  current: number;
+  previous: number;
+  /** Null when the previous period was zero — a first sale is not a percentage. */
+  change_pct?: number | null;
+  unit?: string | null;
+  days_with_data: number;
+}
+
 /** One commit in a project's repository. */
 export interface Commit {
   sha: string;
@@ -1318,6 +1341,12 @@ export const api = {
     }),
   unreadUserMessages: (workspaceId?: string | null) =>
     invoke<AgentMessage[]>("unread_user_messages", { workspaceId: workspaceId ?? null }),
+  /** What one agent has done lately: tasks and outcomes, files changed, what it said. */
+  agentActivity: (personaId: string, days?: number) =>
+    invoke<AgentActivity>("agent_activity", { personaId, days: days ?? null }),
+  /** How a project's numbers moved against the period before. */
+  projectMetrics: (workspaceId: string, days?: number) =>
+    invoke<MetricMovement[]>("project_metrics", { workspaceId, days: days ?? null }),
   /** One project's record: tasks, conversation, file changes and commits. */
   projectHistory: (workspaceId: string, limit?: number) =>
     invoke<ProjectHistory>("project_history", { workspaceId, limit: limit ?? null }),

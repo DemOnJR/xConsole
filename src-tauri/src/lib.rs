@@ -538,6 +538,8 @@ pub fn run() {
             commands::persona::persona_org_chart,
             commands::persona::list_agent_messages,
             commands::project::project_history,
+            commands::persona::agent_activity,
+            commands::project::project_metrics,
             commands::persona::unread_user_messages,
             commands::persona::mark_agent_messages_read,
             commands::goal::start_goal,
