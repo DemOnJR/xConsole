@@ -168,6 +168,11 @@ impl CliProvider {
             &prompt,
             |mcp_url| {
                 let mut cmd = format!("{bin} {}", model_flags.join(" "));
+                // Logged before the MCP argument is appended: that one carries this
+                // run's bearer token, and the log is a file on disk. The flags are what
+                // matter anyway — "what did it actually run" was unanswerable without
+                // reproducing the whole path by hand.
+                crate::diag(&format!("cli(remote): {cmd}"));
                 if let Some(url) = mcp_url {
                     cmd.push_str(" --mcp-config ");
                     cmd.push_str(&crate::ssh::agent_exec::mcp_config_arg(url, &bridge_token(&bridge)));
@@ -185,6 +190,31 @@ impl CliProvider {
         let mut out = std::sync::Arc::try_unwrap(out_cell)
             .map(|m| m.into_inner().unwrap())
             .unwrap_or_default();
+
+        // A `--output-format stream-json` run always ends with a `result` event, and
+        // that event is where the token counts come from. Text arriving without one
+        // means the CLI answered in some other format — an older build that does not
+        // know the flag, or a launcher printing plain text — and the parser fell back
+        // to treating each line as prose. It still shows an answer, so the only visible
+        // symptom is a turn that reports no tokens, which reads as a display glitch
+        // rather than as "this ran in a mode we do not understand".
+        if out.prompt_tokens.is_none() && out.completion_tokens.is_none() {
+            crate::diag(&format!(
+                "cli(remote): no result event from {} — output was not stream-json, so \
+                 token counts and the resume id are missing. stderr: {}",
+                remote.vps_id,
+                run.stderr.trim().chars().take(400).collect::<String>()
+            ));
+            emit(
+                sink,
+                StreamEvent::Status(format!(
+                    "Claude Code on {} did not report a result — check its version there \
+                     (`claude --version`); xConsole needs one that supports \
+                     `--output-format stream-json`.",
+                    remote.vps_id
+                )),
+            );
+        }
 
         if run.exit_code != 0 {
             // A failed run's session id is not worth resuming into.
