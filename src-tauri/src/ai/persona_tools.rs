@@ -155,6 +155,21 @@ staging box\"). Naming an existing agent updates it instead of creating a second
             parameters: json!({"type": "object", "properties": {}}),
         },
         ToolDef {
+            name: "project_review".into(),
+            description: "The whole picture for one project in one call: how its numbers moved, \
+what each agent on it did and what came of that, what changed on the servers, and what is still \
+open. This is the briefing for deciding what the team should do next — run it before changing \
+anyone's remit, and on a schedule so a project is reviewed even when nobody asks."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Project name. Defaults to the one currently open."},
+                    "days": {"type": "integer", "description": "Period to review, in days (default 7)."}
+                }
+            }),
+        },
+        ToolDef {
             name: "agent_activity".into(),
             description: "What one agent has actually done over the last N days: the tasks it \
 was given and how each ended, the files it changed, and what it said to the rest of the team. \
@@ -220,6 +235,7 @@ pub fn is_persona_tool(name: &str) -> bool {
             | "agent_org"
             | "teams_overview"
             | "agent_activity"
+            | "project_review"
             | "project_history"
     )
 }
@@ -249,6 +265,7 @@ pub async fn dispatch(ctx: &ToolContext, name: &str, args: &Value) -> String {
         "agent_org" => agent_org(ctx),
         "teams_overview" => teams_overview(ctx),
         "agent_activity" => agent_activity(ctx, args),
+        "project_review" => project_review(ctx, args).await,
         "project_history" => project_history(ctx, args).await,
         _ => format!("error: unknown persona tool {name}"),
     }
@@ -867,6 +884,134 @@ fn agent_org(ctx: &ToolContext) -> String {
         return "There are no named agents yet. Use agent_hire to create one.".into();
     }
     crate::ai::persona::format_org_chart(&all)
+}
+
+/// Everything needed to decide what a project's team should do next.
+///
+/// The pieces existed separately — numbers, per-agent work, what changed on the servers
+/// — and separately they do not answer the question. "The team shipped nine fixes" and
+/// "revenue fell 12%" are each unremarkable; together they say the work is not touching
+/// whatever is actually wrong, which is the finding worth acting on.
+///
+/// So it ends by naming the decision rather than leaving a pile of data. An agent handed
+/// a report and no question tends to summarise it back.
+async fn project_review(ctx: &ToolContext, args: &Value) -> String {
+    let all_ws = ctx.db.list_workspaces().unwrap_or_default();
+    let named = args.get("project").and_then(|v| v.as_str()).map(str::trim);
+    let ws = match named.filter(|n| !n.is_empty()) {
+        Some(n) => match all_ws.iter().find(|w| w.name.eq_ignore_ascii_case(n) || w.id == n) {
+            Some(w) => w.clone(),
+            None => {
+                return format!(
+                    "error: no project called {n:?}. Known: {}",
+                    all_ws.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")
+                )
+            }
+        },
+        None => match ctx.workspace_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(id) => match all_ws.iter().find(|w| w.id == id) {
+                Some(w) => w.clone(),
+                None => return "error: the open project no longer exists".into(),
+            },
+            None => return "error: no project is open, so name one with `project`".into(),
+        },
+    };
+    let days = args.get("days").and_then(|v| v.as_i64()).unwrap_or(7).clamp(1, 90);
+
+    let mut out = format!("# {} — last {days} day(s)\n", ws.name);
+
+    // 1. Whether it is earning more or less. First, because it is what the rest is for.
+    out.push_str("\n## Numbers\n");
+    out.push_str(&crate::ai::metrics_tools::trend_for(
+        ctx,
+        &ws.id,
+        &ws.name,
+        None,
+        days,
+    ));
+
+    // 2. Who did what, and what came of it.
+    let personas = ctx.db.list_personas().unwrap_or_default();
+    let team: Vec<&crate::storage::models::Persona> = personas
+        .iter()
+        .filter(|p| p.workspace_id.as_deref() == Some(ws.id.as_str()) && p.enabled)
+        .collect();
+    let since = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+
+    out.push_str("\n## The team\n");
+    if team.is_empty() {
+        out.push_str(
+            "Nobody is assigned to this project. Whatever happened here was done by a \
+             company-wide agent or by the user — worth fixing if this project is meant to \
+             look after itself.\n",
+        );
+    }
+    for p in &team {
+        let tasks = ctx.db.agent_tasks_since(&p.id, &since).unwrap_or_default();
+        let done = tasks.iter().filter(|t| t.status == "done").count();
+        let stuck = tasks.iter().filter(|t| t.status == "blocked").count();
+        out.push_str(&format!(
+            "\n- **{}**: {} task(s) — {done} finished, {stuck} blocked\n",
+            p.name,
+            tasks.len()
+        ));
+        for t in tasks.iter().take(5) {
+            out.push_str(&format!("  · [{}] {}\n", t.status, t.title));
+            if let Some(o) = t.outcome.as_deref().filter(|o| !o.trim().is_empty()) {
+                out.push_str(&format!("      → {}\n", o.trim().lines().next().unwrap_or("")));
+            }
+        }
+        if tasks.is_empty() {
+            // An idle agent is a finding: either it has nothing to do, or nobody is
+            // giving it anything.
+            out.push_str("  · nothing this period\n");
+        }
+    }
+
+    // 3. What actually changed, and what is still open.
+    match crate::commands::project::history(&ctx.db, &ctx.sessions, &ws.id, 100).await {
+        Ok(h) => {
+            out.push_str(&format!(
+                "\n## Changes\n{} file change(s); {} commit(s){}\n",
+                h.changes.len(),
+                h.commits.len(),
+                h.branch.map(|b| format!(" on {b}")).unwrap_or_default()
+            ));
+            for c in h.commits.iter().take(8) {
+                out.push_str(&format!("- {} {}\n", c.sha, c.subject));
+            }
+            if let Some(note) = h.git_note {
+                out.push_str(&format!("- {note}\n"));
+            }
+            let open: Vec<&crate::storage::models::GoalSession> = h
+                .tasks
+                .iter()
+                .filter(|t| matches!(t.status.as_str(), "active" | "waiting" | "blocked"))
+                .collect();
+            out.push_str(&format!("\n## Still open ({})\n", open.len()));
+            for t in open.iter().take(10) {
+                out.push_str(&format!("- [{}] {}\n", t.status, t.title));
+            }
+            if open.is_empty() {
+                out.push_str("- (nothing in flight)\n");
+            }
+        }
+        Err(e) => out.push_str(&format!("\n## Changes\n(could not read: {e})\n")),
+    }
+
+    out.push_str(
+        "\n## What to decide\n\
+         Read the numbers against the work, not on their own. If a metric fell while the \
+         team shipped plenty, the work is not touching what is actually wrong — say what \
+         you think the cause is and what would test that, rather than proposing more of \
+         the same. If a metric rose, say which change you think did it, so it can be \
+         repeated. If there are no numbers at all, that is the first thing to fix: record \
+         them with metric_record, because without them none of this is answerable.\n\
+         Then act: agent_delegate the work you decided on, agent_hire someone if the team \
+         is missing a skill, agent_dismiss or agent_hire (same name) to change a remit \
+         that is not paying off. Report what you decided upward with agent_report.\n",
+    );
+    out
 }
 
 /// One agent's record over a window: what it was asked, what came of it, what it

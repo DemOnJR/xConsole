@@ -660,6 +660,10 @@ export interface CronJob {
   enabled: boolean;
   last_run?: string | null;
   last_status?: string | null;
+  /** Project this job is about. The run gets that project's brief. */
+  workspace_id?: string | null;
+  /** The named agent it runs as. Null = the main agent. */
+  persona_id?: string | null;
   created_at?: string | null;
 }
 

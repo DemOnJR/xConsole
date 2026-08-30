@@ -348,14 +348,18 @@ async fn run_prompt_job(
         targets,
         safety: safety::global_safety_mode(&ctx.db),
         plan_mode: false,
-        workspace_id: None,
+        // The project the job is about, so the run gets that project's brief and files
+        // its work there. A scheduled review of "the project" is meaningless without it.
+        workspace_id: job.workspace_id.clone().filter(|s| !s.is_empty()),
         canvas: Vec::new(),
         edits: crate::ai::edits::EditJournal::with_db(ctx.db.clone()),
         hooks: hooks_cfg,
         turn_images: Vec::new(),
         goal_id: None,
-        // A scheduled run is the main agent unless a goal gives it a persona.
-        persona_id: None,
+        // Runs as the agent the job names. That is what makes a schedule a member of
+        // staff rather than a script: the work happens under that agent's instructions
+        // and trust level, and what it says lands in its team's thread.
+        persona_id: job.persona_id.clone().filter(|s| !s.is_empty()),
     };
 
     let messages = vec![ChatMessage::user(job.payload.clone())];

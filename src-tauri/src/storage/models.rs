@@ -207,6 +207,17 @@ pub struct CronJob {
     pub last_run: Option<String>,
     #[serde(default)]
     pub last_status: Option<String>,
+    /// Project this job is about. The run gets that project's brief and files its work
+    /// there — a scheduled review of "the project" is meaningless without one.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// The named agent the job runs as. `None` runs it as the main agent.
+    ///
+    /// This is what makes a schedule a member of staff rather than a script: the review
+    /// happens as the lead of that project, under its instructions and its trust level,
+    /// and what it says goes into that team's thread.
+    #[serde(default)]
+    pub persona_id: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
 }
@@ -223,11 +234,12 @@ pub struct CronJobInput {
     pub targets_json: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default)]
-    pub reports_to: Option<String>,
-    /// Project this agent belongs to. `None` = company-wide.
+    /// Project this job is about.
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// The named agent it runs as. `None` = the main agent.
+    #[serde(default)]
+    pub persona_id: Option<String>,
 }
 
 /// A persistent goal session (the /goal autonomous mode). The loop controller in

@@ -685,6 +685,10 @@ impl Db {
         let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN workspace_id TEXT", []);
         // What came of the task, not just that it ended.
         let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN outcome TEXT", []);
+        // A schedule that is a member of staff rather than a script: it runs as an
+        // agent, on a project.
+        let _ = conn.execute("ALTER TABLE cron_job ADD COLUMN workspace_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE cron_job ADD COLUMN persona_id TEXT", []);
         // The inbox and the per-project history are both read on every agent cycle.
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_message_workspace
@@ -1150,13 +1154,16 @@ impl Db {
             last_run: r.get(7)?,
             last_status: r.get(8)?,
             created_at: r.get(9)?,
+            workspace_id: r.get(10)?,
+            persona_id: r.get(11)?,
         })
     }
 
     pub fn list_cron_jobs(&self) -> Result<Vec<CronJob>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, schedule, kind, payload, targets_json, enabled, last_run, last_status, created_at
+            "SELECT id, name, schedule, kind, payload, targets_json, enabled, last_run, last_status, created_at,
+                    workspace_id, persona_id
              FROM cron_job ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], Self::row_to_cron)?;
@@ -1166,7 +1173,8 @@ impl Db {
     pub fn get_cron_job(&self, id: &str) -> Result<Option<CronJob>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, schedule, kind, payload, targets_json, enabled, last_run, last_status, created_at
+            "SELECT id, name, schedule, kind, payload, targets_json, enabled, last_run, last_status, created_at,
+                    workspace_id, persona_id
              FROM cron_job WHERE id = ?1",
         )?;
         let mut rows = stmt.query([id])?;
@@ -1181,15 +1189,18 @@ impl Db {
         {
             let conn = self.conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO cron_job (id, name, schedule, kind, payload, targets_json, enabled)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "INSERT INTO cron_job (id, name, schedule, kind, payload, targets_json, enabled,
+                                       workspace_id, persona_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     schedule = excluded.schedule,
                     kind = excluded.kind,
                     payload = excluded.payload,
                     targets_json = excluded.targets_json,
-                    enabled = excluded.enabled",
+                    enabled = excluded.enabled,
+                    workspace_id = excluded.workspace_id,
+                    persona_id = excluded.persona_id",
                 params![
                     id,
                     input.name,
@@ -1198,6 +1209,8 @@ impl Db {
                     input.payload,
                     input.targets_json,
                     input.enabled as i64,
+                    input.workspace_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+                    input.persona_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
                 ],
             )?;
         }

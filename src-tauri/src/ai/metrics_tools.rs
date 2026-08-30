@@ -179,21 +179,26 @@ impl Movement {
     }
 }
 
-fn trend(ctx: &ToolContext, args: &Value) -> String {
-    let (ws_id, ws_name) = match project_of(ctx, args) {
-        Ok(v) => v,
-        Err(e) => return format!("error: {e}"),
-    };
-    let days = args.get("days").and_then(|v| v.as_i64()).unwrap_or(7).clamp(1, 365);
-
-    let names: Vec<String> = match args.get("name").and_then(|v| v.as_str()).map(str::trim) {
-        Some(n) if !n.is_empty() => vec![n.to_lowercase()],
-        _ => ctx.db.metric_names(&ws_id).unwrap_or_default(),
+/// The trend report for one project, without going through tool arguments.
+///
+/// Shared with `project_review`, so the weekly briefing and the direct question give the
+/// same answer — a review that computed its own version of "revenue is down" would drift
+/// from the one the user sees when they ask.
+pub fn trend_for(
+    ctx: &ToolContext,
+    ws_id: &str,
+    ws_name: &str,
+    only: Option<&str>,
+    days: i64,
+) -> String {
+    let names: Vec<String> = match only.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => vec![n.to_lowercase()],
+        None => ctx.db.metric_names(ws_id).unwrap_or_default(),
     };
     if names.is_empty() {
         return format!(
             "{ws_name} has no figures recorded yet. Record them with metric_record — without \
-             numbers there is no way to tell whether the work is helping."
+             numbers there is no way to tell whether the work is helping.\n"
         );
     }
 
@@ -210,16 +215,27 @@ fn trend(ctx: &ToolContext, args: &Value) -> String {
     let mut out = format!("{ws_name} — last {days} day(s) against the {days} before:\n");
     for name in names {
         let (current, days_with_data) =
-            ctx.db.metric_total(&ws_id, &name, &mid, &end).unwrap_or((0.0, 0));
-        let (previous, _) = ctx.db.metric_total(&ws_id, &name, &start, &mid).unwrap_or((0.0, 0));
+            ctx.db.metric_total(ws_id, &name, &mid, &end).unwrap_or((0.0, 0));
+        let (previous, _) = ctx.db.metric_total(ws_id, &name, &start, &mid).unwrap_or((0.0, 0));
         let unit = ctx
             .db
-            .metric_series(&ws_id, &name, &start)
+            .metric_series(ws_id, &name, &start)
             .ok()
             .and_then(|s| s.into_iter().find_map(|(_, _, u)| u));
         out.push_str(&Movement { name, current, previous, days_with_data, unit }.line());
         out.push('\n');
     }
+    out
+}
+
+fn trend(ctx: &ToolContext, args: &Value) -> String {
+    let (ws_id, ws_name) = match project_of(ctx, args) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {e}"),
+    };
+    let days = args.get("days").and_then(|v| v.as_i64()).unwrap_or(7).clamp(1, 365);
+    let only = args.get("name").and_then(|v| v.as_str());
+    let mut out = trend_for(ctx, &ws_id, &ws_name, only, days);
     out.push_str(
         "\nA metric that is down is a question, not a verdict: look at what changed in the \
          period (agent_activity, project_history) before deciding what to do about it.\n",
