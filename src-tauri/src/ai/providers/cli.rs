@@ -445,10 +445,46 @@ impl CliProvider {
         }
     }
 
+    /// The text handed to the CLI on stdin.
+    ///
+    /// A resumed conversation only needs what is new, because the CLI still holds the
+    /// thread on its side. What is new is the user's message — **not** whatever message
+    /// happens to be last.
+    ///
+    /// Every request ends with a synthetic `# Runtime context` user message carrying the
+    /// date, the VPS snapshot and the canvas (see `context::inject_dynamic_into_last_user`).
+    /// Taking the last user message therefore sent the model a block of context and
+    /// nothing the user had typed. It answered the only thing it had been given: it
+    /// narrated the snapshot, or — with nothing worth narrating — said "I'm here, tell me
+    /// what you want to do". Asking "why is the disk full?" produced a diff against the
+    /// previous snapshot; asking it to delete something produced an offer to help. The
+    /// replies looked like a model ignoring the conversation because it never saw it.
+    ///
+    /// So: the real message, with the runtime context ahead of it as context rather than
+    /// in place of it.
     fn build_prompt(req: &ChatRequest, is_resumed_agy: bool) -> String {
+        let is_runtime = crate::ai::context::is_runtime_message;
         if is_resumed_agy {
-            if let Some(last_user) = req.messages.iter().rev().find(|m| m.role == "user") {
-                return last_user.content.clone();
+            if let Some(last_user) = req
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == "user" && !is_runtime(m))
+            {
+                let runtime = req
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| is_runtime(m))
+                    .map(|m| m.content.as_str())
+                    .unwrap_or("");
+                return if runtime.is_empty() {
+                    last_user.content.clone()
+                } else {
+                    // The ask goes last so it is the thing being answered, not the
+                    // thing buried under a screenful of context.
+                    format!("{runtime}\n\n{}", last_user.content)
+                };
             }
         }
         let mut s = String::new();
@@ -458,6 +494,12 @@ impl CliProvider {
         }
         for m in &req.messages {
             match m.role.as_str() {
+                // The runtime block is context, not something the user said. Labelling
+                // it "User:" invites the model to answer it.
+                "user" if is_runtime(m) => {
+                    s.push_str(&m.content);
+                    s.push('\n');
+                }
                 "user" => {
                     s.push_str("User: ");
                     s.push_str(&m.content);
@@ -2203,3 +2245,73 @@ claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n";
         );
     }
 }
+#[cfg(test)]
+mod build_prompt_tests {
+    use super::*;
+    use crate::ai::context::RUNTIME_MARKER;
+    use crate::ai::provider::ChatMessage;
+
+    fn req(messages: Vec<ChatMessage>) -> ChatRequest {
+        let mut r = ChatRequest::new("claude-opus-5");
+        r.system = "You are the xConsole DevOps copilot.".into();
+        r.messages = messages;
+        r
+    }
+
+    fn runtime() -> ChatMessage {
+        ChatMessage::user(format!(
+            "{RUNTIME_MARKER}\nDate: Saturday\nDisk /: 600G / 698G — 87%"
+        ))
+    }
+
+    #[test]
+    fn a_resumed_turn_sends_what_the_user_typed() {
+        // The bug: every request ends with a synthetic runtime block, so taking the
+        // *last* user message sent the model context and none of the question. It
+        // narrated the snapshot instead of answering, and on a turn with nothing worth
+        // narrating it offered to help — which read as the agent ignoring the
+        // conversation entirely.
+        let p = CliProvider::build_prompt(
+            &req(vec![ChatMessage::user("sterge fivem si txadmin"), runtime()]),
+            true,
+        );
+        assert!(p.contains("sterge fivem si txadmin"), "the ask is missing: {p}");
+        // Context still travels, but behind the ask, so the ask is what gets answered.
+        assert!(p.contains("87%"), "runtime context should still be carried");
+        assert!(
+            p.trim_end().ends_with("sterge fivem si txadmin"),
+            "the ask must come last: {p}"
+        );
+    }
+
+    #[test]
+    fn a_resumed_turn_with_no_context_sends_the_ask_alone() {
+        // The CLI holds the thread on its side, so nothing else needs repeating.
+        let p = CliProvider::build_prompt(
+            &req(vec![ChatMessage::user("ce model esti?")]),
+            true,
+        );
+        assert_eq!(p, "ce model esti?");
+    }
+
+    #[test]
+    fn a_fresh_turn_does_not_label_the_runtime_block_as_the_user_speaking() {
+        // "User: # Runtime context …" invites the model to answer the context.
+        let p = CliProvider::build_prompt(
+            &req(vec![ChatMessage::user("hi"), runtime()]),
+            false,
+        );
+        assert!(p.contains("User: hi"));
+        assert!(!p.contains(&format!("User: {RUNTIME_MARKER}")), "runtime is not an ask: {p}");
+        assert!(p.contains(RUNTIME_MARKER), "runtime context should still be carried");
+    }
+
+    #[test]
+    fn a_resumed_turn_with_only_context_has_nothing_to_ask() {
+        // Nothing the user said: fall through rather than handing the model a block of
+        // context and letting it invent a question to answer.
+        let p = CliProvider::build_prompt(&req(vec![runtime()]), true);
+        assert!(p.contains("You are the xConsole DevOps copilot."));
+    }
+}
+
