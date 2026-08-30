@@ -1197,6 +1197,40 @@ fn parse_claude_code_stream_line(
                 if let Some(model) = v.get("model").and_then(|m| m.as_str()) {
                     emit(sink, StreamEvent::Status(format!("Claude Code on {model}")));
                 }
+                // Whether xConsole's own tools actually attached.
+                //
+                // A server the CLI could not reach is reported here and then simply not
+                // offered — the run continues, tool-less, and the agent explains to the
+                // user that it cannot touch their servers and hands them shell commands
+                // to paste. Nothing in xConsole said the bridge had failed, so that read
+                // as the agent being unhelpful rather than as a broken tunnel.
+                let failed: Vec<String> = v
+                    .get("mcp_servers")
+                    .and_then(|m| m.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter(|s| {
+                                s.get("status").and_then(|st| st.as_str()).unwrap_or("") != "connected"
+                            })
+                            .map(|s| {
+                                format!(
+                                    "{} ({})",
+                                    s.get("name").and_then(|n| n.as_str()).unwrap_or("?"),
+                                    s.get("status").and_then(|st| st.as_str()).unwrap_or("unknown")
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !failed.is_empty() {
+                    let msg = format!(
+                        "xConsole's tools did not attach to Claude Code: {}. It will answer \
+                         from the snapshot but cannot run anything on your servers this turn.",
+                        failed.join(", ")
+                    );
+                    crate::diag(&format!("cli: {msg}"));
+                    emit(sink, StreamEvent::Status(msg));
+                }
             }
         }
         "assistant" => {

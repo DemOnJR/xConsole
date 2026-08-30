@@ -136,9 +136,24 @@ pub async fn open_reverse_forward(
         .await
         .map_err(|e| format!("could not establish reverse SSH port forward: {e}"))?;
 
+    // Asking for port 0 means "server, pick one", and the answer comes back in the
+    // reply. A zero here means we never learned it — and the caller would go on to
+    // build `http://127.0.0.1:0/mcp`, which nothing can connect to. The agent then runs
+    // with none of xConsole's tools and explains to the user that it cannot reach their
+    // servers, which looks like the agent being unhelpful rather than a dead tunnel.
+    let port = if bound_port == 0 { remote_port } else { bound_port };
+    if port == 0 {
+        return Err(
+            "the SSH server granted a reverse forward but did not say which port it \
+             bound, so there is no address to hand the agent. Set a fixed port instead \
+             of asking the server to choose."
+                .into(),
+        );
+    }
+
     Ok(ReverseTunnel {
         remote_bind_addr: "127.0.0.1".into(),
-        remote_port: if bound_port == 0 { remote_port } else { bound_port },
+        remote_port: port,
     })
 }
 

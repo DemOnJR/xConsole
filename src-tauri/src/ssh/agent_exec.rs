@@ -99,6 +99,12 @@ pub async fn run_agent(
             // else the user runs on that box.
             let rev = tunnel::open_reverse_forward(&connected.handle, 0).await?;
             let url = format!("http://127.0.0.1:{}/mcp", rev.remote_port);
+            // The one fact that identifies a dead bridge in a bug report: which port the
+            // far side was told to dial back on.
+            crate::diag(&format!(
+                "agent_exec: xConsole tools bridged to {vps_id} at {url} (local {})",
+                b.local_port
+            ));
             _reverse = Some(rev);
             Some(url)
         }
