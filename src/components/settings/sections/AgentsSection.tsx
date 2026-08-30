@@ -11,7 +11,7 @@ import { useVpsStore } from "../../../stores/vpsStore";
 import { useWorkspaceStore } from "../../../stores/workspaceStore";
 import { useSettingsStore } from "../../../stores/settingsStore";
 import { Button, Field, SectionHeader, Select, TextArea, TextInput, Toggle } from "../ui";
-import { BotIcon, CloseIcon, PlusIcon, TrashIcon } from "../../icons";
+import { BotIcon, CloseIcon, ICON, PlusIcon, TrashIcon } from "../../icons";
 
 /** A persona that has not been saved yet. */
 function blankPersona(): PersonaInput {
@@ -75,6 +75,20 @@ export function AgentsSection() {
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const saveTimer = useRef<number | null>(null);
+  /** Which row the editor is on. A new agent gets a temporary key until it has an id. */
+  const editingKey = useRef<string>("");
+  /**
+   * A create is in flight.
+   *
+   * Until it returns there is no id, so a second autosave firing in the meantime would
+   * try to create the same agent again — and the backend, quite rightly, refuses a
+   * duplicate name. Nothing is lost, but the user gets an error for typing quickly.
+   */
+  const creating = useRef(false);
+  /** The draft as last typed, so a save deferred by a create can pick it back up. */
+  const latest = useRef<PersonaInput | null>(null);
   const vps = useVpsStore((s) => s.vpsList);
   const providers = useSettingsStore((s) => s.providers);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
@@ -121,25 +135,89 @@ export function AgentsSection() {
     return (id?: string | null) => (id ? map.get(id) ?? "(deleted)" : "You");
   }, [personas]);
 
-  const save = async () => {
-    if (!draft) return;
+  /**
+   * Edits save themselves.
+   *
+   * The Save button closed the editor and reloaded the whole list, so changing two
+   * settings on one agent meant: save, watch it collapse, find the agent again, scroll
+   * back down, change the second thing, save, collapse. The list is not reloaded either
+   * — the saved row is swapped in place, which is what keeps the scroll position and
+   * stops the panel jumping under the cursor.
+   */
+  const commit = useCallback(async (input: PersonaInput, key: string) => {
+    // Dropping the edit would be worse than the duplicate: the user stops typing and
+    // their last keystrokes are simply gone. Defer instead — the create is about to
+    // return an id, and `finally` picks the latest draft back up.
+    if (!input.id) {
+      if (creating.current) return;
+      creating.current = true;
+    }
     setSaving(true);
     setError(null);
     try {
-      await api.savePersona(draft);
-      setDraft(null);
-      await load();
+      const saved = await api.savePersona(input);
+      // Adopt the new id, or the next keystroke creates a second agent instead of
+      // updating this one. Guarded by the editing key: if the user moved to a different
+      // agent while this was in flight, the id belongs to a row they are no longer on.
+      if (editingKey.current === key) {
+        setDraft((d) => (d ? { ...d, id: saved.id } : d));
+        if (latest.current) latest.current = { ...latest.current, id: saved.id };
+      }
+      setPersonas((list) =>
+        list.some((p) => p.id === saved.id)
+          ? list.map((p) => (p.id === saved.id ? saved : p))
+          : [...list, saved],
+      );
+      setSavedAt(Date.now());
     } catch (e) {
       setError(String(e));
     } finally {
+      const wasCreate = !input.id;
+      creating.current = false;
       setSaving(false);
+      // Anything typed while the create was in flight now has an id to save against.
+      if (wasCreate && editingKey.current === key) {
+        const now = latest.current;
+        if (now && now.id && JSON.stringify({ ...now, id: null }) !== JSON.stringify({ ...input, id: null })) {
+          void commitRef.current?.(now, key);
+        }
+      }
     }
+  }, []);
+  // `commit` refers to itself for the deferred retry above; a ref breaks the cycle
+  // without making the callback depend on its own identity.
+  const commitRef = useRef<typeof commit | null>(null);
+  commitRef.current = commit;
+
+  const edit = (next: PersonaInput) => {
+    setDraft(next);
+    latest.current = next;
+    setError(null);
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    // A nameless agent is refused by the backend, so there is nothing to save yet —
+    // and flashing that refusal while somebody types the first letter would be noise.
+    if (!next.name.trim()) return;
+    const key = editingKey.current;
+    saveTimer.current = window.setTimeout(() => void commit(next, key), 600);
+  };
+
+  /** Open an agent for editing, flushing anything still pending on the previous one. */
+  const open = (input: PersonaInput | null, key: string) => {
+    if (saveTimer.current) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+      // Switching away must not drop the last keystroke.
+      if (draft?.name.trim()) void commit(draft, editingKey.current);
+    }
+    editingKey.current = key;
+    setDraft(input);
+    setError(null);
   };
 
   const remove = async (p: Persona) => {
     await api.deletePersona(p.id).catch((e) => setError(String(e)));
-    if (draft?.id === p.id) setDraft(null);
-    await load();
+    if (draft?.id === p.id) open(null, "");
+    setPersonas((list) => list.filter((x) => x.id !== p.id));
   };
 
   const rows = orgRows(personas);
@@ -150,7 +228,7 @@ export function AgentsSection() {
         title="Agents"
         description="Named agents that take work in the background and report back. Give one a manager and it escalates to them instead of interrupting you — only an agent that reports to you can reach you directly."
         action={
-          <Button variant="primary" onClick={() => setDraft(blankPersona())}>
+          <Button variant="primary" onClick={() => open(blankPersona(), `new-${Date.now()}`)}>
             <PlusIcon size={13} />
             New agent
           </Button>
@@ -163,158 +241,121 @@ export function AgentsSection() {
         </div>
       )}
 
-      {/* Agents & Org Chart Area */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h3 className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">
-            Org chart & Team
-          </h3>
-          {draft && (
-            <span className="text-[11px] text-[var(--accent)] font-medium">
-              {draft.id ? `Editing: ${draft.name || "agent"}` : "Creating new agent"}
-            </span>
-          )}
-        </div>
-
-        {draft ? (
-          <div className="grid gap-4 lg:grid-cols-[240px_minmax(0,1fr)]">
-            {/* Compact list when editor is open */}
-            <div className="space-y-1 max-h-[500px] overflow-y-auto pr-1">
-              <div className="text-[10px] uppercase font-mono tracking-wider text-gray-500 pb-1">
-                Select Agent
-              </div>
+      {/*
+        One layout, always. The panel used to swap between a full-width list and a
+        narrow list + editor, so opening an agent moved every row out from under the
+        cursor. The list is sticky, so the team stays reachable while the editor scrolls.
+      */}
+      <div className="grid gap-5 lg:grid-cols-[260px_minmax(0,1fr)] lg:items-start">
+        <div className="lg:sticky lg:top-4">
+          <div className="mb-1.5 flex items-baseline justify-between">
+            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+              Team
+            </h3>
+            <span className="font-mono text-[10px] text-gray-600">{rows.length}</span>
+          </div>
+          {rows.length === 0 ? (
+            <p className="border border-dashed border-[var(--border)] px-3 py-6 text-center text-[11px] text-gray-500">
+              No agents yet.
+            </p>
+          ) : (
+            <div className="max-h-[calc(100vh-15rem)] divide-y divide-[var(--border)] overflow-y-auto border border-[var(--border)]">
               {rows.map(({ persona, depth }) => {
-                const isSelected = draft.id === persona.id;
+                const selected = draft?.id === persona.id;
                 return (
                   <div
                     key={persona.id}
-                    onClick={() => setDraft(toInput(persona))}
-                    className={`group flex items-center gap-2 border px-2.5 py-2 transition text-left cursor-pointer ${
-                      isSelected
-                        ? "border-[var(--accent)] bg-[var(--accent-muted)]/20"
-                        : "border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--surface-hover)]"
+                    className={`group flex items-center gap-2 py-2 pr-2.5 transition ${
+                      selected
+                        ? "bg-[var(--accent-muted)]"
+                        : "bg-[var(--surface)] hover:bg-[var(--surface-hover)]"
                     }`}
-                    style={{ paddingLeft: 8 + depth * 12 }}
+                    style={{ paddingLeft: 10 + depth * 12 }}
                   >
                     <BotIcon
-                      size={13}
-                      className={persona.enabled ? "text-cyan-400 shrink-0" : "text-gray-600 shrink-0"}
+                      size={ICON.small}
+                      className={
+                        persona.enabled
+                          ? "shrink-0 text-[var(--text-dim)]"
+                          : "shrink-0 text-[var(--text-faint)]"
+                      }
                     />
-                    <div className="min-w-0 flex-1">
-                      <p
-                        className={`truncate text-xs font-semibold ${
+                    <button
+                      type="button"
+                      onClick={() => open(toInput(persona), persona.id)}
+                      className="min-w-0 flex-1 text-left"
+                    >
+                      <span
+                        className={`block truncate text-xs font-medium ${
                           persona.enabled ? "text-gray-200" : "text-gray-500 line-through"
                         }`}
                       >
                         {persona.name}
-                      </p>
+                      </span>
                       {persona.role && (
-                        <p className="truncate text-[10px] text-gray-400">{persona.role}</p>
+                        <span className="block truncate text-[10px] text-gray-500">
+                          {persona.role}
+                        </span>
                       )}
-                    </div>
+                    </button>
                     {!persona.reports_to && (
-                      <span className="shrink-0 text-[8px] font-mono uppercase text-cyan-400 bg-cyan-500/10 px-1 py-0.5 border border-cyan-500/20">
+                      <span
+                        className="shrink-0 border border-[var(--border-strong)] px-1 py-0.5 font-mono text-[9px] uppercase text-gray-400"
+                        title="Reports to you — this agent can message you directly"
+                      >
                         you
                       </span>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => void remove(persona)}
+                      title={`Delete ${persona.name}`}
+                      className="shrink-0 p-1 text-[var(--text-faint)] opacity-0 transition hover:text-red-400 group-hover:opacity-100"
+                    >
+                      <TrashIcon size={ICON.small} />
+                    </button>
                   </div>
                 );
               })}
             </div>
+          )}
+        </div>
 
-            {/* Persona Editor */}
-            <div className="min-w-0">
+        <div className="min-w-0">
+          {draft ? (
+            <>
+              <div className="mb-1.5 flex items-baseline gap-2">
+                <h3 className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+                  {draft.id ? draft.name || "Agent" : "New agent"}
+                </h3>
+                {/* Where the Save button was. The change is already stored; this only
+                    reports it, so nothing here is a thing left to do. */}
+                <span className="font-mono text-[10px] text-gray-500">
+                  {saving ? "Saving…" : savedAt ? "Saved" : "Changes save as you type"}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => open(null, "")}
+                  className="ml-auto p-1 text-[var(--text-faint)] transition hover:text-gray-200"
+                  title="Close editor"
+                >
+                  <CloseIcon size={ICON.small} />
+                </button>
+              </div>
               <PersonaEditor
                 draft={draft}
                 personas={personas}
                 vps={vps}
                 providers={providers}
-                saving={saving}
-                onChange={setDraft}
-                onSave={save}
-                onCancel={() => {
-                  setDraft(null);
-                  setError(null);
-                }}
+                onChange={edit}
               />
-            </div>
-          </div>
-        ) : (
-          /* Full width org chart rows when not editing */
-          rows.length === 0 ? (
-            <p className="border border-dashed border-[var(--border)] px-3 py-6 text-center text-[11px] text-gray-500">
-              No agents yet. Create one and the main agent can hand work to it.
-            </p>
+            </>
           ) : (
-            <div className="divide-y divide-[var(--border)] border border-[var(--border)] bg-[var(--surface)] overflow-hidden">
-              {rows.map(({ persona, depth }) => (
-                <div
-                  key={persona.id}
-                  className="group flex items-center gap-3 px-3.5 py-2.5 hover:bg-[var(--surface-hover)] transition"
-                  style={{ paddingLeft: 14 + depth * 18 }}
-                >
-                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-[var(--border)] bg-[var(--surface-2)]">
-                    <BotIcon
-                      size={14}
-                      className={persona.enabled ? "text-cyan-400" : "text-gray-600"}
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setDraft(toInput(persona))}
-                    className="flex min-w-0 flex-1 items-baseline gap-2.5 text-left"
-                  >
-                    <span
-                      className={`shrink-0 text-xs font-semibold ${
-                        persona.enabled ? "text-gray-200" : "text-gray-500 line-through"
-                      }`}
-                    >
-                      {persona.name}
-                    </span>
-                    {persona.role && (
-                      <span className="min-w-0 truncate text-[11px] text-gray-400">
-                        {persona.role}
-                      </span>
-                    )}
-                  </button>
-                  {!persona.reports_to ? (
-                    <span
-                      className="shrink-0 border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-mono uppercase tracking-wide text-cyan-400"
-                      title="Reports to you — this agent can message you directly"
-                    >
-                      reports to you
-                    </span>
-                  ) : (
-                    <span
-                      className="shrink-0 border border-[var(--border)] bg-[var(--surface-2)] px-2 py-0.5 text-[10px] font-mono text-gray-400"
-                      title={`Reports to ${nameOf(persona.reports_to)}`}
-                    >
-                      escalates to {nameOf(persona.reports_to)}
-                    </span>
-                  )}
-                  <div className="flex items-center gap-2 opacity-0 transition group-hover:opacity-100">
-                    <button
-                      type="button"
-                      onClick={() => setDraft(toInput(persona))}
-                      className="rounded px-2 py-0.5 text-[11px] font-medium text-gray-300 hover:bg-[var(--surface-2)] hover:text-white border border-[var(--border)]"
-                      title={`Edit ${persona.name}`}
-                    >
-                      Edit
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void remove(persona)}
-                      title={`Delete ${persona.name}`}
-                      className="p-1 text-[var(--text-faint)] hover:text-red-400 transition"
-                    >
-                      <TrashIcon size={13} />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )
-        )}
+            <p className="border border-dashed border-[var(--border)] px-3 py-10 text-center text-[11px] text-gray-500">
+              Pick an agent to edit it, or create one. Changes save as you type.
+            </p>
+          )}
+        </div>
       </div>
 
       {/* Activity & Conversation Section */}
@@ -511,24 +552,36 @@ function ConversationFeed({
   );
 }
 
+/**
+ * A headed block of related fields.
+ *
+ * The editor was one column of eight unrelated controls, so finding "Trust" meant
+ * reading all of them. Three groups — who it is, how it works, what it may reach —
+ * make it scannable, and the last is the one worth pausing over.
+ */
+function EditorGroup({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-3">
+      <h4 className="border-b border-[var(--border)] pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+        {title}
+      </h4>
+      {children}
+    </div>
+  );
+}
+
 function PersonaEditor({
   draft,
   personas,
   vps,
   providers,
-  saving,
   onChange,
-  onSave,
-  onCancel,
 }: {
   draft: PersonaInput;
   personas: Persona[];
   vps: { id: string; name: string }[];
   providers: { id: string; name: string; model?: string | null }[];
-  saving: boolean;
   onChange: (next: PersonaInput) => void;
-  onSave: () => void;
-  onCancel: () => void;
 }) {
   const set = <K extends keyof PersonaInput>(key: K, value: PersonaInput[K]) =>
     onChange({ ...draft, [key]: value });
@@ -550,20 +603,10 @@ function PersonaEditor({
   const managerOptions = personas.filter((p) => p.id !== draft.id);
 
   return (
-    <div className="space-y-4 border border-[var(--border)] bg-[var(--surface)] p-4">
-      <div className="flex items-center justify-between">
-        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-gray-300">
-          {draft.id ? `Edit ${draft.name || "agent"}` : "New agent"}
-        </h3>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="p-1 text-[var(--text-faint)] hover:text-gray-200"
-        >
-          <CloseIcon size={13} />
-        </button>
-      </div>
-
+    // Title, save state and close live in the header above this, so the editor is only
+    // the fields — one column of them, in the order somebody sets an agent up.
+    <div className="space-y-5 border border-[var(--border)] bg-[var(--surface)] p-4">
+      <EditorGroup title="Identity">
       <Field label="Name" hint="What you and the other agents call it — Ada, CEO, night-shift.">
         <TextInput
           value={draft.name}
@@ -601,6 +644,9 @@ function PersonaEditor({
         </Select>
       </Field>
 
+      </EditorGroup>
+
+      <EditorGroup title="How it works">
       <Field label="Standing instructions" hint="Always in this agent's prompt. How it should work, what it must never do.">
         <TextArea
           value={draft.instructions}
@@ -610,6 +656,9 @@ function PersonaEditor({
         />
       </Field>
 
+      </EditorGroup>
+
+      <EditorGroup title="Reach and trust">
       <Field label="Servers" hint="Where it works unless a task says otherwise.">
         {vps.length === 0 ? (
           <p className="text-[11px] text-gray-500">No servers configured yet.</p>
@@ -678,18 +727,14 @@ function PersonaEditor({
         </Field>
       </div>
 
+      </EditorGroup>
+
       <div className="flex items-center gap-3 border-t border-[var(--border)] pt-3">
-        <Button variant="primary" onClick={onSave} disabled={saving || !draft.name.trim()}>
-          {saving ? "Saving…" : "Save"}
-        </Button>
-        <Button onClick={onCancel}>Cancel</Button>
-        <div className="ml-auto">
-          <Toggle
-            checked={draft.enabled}
-            onChange={(v) => set("enabled", v)}
-            label={draft.enabled ? "Active" : "Disabled"}
-          />
-        </div>
+        <Toggle
+          checked={draft.enabled}
+          onChange={(v) => set("enabled", v)}
+          label={draft.enabled ? "Active — may be given work" : "Disabled"}
+        />
       </div>
     </div>
   );
