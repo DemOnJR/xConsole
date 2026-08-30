@@ -393,7 +393,6 @@ fn location(
 
 /// Run one of the scripts above wherever the project actually is.
 async fn run_there(
-    db: &crate::storage::Db,
     sessions: &crate::ssh::SessionManager,
     loc: &crate::ai::workspace_context::ProjectLocation,
     command: String,
@@ -423,7 +422,7 @@ pub async fn status_of(
     workspace_id: &str,
 ) -> Result<RepoStatus, String> {
     let loc = location(db, workspace_id).ok_or("this project has no location set")?;
-    let out = run_there(db, sessions, &loc, status_command(loc.path.as_deref().unwrap_or(""))).await?;
+    let out = run_there(sessions, &loc, status_command(loc.path.as_deref().unwrap_or(""))).await?;
     Ok(parse_status(&out))
 }
 
@@ -435,7 +434,7 @@ pub async fn pull_requests(
 ) -> Vec<PullRequest> {
     let Some(loc) = location(db, workspace_id) else { return vec![] };
     let cmd = pr_list_command(loc.path.as_deref().unwrap_or(""));
-    match run_there(db, sessions, &loc, cmd).await {
+    match run_there(sessions, &loc, cmd).await {
         Ok(out) => parse_pull_requests(&out, chrono::Utc::now()),
         Err(_) => vec![],
     }
@@ -450,7 +449,7 @@ pub async fn save(
 ) -> Result<String, String> {
     let loc = location(db, workspace_id).ok_or("this project has no location set")?;
     let cmd = save_command(loc.path.as_deref().unwrap_or(""), message);
-    run_there(db, sessions, &loc, cmd).await
+    run_there(sessions, &loc, cmd).await
 }
 
 /// Commit everything and push it, on whatever branch the tree is on.
