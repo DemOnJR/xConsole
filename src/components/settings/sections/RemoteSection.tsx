@@ -5,6 +5,7 @@ import {
   type Persona,
   type RemoteKind,
   type RemoteStatus,
+  type WhatsAppChat,
   type WhatsAppStatus,
 } from "../../../lib/tauri";
 import { useVpsStore } from "../../../stores/vpsStore";
@@ -55,8 +56,8 @@ const COPY: Record<
   whatsapp: {
     name: "WhatsApp",
     setup: "Scan a QR code with your phone. No account to register, nothing to paste.",
-    chatLabel: "Restrict to one chat",
-    chatHint: "Optional. A phone number or group id — leave blank to accept any chat an allowed person writes from.",
+    chatLabel: "Which chat it listens to",
+    chatHint: "Leave this on 'any chat' and the agent reads every conversation your linked account takes part in, including ones with other people. Pick your own Note-to-Self chat or a group and it only ever reads that one.",
     allowLabel: "Who may command it",
     allowHint:
       "Phone numbers in international form (+40 712 345 678), or @usernames. If left blank, your paired phone number is authorized by default. Anyone listed here can run commands on your servers.",
@@ -520,11 +521,15 @@ function TransportCard({
         )}
 
         <Field label={copy.chatLabel} hint={copy.chatHint}>
-          <TextInput
-            value={draft.chatId}
-            onChange={(e) => onChange({ chatId: e.target.value })}
-            placeholder={kind === "discord" ? "123456789012345678" : "optional"}
-          />
+          {kind === "whatsapp" ? (
+            <WhatsAppChatPicker value={draft.chatId} onChange={(v) => onChange({ chatId: v })} />
+          ) : (
+            <TextInput
+              value={draft.chatId}
+              onChange={(e) => onChange({ chatId: e.target.value })}
+              placeholder={kind === "discord" ? "123456789012345678" : "optional"}
+            />
+          )}
         </Field>
 
         <Field label={copy.allowLabel} hint={copy.allowHint}>
@@ -536,6 +541,72 @@ function TransportCard({
         </Field>
       </div>
     </Card>
+  );
+}
+
+/**
+ * Choosing which WhatsApp chat the bridge listens to.
+ *
+ * This was a free-text box asking for "a phone number or group id". A WhatsApp group id
+ * is an 18-digit number nobody has ever seen, so the honest answer was always to leave
+ * it blank — and blank means the agent reads every conversation the linked account takes
+ * part in, weighs each one against the allowlist, and answers in whichever it is allowed
+ * to. Asking the phone what the chats are called turns that into a choice.
+ */
+function WhatsAppChatPicker({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const [chats, setChats] = useState<WhatsAppChat[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setChats(await api.whatsappChats());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // A saved chat that is not in the list yet — the phone has not been asked, or the
+  // group has since been left. Kept as an option so opening settings cannot silently
+  // widen the bridge back to every chat.
+  const known = chats ?? [];
+  const missing = value && !known.some((c) => c.id === value);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <Select value={value} onChange={(e) => onChange(e.target.value)}>
+          <option value="">Any chat an allowed person writes from</option>
+          {missing && <option value={value}>{value}</option>}
+          {known.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.kind === "self" ? `${c.name} — your own chat` : `Group: ${c.name}`}
+            </option>
+          ))}
+        </Select>
+        <Button onClick={load} disabled={loading}>
+          {loading ? "Reading…" : chats ? "Refresh" : "Load chats"}
+        </Button>
+      </div>
+      {!value && (
+        // Colour only where it reports something to act on: this is the setting that
+        // decides whether a private conversation is read by an agent.
+        <p className="text-[11px] text-[var(--warning)]">
+          Every chat is being read. Pick one to narrow it.
+        </p>
+      )}
+      {error && <p className="text-[11px] text-red-300">{error}</p>}
+    </div>
   );
 }
 

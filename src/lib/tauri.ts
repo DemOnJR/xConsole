@@ -431,6 +431,15 @@ export interface RemoteStatus {
   conversation_len: number;
 }
 
+/** One chat the WhatsApp bridge can be restricted to. */
+export interface WhatsAppChat {
+  /** Full JID — what the bridge matches an incoming chat against. */
+  id: string;
+  name: string;
+  /** "self" (Note to Self) or "group". */
+  kind: string;
+}
+
 /** Pairing state for the WhatsApp bridge. */
 export interface WhatsAppStatus {
   /** The sidecar binary was found. False means WhatsApp needs building or is not ready yet. */
@@ -1278,6 +1287,8 @@ export const api = {
   whatsappLinkStart: () => invoke<WhatsAppStatus>("whatsapp_link_start"),
   whatsappLinkCancel: () => invoke<WhatsAppStatus>("whatsapp_link_cancel"),
   whatsappUnlink: () => invoke<WhatsAppStatus>("whatsapp_unlink"),
+  /** Chats the WhatsApp bridge can be restricted to: your own chat, and your groups. */
+  whatsappChats: () => invoke<WhatsAppChat[]>("whatsapp_chats"),
   whatsappAutoInstall: () => invoke<WhatsAppStatus>("whatsapp_auto_install"),
 
   listPersonas: () => invoke<Persona[]>("list_personas"),

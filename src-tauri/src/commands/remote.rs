@@ -262,6 +262,16 @@ pub async fn whatsapp_link_cancel(app: AppHandle) -> Result<whatsapp::WhatsAppSt
     Ok(whatsapp::link_cancel(&app).await)
 }
 
+/// Chats the WhatsApp bridge can be restricted to.
+///
+/// A group id is an 18-digit number nobody has seen, so a free-text field means the
+/// restriction is left blank and every conversation the linked account takes part in is
+/// read. This turns it into a choice.
+#[tauri::command]
+pub async fn whatsapp_chats(app: AppHandle) -> Result<Vec<whatsapp::Chat>, String> {
+    whatsapp::chats(&app).await
+}
+
 #[tauri::command]
 pub async fn whatsapp_unlink(app: AppHandle) -> Result<whatsapp::WhatsAppStatus, String> {
     whatsapp::unlink(&app).await

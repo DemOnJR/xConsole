@@ -73,6 +73,23 @@ type Event struct {
 	IsOurEcho      bool   `json:"is_our_echo,omitempty"`
 	IsGroup        bool   `json:"is_group,omitempty"`
 	Text           string `json:"text,omitempty"`
+
+	Chats []Chat `json:"chats,omitempty"`
+}
+
+// Chat is one place the bridge could be restricted to.
+//
+// Without this the host could only offer a free-text box asking for a "group id", and a
+// WhatsApp group id is an 18-digit number nobody has ever seen. So the answer was always
+// to leave it blank, which means every conversation the linked account takes part in is
+// read and evaluated.
+type Chat struct {
+	// Full JID, which is what the host matches against.
+	ID string `json:"id"`
+	// What it is called in WhatsApp.
+	Name string `json:"name"`
+	// "self" (the Note to Self chat) or "group".
+	Kind string `json:"kind"`
 }
 
 // Command is one line of stdin.
@@ -262,6 +279,8 @@ func (b *bridge) readCommands(ctx context.Context) {
 		switch cmd.Type {
 		case "send":
 			b.send(ctx, cmd)
+		case "list_chats":
+			b.listChats(ctx)
 		case "logout":
 			if err := b.client.Logout(ctx); err != nil {
 				emit(Event{Type: "error", Message: "logout failed: " + err.Error()})
@@ -402,6 +421,47 @@ func extractText(msg *waE2E.Message) string {
 		return extractText(p.GetEditedMessage())
 	}
 	return ""
+}
+
+// listChats reports the chats the bridge can be restricted to: the account's own
+// Note-to-Self chat, and every group it has joined.
+//
+// Deliberately not the full contact list. The point of restricting is to stop the agent
+// reading conversations with other people; offering those as targets would invite
+// exactly that, and a one-to-one chat with somebody else is not a place an unattended
+// agent should be answering anyway.
+func (b *bridge) listChats(ctx context.Context) {
+	chats := []Chat{}
+	if b.client.Store.ID != nil {
+		self := b.client.Store.ID.ToNonAD()
+		name := b.client.Store.PushName
+		if name == "" {
+			name = self.User
+		}
+		chats = append(chats, Chat{
+			ID:   self.String(),
+			Name: name + " (only me)",
+			Kind: "self",
+		})
+	}
+
+	groups, err := b.client.GetJoinedGroups(ctx)
+	if err != nil {
+		// The self chat is still worth returning: it is the safest option and the one
+		// most people want, and it does not depend on this query.
+		logf("could not list groups: %v", err)
+	}
+	for _, g := range groups {
+		if g == nil {
+			continue
+		}
+		name := g.Name
+		if name == "" {
+			name = g.JID.User
+		}
+		chats = append(chats, Chat{ID: g.JID.String(), Name: name, Kind: "group"})
+	}
+	emit(Event{Type: "chats", Chats: chats})
 }
 
 // username resolves a sender's WhatsApp username (the `@handle` form), or "".

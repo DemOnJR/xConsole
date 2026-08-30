@@ -1083,6 +1083,47 @@ mod tests {
     }
 
     #[test]
+    fn picking_a_chat_shuts_out_every_other_one() {
+        // The reported problem: with no chat set, the bridge reads every conversation
+        // the linked WhatsApp account takes part in — including ones with other people
+        // — and weighs each against the allowlist. Naming a chat has to actually
+        // confine it, and the ids involved are full JIDs the user picks from a list.
+        let mut c = cfg();
+        c.kind = Kind::WhatsApp;
+        c.chat_id = "120363000000000000@g.us".into();
+
+        let mut here = msg();
+        here.chat_id = "120363000000000000@g.us".into();
+        assert_eq!(authorize(&c, &here), Ok("restart nginx".into()));
+
+        // Same allowed person, different conversation. Being allowed to command the
+        // agent must not mean every chat they are in is read.
+        let mut elsewhere = msg();
+        elsewhere.chat_id = "120363999999999999@g.us".into();
+        assert_eq!(authorize(&c, &elsewhere), Err(Rejected::WrongChannel));
+
+        let mut dm = msg();
+        dm.chat_id = "40799999999@s.whatsapp.net".into();
+        assert_eq!(authorize(&c, &dm), Err(Rejected::WrongChannel));
+    }
+
+    #[test]
+    fn a_note_to_self_chat_is_matched_however_it_is_written() {
+        // The chat people most want to restrict to is their own. Its id is their own
+        // number, which they may have typed by hand before the picker existed, so the
+        // bare number and the full JID have to mean the same chat.
+        let mut c = cfg();
+        c.kind = Kind::WhatsApp;
+        let mut m = msg();
+        m.chat_id = "393805978429@s.whatsapp.net".into();
+
+        for stored in ["393805978429@s.whatsapp.net", "393805978429"] {
+            c.chat_id = stored.into();
+            assert_eq!(authorize(&c, &m), Ok("restart nginx".into()), "stored as {stored}");
+        }
+    }
+
+    #[test]
     fn bot_messages_are_ignored_including_our_own() {
         // Otherwise a reply containing the prefix drives the next turn and the agent
         // talks to itself until the tokens run out.

@@ -77,6 +77,18 @@ struct Shared {
     /// Set while the user is on the pairing screen, so the driver does not shut the
     /// sidecar down underneath a QR code the bridge is not yet armed to use.
     linking: Mutex<Option<std::time::Instant>>,
+    /// Chats the bridge can be restricted to, as last reported by the sidecar.
+    chats: Mutex<Vec<Chat>>,
+}
+
+/// One chat the bridge can be restricted to.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct Chat {
+    /// Full JID — what `authorize` matches the incoming chat against.
+    pub id: String,
+    pub name: String,
+    /// "self" (Note to Self) or "group".
+    pub kind: String,
 }
 
 /// One sidecar per process. The settings commands and the polling loop both need to
@@ -562,6 +574,27 @@ pub async fn link_start(app: &tauri::AppHandle) -> Result<WhatsAppStatus, String
     Ok(status(app).await)
 }
 
+/// Ask the sidecar which chats the bridge could be restricted to.
+///
+/// Round-trips through the pipe, so it waits — briefly. Returning whatever is already
+/// cached on timeout beats an error: a stale list is still better than a free-text box
+/// asking for an 18-digit group id.
+pub async fn chats(app: &tauri::AppHandle) -> Result<Vec<Chat>, String> {
+    ensure_running(app).await?;
+    send_command(serde_json::json!({ "type": "list_chats" })).await?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let before = shared().chats.lock().await.clone();
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let now = shared().chats.lock().await.clone();
+        if now != before && !now.is_empty() {
+            return Ok(now);
+        }
+    }
+    Ok(shared().chats.lock().await.clone())
+}
+
 /// Cancel a pairing attempt the user walked away from.
 pub async fn link_cancel(app: &tauri::AppHandle) -> WhatsAppStatus {
     *shared().linking.lock().await = None;
@@ -671,6 +704,37 @@ async fn handle_event(app: &tauri::AppHandle, ev: serde_json::Value) {
                 s.error = Some("WhatsApp unlinked this device — scan again to reconnect".into());
             })
             .await;
+        }
+        "chats" => {
+            let list: Vec<Chat> = ev
+                .get("chats")
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|c| {
+                            let id = c.get("id")?.as_str()?.trim().to_string();
+                            if id.is_empty() {
+                                return None;
+                            }
+                            Some(Chat {
+                                name: c
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .filter(|n| !n.trim().is_empty())
+                                    .unwrap_or(&id)
+                                    .to_string(),
+                                kind: c
+                                    .get("kind")
+                                    .and_then(|k| k.as_str())
+                                    .unwrap_or("group")
+                                    .to_string(),
+                                id,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            *shared().chats.lock().await = list;
         }
         "error" => {
             let msg = ev.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
