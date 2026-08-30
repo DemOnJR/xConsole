@@ -155,6 +155,24 @@ staging box\"). Naming an existing agent updates it instead of creating a second
             parameters: json!({"type": "object", "properties": {}}),
         },
         ToolDef {
+            name: "review_schedule".into(),
+            description: "Set up (or change, or stop) a recurring review of a project, run by \
+one of its agents. This is what makes a team look after a project while nobody is asking: on \
+the schedule, that agent reads the project's numbers and its own team's work, decides what to \
+change, and reports up. Use it when the user says a project should be kept an eye on."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Project name. Defaults to the one currently open."},
+                    "agent": {"type": "string", "description": "Which agent runs it — normally the lead of that project. Defaults to the project's agent that reports to the user."},
+                    "schedule": {"type": "string", "description": "\"@daily HH:MM\", \"@weekly mon HH:MM\", \"@hourly\", or \"@every 6h\". Default \"@weekly mon 09:00\"."},
+                    "enabled": {"type": "boolean", "description": "False stops an existing review without deleting it."},
+                    "focus": {"type": "string", "description": "Anything specific this review should always check, on top of the standard briefing."}
+                }
+            }),
+        },
+        ToolDef {
             name: "project_review".into(),
             description: "The whole picture for one project in one call: how its numbers moved, \
 what each agent on it did and what came of that, what changed on the servers, and what is still \
@@ -236,6 +254,7 @@ pub fn is_persona_tool(name: &str) -> bool {
             | "teams_overview"
             | "agent_activity"
             | "project_review"
+            | "review_schedule"
             | "project_history"
     )
 }
@@ -247,7 +266,12 @@ pub fn is_persona_tool(name: &str) -> bool {
 pub fn tool_is_mutating(name: &str) -> bool {
     matches!(
         name,
-        "agent_delegate" | "agent_send" | "agent_report" | "agent_hire" | "agent_dismiss"
+        "agent_delegate"
+            | "agent_send"
+            | "agent_report"
+            | "agent_hire"
+            | "agent_dismiss"
+            | "review_schedule"
     )
 }
 
@@ -266,6 +290,7 @@ pub async fn dispatch(ctx: &ToolContext, name: &str, args: &Value) -> String {
         "teams_overview" => teams_overview(ctx),
         "agent_activity" => agent_activity(ctx, args),
         "project_review" => project_review(ctx, args).await,
+        "review_schedule" => review_schedule(ctx, args).await,
         "project_history" => project_history(ctx, args).await,
         _ => format!("error: unknown persona tool {name}"),
     }
@@ -897,6 +922,150 @@ fn agent_org(ctx: &ToolContext) -> String {
         return "There are no named agents yet. Use agent_hire to create one.".into();
     }
     crate::ai::persona::format_org_chart(&all)
+}
+
+/// Standing instruction for a scheduled review.
+///
+/// Written as the prompt the agent wakes up to, because that is all a scheduled run is:
+/// it does not remember being scheduled, so the reason it is awake has to be in front
+/// of it. It names the tool that gathers the briefing rather than repeating the
+/// briefing's own structure, which would then have two places to drift.
+fn review_prompt(project: &str, focus: Option<&str>) -> String {
+    let mut p = format!(
+        "This is the recurring review of {project}. Nobody asked for it — it is your \
+         standing job to keep this project healthy.\n\n\
+         Call project_review to get the briefing: how the numbers moved, what the team \
+         did and what came of it, what changed, and what is still open. Then decide, and \
+         act:\n\
+         - If the numbers are missing, get them and record them with metric_record. \
+         Nothing here is answerable without them.\n\
+         - If they fell while the team was busy, say what you think the real cause is and \
+         delegate work that would test it — not more of what was already not working.\n\
+         - If they rose, say which change you think did it, so it can be repeated.\n\
+         - If someone on the team did nothing, either give them work or say their remit \
+         is wrong.\n\n\
+         Finish with agent_report so it reaches the user: what changed, what you decided, \
+         and what you need from them. Keep it short — it is read on a phone."
+    );
+    if let Some(f) = focus.map(str::trim).filter(|f| !f.is_empty()) {
+        p.push_str(&format!("\n\nAlways check this as well: {f}"));
+    }
+    p
+}
+
+async fn review_schedule(ctx: &ToolContext, args: &Value) -> String {
+    let all_ws = ctx.db.list_workspaces().unwrap_or_default();
+    let named = args.get("project").and_then(|v| v.as_str()).map(str::trim);
+    let ws = match named.filter(|n| !n.is_empty()) {
+        Some(n) => match all_ws.iter().find(|w| w.name.eq_ignore_ascii_case(n) || w.id == n) {
+            Some(w) => w.clone(),
+            None => {
+                return format!(
+                    "error: no project called {n:?}. Known: {}",
+                    all_ws.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")
+                )
+            }
+        },
+        None => match ctx.workspace_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(id) => match all_ws.iter().find(|w| w.id == id) {
+                Some(w) => w.clone(),
+                None => return "error: the open project no longer exists".into(),
+            },
+            None => return "error: no project is open, so name one with `project`".into(),
+        },
+    };
+
+    let personas = ctx.db.list_personas().unwrap_or_default();
+    let runner = match args.get("agent").and_then(|v| v.as_str()).map(str::trim) {
+        Some(n) if !n.is_empty() => match crate::ai::persona::resolve(&ctx.db, n) {
+            Some(p) => p,
+            None => return format!("error: no agent named {n:?}"),
+        },
+        // Default to that project's lead: the one on it who answers to the user.
+        _ => match personas
+            .iter()
+            .find(|p| {
+                p.enabled
+                    && p.workspace_id.as_deref() == Some(ws.id.as_str())
+                    && p.reports_to.is_none()
+            })
+            .or_else(|| {
+                personas
+                    .iter()
+                    .find(|p| p.enabled && p.workspace_id.as_deref() == Some(ws.id.as_str()))
+            }) {
+            Some(p) => p.clone(),
+            None => {
+                return format!(
+                    "error: {} has no agents, so there is nobody to run the review. Create \
+                     one with agent_hire first — a review nobody owns is a report nobody \
+                     reads.",
+                    ws.name
+                )
+            }
+        },
+    };
+
+    let schedule = args
+        .get("schedule")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("@weekly mon 09:00")
+        .to_string();
+    if !crate::ai::cron::schedule_is_valid(&schedule) {
+        return format!(
+            "error: {schedule:?} is not a schedule xConsole understands. Use \"@daily \
+             HH:MM\", \"@weekly mon HH:MM\", \"@hourly\", or \"@every 6h\"."
+        );
+    }
+    let enabled = args.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let focus = args.get("focus").and_then(|v| v.as_str());
+
+    // One review per project, found by name so calling this twice edits rather than
+    // stacking up duplicate reviews that all wake at the same minute.
+    let name = format!("Review: {}", ws.name);
+    let existing = ctx
+        .db
+        .list_cron_jobs()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|j| j.name == name);
+
+    let summary = format!(
+        "{} the recurring review of {}.\n\
+         Runs {schedule}, as {}. It reads the project's numbers and its team's work, \
+         decides what to change, and reports back to you.",
+        if existing.is_some() { "Update" } else { "Set up" },
+        ws.name,
+        runner.name
+    );
+    if let Err(e) = confirm(ctx, &summary).await {
+        return format!("not scheduled: {e}");
+    }
+
+    let input = crate::storage::models::CronJobInput {
+        id: existing.as_ref().map(|j| j.id.clone()),
+        name: name.clone(),
+        schedule: schedule.clone(),
+        kind: "prompt".into(),
+        payload: review_prompt(&ws.name, focus),
+        targets_json: Some(
+            serde_json::to_string(&runner.targets).unwrap_or_else(|_| "[]".into()),
+        ),
+        enabled,
+        workspace_id: Some(ws.id.clone()),
+        persona_id: Some(runner.id.clone()),
+    };
+    match ctx.db.upsert_cron_job(&input) {
+        Ok(_) if !enabled => format!("Stopped the review of {}.", ws.name),
+        Ok(_) => format!(
+            "{name} is set: {schedule}, run by {}. Nothing else needs to happen — it will \
+             report to you on its own.",
+            runner.name
+        ),
+        Err(e) => format!("error scheduling the review: {e}"),
+    }
 }
 
 /// Everything needed to decide what a project's team should do next.
