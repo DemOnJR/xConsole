@@ -178,19 +178,33 @@ For an existing file prefer edit_file (replace a unique snippet) — cheaper and
         },
         ToolDef {
             name: "edit_file".into(),
-            description: "Replace a unique snippet in an existing file on a server. Prefer this \
-over write_file for any file you have already read. old_string must match exactly once unless \
-replace_all is true.".into(),
+            description: "Replace snippets in an existing file on a server. Prefer this over \
+write_file for any file you have already read. old_string must match exactly once unless \
+replace_all is true. To change several places, pass `edits` and do it in one call — a separate \
+call per edit reads and rewrites the whole file each time.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
-                    "old_string": {"type": "string"},
+                    "old_string": {"type": "string", "description": "For a single edit. Ignored when `edits` is given."},
                     "new_string": {"type": "string"},
                     "replace_all": {"type": "boolean"},
+                    "edits": {
+                        "type": "array",
+                        "description": "Several replacements in one call, applied in order. Use this whenever you are changing more than one place in a file: each single edit reads and rewrites the whole file, so five separate calls is five of each. If any one fails, none are applied.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_string": {"type": "string"},
+                                "new_string": {"type": "string"},
+                                "replace_all": {"type": "boolean"}
+                            },
+                            "required": ["old_string", "new_string"]
+                        }
+                    },
                     "vps_id": {"type": "string"}
                 },
-                "required": ["path", "old_string", "new_string"]
+                "required": ["path"]
             }),
         },
         ToolDef {
@@ -534,17 +548,31 @@ on large files.".into(),
         },
         ToolDef {
             name: "local_edit_file".into(),
-            description: "Replace a unique snippet in a file on this PC. Prefer this over \
-local_write_file for existing files.".into(),
+            description: "Replace snippets in a file on this PC. Prefer this over \
+local_write_file for existing files. To change several places, pass `edits` and do it in one \
+call.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
-                    "old_string": {"type": "string"},
+                    "old_string": {"type": "string", "description": "For a single edit. Ignored when `edits` is given."},
                     "new_string": {"type": "string"},
-                    "replace_all": {"type": "boolean"}
+                    "replace_all": {"type": "boolean"},
+                    "edits": {
+                        "type": "array",
+                        "description": "Several replacements in one call, applied in order. If any one fails, none are applied.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_string": {"type": "string"},
+                                "new_string": {"type": "string"},
+                                "replace_all": {"type": "boolean"}
+                            },
+                            "required": ["old_string", "new_string"]
+                        }
+                    }
                 },
-                "required": ["path", "old_string", "new_string"]
+                "required": ["path"]
             }),
         },
         ToolDef {
@@ -2354,14 +2382,58 @@ async fn write_remote_contents(
     result
 }
 
+/// The edits an edit tool was asked for: the `edits` array, or the single-edit form.
+///
+/// Both spellings are kept because both are the natural one for their case — a one-line
+/// fix should not need an array, and a five-place change should not need five calls.
+fn requested_edits(args: &Value) -> Result<Vec<(String, String, bool)>, String> {
+    if let Some(list) = args.get("edits").and_then(|v| v.as_array()) {
+        if list.is_empty() {
+            return Err("error: 'edits' was empty".into());
+        }
+        return list
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let old = e.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+                if old.is_empty() {
+                    return Err(format!("error: edit {} has no old_string", i + 1));
+                }
+                Ok((
+                    old.to_string(),
+                    e.get("new_string").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    e.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false),
+                ))
+            })
+            .collect();
+    }
+    let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+    if old.is_empty() {
+        return Err("error: give either 'old_string' or a non-empty 'edits' array".into());
+    }
+    Ok(vec![(
+        old.to_string(),
+        args.get("new_string").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false),
+    )])
+}
+
+/// Run the requested edits over one file's contents.
+fn edit_contents(before: &str, args: &Value) -> Result<(String, usize, usize), String> {
+    let requested = requested_edits(args)?;
+    let edits: Vec<crate::ai::file_ops::Edit<'_>> = requested
+        .iter()
+        .map(|(o, n, all)| crate::ai::file_ops::Edit { old: o, new: n, replace_all: *all })
+        .collect();
+    let (next, n) = crate::ai::file_ops::apply_edits(before, &edits)?;
+    Ok((next, n, edits.len()))
+}
+
 async fn edit_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str) -> String {
     let path = match args.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => normalize_vps_write_path(p),
         _ => return "error: missing 'path'".into(),
     };
-    let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-    let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
-    let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
     let vps_id = match resolve_target(ctx, args) {
         Ok(id) => id,
         Err(e) => return format!("error: {e}"),
@@ -2397,14 +2469,17 @@ async fn edit_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str)
             return e;
         }
     }
-    let (next, n) = match crate::ai::file_ops::apply_edit(&before_out.stdout, old, new, replace_all)
-    {
+    let (next, n, count) = match edit_contents(&before_out.stdout, args) {
         Ok(v) => v,
         Err(e) => return e,
     };
     let result = write_remote_contents(ctx, &vps_id, &path, &next, sink, &before_out.stdout).await;
     if result.starts_with("exit_code: 0") {
-        format!("updated {path} ({n} replacement{}).\n{result}", if n == 1 { "" } else { "s" })
+        format!(
+            "updated {path} ({n} replacement{} from {count} edit{}).\n{result}",
+            if n == 1 { "" } else { "s" },
+            if count == 1 { "" } else { "s" }
+        )
     } else {
         result
     }
@@ -3083,9 +3158,7 @@ async fn local_edit_file(ctx: &ToolContext, args: &Value) -> String {
         Some(p) if !p.is_empty() => p,
         _ => return "error: missing 'path'".into(),
     };
-    let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-    let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
-    let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+
     if let Err(e) = authorize_local(ctx, &format!("edit local file {path}")).await {
         return format!("error: {e}");
     }
@@ -3093,7 +3166,7 @@ async fn local_edit_file(ctx: &ToolContext, args: &Value) -> String {
         Ok(s) => s,
         Err(e) => return format!("error: {e}"),
     };
-    let (next, n) = match crate::ai::file_ops::apply_edit(&before, old, new, replace_all) {
+    let (next, n, _count) = match edit_contents(&before, args) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -4121,4 +4194,67 @@ fn canvas_open_preview(ctx: &ToolContext, args: &Value) -> String {
     }));
 
     format!("Opened preview sandbox '{title}' (node_id: {node_id}) on the canvas.")
+}
+
+#[cfg(test)]
+mod edit_request_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_single_edit_still_needs_no_array() {
+        // A one-line fix should not have to be wrapped in a list; making `edits`
+        // mandatory would tax the common case to serve the rare one.
+        let got = requested_edits(&json!({"old_string": "a", "new_string": "b"})).unwrap();
+        assert_eq!(got, vec![("a".into(), "b".into(), false)]);
+    }
+
+    #[test]
+    fn a_batch_is_read_in_order_with_its_flags() {
+        let got = requested_edits(&json!({"edits": [
+            {"old_string": "a", "new_string": "b"},
+            {"old_string": "c", "new_string": "d", "replace_all": true}
+        ]}))
+        .unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(!got[0].2);
+        assert!(got[1].2);
+    }
+
+    #[test]
+    fn the_batch_wins_when_both_are_sent() {
+        // A model that fills in both should get the one it clearly meant, not a silent
+        // half-application of the other.
+        let got = requested_edits(&json!({
+            "old_string": "ignored", "new_string": "x",
+            "edits": [{"old_string": "a", "new_string": "b"}]
+        }))
+        .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "a");
+    }
+
+    #[test]
+    fn an_empty_or_malformed_request_says_which_part_is_wrong() {
+        assert!(requested_edits(&json!({"path": "/x"})).unwrap_err().contains("old_string"));
+        assert!(requested_edits(&json!({"edits": []})).unwrap_err().contains("empty"));
+        let err = requested_edits(&json!({"edits": [{"new_string": "b"}]})).unwrap_err();
+        assert!(err.contains("edit 1"), "{err}");
+    }
+
+    #[test]
+    fn a_batch_over_one_file_is_a_single_rewrite() {
+        // The whole reason it exists: over SSH each edit reads and writes the entire
+        // file, so five calls is five of each and one call is one.
+        let (out, replacements, edits) = edit_contents(
+            "alpha\nbeta\ngamma\n",
+            &json!({"edits": [
+                {"old_string": "alpha", "new_string": "1"},
+                {"old_string": "gamma", "new_string": "3"}
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(out, "1\nbeta\n3\n");
+        assert_eq!((replacements, edits), (2, 2));
+    }
 }
