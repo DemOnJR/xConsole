@@ -85,6 +85,7 @@ server; check it later with job_status.".into(),
                 "properties": {
                     "command": {"type": "string", "description": "The shell command to run."},
                     "vps_id": {"type": "string", "description": "Exact target UUID. Required when more than one VPS is selected."},
+                    "timeout_secs": {"type": "integer", "description": "How long to wait, in seconds (default 120, max 3600). Raise it for a build or a migration you want to watch to the end; past a few minutes prefer background:true, which survives the turn."},
                     "background": {
                         "type": "boolean",
                         "description": "Run detached and return a job_id straight away. Use for anything that may take over ~2 minutes. The job survives this turn, the session, and an xConsole restart."
@@ -563,7 +564,8 @@ in sh. For remote servers use run_command instead.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "The shell command to run on this PC."}
+                    "command": {"type": "string", "description": "The shell command to run on this PC."},
+                    "timeout_secs": {"type": "integer", "description": "How long to wait, in seconds (default 120, max 3600). Raise it for a build or an install rather than splitting work that has to run in one go."}
                 },
                 "required": ["command"]
             }),
@@ -1983,6 +1985,16 @@ async fn exec_authorized_as(
 }
 
 async fn exec_inner(ctx: &ToolContext, vps_id: &str, command: &str) -> String {
+    exec_inner_for(ctx, vps_id, command, crate::ssh::command::COMMAND_TIMEOUT).await
+}
+
+/// The same, with a deadline the caller chose.
+async fn exec_inner_for(
+    ctx: &ToolContext,
+    vps_id: &str,
+    command: &str,
+    timeout: std::time::Duration,
+) -> String {
     let base = safety::effective_mode(&ctx.db, &ctx.safety, vps_id);
     let mode = safety::resolve_session_mode(&ctx.session_state, &ctx.session_id, &base);
     if let Err(e) = safety::authorize(
@@ -1999,7 +2011,7 @@ async fn exec_inner(ctx: &ToolContext, vps_id: &str, command: &str) -> String {
         return format!("error: {e}");
     }
 
-    match ctx.sessions.run_command(vps_id, command).await {
+    match ctx.sessions.run_command_for(vps_id, command, timeout).await {
         Ok(out) => format_command_output(&out),
         Err(e) => {
             let err = e.to_string();
@@ -2113,7 +2125,7 @@ async fn run_command(ctx: &ToolContext, args: &Value, _sink: &EventSink, _id: &s
     if args.get("background").and_then(|v| v.as_bool()).unwrap_or(false) {
         return start_background_job(ctx, &vps_id, command).await;
     }
-    let mut result = exec_inner(ctx, &vps_id, command).await;
+    let mut result = exec_inner_for(ctx, &vps_id, command, command_timeout(args)).await;
     result = crate::ai::vps_snapshot::annotate_command_output(command, &result);
     // The ToolResult is emitted once by the agent loop (run_command emits a
     // byte-identical one otherwise). Per-target/snapshot emits use distinct ids.
@@ -2283,6 +2295,20 @@ async fn run_command_all_targets_impl(
 
 fn list_vps_targets(ctx: &ToolContext) -> String {
     format_targets_catalog(&ctx.db, &ctx.targets)
+}
+
+/// How long a caller is prepared to wait for one command.
+///
+/// Two minutes stays the default — most commands are quick, and a long default would
+/// turn a hung one into a long silence. What changed is that it is no longer the
+/// ceiling: a build or a migration that needs five is not a failure, and reporting it as
+/// one taught the agent to split work that has to run in one go.
+fn command_timeout(args: &Value) -> std::time::Duration {
+    args.get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(crate::ssh::command::COMMAND_TIMEOUT)
 }
 
 /// Build the directory listing. Pure, so the quoting and the cap are testable.
@@ -3570,7 +3596,7 @@ async fn local_run_command(ctx: &ToolContext, args: &Value) -> String {
     if let Err(e) = authorize_local(ctx, command).await {
         return format!("error: {e}");
     }
-    match crate::local::run_local_command(command).await {
+    match crate::local::run_local_command_for(command, command_timeout(args)).await {
         Ok(out) => format_local_output(&out),
         Err(e) => format!("error running command: {e}"),
     }
@@ -4766,6 +4792,43 @@ mod edit_request_tests {
         .unwrap();
         assert_eq!(out, "1\nbeta\n3\n");
         assert_eq!((replacements, edits), (2, 2));
+    }
+}
+
+#[cfg(test)]
+mod command_timeout_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn the_default_stays_two_minutes() {
+        // Most commands are quick, and a long default turns a hung one into a long
+        // silence. What changed is that it is no longer also the ceiling.
+        assert_eq!(command_timeout(&json!({})), crate::ssh::command::COMMAND_TIMEOUT);
+        assert_eq!(command_timeout(&json!({"command": "ls"})), crate::ssh::command::COMMAND_TIMEOUT);
+    }
+
+    #[test]
+    fn a_caller_can_wait_longer_for_work_that_takes_longer() {
+        // A build or a migration that needs five minutes is not a failure, and calling
+        // it one taught the agent to split work that has to run in one go.
+        assert_eq!(command_timeout(&json!({"timeout_secs": 600})).as_secs(), 600);
+    }
+
+    #[test]
+    fn a_nonsense_deadline_falls_back_rather_than_failing_instantly() {
+        // Zero would make every command time out immediately, which reads as the server
+        // being broken.
+        assert_eq!(command_timeout(&json!({"timeout_secs": 0})), crate::ssh::command::COMMAND_TIMEOUT);
+        assert_eq!(command_timeout(&json!({"timeout_secs": "ten"})), crate::ssh::command::COMMAND_TIMEOUT);
+    }
+
+    #[test]
+    fn the_ceiling_is_enforced_where_the_command_runs() {
+        // An hour is past the point where waiting synchronously was the right choice;
+        // the clamp lives with the runner so every caller gets it.
+        assert_eq!(crate::ssh::command::MAX_COMMAND_TIMEOUT.as_secs(), 3600);
+        assert_eq!(crate::local::MAX_LOCAL_COMMAND_TIMEOUT.as_secs(), 3600);
     }
 }
 

@@ -261,6 +261,16 @@ impl SessionManager {
     pub async fn run_command(&self, vps_id: &str, command: &str) -> Result<CommandOutput, String> {
         super::command::run_vps_command(&self.db, vps_id, command).await
     }
+
+    /// Run one command with a caller-chosen deadline. See `command::run_vps_command_for`.
+    pub async fn run_command_for(
+        &self,
+        vps_id: &str,
+        command: &str,
+        timeout: std::time::Duration,
+    ) -> Result<CommandOutput, String> {
+        super::command::run_vps_command_for(&self.db, vps_id, command, timeout).await
+    }
 }
 
 #[cfg(test)]
