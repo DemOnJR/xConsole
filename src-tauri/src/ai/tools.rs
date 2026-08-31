@@ -244,6 +244,24 @@ find files by *name* instead, use find_files.".into(),
             }),
         },
         ToolDef {
+            name: "list_dir".into(),
+            description: "List a directory on a server: names, sizes, modification times and \
+what is a directory. This is the orientation call — use it when you do not yet know what is in a \
+place, before grepping or reading. To find a file whose location you do not know, use find_files \
+instead."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory to list."},
+                    "all": {"type": "boolean", "description": "Include dotfiles. Default true, because a hidden file is usually exactly what is being looked for."},
+                    "head_limit": {"type": "integer", "description": "Max entries (default 100)."},
+                    "vps_id": {"type": "string"}
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
             name: "find_files".into(),
             description: "Find files on a server by name pattern, newest first. Use this when you \
 know roughly what a file is called but not where it lives (nginx configs, *.service units, a \
@@ -631,6 +649,23 @@ Parent directories are created automatically. Subject to the safety mode.".into(
                     "content": {"type": "string"}
                 },
                 "required": ["path", "content"]
+            }),
+        },
+        ToolDef {
+            name: "local_find_files".into(),
+            description: "Find files on this PC by name pattern, newest first. The twin of \
+find_files — use it when you know roughly what a file is called but not where it lives, instead \
+of grepping the whole disk for a filename."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Filename glob, e.g. *.conf, docker-compose.y*ml"},
+                    "path": {"type": "string", "description": "Directory to search under (default the current one)."},
+                    "type": {"type": "string", "enum": ["file", "dir", "any"], "description": "What to match (default file)."},
+                    "head_limit": {"type": "integer", "description": "Max results (default 40, max 200)."}
+                },
+                "required": ["pattern"]
             }),
         },
         ToolDef {
@@ -1192,6 +1227,7 @@ pub async fn dispatch_with_telemetry(
         "write_file" => write_file(ctx, args, sink, &call.id).await,
         "edit_file" => edit_file(ctx, args, sink, &call.id).await,
         "grep_search" => grep_search(ctx, args, sink, &call.id).await,
+        "list_dir" => list_dir(ctx, args, sink).await,
         "find_files" => find_files(ctx, args, sink).await,
         "todo_write" => todo_write(ctx, args),
         "local_run_command" => local_run_command(ctx, args).await,
@@ -1199,6 +1235,7 @@ pub async fn dispatch_with_telemetry(
         "local_edit_file" => local_edit_file(ctx, args).await,
         "local_grep_search" => local_grep_search(ctx, args).await,
         "local_write_file" => local_write_file(ctx, args).await,
+        "local_find_files" => local_find_files(ctx, args).await,
         "local_list_dir" => local_list_dir(ctx, args).await,
         "upload_file" => upload_file(ctx, args, sink, &call.id).await,
         "download_file" => download_file(ctx, args, sink, &call.id).await,
@@ -1406,6 +1443,11 @@ fn tool_activity_label(ctx: &ToolContext, call: &ToolCall) -> String {
             args.get("agent").and_then(|v| v.as_str()).unwrap_or("an agent")
         ),
         "agent_check" => "Check delegated tasks".into(),
+        "list_dir" => format!(
+            "List {} on {}",
+            args.get("path").and_then(|v| v.as_str()).unwrap_or("a directory"),
+            vps_label(ctx, args)
+        ),
         "find_files" => format!(
             "Find {} on {}",
             args.get("pattern").and_then(|v| v.as_str()).unwrap_or("files"),
@@ -2241,6 +2283,70 @@ async fn run_command_all_targets_impl(
 
 fn list_vps_targets(ctx: &ToolContext) -> String {
     format_targets_catalog(&ctx.db, &ctx.targets)
+}
+
+/// Build the directory listing. Pure, so the quoting and the cap are testable.
+///
+/// `ls -l` rather than anything cleverer: it is on every machine, the agent reads it
+/// without help, and a bespoke format would be one more thing to keep true. The `-A`
+/// includes dotfiles but not `.` and `..`, which are noise in every listing.
+pub fn list_dir_command(path: &str, all: bool, head: u64) -> String {
+    let p = shell_quote(path);
+    let a = if all { "A" } else { "" };
+    format!(
+        "d={p}; \
+         if [ ! -d \"$d\" ]; then \
+           if [ -e \"$d\" ]; then echo 'NOT_A_DIRECTORY'; else echo 'NOT_FOUND'; fi; exit 0; \
+         fi; \
+         ls -l{a}h --time-style=long-iso -- \"$d\" 2>/dev/null | head -n {head}; \
+         echo \"__XCONS_TOTAL__ $(ls -{a}1 -- \"$d\" 2>/dev/null | wc -l)\""
+    )
+}
+
+async fn list_dir(ctx: &ToolContext, args: &Value, sink: &EventSink) -> String {
+    let path = match args.get("path").and_then(|v| v.as_str()) {
+        Some(p) if !p.trim().is_empty() => p.trim(),
+        _ => return "error: missing 'path'".into(),
+    };
+    let all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(true);
+    let head = args.get("head_limit").and_then(|v| v.as_u64()).unwrap_or(100).clamp(1, 500);
+    let vps_id = match resolve_target(ctx, args) {
+        Ok(id) => id,
+        Err(e) => return format!("error: {e}"),
+    };
+    let raw = exec(ctx, &vps_id, &list_dir_command(path, all, head), Some(sink), true).await;
+    if raw.starts_with("error") {
+        return raw;
+    }
+    let body = stdout_body(&raw);
+    let trimmed = body.trim();
+    // Told apart on purpose: "there is no such directory" and "there is a file by that
+    // name" lead to completely different next steps, and an empty listing implies
+    // neither.
+    if trimmed.starts_with("NOT_FOUND") {
+        return format!("{path} does not exist on that server.");
+    }
+    if trimmed.starts_with("NOT_A_DIRECTORY") {
+        return format!("{path} is a file, not a directory — read it with read_file.");
+    }
+
+    let (listing, total) = match trimmed.rsplit_once("__XCONS_TOTAL__") {
+        Some((l, t)) => (l.trim_end(), t.trim().parse::<u64>().unwrap_or(0)),
+        None => (trimmed, 0),
+    };
+    if listing.is_empty() {
+        return format!("{path} is empty.");
+    }
+    let shown = listing.lines().filter(|l| !l.starts_with("total ")).count() as u64;
+    format!(
+        "{path} ({total} entr{}):\n{listing}{}",
+        if total == 1 { "y" } else { "ies" },
+        if total > shown && shown > 0 {
+            format!("\n\n(showing {shown} of {total} — raise head_limit for the rest)")
+        } else {
+            String::new()
+        }
+    )
 }
 
 /// The files a read was asked for: the `paths` array, or the single `path`.
@@ -3647,6 +3753,53 @@ async fn local_write_file(ctx: &ToolContext, args: &Value) -> String {
     }
 }
 
+/// The twin of `find_files`, run here rather than over SSH.
+///
+/// Built by the same `find_command`, so the pruning of /proc, node_modules and .git,
+/// the newest-first ordering and the result cap are the same on both — the divergence
+/// that had crept into the two search implementations is not worth repeating here.
+async fn local_find_files(ctx: &ToolContext, args: &Value) -> String {
+    let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
+        Some(p) if !p.trim().is_empty() => p.trim(),
+        _ => return "error: missing 'pattern'".into(),
+    };
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(".");
+    let kind = match args.get("type").and_then(|v| v.as_str()).unwrap_or("file") {
+        "dir" => "-type d",
+        "any" => "",
+        _ => "-type f",
+    };
+    let head = args.get("head_limit").and_then(|v| v.as_u64()).unwrap_or(40).clamp(1, 200);
+
+    let cmd = find_command(path, kind, pattern, head);
+    if let Err(e) = authorize_local(ctx, &cmd).await {
+        return format!("error: {e}");
+    }
+    match crate::local::run_local_command(&cmd).await {
+        Ok(out) => {
+            let body = out.stdout.trim();
+            if body.is_empty() {
+                return format!("no files matching {pattern:?} under {path}");
+            }
+            let n = body.lines().count() as u64;
+            format!(
+                "{n} match(es), newest first:\n{body}{}",
+                if n >= head {
+                    format!("\n\n(stopped at {head} — narrow the path or raise head_limit)")
+                } else {
+                    String::new()
+                }
+            )
+        }
+        Err(e) => format!("error: {e}"),
+    }
+}
+
 async fn local_list_dir(ctx: &ToolContext, args: &Value) -> String {
     let path = match args.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p,
@@ -4613,6 +4766,95 @@ mod edit_request_tests {
         .unwrap();
         assert_eq!(out, "1\nbeta\n3\n");
         assert_eq!((replacements, edits), (2, 2));
+    }
+}
+
+#[cfg(test)]
+mod tool_pairing_tests {
+    use super::*;
+
+    /// Every tool that acts on files should work the same on a server and on this PC.
+    ///
+    /// The two searches had drifted apart while nobody was comparing them — the local
+    /// one lost its fallback, its overall cap and its context lines, and each fix landed
+    /// in one copy. A missing twin is the same failure one step earlier: the agent finds
+    /// a tool for a server, looks for the local one, and has to improvise.
+    #[test]
+    fn every_file_tool_exists_on_both_sides() {
+        let defs = definitions(&crate::ai::AgentHome::new(std::env::temp_dir().join("xc-pair-test")));
+        let names: std::collections::HashSet<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+
+        for base in ["read_file", "write_file", "edit_file", "grep_search", "find_files", "list_dir"] {
+            assert!(names.contains(base), "no server tool `{base}`");
+            let local = format!("local_{base}");
+            assert!(names.contains(local.as_str()), "no local twin `{local}`");
+        }
+    }
+}
+
+#[cfg(test)]
+mod list_dir_tests {
+    use super::*;
+
+    fn run(cmd: &str) -> String {
+        let out = std::process::Command::new("sh").arg("-c").arg(cmd).output().expect("shell runs");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("xc-ls-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        std::fs::write(dir.join(".hidden"), "y").unwrap();
+        dir
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_listing_includes_hidden_files_and_a_total() {
+        // A dotfile is usually exactly what is being looked for — an .env, a .gitignore,
+        // a .service override — so hiding them by default would hide the answer.
+        let dir = fixture("basic");
+        let out = run(&list_dir_command(dir.to_str().unwrap(), true, 100));
+        assert!(out.contains("a.txt"), "{out}");
+        assert!(out.contains(".hidden"), "dotfiles missing: {out}");
+        assert!(out.contains("sub"), "{out}");
+        assert!(out.contains("__XCONS_TOTAL__ 3"), "wrong total: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_missing_path_and_a_file_are_told_apart() {
+        // "No such directory" and "that is a file" lead to completely different next
+        // steps, and an empty listing implies neither.
+        let dir = fixture("kinds");
+        assert!(run(&list_dir_command("/definitely/not/here", true, 10)).contains("NOT_FOUND"));
+        let file = dir.join("a.txt");
+        assert!(run(&list_dir_command(file.to_str().unwrap(), true, 10)).contains("NOT_A_DIRECTORY"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_total_is_the_real_count_even_when_the_listing_is_capped() {
+        // A capped listing that reported only what it showed would let an agent
+        // conclude a directory has three files when it has three hundred.
+        let dir = fixture("capped");
+        for i in 0..30 {
+            std::fs::write(dir.join(format!("f{i}.txt")), "x").unwrap();
+        }
+        let out = run(&list_dir_command(dir.to_str().unwrap(), true, 5));
+        assert!(out.contains("__XCONS_TOTAL__ 33"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_hostile_path_is_listed_not_executed() {
+        let out = run(&list_dir_command("/tmp'; touch /tmp/xc-ls-pwned; '", true, 5));
+        assert!(!std::path::Path::new("/tmp/xc-ls-pwned").exists(), "command injection: {out}");
     }
 }
 
