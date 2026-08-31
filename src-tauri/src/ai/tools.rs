@@ -96,9 +96,10 @@ server; check it later with job_status.".into(),
         },
         ToolDef {
             name: "job_status".into(),
-            description: "Check a background job started with run_command(background:true): \
-whether it is still running, its exit code once finished, and the tail of its output. \
-Poll this instead of waiting — do other useful work between checks.".into(),
+            description: "Check a background job started with run_command(background:true) or \
+local_run_command(background:true): whether it is still running, its exit code once finished, \
+and the tail of its output. Poll this instead of waiting — do other useful work between \
+checks.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -112,8 +113,9 @@ Poll this instead of waiting — do other useful work between checks.".into(),
         },
         ToolDef {
             name: "job_list".into(),
-            description: "List background jobs on a server with their state and command. Use it \
-to pick up jobs started in an earlier session — jobs live on the server, not in this chat."
+            description: "List background jobs with their state and command. Use it to pick up \
+jobs started in an earlier session — a job lives on the machine that runs it, not in this chat, \
+so it survives the session and an xConsole restart."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -1010,6 +1012,12 @@ const OLLAMA_VPS_TOOLS: &[&str] = &[
     "find_files",
     "job_status",
     "job_list",
+    "job_kill",
+    // Reading a file you had to guess the path of is guesswork twice. list_dir was
+    // missing while local_list_dir was not, so a local model could look around this
+    // PC but had to grope for paths on the server it was actually working on.
+    "list_dir",
+    "explore",
     "todo_write",
     "upload_file",
     "download_file",
@@ -1057,6 +1065,14 @@ const OLLAMA_LOCAL_TOOLS: &[&str] = &[
     "local_grep_search",
     "local_write_file",
     "local_list_dir",
+    "local_find_files",
+    // local_run_command can start a detached job. Without these it could start one
+    // and then had no way on earth to find out whether it worked.
+    "job_status",
+    "job_list",
+    "job_kill",
+    "explore",
+    "artifact_list",
     "todo_write",
     "canvas_open_preview",
     "generate_svg",
@@ -2203,8 +2219,16 @@ async fn start_local_background_job(command: &str) -> String {
 }
 
 /// Whether a job call is about this PC rather than a server.
-fn job_is_local(args: &Value) -> bool {
-    args.get("local").and_then(|v| v.as_bool()).unwrap_or(false)
+/// Whether a job tool is being asked about this PC rather than a server.
+///
+/// With no VPS selected there is nowhere else the job could be, so the flag is
+/// assumed rather than demanded: otherwise a session working purely on the local
+/// machine starts a job with `local_run_command` and then gets "no VPS target
+/// selected" when it asks how the job went, which reads like the job is gone.
+fn job_is_local(ctx: &ToolContext, args: &Value) -> bool {
+    args.get("local")
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(|| ctx.targets.is_empty())
 }
 
 /// Run one of the job scripts where the job actually lives.
@@ -2218,7 +2242,7 @@ async fn run_job_script(
     posix: impl FnOnce() -> String,
     windows: impl FnOnce() -> String,
 ) -> Result<String, String> {
-    if job_is_local(args) {
+    if job_is_local(ctx, args) {
         // The PC's own shell decides: PowerShell on Windows, sh everywhere else.
         let script = if cfg!(windows) { windows() } else { posix() };
         return crate::local::run_local_command(&script)
@@ -2258,7 +2282,7 @@ async fn job_status(ctx: &ToolContext, args: &Value) -> String {
         Ok(out) => {
             let text = out.trim().to_string();
             if text.contains("STATE=unknown") {
-                let where_ = if job_is_local(args) { "this PC" } else { "this server" };
+                let where_ = if job_is_local(ctx, args) { "this PC" } else { "this server" };
                 format!("No job {job_id} on {where_} (it may have been started somewhere else, or the temp directory was cleared). Use job_list.")
             } else {
                 text
@@ -2269,7 +2293,7 @@ async fn job_status(ctx: &ToolContext, args: &Value) -> String {
 }
 
 async fn job_list(ctx: &ToolContext, args: &Value) -> String {
-    let where_ = if job_is_local(args) { "this PC" } else { "this server" };
+    let where_ = if job_is_local(ctx, args) { "this PC" } else { "this server" };
     match run_job_script(ctx, args, jobs::list_script, jobs::list_script_windows).await {
         Ok(out) => {
             let text = out.trim();
@@ -2291,7 +2315,7 @@ async fn job_kill(ctx: &ToolContext, args: &Value) -> String {
     };
     // Stopping a job the user's agent started is a mutation, so it goes through the
     // safety gate like any other one — on either machine.
-    if job_is_local(args) {
+    if job_is_local(ctx, args) {
         let script = if cfg!(windows) {
             jobs::kill_script_windows(&job_id)
         } else {
@@ -5435,5 +5459,89 @@ mod local_freshness_tests {
             file_state::check_write("s4", "vps-uuid", "/etc/nginx.conf", "999").is_ok(),
             "a read of the local copy was accepted as a read of the server's"
         );
+    }
+}
+
+#[cfg(test)]
+mod ollama_tool_list_tests {
+    use super::*;
+
+    fn declared() -> Vec<String> {
+        definitions(&crate::ai::AgentHome::new(
+            std::env::temp_dir().join("xc-ollama-defs-test"),
+        ))
+        .into_iter()
+        .map(|d| d.name)
+        .collect()
+    }
+
+    #[test]
+    fn every_name_on_the_lists_is_a_tool_that_exists() {
+        // The lists are names in a const, so a rename or a typo does not fail the
+        // build — it just quietly drops the tool for every local model.
+        let have = declared();
+        for name in OLLAMA_VPS_TOOLS.iter().chain(OLLAMA_LOCAL_TOOLS.iter()) {
+            assert!(
+                have.iter().any(|d| d == name),
+                "{name} is offered to Ollama but no such tool is declared"
+            );
+        }
+    }
+
+    /// Tools that make no sense without their follow-up.
+    ///
+    /// Handing a model the tool that *starts* something without the tools that
+    /// check on it or stop it is worse than not offering it at all: the work runs
+    /// and the model has no way to find out how it went.
+    const MUST_TRAVEL_TOGETHER: &[(&str, &[&str])] = &[
+        ("run_command", &["job_status", "job_list", "job_kill"]),
+        ("local_run_command", &["job_status", "job_list", "job_kill"]),
+        ("write_file", &["read_file", "edit_file"]),
+        ("local_write_file", &["local_read_file", "local_edit_file"]),
+        ("terminal_send", &["terminal_capture"]),
+        ("upload_file", &["download_file"]),
+    ];
+
+    fn check_pairs(list: &[&str], which: &str) {
+        for (starter, followups) in MUST_TRAVEL_TOGETHER {
+            if !list.contains(starter) {
+                continue;
+            }
+            for f in *followups {
+                assert!(
+                    list.contains(f),
+                    "{which} offers {starter} but not {f} — the model can start work \
+                     it has no way to follow up on"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_local_model_can_follow_up_on_anything_it_can_start() {
+        check_pairs(OLLAMA_VPS_TOOLS, "OLLAMA_VPS_TOOLS");
+        check_pairs(OLLAMA_LOCAL_TOOLS, "OLLAMA_LOCAL_TOOLS");
+    }
+
+    #[test]
+    fn looking_around_is_possible_on_both_sides() {
+        // Reading a file you cannot find is guesswork. Whichever side of the
+        // machine a list covers, it needs the tools that locate things there.
+        for (list, which, needed) in [
+            (
+                OLLAMA_VPS_TOOLS,
+                "OLLAMA_VPS_TOOLS",
+                ["list_dir", "find_files", "grep_search"],
+            ),
+            (
+                OLLAMA_LOCAL_TOOLS,
+                "OLLAMA_LOCAL_TOOLS",
+                ["local_list_dir", "local_find_files", "local_grep_search"],
+            ),
+        ] {
+            for n in needed {
+                assert!(list.contains(&n), "{which} cannot {n}");
+            }
+        }
     }
 }
