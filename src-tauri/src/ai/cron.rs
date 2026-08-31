@@ -360,6 +360,7 @@ async fn run_prompt_job(
         // staff rather than a script: the work happens under that agent's instructions
         // and trust level, and what it says lands in its team's thread.
         persona_id: job.persona_id.clone().filter(|s| !s.is_empty()),
+        read_only: false,
     };
 
     let messages = vec![ChatMessage::user(job.payload.clone())];

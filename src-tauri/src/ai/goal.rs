@@ -280,6 +280,7 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
         goal_id: Some(goal.id.clone()),
         // The goal row already carries it; `current_persona` reads that.
         persona_id: None,
+        read_only: false,
     };
 
     let messages = vec![ChatMessage::user(prompt)];

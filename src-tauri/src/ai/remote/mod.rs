@@ -900,6 +900,7 @@ async fn run_remote_turn(
         turn_images: Vec::new(),
         goal_id: None,
         persona_id: persona.as_ref().map(|p| p.id.clone()),
+        read_only: false,
     };
 
     // Who it is, who reports to it, and what its colleagues have said to it since last

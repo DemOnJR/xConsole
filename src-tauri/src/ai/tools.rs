@@ -61,6 +61,12 @@ pub struct ToolContext {
     /// unnamed main agent, which then had to relay to the lead agent. The user asked a
     /// question on WhatsApp and got an answer from a middleman.
     pub persona_id: Option<String>,
+    /// This turn may look but not touch.
+    ///
+    /// Distinct from `plan_mode`, which also tells the agent to draft a plan and wait
+    /// for approval. An exploration sub-agent is not drafting anything — it is being
+    /// asked a question, and the answer is the whole job.
+    pub read_only: bool,
 }
 
 /// Tool schemas advertised to the model.
@@ -876,6 +882,25 @@ artifacts/images/ and renders inline."
             }),
         },
         ToolDef {
+            name: "explore".into(),
+            description: "Send a sub-agent to find something out and report back in a few lines. \
+It gets its own context and read-only tools, so the searching, the false starts and the files it \
+opens never reach your conversation — only the answer does.\n\nUse it whenever finding out will \
+take several steps and you only need the conclusion: \"where is the checkout handler and what \
+calls it\", \"which service writes to this log\", \"is this config the one nginx actually \
+loads\". Do not use it for something one grep would answer, or for anything that has to change \
+something — it cannot."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "What you need to know, in full. It cannot see your conversation, so include what it needs: which project, which server, what you have already ruled out."},
+                    "vps_id": {"type": "string", "description": "Server to look on. Defaults to the ones selected for this turn."}
+                },
+                "required": ["question"]
+            }),
+        },
+        ToolDef {
             name: "canvas_open_preview".into(),
             description: "Open an interactive live HTML/CSS/JS preview or UI sandbox node directly on \
 the xConsole canvas flow. Use this to demonstrate web components, designs, dashboards, or prototypes to the user."
@@ -1123,10 +1148,16 @@ pub async fn dispatch_with_telemetry(
     // Plan-mode guard: until the user approves a plan, block anything that would
     // change the PC or a server. Read-only inspection, ask_user, and present_plan
     // still run so the agent can investigate and propose its plan.
-    let result = if ctx.plan_mode
+    let plan_blocked = ctx.plan_mode
         && !ctx.session_state.plan_approved(&ctx.session_id)
-        && tool_is_mutating(&call.name, args)
-    {
+        && tool_is_mutating(&call.name, args);
+    let result = if ctx.read_only && tool_is_mutating(&call.name, args) {
+        format!(
+            "error: '{}' changes something, and you were asked a question. Report what you \
+             found and let the agent that asked decide what to do about it.",
+            call.name
+        )
+    } else if plan_blocked {
         format!(
             "error: plan mode is active. Investigate with read-only tools, then call present_plan \
              with your plan and wait for the user to approve it before running '{}'.",
@@ -1187,6 +1218,7 @@ pub async fn dispatch_with_telemetry(
         "learn_skill" => learn_skill(ctx, args, sink).await,
         "generate_svg" => generate_svg_tool(ctx, args).await,
         "generate_image" => generate_image_tool(ctx, args).await,
+        "explore" => explore(ctx, args, sink).await,
         "canvas_open_preview" => canvas_open_preview(ctx, args),
         name if web_tools::is_web_tool(name) => {
             // Gate `web_fetch` like a command. Its URL is model-controlled, so with a
@@ -1643,6 +1675,9 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
                 || n.contains("fmt")
                 || n.contains("version"))
         }
+        // Asking a question changes nothing; the sub-agent it runs is read-only, and its
+        // own guard refuses a further nesting.
+        "explore" => false,
         // Unknown tools: be conservative and treat as mutating.
         _ => true,
     }
@@ -2670,6 +2705,113 @@ async fn grep_search(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &st
             String::new()
         }
     )
+}
+
+/// Answer one question in a context of its own, and hand back only the answer.
+///
+/// Finding something out is expensive in the wrong currency: a search that reads ten
+/// files puts ten file dumps into the conversation, and they stay there for every turn
+/// afterwards. The answer was five lines. On a long session that is the difference
+/// between a thread that still fits and one that has to be compacted, losing the early
+/// reasoning that made the later work make sense.
+///
+/// So this runs a real turn with a fresh session id — its own context, nothing shared —
+/// and read-only tools, and returns its final message. The false starts stay in there.
+///
+/// Read-only is not only about safety. An agent that can act on what it finds will act,
+/// and then the caller has a change it did not ask for and did not see happen.
+async fn explore(ctx: &ToolContext, args: &Value, sink: &EventSink) -> String {
+    let question = args.get("question").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if question.is_empty() {
+        return "error: explore needs a 'question'".into();
+    }
+    // No sub-agent spawning a sub-agent. The depth is never worth it — a question that
+    // needs delegating again was too broad — and unbounded recursion here is a way to
+    // spend a lot of money on nothing.
+    if ctx.read_only {
+        return "error: you are already answering a question for another agent. Investigate \
+                it yourself and report what you find."
+            .into();
+    }
+
+    let targets = match args.get("vps_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        Some(v) => vec![v.to_string()],
+        None => ctx.targets.clone(),
+    };
+
+    let sub = ToolContext {
+        app: ctx.app.clone(),
+        db: ctx.db.clone(),
+        sessions: ctx.sessions.clone(),
+        home: ctx.home.clone(),
+        approvals: ctx.approvals.clone(),
+        // Nothing it does needs approving, because nothing it does changes anything —
+        // and there is nobody watching a sub-turn to answer a prompt anyway.
+        prompts: crate::ai::interaction::PromptRegistry::new(),
+        // Its own state as well as its own id: the caller's todos, plan approval and
+        // prefix cache are not its business, and it must not be able to disturb them.
+        session_state: crate::ai::interaction::SessionState::new(),
+        session_id: format!("explore:{}", uuid::Uuid::new_v4()),
+        targets,
+        safety: ctx.safety.clone(),
+        plan_mode: false,
+        read_only: true,
+        workspace_id: ctx.workspace_id.clone(),
+        canvas: Vec::new(),
+        edits: ctx.edits.clone(),
+        hooks: ctx.hooks.clone(),
+        turn_images: Vec::new(),
+        goal_id: None,
+        persona_id: ctx.persona_id.clone(),
+    };
+
+    let prompt = format!(
+        "Another agent needs to know one thing and has sent you to find out. You have \
+         read-only tools; you cannot change anything, and you are not being asked to.\n\n\
+         Investigate properly — grep, read the files, follow it through — and then answer \
+         in a few lines. Cite paths and line numbers so the answer can be checked. If you \
+         could not find out, say what you looked at and what you would try next; a wrong \
+         confident answer is worse than an admission, because it will be acted on.\n\n\
+         Do not describe your search, do not summarise your process, and do not offer to \
+         do more. Just the answer.\n\nThe question:\n{question}"
+    );
+
+    emit(Some(sink), StreamEvent::Status(format!("Looking into: {question}")));
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
+    // Its stream is its own. Forwarding it would put back into the conversation exactly
+    // the noise this exists to keep out — but errors are worth surfacing, since an
+    // exploration that failed silently reads as an exploration that found nothing.
+    let outer = sink.clone();
+    let drain = tauri::async_runtime::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            if let StreamEvent::Error(e) = &ev {
+                let _ = outer.send(StreamEvent::Status(format!("(exploring: {e})")));
+            }
+        }
+    });
+
+    // Boxed: `explore` runs a turn, and a turn can dispatch `explore`, so the future
+    // refers to itself. The depth guard above stops it happening at run time; this is
+    // what lets the type check.
+    let result = Box::pin(crate::ai::agent::run_turn(
+        &sub,
+        crate::ai::registry::ModelChoice::active(),
+        vec![crate::ai::provider::ChatMessage::user(prompt)],
+        false,
+        &tx,
+    ))
+    .await;
+    drop(tx);
+    let _ = drain.await;
+
+    match result {
+        Ok(msg) if !msg.content.trim().is_empty() => msg.content,
+        Ok(_) => "The sub-agent finished without answering. Ask it again more narrowly, or \
+                  look yourself."
+            .to_string(),
+        Err(e) => format!("The sub-agent could not finish: {e}"),
+    }
 }
 
 fn todo_write(ctx: &ToolContext, args: &Value) -> String {
@@ -4339,6 +4481,27 @@ mod edit_request_tests {
         .unwrap();
         assert_eq!(out, "1\nbeta\n3\n");
         assert_eq!((replacements, edits), (2, 2));
+    }
+}
+
+#[cfg(test)]
+mod explore_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn asking_a_question_is_not_a_mutation() {
+        // It has to stay available in plan mode: investigating is exactly what plan mode
+        // is for, and withholding the tool that investigates best would defeat it.
+        assert!(!tool_is_mutating("explore", &json!({"question": "where is the handler"})));
+    }
+
+    #[test]
+    fn the_tool_is_declared_and_routed() {
+        // A tool the model can see but the dispatcher does not know answers "unknown
+        // tool" at run time, which stays invisible until somebody asks for it.
+        let defs = definitions(&crate::ai::AgentHome::new(std::env::temp_dir().join("xc-defs-test")));
+        assert!(defs.iter().any(|d| d.name == "explore"), "explore is not declared");
     }
 }
 
