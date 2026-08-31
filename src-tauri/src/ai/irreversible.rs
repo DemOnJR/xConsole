@@ -72,6 +72,55 @@ fn q(path: &str) -> String {
     crate::ssh::remote_ops::shell_quote(path)
 }
 
+/// Where a bare `rm ` command starts, ignoring an `rm` that is only part of a longer word.
+///
+/// `find("rm ")` also matched the `--rm` in `docker run --rm --entrypoint cat registry:2
+/// /etc/…`, whose next non-flag word is `cat`. The guard then measured the blast radius
+/// of deleting a file called `cat` and put "THIS CANNOT BE UNDONE" in front of a
+/// read-only read of a config file. A misfire like that costs more than the miss it
+/// insures against: it is exactly what teaches a person to approve without reading.
+///
+/// So the word has to stand where a command can stand — the start of the line, after a
+/// separator or a pipe, after the quote that opens `sh -c "rm -rf /x"`, or as the tail
+/// of a path like `/bin/rm`.
+fn rm_command_at(lower: &str) -> Option<usize> {
+    let bytes = lower.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find("rm ") {
+        let idx = from + rel;
+        let at_command_start = match idx.checked_sub(1) {
+            None => true,
+            Some(i) => {
+                let c = bytes[i] as char;
+                c.is_ascii_whitespace() || matches!(c, ';' | '&' | '|' | '(' | '{' | '"' | '\'' | '`' | '/')
+            }
+        };
+        if at_command_start {
+            return Some(idx);
+        }
+        from = idx + 2;
+    }
+    None
+}
+
+/// Whether rm's flags ask for a recursive delete.
+///
+/// Reading the letters of every flag counted `--force` and `--preserve-root` as
+/// recursive, because both contain an `r`. Only the short bundles carry `-r` as a
+/// letter; a long flag has to be named.
+fn deletes_recursively(after: &str) -> bool {
+    after
+        .split_whitespace()
+        .take_while(|w| w.starts_with('-'))
+        .any(|w| {
+            if let Some(long) = w.strip_prefix("--") {
+                long == "recursive"
+            } else {
+                w.contains('r') || w.contains('R')
+            }
+        })
+}
+
 /// Decide whether a command destroys something, and how to measure it first.
 ///
 /// Matches on the lowercased text, so it sees `RM -RF` and `Drop Database` too. It is
@@ -83,10 +132,11 @@ pub fn classify(command: &str) -> Option<Irreversible> {
 
     // Recursive delete. The single most common way an agent destroys something it did
     // not mean to, because one wrong path looks exactly like the right one.
-    if let Some(idx) = trimmed.find("rm ") {
+    // Searched in `lower` rather than `trimmed`, because the offset is read back out of
+    // `command`: trimming shifts every index by the leading whitespace it removed.
+    if let Some(idx) = rm_command_at(&lower) {
         let after = &command[idx + 3..];
-        let flags: String = after.split_whitespace().take_while(|w| w.starts_with('-')).collect();
-        if flags.contains('r') || flags.contains("-recursive") {
+        if deletes_recursively(after) {
             let path = first_path(after).unwrap_or_default();
             if !path.is_empty() {
                 return Some(Irreversible {
@@ -235,6 +285,38 @@ mod tests {
         assert!(classify("rm --recursive /tmp/x").is_some());
         assert!(classify("rm -f /tmp/one-file.log").is_none());
         assert!(classify("rm /tmp/one-file.log").is_none());
+    }
+
+    #[test]
+    fn the_rm_inside_a_longer_word_is_not_a_delete() {
+        // `docker run --rm --entrypoint cat registry:2 /etc/docker/registry/config.yml`
+        // was read as a recursive delete of a file called `cat`, and put "THIS CANNOT BE
+        // UNDONE" in front of reading a config file. An approval prompt in front of a
+        // read is not a small cost: it is what teaches a person to approve without
+        // reading, and the next prompt is a real one.
+        assert!(classify(
+            "docker run --rm --entrypoint cat registry:2 /etc/docker/registry/config.yml"
+        )
+        .is_none());
+        assert!(classify("podman run --rm -v /data:/data alpine ls /data").is_none());
+        assert!(classify("git status --short").is_none());
+
+        // Still caught where an `rm` really does run, however it is reached.
+        assert!(classify("docker run --rm alpine rm -rf /data").is_some());
+        assert!(classify("sudo rm -rf /srv/old").is_some());
+        assert!(classify("/bin/rm -rf /srv/old").is_some());
+        assert!(classify("ssh box 'rm -rf /srv/old'").is_some());
+        assert!(classify("ls /tmp && rm -rf /tmp/x").is_some());
+    }
+
+    #[test]
+    fn a_long_flag_that_merely_contains_an_r_is_not_recursion() {
+        // `--force` and `--preserve-root` both have an `r` in them, and reading the
+        // letters of every flag counted them as `-r`.
+        assert!(classify("rm --force /tmp/one-file.log").is_none());
+        assert!(classify("rm --preserve-root /tmp/one-file.log").is_none());
+        assert!(classify("rm --recursive /tmp/x").is_some());
+        assert!(classify("rm -R /tmp/x").is_some());
     }
 
     #[test]

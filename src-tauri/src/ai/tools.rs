@@ -4621,9 +4621,25 @@ fn is_unattended_session(session_id: &str) -> bool {
     session_id.starts_with("cron:") || session_id.starts_with("goal:")
 }
 
+/// A turn the user is driving from a chat app rather than from the desktop.
+///
+/// There is no dialog to open: the reply is the only way back to them. A tool that waits
+/// on one therefore waits out its whole timeout while the user sits watching a chat that
+/// says nothing — and the modal it opened is still there on a PC they are not at.
+fn is_remote_session(session_id: &str) -> bool {
+    session_id == crate::ai::remote::CONVERSATION_ID && crate::ai::remote::turn_in_flight()
+}
+
 async fn ask_user(ctx: &ToolContext, args: &Value) -> String {
     if is_unattended_session(&ctx.session_id) {
         return "error: ask_user is not available in unattended runs (cron/goal)".into();
+    }
+    if is_remote_session(&ctx.session_id) {
+        return "error: the user is on their phone — there is no dialog to open. Decide the \
+                ordinary calls yourself; where the answer belongs to a colleague, ask that \
+                colleague. If it is genuinely the user's to decide, put the question in \
+                your reply in one line and stop: their next message is the answer."
+            .into();
     }
     let questions = args.get("questions").filter(|q| {
         q.as_array().map(|a| !a.is_empty()).unwrap_or(false)
@@ -4655,6 +4671,12 @@ async fn present_plan(ctx: &ToolContext, args: &Value) -> String {
     if is_unattended_session(&ctx.session_id) {
         return "error: plan mode is not available in unattended runs (cron/goal). Present the \
                 plan as normal text instead, and do not attempt to execute anything."
+            .into();
+    }
+    if is_remote_session(&ctx.session_id) {
+        return "error: the user is on their phone — there is no plan dialog to approve. Put \
+                the plan in your reply as a few short plain-text lines and stop; their next \
+                message is the answer."
             .into();
     }
     let plan = match crate::ai::consent::plan_body_from_args(args) {

@@ -448,6 +448,16 @@ pub async fn authorize(
         shown.push_str(&note);
     }
 
+    // Where is the person who has to answer this? A turn driven from a chat app is
+    // being watched from a phone, and a modal on the desktop is then not a question at
+    // all: it blocks the turn until it times out, and the only way to clear it is to
+    // walk to the PC. That turn asks in the chat instead and stops.
+    if let Some(decided) =
+        crate::ai::remote::intercept_approval(session_id, command, &shown).await
+    {
+        return decided;
+    }
+
     let approval = db
         .create_approval(session_id, vps_id, &shown)
         .map_err(|e| e.to_string())?;

@@ -94,6 +94,50 @@ pub async fn send_message(token: &str, channel_id: &str, text: &str) -> Result<(
     Ok(())
 }
 
+/// Percent-encode an emoji for Discord's reaction path.
+///
+/// The emoji is a path segment, and a raw multi-byte character there is not a URL. Only
+/// the unreserved set survives; everything else goes out as `%XX`, which is what makes
+/// 🛠️ — two code points, seven bytes — addressable at all.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Put an emoji on a message, as the bot.
+pub async fn add_reaction(
+    token: &str,
+    channel_id: &str,
+    message_id: &str,
+    emoji: &str,
+) -> Result<(), String> {
+    if message_id.trim().is_empty() {
+        return Err("no message id to react to".into());
+    }
+    let resp = client()
+        .put(format!(
+            "{DISCORD_API}/channels/{channel_id}/messages/{message_id}/reactions/{}/@me",
+            percent_encode(emoji)
+        ))
+        .header("Authorization", format!("Bot {token}"))
+        .header("Content-Length", "0")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("discord refused a reaction: {}", resp.status()));
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl Transport for Discord {
     fn kind(&self) -> Kind {
@@ -118,6 +162,11 @@ impl Transport for Discord {
         send_message(&token, &to.chat_id, text).await
     }
 
+    async fn react(&mut self, to: &IncomingMessage, emoji: &str) -> Result<(), String> {
+        let token = super::load_token(Kind::Discord).ok_or("no discord token saved")?;
+        add_reaction(&token, &to.chat_id, &to.id, emoji).await
+    }
+
     /// Discord's typing endpoint. Lasts about ten seconds and cannot be cancelled, so
     /// `on == false` has nothing to do — and a turn that dies leaves nothing stuck.
     async fn set_typing(&mut self, to: &IncomingMessage, on: bool) -> Result<(), String> {
@@ -140,5 +189,18 @@ impl Transport for Discord {
 
     fn reset(&mut self) {
         self.after = None;
+    }
+}
+
+#[cfg(test)]
+mod reaction_url_tests {
+    use super::percent_encode;
+
+    #[test]
+    fn an_emoji_survives_the_url() {
+        // A raw multi-byte character in a path segment is not a URL, and Discord answers
+        // 404 for it — a reaction that silently never appears.
+        assert_eq!(percent_encode("👀"), "%F0%9F%91%80");
+        assert_eq!(percent_encode("a-b_c.d~e"), "a-b_c.d~e");
     }
 }

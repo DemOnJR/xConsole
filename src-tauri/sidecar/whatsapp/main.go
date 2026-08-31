@@ -100,6 +100,8 @@ type Command struct {
 	Type string `json:"type"`
 	Chat string `json:"chat"`
 	Text string `json:"text"`
+	// For "react": the message the emoji goes on. For "send" it is unused.
+	ID string `json:"id"`
 	// For "presence": true while the agent is composing.
 	On bool `json:"on"`
 }
@@ -243,6 +245,17 @@ type bridge struct {
 	mu        sync.Mutex
 	usernames map[string]string
 	sentIDs   map[string]time.Time
+	// Message id -> who sent it. A WhatsApp reaction carries the *key* of the message
+	// it points at, and that key needs the sender, not just the chat: in a group it is
+	// the participant, and in Note to Self it is what makes the key say "from me".
+	// Only the host's own id travels back here, so the sender is remembered on arrival.
+	senders map[string]senderRef
+}
+
+// senderRef is who a remembered message came from, and when it arrived.
+type senderRef struct {
+	jid  types.JID
+	seen time.Time
 }
 
 func (b *bridge) resolveSenderPhone(info *types.MessageInfo) string {
@@ -284,6 +297,8 @@ func (b *bridge) readCommands(ctx context.Context) {
 		switch cmd.Type {
 		case "send":
 			b.send(ctx, cmd)
+		case "react":
+			b.react(ctx, cmd)
 		case "presence":
 			b.presence(ctx, cmd)
 		case "list_chats":
@@ -306,6 +321,53 @@ func (b *bridge) readCommands(ctx context.Context) {
 						"or reinstall.", cmd.Type),
 			})
 		}
+	}
+}
+
+// remember keeps the sender of one inbound message, so a later reaction can name it.
+//
+// Bounded by age rather than count: reacting happens seconds after the message arrives,
+// and anything older than an hour is a leak, not a feature.
+func (b *bridge) remember(id string, sender types.JID) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.senders == nil {
+		b.senders = make(map[string]senderRef)
+	}
+	now := time.Now()
+	b.senders[id] = senderRef{jid: sender, seen: now}
+	for k, v := range b.senders {
+		if now.Sub(v.seen) > time.Hour {
+			delete(b.senders, k)
+		}
+	}
+}
+
+// react puts an emoji on a message the host has just picked up.
+//
+// Errors are logged, not emitted: like the typing indicator this is a courtesy, and the
+// host must not read a refused reaction as a failed turn.
+func (b *bridge) react(ctx context.Context, cmd Command) {
+	chat, err := parseChatJID(cmd.Chat)
+	if err != nil {
+		logf("cannot react: %v", err)
+		return
+	}
+	if strings.TrimSpace(cmd.ID) == "" {
+		logf("cannot react: no message id")
+		return
+	}
+	b.mu.Lock()
+	ref, known := b.senders[cmd.ID]
+	b.mu.Unlock()
+	// An unknown message is one from before this process started. The chat itself is
+	// the right sender for a one-to-one conversation, which is the case that matters.
+	sender := chat
+	if known {
+		sender = ref.jid
+	}
+	if _, err := b.client.SendMessage(ctx, chat, b.client.BuildReaction(chat, sender, cmd.ID, cmd.Text)); err != nil {
+		logf("could not react: %v", err)
 	}
 }
 
@@ -394,6 +456,7 @@ func (b *bridge) onMessage(evt *events.Message) {
 	b.mu.Unlock()
 
 	sender := evt.Info.Sender
+	b.remember(evt.Info.ID, sender)
 	senderPhone := b.resolveSenderPhone(&evt.Info)
 	senderLID := ""
 	if sender.Server == types.HiddenUserServer {

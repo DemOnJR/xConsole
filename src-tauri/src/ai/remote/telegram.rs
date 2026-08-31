@@ -151,6 +151,42 @@ pub async fn send_message(token: &str, chat_id: &str, text: &str) -> Result<(), 
     Ok(())
 }
 
+/// Put one emoji on a message.
+///
+/// Telegram takes a *list*, and replaces whatever the bot had there before — so this
+/// also moves the mark rather than stacking marks. Only emoji from its published set are
+/// accepted; anything else fails the whole request, which is why the choice is made in
+/// [`super::reaction`] per platform.
+pub async fn set_reaction(
+    token: &str,
+    chat_id: &str,
+    message_id: &str,
+    emoji: &str,
+) -> Result<(), String> {
+    let id: i64 = message_id
+        .trim()
+        .parse()
+        .map_err(|_| format!("not a telegram message id: {message_id:?}"))?;
+    let resp = client()
+        .post(api(token, "setMessageReaction"))
+        .json(&serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": id,
+            "reaction": [{ "type": "emoji", "emoji": emoji }],
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if !status.is_success() {
+        return Err(unwrap_result(body)
+            .err()
+            .unwrap_or_else(|| format!("telegram refused a reaction: {status}")));
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl Transport for Telegram {
     fn kind(&self) -> Kind {
@@ -177,6 +213,11 @@ impl Transport for Telegram {
             self.offset = next;
         }
         Ok(msgs)
+    }
+
+    async fn react(&mut self, to: &IncomingMessage, emoji: &str) -> Result<(), String> {
+        let token = super::load_token(Kind::Telegram).ok_or("no telegram token saved")?;
+        set_reaction(&token, &to.chat_id, &to.id, emoji).await
     }
 
     async fn send(&mut self, _cfg: &Config, to: &IncomingMessage, text: &str) -> Result<(), String> {

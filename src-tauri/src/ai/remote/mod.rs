@@ -24,8 +24,11 @@
 //! - Bot messages and our own replies are ignored — otherwise a reply that happens to
 //!   contain the prefix drives the next turn, and the agent talks to itself until the
 //!   tokens run out.
-//! - The safety mode still applies. Nobody can answer an approval prompt from a
-//!   phone, so a remote turn runs under its own mode and defaults to the strictest.
+//! - The safety mode still applies, and a remote turn runs under its own mode, which
+//!   defaults to the strictest. What needs approval is asked in the chat and answered
+//!   there — with the command and its blast radius in front of the user — rather than
+//!   opening a modal on a desktop nobody is sitting at. The allowlist is still the whole
+//!   boundary: anyone who can send a command can also say yes to one.
 //!
 //! # One conversation, many transports
 //!
@@ -41,6 +44,7 @@
 //! rather than by any command syntax, so it reads as ordinary conversation.
 
 pub mod discord;
+pub mod reaction;
 pub mod telegram;
 pub mod whatsapp;
 
@@ -486,9 +490,10 @@ pub fn load_config(db: &crate::storage::Db, kind: Kind) -> Config {
         chat_id: get(&kind.setting_chat()).trim().to_string(),
         allowed_user_ids: allowed,
         prefix: get(SETTING_PREFIX),
-        // Strictest by default. An approval prompt opens a modal on a desktop nobody
-        // is sitting at, so a remote turn that needs one blocks until it times out —
-        // better that than a phone silently authorising a destructive command.
+        // Strictest by default. Approvals reach the chat rather than the desktop, so a
+        // remote turn no longer stalls on a modal — but a mode that asks is still the
+        // right default, because "ask" is what puts the command in front of a person
+        // before it runs.
         safety_mode: match get(SETTING_SAFETY).as_str() {
             m @ ("full" | "allowlist" | "approve") => m.to_string(),
             _ => "allowlist".to_string(),
@@ -614,6 +619,211 @@ pub fn load_token(kind: Kind) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Approvals, answered from the phone
+// ---------------------------------------------------------------------------
+
+/// How long a command stays answerable after the agent asked about it.
+///
+/// Long enough to survive a meeting, short enough that "yes" typed tomorrow morning
+/// does not run something proposed in a conversation nobody remembers.
+const PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// How long a yes stays usable. It only has to cover the agent re-issuing the same
+/// command on the next turn, which happens in seconds.
+const GRANT_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// A command a remote turn wanted to run, waiting for a person to say yes.
+#[derive(Debug, Clone)]
+pub struct PendingApproval {
+    /// The exact string the agent proposed. A grant matches on this and nothing else.
+    pub command: String,
+    /// What the user is shown: redacted, and carrying the blast radius when there is one.
+    pub shown: String,
+    asked_at: std::time::Instant,
+}
+
+/// True while a turn started by a chat message is running.
+///
+/// The desktop can be sitting on the same conversation, so the session id alone does not
+/// say where the user is. This does.
+static REMOTE_TURN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The command waiting on an answer, if any. One at a time: a second question replaces
+/// the first, because a phone cannot keep two of these straight either.
+static PENDING: tokio::sync::Mutex<Option<PendingApproval>> = tokio::sync::Mutex::const_new(None);
+
+/// A yes, spent the first time the same command comes back.
+static GRANT: tokio::sync::Mutex<Option<(String, std::time::Instant)>> =
+    tokio::sync::Mutex::const_new(None);
+
+/// Marks a remote turn as running, and unmarks it however the turn ends.
+pub struct RemoteTurnGuard;
+
+impl RemoteTurnGuard {
+    pub fn enter() -> Self {
+        REMOTE_TURN.store(true, std::sync::atomic::Ordering::SeqCst);
+        RemoteTurnGuard
+    }
+}
+
+impl Drop for RemoteTurnGuard {
+    fn drop(&mut self) {
+        REMOTE_TURN.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+pub fn turn_in_flight() -> bool {
+    REMOTE_TURN.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// What a message did to the question the agent was waiting on.
+#[derive(Debug, Clone)]
+pub enum Answer {
+    Approved(PendingApproval),
+    Denied(PendingApproval),
+    /// No question was open, or this message was about something else.
+    Unrelated,
+}
+
+/// Yes or no, in the words people type on a phone — or neither, which is the answer
+/// that matters most.
+///
+/// Every word has to be part of the answer. `"nu merge site-ul"` opens with a no and is
+/// not one: it is the next job, and reading it as a refusal would throw the message away
+/// and leave the user waiting on an agent that thinks it was told to stop.
+pub fn verdict(text: &str) -> Option<bool> {
+    const YES: &[&str] = &[
+        "da", "ok", "okay", "k", "yes", "yep", "yeah", "y", "sure", "sigur", "hai",
+        "ruleaza", "rulează", "run", "go", "aproba", "aprobă", "aprob", "fa", "fă",
+        "fa-o", "fă-o", "da-i", "dă-i", "👍", "✅", "👌",
+    ];
+    const NO: &[&str] = &[
+        "nu", "no", "n", "nope", "nah", "stop", "anuleaza", "anulează", "renunta",
+        "renunță", "lasa", "lasă", "skip", "👎", "❌", "✋",
+    ];
+    // Words that carry no decision but are typed alongside one.
+    const FILLER: &[&str] = &[
+        "te", "rog", "please", "acum", "now", "it", "o", "il", "îl", "la", "asta",
+        "this", "mersi", "thanks", "ty",
+    ];
+
+    let cleaned = text
+        .to_lowercase()
+        .replace(['.', ',', '!', '?', ';', ':', '"'], " ");
+    let words: Vec<&str> = cleaned.split_whitespace().collect();
+    if words.is_empty() || words.len() > 3 {
+        return None;
+    }
+    let known = |w: &str| YES.contains(&w) || NO.contains(&w) || FILLER.contains(&w);
+    if !words.iter().all(|w| known(w)) {
+        return None;
+    }
+    // A no anywhere wins: "da... nu" is not a yes, and neither is anything ambiguous.
+    if words.iter().any(|w| NO.contains(w)) {
+        return Some(false);
+    }
+    words.iter().any(|w| YES.contains(w)).then_some(true)
+}
+
+/// Take an approval decision out of an incoming message, if there was a question open.
+///
+/// Called before the message becomes a turn, so a bare "da" resolves the command rather
+/// than reaching the agent as a new instruction it cannot make sense of.
+pub async fn answer_pending(text: &str) -> Answer {
+    let mut slot = PENDING.lock().await;
+    let pending = match slot.clone() {
+        Some(p) if p.asked_at.elapsed() <= PENDING_TTL => p,
+        // Nothing open, or open too long to still be about this conversation.
+        _ => {
+            *slot = None;
+            return Answer::Unrelated;
+        }
+    };
+    match verdict(text) {
+        Some(true) => {
+            *slot = None;
+            drop(slot);
+            *GRANT.lock().await = Some((pending.command.clone(), std::time::Instant::now()));
+            Answer::Approved(pending)
+        }
+        Some(false) => {
+            *slot = None;
+            Answer::Denied(pending)
+        }
+        // The user moved on. The question goes with them rather than lying in wait for a
+        // "yes" typed an hour later about something else entirely.
+        None => {
+            *slot = None;
+            Answer::Unrelated
+        }
+    }
+}
+
+/// The question this turn left open, for the footer that tells the user how to answer it.
+pub async fn pending() -> Option<PendingApproval> {
+    PENDING.lock().await.clone()
+}
+
+/// Decide an approval for a turn the user is driving from their phone.
+///
+/// `Some` means the desktop prompt is not the right place to ask — the caller returns
+/// this instead of opening a modal on a machine nobody is sitting at, where it blocks
+/// the turn until it times out and the user has to walk to the PC to clear it.
+///
+/// The grant is deliberately narrow: one command, matched byte for byte, spent on first
+/// use and expiring on its own. "Yes" answers the command that was shown, not the next
+/// one the agent thinks of.
+pub async fn intercept_approval(
+    session_id: &str,
+    command: &str,
+    shown: &str,
+) -> Option<Result<(), String>> {
+    if session_id != CONVERSATION_ID || !turn_in_flight() {
+        return None;
+    }
+
+    let mut grant = GRANT.lock().await;
+    match grant.clone() {
+        Some((granted, at)) if at.elapsed() <= GRANT_TTL && granted == command => {
+            *grant = None;
+            return Some(Ok(()));
+        }
+        Some((_, at)) if at.elapsed() > GRANT_TTL => *grant = None,
+        _ => {}
+    }
+    drop(grant);
+
+    *PENDING.lock().await = Some(PendingApproval {
+        command: command.to_string(),
+        shown: shown.to_string(),
+        asked_at: std::time::Instant::now(),
+    });
+
+    Some(Err(
+        "not run: this needs the user's approval, and they are on their phone rather than \
+         at the desktop. The question has been sent to the chat for them to answer. Do not \
+         ask again, and do not look for a way around it — do whatever else the job needs, \
+         then say in one line what is waiting on their answer and stop."
+            .to_string(),
+    ))
+}
+
+/// The line appended to a reply that left a command waiting.
+///
+/// Deterministic rather than left to the agent to remember: the user has to be able to
+/// see what they are approving, and a model that forgets to repeat it turns "yes" into
+/// a guess.
+pub fn approval_footer(p: &PendingApproval) -> String {
+    let mut command = p.shown.trim().to_string();
+    if command.chars().count() > 700 {
+        command = command.chars().take(700).collect::<String>() + "…";
+    }
+    format!(
+        "\n\n— waiting on you —\n{command}\n\nReply *da* / *yes* to run it, *nu* / *no* to skip it."
+    )
+}
+
+// ---------------------------------------------------------------------------
 // The bridge
 // ---------------------------------------------------------------------------
 
@@ -659,6 +869,15 @@ pub trait Transport: Send {
     /// effort by design: a failed indicator must never stop the reply, and every
     /// platform expires it on its own, so a crash mid-turn leaves nothing stuck on.
     async fn set_typing(&mut self, _to: &IncomingMessage, _on: bool) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Put an emoji on the user's message the moment it is picked up.
+    ///
+    /// The one signal that survives a locked phone: it lands on their message, stays
+    /// there, and is readable from the chat list. Best effort like the typing indicator
+    /// — a platform that refuses the emoji must never cost the reply.
+    async fn react(&mut self, _to: &IncomingMessage, _emoji: &str) -> Result<(), String> {
         Ok(())
     }
 
@@ -763,6 +982,34 @@ fn drive(app: tauri::AppHandle, mut transport: Box<dyn Transport>) {
                     ask
                 ));
 
+                // Before anything slow: a sent tick says the message left the phone, and
+                // nothing at all says it was picked up. The emoji says which, and which
+                // job it was read as. Failures are ignored — a missing reaction must never
+                // cost the reply.
+                let mark = reaction::for_message(kind, &ask);
+                if let Err(e) = transport.react(&msg, mark).await {
+                    crate::diag(&format!("remote({}): could not react: {e}", kind.as_str()));
+                }
+
+                // A command the last turn asked about, answered by this message. Resolved
+                // here rather than inside the turn: the poll loop is what reads the chat,
+                // so a turn blocked waiting for an answer is a turn that can never receive
+                // one.
+                let ask = match answer_pending(&ask).await {
+                    Answer::Approved(p) => format!(
+                        "The user has just approved this on their phone:\n\n{}\n\nRun it now — \
+                         exactly the command you proposed, unchanged — and report what it did. \
+                         Their message was: {ask}",
+                        p.shown.trim()
+                    ),
+                    Answer::Denied(p) => format!(
+                        "The user has just refused this:\n\n{}\n\nDo not run it, and do not \
+                         look for another way to do the same thing. Their message was: {ask}",
+                        p.shown.trim()
+                    ),
+                    Answer::Unrelated => ask,
+                };
+
                 let _ = app.emit("remote://activity", serde_json::json!({
                     "kind": kind.as_str(),
                     "status": "executing",
@@ -788,6 +1035,13 @@ fn drive(app: tauri::AppHandle, mut transport: Box<dyn Transport>) {
                     run_remote_turn(&app, &cfg, &ask).await
                 };
                 let _ = transport.set_typing(&msg, false).await;
+
+                // A turn that stopped for an approval has to say so where the user is,
+                // with the command in front of them and the two words that answer it.
+                let reply = match pending().await {
+                    Some(p) => format!("{}{}", reply.trim_end(), approval_footer(&p)),
+                    None => reply,
+                };
 
 
 
@@ -849,6 +1103,10 @@ async fn run_remote_turn(
     ask: &str,
 ) -> (String, Option<Kind>) {
     use tauri::Manager;
+    // Marks the turn as one the user is watching from a phone, for as long as it runs.
+    // `safety::authorize` reads this to decide that the desktop is the wrong place to
+    // ask, and it is cleared however the turn ends.
+    let _remote = RemoteTurnGuard::enter();
     let db = app.state::<crate::storage::Db>().inner().clone();
     let hooks_cfg = if db.get_setting("agent.hooks_enabled").ok().flatten().as_deref()
         == Some("false")
@@ -925,8 +1183,14 @@ async fn run_remote_turn(
     let prompt = format!(
         "{persona_block}This request arrived over remote chat, not from the desktop app. The user is \
          on their phone: keep the reply short and plain-text (no wide tables, no long \
-         file dumps). Nobody can answer an approval prompt right now, so if something \
-         needs one, say what you would do and stop rather than waiting.\n\n\
+         file dumps).\n\n\
+         They cannot see a dialog on the desktop, so nothing may wait on one. Decide the \
+         ordinary calls yourself, and where the answer belongs to a colleague — their \
+         servers, their part of the system — ask that colleague rather than the user; that \
+         is what the team is for. Ask the user only for what is genuinely theirs to decide, \
+         and then by saying it in your reply and stopping, never with a tool that opens a \
+         dialog. If a command needs their approval, the question reaches their chat on its \
+         own: do the rest of the job, say in one line what is waiting, and stop.\n\n\
          You are on {arrived}, and earlier messages in this thread may have arrived on a \
          different app — it is one conversation either way. If the user asks to carry on \
          somewhere else, call remote_reply_on and answer normally; do not describe the \
@@ -1026,6 +1290,85 @@ async fn run_remote_turn(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_yes_is_only_a_yes_when_the_whole_message_is_one() {
+        assert_eq!(verdict("da"), Some(true));
+        assert_eq!(verdict("DA!"), Some(true));
+        assert_eq!(verdict("ok hai"), Some(true));
+        assert_eq!(verdict("yes run it"), Some(true));
+        assert_eq!(verdict("👍"), Some(true));
+        assert_eq!(verdict("nu"), Some(false));
+        assert_eq!(verdict("no, stop"), Some(false));
+
+        // The message that matters most: it opens with "nu" and is not a refusal, it is
+        // the next job. Reading it as an answer would throw it away and leave the user
+        // waiting on an agent that thinks it was told to stop.
+        assert_eq!(verdict("nu merge site-ul"), None);
+        assert_eq!(verdict("da-mi logurile de la nginx"), None);
+        assert_eq!(verdict(""), None);
+        // Ambiguity is never a yes.
+        assert_eq!(verdict("da nu"), Some(false));
+    }
+
+    #[tokio::test]
+    async fn a_command_is_approved_from_the_phone_and_the_yes_is_spent() {
+        let _turn = RemoteTurnGuard::enter();
+
+        // A desktop session is untouched: it still gets the desktop prompt.
+        assert!(intercept_approval("desktop-session", "systemctl restart nginx", "…")
+            .await
+            .is_none());
+
+        // A turn driven from a chat asks there instead, and stops rather than blocking
+        // on a modal on a machine nobody is sitting at.
+        let asked = intercept_approval(CONVERSATION_ID, "systemctl restart nginx", "systemctl restart nginx").await;
+        assert!(matches!(asked, Some(Err(_))), "the turn should be told to stop and ask");
+        let waiting = pending().await.expect("the question is waiting for an answer");
+        let footer = approval_footer(&waiting);
+        assert!(footer.contains("systemctl restart nginx"), "{footer}");
+        assert!(footer.contains("da"), "the user has to be told how to answer: {footer}");
+
+        // "da" runs it — once.
+        assert!(matches!(answer_pending("da").await, Answer::Approved(_)));
+        assert!(pending().await.is_none(), "an answered question stops waiting");
+        assert!(intercept_approval(CONVERSATION_ID, "systemctl restart nginx", "…")
+            .await
+            .expect("still the remote path")
+            .is_ok());
+        assert!(
+            matches!(intercept_approval(CONVERSATION_ID, "systemctl restart nginx", "…").await, Some(Err(_))),
+            "a spent yes must not authorise the same command twice"
+        );
+
+        // And a yes covers the command it was shown, not the next one the agent thinks of.
+        assert!(matches!(answer_pending("ok").await, Answer::Approved(_)));
+        assert!(
+            matches!(intercept_approval(CONVERSATION_ID, "rm -rf /srv/app", "…").await, Some(Err(_))),
+            "the grant is for one exact command"
+        );
+
+        // A message about something else takes the question with it, so a "yes" typed an
+        // hour later cannot land on a command nobody remembers proposing.
+        assert!(matches!(answer_pending("cate servere sunt sus?").await, Answer::Unrelated));
+        assert!(pending().await.is_none());
+
+        // A refusal, in the same test because the question is one per conversation and
+        // lives in a static: two tests holding it at once would only be testing each
+        // other.
+        assert!(matches!(
+            intercept_approval(CONVERSATION_ID, "rm -rf /srv/data", "rm -rf /srv/data").await,
+            Some(Err(_))
+        ));
+        assert!(matches!(answer_pending("nu").await, Answer::Denied(_)));
+        assert!(pending().await.is_none());
+        // The refusal is not a grant: asking again asks again.
+        assert!(matches!(
+            intercept_approval(CONVERSATION_ID, "rm -rf /srv/data", "…").await,
+            Some(Err(_))
+        ));
+        let _ = answer_pending("nu").await;
+    }
+
     use super::*;
 
     fn cfg() -> Config {

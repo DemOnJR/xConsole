@@ -240,6 +240,21 @@ fn go_binary() -> Option<std::path::PathBuf> {
         .map(|_| std::path::PathBuf::from(exe_name))
 }
 
+/// Whether the helper binary predates the sources it was built from.
+///
+/// Both timestamps have to be readable to say yes: an install with no sources, or a
+/// clock that cannot be read, must not rebuild on every start.
+fn helper_is_stale(binary: &std::path::Path) -> bool {
+    let modified = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let Some(src) = sidecar_source_dir() else {
+        return false;
+    };
+    match (modified(&src.join("main.go")), modified(binary)) {
+        (Some(source), Some(built)) => source > built,
+        _ => false,
+    }
+}
+
 /// Rebuild the helper from source and put it where the app looks for it.
 ///
 /// An app rebuild does not touch the helper — it is a separate Go binary — so a build
@@ -578,7 +593,27 @@ pub async fn ensure_running(app: &tauri::AppHandle) -> Result<(), String> {
     if shared().child.lock().await.is_some() {
         return Ok(());
     }
+    // An app update does not touch the helper — it is a separate Go binary — so an
+    // xConsole that has learned a new command can be driving a helper that has never
+    // heard of it. That fails as a feature which looks broken rather than out of date,
+    // and the fix used to be "go and run a shell script". If the sources are newer than
+    // the binary, they are what should be running.
     let path = match sidecar_path(app) {
+        Some(p) if helper_is_stale(&p) => match rebuild_helper(app).await {
+            Ok(msg) => {
+                crate::diag(&format!("remote(whatsapp): {msg}"));
+                sidecar_path(app).unwrap_or(p)
+            }
+            // Not fatal. An old helper still carries messages; only the newest commands
+            // are missing, and it says so itself when one arrives.
+            Err(e) => {
+                crate::diag(&format!(
+                    "remote(whatsapp): the helper is older than its sources and could not be \
+                     rebuilt ({e})"
+                ));
+                p
+            }
+        },
         Some(p) => p,
         None => ensure_sidecar_installed(app).await?,
     };
@@ -675,6 +710,24 @@ pub async fn send_message(chat_id: &str, text: &str) -> Result<(), String> {
         .await?;
     }
     Ok(())
+}
+
+/// Put an emoji on one message.
+///
+/// WhatsApp reactions are ordinary messages carrying the key of the one they point at,
+/// so the sidecar needs the message id — and, to build that key, who sent it. It kept
+/// that when the message came in, which is why nothing but the id travels here.
+pub async fn react(chat_id: &str, message_id: &str, emoji: &str) -> Result<(), String> {
+    if message_id.trim().is_empty() {
+        return Err("no message id to react to".into());
+    }
+    send_command(serde_json::json!({
+        "type": "react",
+        "chat": chat_id,
+        "id": message_id,
+        "text": emoji,
+    }))
+    .await
 }
 
 /// Begin (or resume) pairing, and keep the sidecar up long enough to scan.
@@ -942,6 +995,10 @@ impl Transport for WhatsApp {
 
     async fn send(&mut self, _cfg: &Config, to: &IncomingMessage, text: &str) -> Result<(), String> {
         send_message(&to.chat_id, text).await
+    }
+
+    async fn react(&mut self, to: &IncomingMessage, emoji: &str) -> Result<(), String> {
+        react(&to.chat_id, &to.id, emoji).await
     }
 
     /// WhatsApp's composing state, unlike Telegram's and Discord's, does not expire on
