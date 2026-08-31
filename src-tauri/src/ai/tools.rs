@@ -102,6 +102,7 @@ Poll this instead of waiting — do other useful work between checks.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
+                    "local": {"type": "boolean", "description": "The job is on this PC rather than a server. Set it when the job was started by local_run_command."},
                     "job_id": {"type": "string", "description": "The job_id returned when the job was started."},
                     "tail_lines": {"type": "integer", "description": "Lines of output to return (default 40, max 500)."},
                     "vps_id": {"type": "string", "description": "The server the job runs on. Required when more than one VPS is selected."}
@@ -117,6 +118,7 @@ to pick up jobs started in an earlier session — jobs live on the server, not i
             parameters: json!({
                 "type": "object",
                 "properties": {
+                    "local": {"type": "boolean", "description": "The job is on this PC rather than a server. Set it when the job was started by local_run_command."},
                     "vps_id": {"type": "string", "description": "Exact target UUID. Required when more than one VPS is selected."}
                 }
             }),
@@ -128,6 +130,7 @@ Signals the whole process group, so work the job spawned stops too.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
+                    "local": {"type": "boolean", "description": "The job is on this PC rather than a server. Set it when the job was started by local_run_command."},
                     "job_id": {"type": "string"},
                     "vps_id": {"type": "string", "description": "Exact target UUID. Required when more than one VPS is selected."}
                 },
@@ -565,7 +568,8 @@ in sh. For remote servers use run_command instead.".into(),
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "The shell command to run on this PC."},
-                    "timeout_secs": {"type": "integer", "description": "How long to wait, in seconds (default 120, max 3600). Raise it for a build or an install rather than splitting work that has to run in one go."}
+                    "timeout_secs": {"type": "integer", "description": "How long to wait, in seconds (default 120, max 3600). Raise it for a build or an install rather than splitting work that has to run in one go."},
+                    "background": {"type": "boolean", "description": "Run detached and return a job_id straight away. Use for anything over a few minutes — a build, an install, a large copy. The job outlives this turn and an xConsole restart; follow it with job_status(local: true)."}
                 },
                 "required": ["command"]
             }),
@@ -2155,28 +2159,74 @@ async fn start_background_job(ctx: &ToolContext, vps_id: &str, command: &str) ->
     )
 }
 
-/// Resolve the job's target and validate its id. Shared by the three job tools,
-/// which all fail the same way.
-fn job_args(ctx: &ToolContext, args: &Value) -> Result<(String, String), String> {
-    let job_id = args
-        .get("job_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if !jobs::is_valid_job_id(&job_id) {
-        return Err(format!(
-            "invalid job_id {job_id:?} — use the id returned by run_command(background:true), or job_list to see them"
-        ));
+
+/// Start `command` detached on this PC and return its job id.
+///
+/// The server side has had this since jobs existed; the PC had neither it nor an
+/// adjustable deadline, so a long local build had no recourse at all. The two use
+/// different shells — `setsid sh -c` against `Start-Process -EncodedCommand` — but write
+/// the same four files and print the same status contract, so nothing downstream has to
+/// know which machine a job is on.
+///
+/// The authorisation is the same as running it in the foreground: backgrounding changes
+/// how long it takes, not what it may do.
+async fn start_local_background_job(command: &str) -> String {
+    let job_id = jobs::new_job_id();
+    let script = if cfg!(windows) {
+        jobs::start_script_windows(&job_id, command)
+    } else {
+        jobs::start_script(&job_id, command)
+    };
+    match crate::local::run_local_command(&script).await {
+        Ok(out) if out.stdout.contains("started") => format!(
+            "Started background job {job_id} on this PC.\n\
+             It keeps running after this turn ends. Check it with \
+             job_status(job_id: \"{job_id}\", local: true), and stop it with job_kill."
+        ),
+        Ok(out) => format!(
+            "error: could not start the job. {}",
+            if out.stderr.trim().is_empty() { out.stdout } else { out.stderr }
+        ),
+        Err(e) => format!("error starting the job: {e}"),
+    }
+}
+
+/// Whether a job call is about this PC rather than a server.
+fn job_is_local(args: &Value) -> bool {
+    args.get("local").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+/// Run one of the job scripts where the job actually lives.
+///
+/// A job on this PC and a job on a server are the same idea with two shells behind it,
+/// and both scripts print the same `STATE=`/`EXIT=`/`PID=` contract — so everything
+/// that reads a job's status stays one implementation and only this chooses the shell.
+async fn run_job_script(
+    ctx: &ToolContext,
+    args: &Value,
+    posix: impl FnOnce() -> String,
+    windows: impl FnOnce() -> String,
+) -> Result<String, String> {
+    if job_is_local(args) {
+        // The PC's own shell decides: PowerShell on Windows, sh everywhere else.
+        let script = if cfg!(windows) { windows() } else { posix() };
+        return crate::local::run_local_command(&script)
+            .await
+            .map(|o| if o.stdout.trim().is_empty() { o.stderr } else { o.stdout });
     }
     let vps_id = resolve_target(ctx, args)?;
-    Ok((job_id, vps_id))
+    ctx.sessions
+        .run_command(&vps_id, &posix())
+        .await
+        .map(|o| o.stdout)
+        .map_err(|e| e.to_string())
 }
 
 async fn job_status(ctx: &ToolContext, args: &Value) -> String {
-    let (job_id, vps_id) = match job_args(ctx, args) {
-        Ok(v) => v,
-        Err(e) => return format!("error: {e}"),
+    let job_id = match args.get("job_id").and_then(|v| v.as_str()) {
+        Some(j) if jobs::is_valid_job_id(j) => j.to_string(),
+        Some(j) => return format!("error: {j:?} is not a job id"),
+        None => return "error: missing 'job_id'".into(),
     };
     let tail = args
         .get("tail_lines")
@@ -2184,15 +2234,21 @@ async fn job_status(ctx: &ToolContext, args: &Value) -> String {
         .unwrap_or(jobs::DEFAULT_TAIL_LINES as u64) as u32;
     // Reading a log is read-only, so it does not need the approval gate the job
     // itself already passed — asking again for every poll would defeat the point.
-    match ctx
-        .sessions
-        .run_command(&vps_id, &jobs::status_script(&job_id, tail))
-        .await
+    let id = job_id.clone();
+    let id2 = job_id.clone();
+    match run_job_script(
+        ctx,
+        args,
+        || jobs::status_script(&id, tail),
+        || jobs::status_script_windows(&id2, tail),
+    )
+    .await
     {
         Ok(out) => {
-            let text = out.stdout.trim().to_string();
+            let text = out.trim().to_string();
             if text.contains("STATE=unknown") {
-                format!("No job {job_id} on this server (it may have been on another target, or /tmp was cleared). Use job_list.")
+                let where_ = if job_is_local(args) { "this PC" } else { "this server" };
+                format!("No job {job_id} on {where_} (it may have been started somewhere else, or the temp directory was cleared). Use job_list.")
             } else {
                 text
             }
@@ -2202,17 +2258,14 @@ async fn job_status(ctx: &ToolContext, args: &Value) -> String {
 }
 
 async fn job_list(ctx: &ToolContext, args: &Value) -> String {
-    let vps_id = match resolve_target(ctx, args) {
-        Ok(id) => id,
-        Err(e) => return format!("error: {e}"),
-    };
-    match ctx.sessions.run_command(&vps_id, &jobs::list_script()).await {
+    let where_ = if job_is_local(args) { "this PC" } else { "this server" };
+    match run_job_script(ctx, args, jobs::list_script, jobs::list_script_windows).await {
         Ok(out) => {
-            let text = out.stdout.trim();
+            let text = out.trim();
             if text.is_empty() || text.contains("(no jobs)") {
-                "No background jobs on this server.".into()
+                format!("No background jobs on {where_}.")
             } else {
-                format!("Background jobs (newest first):\n{text}")
+                format!("Background jobs on {where_} (newest first):\n{text}")
             }
         }
         Err(e) => format!("error listing jobs: {e}"),
@@ -2220,12 +2273,31 @@ async fn job_list(ctx: &ToolContext, args: &Value) -> String {
 }
 
 async fn job_kill(ctx: &ToolContext, args: &Value) -> String {
-    let (job_id, vps_id) = match job_args(ctx, args) {
-        Ok(v) => v,
-        Err(e) => return format!("error: {e}"),
+    let job_id = match args.get("job_id").and_then(|v| v.as_str()) {
+        Some(j) if jobs::is_valid_job_id(j) => j.to_string(),
+        Some(j) => return format!("error: {j:?} is not a job id"),
+        None => return "error: missing 'job_id'".into(),
     };
     // Stopping a job the user's agent started is a mutation, so it goes through the
-    // safety gate like any other one.
+    // safety gate like any other one — on either machine.
+    if job_is_local(args) {
+        let script = if cfg!(windows) {
+            jobs::kill_script_windows(&job_id)
+        } else {
+            jobs::kill_script(&job_id)
+        };
+        if let Err(e) = authorize_local(ctx, &format!("stop background job {job_id}")).await {
+            return format!("error: {e}");
+        }
+        return match crate::local::run_local_command(&script).await {
+            Ok(out) => format_local_output(&out),
+            Err(e) => format!("error stopping job {job_id}: {e}"),
+        };
+    }
+    let vps_id = match resolve_target(ctx, args) {
+        Ok(id) => id,
+        Err(e) => return format!("error: {e}"),
+    };
     exec_authorized_as(
         ctx,
         &vps_id,
@@ -3595,6 +3667,9 @@ async fn local_run_command(ctx: &ToolContext, args: &Value) -> String {
     };
     if let Err(e) = authorize_local(ctx, command).await {
         return format!("error: {e}");
+    }
+    if args.get("background").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return start_local_background_job(command).await;
     }
     match crate::local::run_local_command_for(command, command_timeout(args)).await {
         Ok(out) => format_local_output(&out),
