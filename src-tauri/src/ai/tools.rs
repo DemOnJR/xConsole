@@ -2785,6 +2785,19 @@ async fn write_remote_contents(
     }
 }
 
+/// The sha256 out of a trailing `sha256sum` line, if the server had the command.
+///
+/// `sha256sum` prints `<hex>  <path>`. Anything else — "command not found", a
+/// path containing spaces, a BSD-style `SHA256 (f) = ...` — yields None rather
+/// than a guess, because a wrong hash here would condemn a good upload.
+fn remote_sha256(output: &str) -> Option<String> {
+    output.lines().rev().find_map(|line| {
+        let first = line.split_whitespace().next()?;
+        (first.len() == 64 && first.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| first.to_lowercase())
+    })
+}
+
 /// Pull `mtime` and `size` out of the trailing `stat -c '%Y %s'` line of a write.
 ///
 /// Kept separate from the SSH call so the parsing is testable: the line arrives at
@@ -4039,6 +4052,24 @@ async fn local_list_dir(ctx: &ToolContext, args: &Value) -> String {
 /// Cap transfers at the same size the SFTP path uses (10 MB).
 const MAX_TRANSFER: usize = 10 * 1024 * 1024;
 
+/// Read a remote file as base64, refusing on the server anything over the limit.
+///
+/// The order is the point, and it is why this is a function rather than a string
+/// inline: the limit used to be applied after the whole file had crossed the wire
+/// as base64 and been decoded in memory, so a download refused for being too large
+/// was one already paid for in full — a 2GB file arriving as ~2.7GB of text in RAM
+/// before anything said no. Asking costs one `wc -c`.
+///
+/// A missing file falls through to `base64`, which fails with the real error rather
+/// than a size complaint about a file that is not there.
+fn download_command(remote_path: &str) -> String {
+    format!(
+        "sz=$(wc -c < {p} 2>/dev/null || echo -1) ; \
+         if [ \"$sz\" -gt {MAX_TRANSFER} ] ; then echo \"xc-too-big $sz\" ; else base64 -- {p} ; fi",
+        p = shell_quote(remote_path)
+    )
+}
+
 async fn upload_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str) -> String {
     let local_path = match args.get("local_path").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p,
@@ -4076,17 +4107,51 @@ async fn upload_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &st
         .filter(|p| !p.is_empty())
         .unwrap_or("/tmp");
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    // Check what landed. This is the binary path — a tarball, a dump, a compiled
+    // artifact — where a truncated transfer is both the likeliest failure and the
+    // one an exit code says nothing about. Reporting "uploaded 4.2 MB" because the
+    // shell returned 0 is a claim with nothing behind it, and the user finds out
+    // when the archive will not open.
+    //
+    // Neither check may fail the upload: plenty of small boxes have no `stat -c`
+    // and no `sha256sum`, and there the honest answer is that it could not be
+    // confirmed, not that it did not work.
     let command = format!(
-        "mkdir -p {} && printf %s {} | base64 -d > {}",
+        "mkdir -p {} && printf %s {} | base64 -d > {} && \
+         {{ stat -c 'xc-wrote %Y %s' -- {} 2>/dev/null || true ; }} && \
+         {{ sha256sum -- {} 2>/dev/null || true ; }}",
         shell_quote(parent),
         shell_quote(&b64),
+        shell_quote(remote_path),
+        shell_quote(remote_path),
         shell_quote(remote_path)
     );
 
     let activity_id = format!("upload-{vps_id}");
     emit_command_activity(ctx, sink, &activity_id, &vps_id, &format!("upload → {remote_path}"));
+    let sent = bytes.len();
+    let want = crate::artifacts::sha256_hex(&bytes);
     let result = match ctx.sessions.run_command(&vps_id, &command).await {
-        Ok(out) if out.exit_code == 0 => format!("uploaded {} bytes to {remote_path}", bytes.len()),
+        Ok(out) if out.exit_code == 0 => {
+            let (_, size) = parse_stat_line(&out.stdout);
+            let got = remote_sha256(&out.stdout);
+            match (size, got) {
+                (Some(n), _) if n != sent as u64 => format!(
+                    "error: upload landed short — {n} bytes on the server, {sent} sent. \
+                     {remote_path} is corrupt; delete it and try again."
+                ),
+                (_, Some(h)) if h != want => format!(
+                    "error: upload arrived corrupted — sha256 on the server is {h}, \
+                     the file sent was {want}. Do not use {remote_path}."
+                ),
+                (_, Some(_)) => format!("uploaded {sent} bytes to {remote_path} (sha256 verified)"),
+                (Some(_), None) => format!("uploaded {sent} bytes to {remote_path} (size verified)"),
+                (None, None) => format!(
+                    "uploaded {sent} bytes to {remote_path} (the server has neither stat nor \
+                     sha256sum, so this could not be checked)"
+                ),
+            }
+        }
         Ok(out) => format!("error: upload failed: {}", out.stderr.trim()),
         Err(e) => format!("error: {e}"),
     };
@@ -4114,7 +4179,12 @@ async fn download_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &
 
     let activity_id = format!("download-{vps_id}");
     emit_command_activity(ctx, sink, &activity_id, &vps_id, &format!("download {remote_path}"));
-    let read_cmd = format!("base64 -- {}", shell_quote(remote_path));
+    // See download_command: the size is asked before anything is pulled. The limit used to be applied after the
+    // whole file had been base64'd across the wire and decoded in memory, so a
+    // download refused for being too large was one that had already been paid for
+    // in full — a 2GB file arriving as ~2.7GB of text in RAM before anything said
+    // no. Refusing costs one `wc -c` now.
+    let read_cmd = download_command(remote_path);
     let out = match ctx.sessions.run_command(&vps_id, &read_cmd).await {
         Ok(o) => o,
         Err(e) => {
@@ -4125,6 +4195,15 @@ async fn download_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &
     };
     if out.exit_code != 0 {
         let m = format!("error: reading remote file: {}", out.stderr.trim());
+        emit_command_result(sink, &activity_id, &m);
+        return m;
+    }
+    if let Some(rest) = out.stdout.trim().strip_prefix("xc-too-big ") {
+        let m = format!(
+            "error: {remote_path} is {} bytes, over the {MAX_TRANSFER} limit — nothing was \
+             transferred. Copy a part of it, or compress it on the server first.",
+            rest.trim()
+        );
         emit_command_result(sink, &activity_id, &m);
         return m;
     }
@@ -5329,6 +5408,57 @@ mod write_verification_tests {
         let (mtime, size) = parse_stat_line("exit_code: 0\nstat: invalid option -- 'c'\n");
         assert!(mtime.is_empty());
         assert_eq!(size, None);
+    }
+
+    #[test]
+    fn a_checksum_is_read_off_an_upload_or_not_read_at_all() {
+        assert_eq!(
+            remote_sha256(
+                "xc-wrote 1735600000 12\n\
+                 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08  /tmp/f"
+            )
+            .as_deref(),
+            Some("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08")
+        );
+        // A box without sha256sum must yield nothing rather than a guess: a wrong
+        // hash here condemns a perfectly good upload as corrupt.
+        assert_eq!(remote_sha256("sh: sha256sum: not found"), None);
+        assert_eq!(remote_sha256("xc-wrote 1735600000 12"), None);
+        // BSD prints a different shape entirely. Not understood is not guessed at.
+        assert_eq!(remote_sha256("SHA256 (f) = 9f86d081"), None);
+    }
+
+    #[test]
+    fn a_download_is_refused_before_it_is_paid_for() {
+        // The limit used to be checked after the file had crossed the wire as
+        // base64 and been decoded in memory, so refusing a 2GB file cost 2.7GB of
+        // RAM first. The guard has to be on the server, in the command.
+        let cmd = download_command("/tmp/big.bin");
+        assert!(
+            cmd.find("wc -c").unwrap() < cmd.find("base64").unwrap(),
+            "the size is still being learned after the transfer: {cmd}"
+        );
+        assert!(cmd.contains("xc-too-big"), "nothing tells the caller it was refused");
+        // A path from the model is a path from whatever it has read — a filename on
+        // a server, a web page, another tool's output. Assert on what the shell
+        // does with it, not on how it looks: the escaped form legitimately contains
+        // the dangerous text, and only running it says whether it stays inert.
+        let dir = std::env::temp_dir().join(format!("xc-dl-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let canary = dir.join("canary");
+        std::fs::write(&canary, "still here").unwrap();
+        let nasty = format!("{}/x'; rm -f {} ; echo '", dir.display(), canary.display());
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(download_command(&nasty))
+            .output()
+            .expect("shell runs");
+        assert!(
+            canary.exists(),
+            "the path broke out of its quotes and ran: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
