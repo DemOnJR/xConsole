@@ -246,7 +246,9 @@ find files by *name* instead, use find_files.".into(),
                         "enum": ["content", "files", "count"],
                         "description": "content = matching lines (default); files = just which files contain it, for 'where does this live'; count = how many per file, for 'how widespread is this'."
                     },
-                    "head_limit": {"type": "integer", "description": "Max output lines (default 40)."},
+                    "multiline": {"type": "boolean", "description": "Let the pattern span lines (needs ripgrep on the host)."},
+                    "head_limit": {"type": "integer", "description": "Max output lines (default 250, max 2000)."},
+                    "offset": {"type": "integer", "description": "Skip this many matching lines first. Use the offset the previous call reported to read on instead of narrowing a search you cannot see the end of."},
                     "vps_id": {"type": "string"}
                 },
                 "required": ["pattern"]
@@ -281,7 +283,7 @@ compose file, logs) — do not grep the whole disk for a filename.".into(),
                     "pattern": {"type": "string", "description": "Filename glob, e.g. *.conf, docker-compose.y*ml, *.service"},
                     "path": {"type": "string", "description": "Directory to search under (default /)."},
                     "type": {"type": "string", "enum": ["file", "dir", "any"], "description": "What to match (default file)."},
-                    "head_limit": {"type": "integer", "description": "Max results (default 40, max 200)."},
+                    "head_limit": {"type": "integer", "description": "Max results (default 200, max 2000)."},
                     "vps_id": {"type": "string"}
                 },
                 "required": ["pattern"]
@@ -644,7 +646,9 @@ something lives.".into(),
                         "enum": ["content", "files", "count"],
                         "description": "content = matching lines (default); files = which files contain it; count = how many per file."
                     },
-                    "head_limit": {"type": "integer", "description": "Max output lines (default 40)."}
+                    "multiline": {"type": "boolean", "description": "Let the pattern span lines (needs ripgrep)."},
+                    "head_limit": {"type": "integer", "description": "Max output lines (default 250, max 2000)."},
+                    "offset": {"type": "integer", "description": "Skip this many matching lines first, to read past a truncated result."}
                 },
                 "required": ["pattern"]
             }),
@@ -676,7 +680,7 @@ of grepping the whole disk for a filename."
                     "pattern": {"type": "string", "description": "Filename glob, e.g. *.conf, docker-compose.y*ml"},
                     "path": {"type": "string", "description": "Directory to search under (default the current one)."},
                     "type": {"type": "string", "enum": ["file", "dir", "any"], "description": "What to match (default file)."},
-                    "head_limit": {"type": "integer", "description": "Max results (default 40, max 200)."}
+                    "head_limit": {"type": "integer", "description": "Max results (default 200, max 2000)."}
                 },
                 "required": ["pattern"]
             }),
@@ -2949,8 +2953,8 @@ async fn find_files(ctx: &ToolContext, args: &Value, sink: &EventSink) -> String
     let head = args
         .get("head_limit")
         .and_then(|v| v.as_u64())
-        .unwrap_or(40)
-        .clamp(1, 200);
+        .unwrap_or(DEFAULT_FIND_RESULTS)
+        .clamp(1, MAX_FIND_RESULTS);
     let kind = match args.get("type").and_then(|v| v.as_str()).unwrap_or("file") {
         "dir" => "-type d",
         "any" => "",
@@ -3005,15 +3009,72 @@ impl GrepOutput {
 /// files returned thousands of lines. The tool-result cap then truncated that to an
 /// arbitrary slice — the agent saw a fraction of the answer and no sign that it had.
 /// Both branches are now capped overall by `head`.
-pub fn grep_command(
-    pattern: &str,
-    path: &str,
-    glob: Option<&str>,
-    case_insensitive: bool,
-    head: u64,
-    context: u64,
-    mode: GrepOutput,
-) -> String {
+/// Everything a search is, in one place.
+///
+/// Seven positional arguments was already one too many to read at a call site, and
+/// the offset and multiline flags would have made nine. A struct also means adding
+/// the next option does not touch every caller and every test.
+#[derive(Debug, Clone)]
+pub struct GrepArgs<'a> {
+    pub pattern: &'a str,
+    pub path: &'a str,
+    pub glob: Option<&'a str>,
+    pub case_insensitive: bool,
+    pub head: u64,
+    pub offset: u64,
+    pub context: u64,
+    pub multiline: bool,
+    pub mode: GrepOutput,
+}
+
+impl<'a> GrepArgs<'a> {
+    /// A plain content search, for tests and callers with nothing special to say.
+    pub fn new(pattern: &'a str, path: &'a str) -> Self {
+        Self {
+            pattern,
+            path,
+            glob: None,
+            case_insensitive: false,
+            head: DEFAULT_GREP_LINES,
+            offset: 0,
+            context: 0,
+            multiline: false,
+            mode: GrepOutput::Content,
+        }
+    }
+}
+
+/// How many matching lines a search returns when nobody says otherwise.
+///
+/// It was 40, and hard-capped at 200 however much was asked for. That is small
+/// enough that an ordinary search across a repository is truncated most times it
+/// runs, and with no offset there was no way to see what came after — so the
+/// answer to "where else is this called" was reliably cut off mid-list, and the
+/// only recourse was to narrow the search until it fitted, which is guesswork.
+pub const DEFAULT_GREP_LINES: u64 = 250;
+/// The ceiling on one search. High enough not to be met by accident, low enough
+/// that a pattern matching everything cannot bury a turn.
+pub const MAX_GREP_LINES: u64 = 2000;
+
+/// How many paths a name search returns by default, and at most.
+///
+/// Also 40 and capped at 200 before. A repository has more than 200 source files,
+/// so "find every *.rs" quietly answered with some of them.
+pub const DEFAULT_FIND_RESULTS: u64 = 200;
+pub const MAX_FIND_RESULTS: u64 = 2000;
+
+pub fn grep_command(a: &GrepArgs) -> String {
+    let GrepArgs {
+        pattern,
+        path,
+        glob,
+        case_insensitive,
+        head,
+        offset,
+        context,
+        multiline,
+        mode,
+    } = *a;
     let pat = shell_quote(pattern);
     let dir = shell_quote(path);
     let i = if case_insensitive { " -i" } else { "" };
@@ -3037,11 +3098,28 @@ pub fn grep_command(
         _ => String::new(),
     };
 
+    // Skip before capping, so a truncated search can be continued rather than only
+    // narrowed. `tail -n +N` counts from 1, hence the +1.
+    let window = if offset > 0 {
+        format!("tail -n +{} | head -n {head}", offset + 1)
+    } else {
+        format!("head -n {head}")
+    };
+    // Patterns that span lines are rg-only; plain grep has no equivalent, and
+    // pretending otherwise would silently return the wrong answer on a box without
+    // rg rather than saying it could not do it.
+    let ml = if multiline { " -U --multiline-dotall" } else { "" };
+    let fallback = if multiline {
+        "echo 'error: multiline search needs ripgrep, which is not installed on this host'".to_string()
+    } else {
+        format!("grep -R -E{grep_mode}{i}{grep_glob} -- {pat} {dir} 2>/dev/null | {window}")
+    };
+
     format!(
         "if command -v rg >/dev/null 2>&1; then \
-           rg --no-heading --color never{rg_mode}{i}{per_file}{rg_glob} -e {pat} -- {dir} 2>/dev/null | head -n {head}; \
+           rg --no-heading --color never{rg_mode}{ml}{i}{per_file}{rg_glob} -e {pat} -- {dir} 2>/dev/null | {window}; \
          else \
-           grep -R -E{grep_mode}{i}{grep_glob} -- {pat} {dir} 2>/dev/null | head -n {head}; \
+           {fallback}; \
          fi"
     )
 }
@@ -3058,9 +3136,16 @@ fn grep_header(mode: GrepOutput, context: u64) -> String {
 
 /// Said when the output hit the cap, because a silently truncated list reads as the
 /// whole answer — and the agent then concludes something is not there when it is.
-fn grep_note(body: &str, head: u64) -> String {
+fn grep_note(body: &str, head: u64, offset: u64) -> String {
     if body.lines().count() as u64 >= head {
-        format!("\n\n(stopped at {head} lines — narrow the path or raise head_limit)")
+        // Say how to continue. Telling the agent only that the output stopped
+        // leaves narrowing the pattern as the sole way forward, and narrowing a
+        // search whose remainder you cannot see is guessing.
+        format!(
+            "\n\n(stopped at {head} lines. For the next {head} call grep_search again with \
+             offset: {}, or raise head_limit)",
+            offset + head
+        )
     } else {
         String::new()
     }
@@ -3077,15 +3162,27 @@ async fn grep_search(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &st
     let head = args
         .get("head_limit")
         .and_then(|v| v.as_u64())
-        .unwrap_or(40)
-        .clamp(1, 200);
+        .unwrap_or(DEFAULT_GREP_LINES)
+        .clamp(1, MAX_GREP_LINES);
+    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+    let multiline = args.get("multiline").and_then(|v| v.as_bool()).unwrap_or(false);
     let vps_id = match resolve_target(ctx, args) {
         Ok(id) => id,
         Err(e) => return format!("error: {e}"),
     };
     let context = args.get("context_lines").and_then(|v| v.as_u64()).unwrap_or(0).min(20);
     let mode = GrepOutput::parse(args.get("output_mode").and_then(|v| v.as_str()));
-    let cmd = grep_command(pattern, path, glob, ci, head, context, mode);
+    let cmd = grep_command(&GrepArgs {
+        pattern,
+        path,
+        glob,
+        case_insensitive: ci,
+        head,
+        offset,
+        context,
+        multiline,
+        mode,
+    });
     let raw = exec(ctx, &vps_id, &cmd, Some(sink), true).await;
     let body = stdout_body(&raw);
     if body.trim().is_empty() {
@@ -3095,7 +3192,7 @@ async fn grep_search(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &st
         "{}:\n{}{}",
         grep_header(mode, context),
         body.trim_end(),
-        grep_note(&body, head)
+        grep_note(&body, head, offset)
     )
 }
 
@@ -3904,12 +4001,24 @@ async fn local_grep_search(ctx: &ToolContext, args: &Value) -> String {
     let head = args
         .get("head_limit")
         .and_then(|v| v.as_u64())
-        .unwrap_or(40)
-        .clamp(1, 200);
+        .unwrap_or(DEFAULT_GREP_LINES)
+        .clamp(1, MAX_GREP_LINES);
+    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+    let multiline = args.get("multiline").and_then(|v| v.as_bool()).unwrap_or(false);
     let context = args.get("context_lines").and_then(|v| v.as_u64()).unwrap_or(0).min(20);
     let mode = GrepOutput::parse(args.get("output_mode").and_then(|v| v.as_str()));
 
-    let cmd = grep_command(pattern, path, glob, ci, head, context, mode);
+    let cmd = grep_command(&GrepArgs {
+        pattern,
+        path,
+        glob,
+        case_insensitive: ci,
+        head,
+        offset,
+        context,
+        multiline,
+        mode,
+    });
     if let Err(e) = authorize_local(ctx, &cmd).await {
         return format!("error: {e}");
     }
@@ -3919,7 +4028,7 @@ async fn local_grep_search(ctx: &ToolContext, args: &Value) -> String {
             if text.trim().is_empty() {
                 return format!("no matches for {pattern:?} under {path}");
             }
-            format!("{}:\n{}{}", grep_header(mode, context), text.trim_end(), grep_note(&text, head))
+            format!("{}:\n{}{}", grep_header(mode, context), text.trim_end(), grep_note(&text, head, offset))
         }
         Err(e) => format!("error: {e}"),
     }
@@ -4007,7 +4116,11 @@ async fn local_find_files(ctx: &ToolContext, args: &Value) -> String {
         "any" => "",
         _ => "-type f",
     };
-    let head = args.get("head_limit").and_then(|v| v.as_u64()).unwrap_or(40).clamp(1, 200);
+    let head = args
+        .get("head_limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_FIND_RESULTS)
+        .clamp(1, MAX_FIND_RESULTS);
 
     let cmd = find_command(path, kind, pattern, head);
     if let Err(e) = authorize_local(ctx, &cmd).await {
@@ -5294,7 +5407,7 @@ mod grep_command_tests {
         // result cap then truncated it to an arbitrary slice, and the agent saw a
         // fraction of the answer with no sign that it had.
         let dir = fixture(FIXTURE);
-        let cmd = grep_command("needle", dir.to_str().unwrap(), None, false, 10, 0, GrepOutput::Content);
+        let cmd = grep_command(&GrepArgs { pattern: "needle", path: dir.to_str().unwrap(), head: 10, ..GrepArgs::new("needle", dir.to_str().unwrap()) });
         let out = run(&cmd, &dir);
         assert!(out.lines().count() <= 10, "returned {} lines", out.lines().count());
         let _ = std::fs::remove_dir_all(&dir);
@@ -5307,7 +5420,7 @@ mod grep_command_tests {
         // The whole point: seeing the surrounding lines is usually why a read_file call
         // followed a search at all.
         let dir = fixture(FIXTURE);
-        let cmd = grep_command("needle", dir.join("small.txt").to_str().unwrap(), None, false, 40, 1, GrepOutput::Content);
+        let cmd = grep_command(&GrepArgs { pattern: "needle", path: dir.join("small.txt").to_str().unwrap(), head: 40, context: 1, ..GrepArgs::new("needle", dir.join("small.txt").to_str().unwrap()) });
         let out = run(&cmd, &dir);
         assert!(out.contains("one"), "missing the line before: {out}");
         assert!(out.contains("three"), "missing the line after: {out}");
@@ -5319,7 +5432,7 @@ mod grep_command_tests {
     fn files_mode_answers_where_without_the_contents() {
         const FIXTURE: &str = "files_mode_answers_where_without_the_contents";
         let dir = fixture(FIXTURE);
-        let cmd = grep_command("needle", dir.to_str().unwrap(), None, false, 40, 0, GrepOutput::Files);
+        let cmd = grep_command(&GrepArgs { pattern: "needle", path: dir.to_str().unwrap(), head: 40, mode: GrepOutput::Files, ..GrepArgs::new("needle", dir.to_str().unwrap()) });
         let out = run(&cmd, &dir);
         assert!(out.contains("small.txt") && out.contains("big.txt"), "{out}");
         // Names, not 200 copies of the line.
@@ -5332,7 +5445,7 @@ mod grep_command_tests {
     fn a_glob_narrows_to_the_files_asked_for() {
         const FIXTURE: &str = "a_glob_narrows_to_the_files_asked_for";
         let dir = fixture(FIXTURE);
-        let cmd = grep_command("needle", dir.to_str().unwrap(), Some("*.log"), false, 40, 0, GrepOutput::Files);
+        let cmd = grep_command(&GrepArgs { pattern: "needle", path: dir.to_str().unwrap(), glob: Some("*.log"), head: 40, mode: GrepOutput::Files, ..GrepArgs::new("needle", dir.to_str().unwrap()) });
         let out = run(&cmd, &dir);
         assert!(out.contains("other.log"), "{out}");
         assert!(!out.contains("big.txt"), "glob was ignored: {out}");
@@ -5353,13 +5466,13 @@ mod grep_command_tests {
     fn the_plain_grep_fallback_behaves_the_same() {
         const FIXTURE: &str = "the_plain_grep_fallback_behaves_the_same";
         let dir = fixture(FIXTURE);
-        let base = grep_command("needle", dir.to_str().unwrap(), None, false, 10, 0, GrepOutput::Content);
+        let base = grep_command(&GrepArgs { pattern: "needle", path: dir.to_str().unwrap(), head: 10, ..GrepArgs::new("needle", dir.to_str().unwrap()) });
         let out = run(&without_ripgrep(&base), &dir);
         assert!(out.contains("needle"), "fallback found nothing: {out}");
         assert!(out.lines().count() <= 10, "fallback ignored the cap: {}", out.lines().count());
 
         // And its glob filter, which is a different flag from ripgrep's.
-        let globbed = grep_command("needle", dir.to_str().unwrap(), Some("*.log"), false, 40, 0, GrepOutput::Files);
+        let globbed = grep_command(&GrepArgs { pattern: "needle", path: dir.to_str().unwrap(), glob: Some("*.log"), head: 40, mode: GrepOutput::Files, ..GrepArgs::new("needle", dir.to_str().unwrap()) });
         let out = run(&without_ripgrep(&globbed), &dir);
         assert!(out.contains("other.log"), "{out}");
         assert!(!out.contains("big.txt"), "fallback ignored the glob: {out}");
@@ -5373,7 +5486,7 @@ mod grep_command_tests {
         const FIXTURE: &str = "a_pattern_with_shell_characters_is_searched_not_executed";
         // The pattern comes from the model and reaches a shell.
         let dir = fixture(FIXTURE);
-        let cmd = grep_command("x'; touch /tmp/xc-pwned; '", dir.to_str().unwrap(), None, false, 5, 0, GrepOutput::Content);
+        let cmd = grep_command(&GrepArgs { pattern: "x'; touch /tmp/xc-pwned; '", path: dir.to_str().unwrap(), head: 5, ..GrepArgs::new("x'; touch /tmp/xc-pwned; '", dir.to_str().unwrap()) });
         let _ = run(&cmd, &dir);
         assert!(!std::path::Path::new("/tmp/xc-pwned").exists(), "command injection");
         let _ = std::fs::remove_dir_all(&dir);
@@ -5589,6 +5702,99 @@ mod local_freshness_tests {
             file_state::check_write("s4", "vps-uuid", "/etc/nginx.conf", "999").is_ok(),
             "a read of the local copy was accepted as a read of the server's"
         );
+    }
+}
+
+#[cfg(test)]
+mod grep_paging_tests {
+    use super::*;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("xc-page-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn run(cmd: &str) -> String {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .output()
+            .expect("shell runs");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    #[test]
+    fn a_truncated_search_can_be_continued_instead_of_narrowed() {
+        // Without offset the only way past a cut-off result was to narrow the
+        // pattern — guessing at the shape of matches you have not seen.
+        let dir = fixture("offset");
+        let body: String = (0..100).map(|i| format!("needle {i}\n")).collect();
+        std::fs::write(dir.join("a.txt"), body).unwrap();
+        let path = dir.to_str().unwrap();
+
+        let first = run(&grep_command(&GrepArgs {
+            head: 10,
+            ..GrepArgs::new("needle", path)
+        }));
+        let second = run(&grep_command(&GrepArgs {
+            head: 10,
+            offset: 10,
+            ..GrepArgs::new("needle", path)
+        }));
+        assert_eq!(first.lines().count(), 10, "{first}");
+        assert_eq!(second.lines().count(), 10, "{second}");
+        assert!(first.contains("needle 0"), "{first}");
+        assert!(!second.contains("needle 0"), "the second page started over: {second}");
+        assert!(second.contains("needle 10"), "the second page skipped matches: {second}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_note_names_the_offset_that_continues_the_search() {
+        let body: String = (0..10).map(|i| format!("hit {i}\n")).collect();
+        let note = grep_note(&body, 10, 0);
+        assert!(note.contains("offset: 10"), "{note}");
+        let later = grep_note(&body, 10, 40);
+        assert!(later.contains("offset: 50"), "the offset did not accumulate: {later}");
+        // Nothing to say when the result was complete.
+        assert!(grep_note("one\ntwo\n", 10, 0).is_empty());
+    }
+
+    #[test]
+    fn a_pattern_can_span_lines_where_ripgrep_exists() {
+        let dir = fixture("multiline");
+        std::fs::write(dir.join("a.rs"), "fn open(\n    path: &str,\n) {}\n").unwrap();
+        let path = dir.to_str().unwrap();
+        let cmd = grep_command(&GrepArgs {
+            multiline: true,
+            ..GrepArgs::new(r"fn open\(\s*path", path)
+        });
+        let out = run(&cmd);
+        if std::process::Command::new("sh")
+            .args(["-c", "command -v rg"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            assert!(out.contains("fn open"), "multiline search found nothing: {out}");
+        } else {
+            // No rg: it must say so rather than quietly answering "no matches",
+            // which would read as "this pattern is not in the code".
+            let full = run(&format!("{cmd} 2>&1"));
+            assert!(full.contains("needs ripgrep"), "silently wrong without rg: {full}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_default_is_big_enough_for_an_ordinary_repository_search() {
+        // 40 lines, hard-capped at 200, meant a normal search across a project was
+        // truncated most times it ran.
+        assert!(DEFAULT_GREP_LINES >= 250);
+        assert!(MAX_GREP_LINES >= 2000);
+        assert!(DEFAULT_FIND_RESULTS >= 200);
     }
 }
 
