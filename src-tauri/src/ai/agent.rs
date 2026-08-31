@@ -1083,35 +1083,67 @@ pub async fn run_turn(
             repair_notes.push(note);
         }
 
-        // Parallelize read-only tool batches (e.g. run_command_all-style multi-host
-        // checks issued as separate run_command calls, list/read tools). Mutating tools
-        // stay sequential so safety/approvals and ordering stay predictable.
-        let all_readonly = repaired_calls
-            .iter()
-            .all(|c| !tools::tool_is_mutating(&c.name, &c.arguments));
-        if all_readonly && repaired_calls.len() > 1 {
-            emit(
-                Some(sink),
-                StreamEvent::Status(format!(
-                    "Running {} read-only tools in parallel…",
-                    repaired_calls.len()
-                )),
-            );
-            let futs: Vec<_> = repaired_calls
-                .into_iter()
-                .zip(repair_notes.into_iter())
-                .map(|(call, repair_note)| {
-                    let telemetry = telemetry.clone();
-                    async move {
-                        let mut output = tools::dispatch_with_telemetry(tc, &call, sink, Some(&telemetry)).await;
-                        if let Some(note) = repair_note {
-                            output = format!("<repaired: {note}>\n{output}");
+        // Run each stretch of read-only calls together, and mutating ones one at a
+        // time in the order they were asked for.
+        //
+        // This used to be all-or-nothing: unless *every* call in the batch was
+        // read-only, the whole lot went one at a time. A model that reads three
+        // files and then writes one — the ordinary shape of doing a piece of work —
+        // got no parallelism at all, and the reads were the slow part, being three
+        // separate SSH round trips. Grouping by run keeps the order exactly as the
+        // model asked for it, so approvals and anything that depends on a write
+        // landing before the next read still behave, while the reads that sit next
+        // to each other go at once.
+        let mut pending: std::collections::VecDeque<(crate::ai::provider::ToolCall, Option<String>)> =
+            repaired_calls.into_iter().zip(repair_notes.into_iter()).collect();
+        let sizes = batch_sizes(
+            &pending.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>(),
+            |c| tools::tool_is_mutating(&c.name, &c.arguments),
+        );
+
+        for size in sizes {
+            let batch: Vec<(crate::ai::provider::ToolCall, Option<String>)> =
+                pending.drain(..size).collect();
+
+            let results: Vec<(crate::ai::provider::ToolCall, String)> = if batch.len() > 1 {
+                emit(
+                    Some(sink),
+                    StreamEvent::Status(format!(
+                        "Running {} read-only tools in parallel…",
+                        batch.len()
+                    )),
+                );
+                let futs: Vec<_> = batch
+                    .into_iter()
+                    .map(|(call, repair_note)| {
+                        let telemetry = telemetry.clone();
+                        async move {
+                            let mut output =
+                                tools::dispatch_with_telemetry(tc, &call, sink, Some(&telemetry))
+                                    .await;
+                            if let Some(note) = repair_note {
+                                output = format!("<repaired: {note}>\n{output}");
+                            }
+                            (call, output)
                         }
-                        (call, output)
+                    })
+                    .collect();
+                futures_util::future::join_all(futs).await
+            } else {
+                let mut out = Vec::with_capacity(1);
+                for (call, repair_note) in batch {
+                    // The provider already streamed StreamEvent::ToolCall for each call;
+                    // the single ToolResult is emitted below. No re-emit here.
+                    let mut output =
+                        tools::dispatch_with_telemetry(tc, &call, sink, Some(&telemetry)).await;
+                    if let Some(note) = repair_note {
+                        output = format!("<repaired: {note}>\n{output}");
                     }
-                })
-                .collect();
-            let results = futures_util::future::join_all(futs).await;
+                    out.push((call, output));
+                }
+                out
+            };
+
             for (call, output) in results {
                 let capped = cap_tool_result(&call, &output);
                 emit(
@@ -1122,24 +1154,6 @@ pub async fn run_turn(
                     },
                 );
                 messages.push(ChatMessage::tool_result(call.id, capped));
-            }
-        } else {
-            for (call, repair_note) in repaired_calls.into_iter().zip(repair_notes.into_iter()) {
-                // The provider already streamed StreamEvent::ToolCall for each call;
-                // the single ToolResult is emitted by this loop below. No re-emit here.
-                let mut output = tools::dispatch_with_telemetry(tc, &call, sink, Some(&telemetry)).await;
-                if let Some(note) = repair_note {
-                    output = format!("<repaired: {note}>\n{output}");
-                }
-                let capped = cap_tool_result(&call, &output);
-                emit(
-                    Some(sink),
-                    StreamEvent::ToolResult {
-                        id: call.id.clone(),
-                        output: capped.clone(),
-                    },
-                );
-                messages.push(ChatMessage::tool_result(call.id.clone(), capped));
             }
         }
 
@@ -1493,3 +1507,87 @@ pub async fn warm_cache_prefix(tc: &ToolContext, prompt_hint: Option<&str>) -> R
     Ok(())
 }
 
+
+/// How many calls to run together at each step, in order.
+///
+/// A maximal run of read-only calls becomes one batch that can go at once; every
+/// mutating call is a batch of one. The order the model asked for is never
+/// changed, so a write still lands before a read that was requested after it, and
+/// approvals still come up one at a time.
+///
+/// Split out from the dispatch loop so the grouping can be tested without a live
+/// session, a provider and an SSH connection — which is why it was previously
+/// only asserted by reading it.
+fn batch_sizes<T>(calls: &[T], is_mutating: impl Fn(&T) -> bool) -> Vec<usize> {
+    let mut sizes = Vec::new();
+    let mut i = 0;
+    while i < calls.len() {
+        if is_mutating(&calls[i]) {
+            sizes.push(1);
+            i += 1;
+        } else {
+            let start = i;
+            while i < calls.len() && !is_mutating(&calls[i]) {
+                i += 1;
+            }
+            sizes.push(i - start);
+        }
+    }
+    sizes
+}
+
+#[cfg(test)]
+mod batching_tests {
+    use super::batch_sizes;
+
+    /// `true` marks a mutating call.
+    fn plan(kinds: &[bool]) -> Vec<usize> {
+        batch_sizes(kinds, |m| *m)
+    }
+
+    #[test]
+    fn reads_next_to_each_other_go_at_once() {
+        assert_eq!(plan(&[false, false, false]), vec![3]);
+    }
+
+    #[test]
+    fn a_write_after_reads_no_longer_makes_the_reads_serial() {
+        // This is the ordinary shape of doing a piece of work — read a few files,
+        // then change one — and it used to defeat parallelism entirely, because the
+        // batch was only run together when every call in it was read-only. The
+        // reads were the slow part: three separate SSH round trips, one at a time.
+        assert_eq!(plan(&[false, false, false, true]), vec![3, 1]);
+    }
+
+    #[test]
+    fn every_write_stands_alone_and_in_order() {
+        // Two writes must never overlap: approvals come up one at a time, and a
+        // second write to the same file has to see the first one's result.
+        assert_eq!(plan(&[true, true]), vec![1, 1]);
+        assert_eq!(plan(&[false, true, false, true, false]), vec![1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn the_order_asked_for_is_the_order_run() {
+        // Whatever the grouping, the sizes must account for every call exactly once
+        // and in sequence — a batch that dropped or reordered one would answer a
+        // tool_call with another call's result.
+        for kinds in [
+            vec![false, true, false, false, true, false],
+            vec![true, false, false],
+            vec![false],
+            vec![true],
+        ] {
+            assert_eq!(
+                plan(&kinds).iter().sum::<usize>(),
+                kinds.len(),
+                "{kinds:?} lost or duplicated a call"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_to_run_is_no_batches() {
+        assert!(plan(&[]).is_empty());
+    }
+}

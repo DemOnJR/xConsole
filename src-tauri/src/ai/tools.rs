@@ -75,11 +75,15 @@ pub fn definitions(_home: &AgentHome) -> Vec<ToolDef> {
         ToolDef {
             name: "run_command".into(),
             description: "Run a shell command on one server over SSH. When multiple targets are \
-selected, vps_id is required (exact UUID from the target list). Commands run in the \
-foreground time out after 120s — for anything slower (builds, apt/dnf upgrades, docker \
-pulls, rsync, migrations) pass background:true instead of splitting the work up or asking \
-the user to run it. That returns a job_id immediately and the command keeps running on the \
-server; check it later with job_status.".into(),
+selected, vps_id is required (exact UUID from the target list). \
+Every call gets a fresh shell: the working directory, exported variables and anything \
+sourced are gone by the next one, so `cd /srv/app` in one call and `npm ci` in the next runs \
+npm in the home directory. Chain what belongs together in one command — `cd /srv/app && npm ci \
+&& npm run build` — rather than splitting it across calls. \
+Commands run in the foreground time out after 120s — for anything slower (builds, apt/dnf \
+upgrades, docker pulls, rsync, migrations) pass background:true instead of splitting the work \
+up or asking the user to run it. That returns a job_id immediately and the command keeps \
+running on the server; check it later with job_status.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -573,7 +577,9 @@ flags, or steps from memory when you're not certain — it learns the capability
             description: "Run a shell command on the user's LOCAL machine (this PC), not a remote \
 server. Use this when the user says 'my pc', 'locally', 'this machine', or asks to check local \
 software (e.g. local docker containers). On Windows the command runs in PowerShell; on macOS/Linux \
-in sh. For remote servers use run_command instead.".into(),
+in sh. Every call gets a fresh shell — no working directory, variables or history carry over, so \
+chain what belongs together with && in one command. For remote servers use run_command \
+instead.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
