@@ -7,6 +7,11 @@ use std::time::Duration;
 use crate::ai::provider::ToolDef;
 
 const MAX_BODY: usize = 48_000;
+/// How much can be downloaded before the page is refused unread.
+///
+/// Deliberately far above MAX_BODY: this guards memory, not the reply. What the
+/// model sees is capped separately, after the markup has been stripped.
+const MAX_DOWNLOAD: usize = 8_000_000;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub fn definitions() -> Vec<ToolDef> {
@@ -28,16 +33,22 @@ Returns a short summary from DuckDuckGo. Prefer this before guessing.".into(),
         },
         ToolDef {
             name: "web_fetch".into(),
-            description: "Fetch a public HTTP(S) URL and return plain text (HTML stripped). \
-For weather use https://wttr.in/City?format=3 (replace City, URL-encode spaces). \
-For weather at the user's own location, https://wttr.in/?format=3 auto-detects by IP — \
-or call geo_locate first to get the city.".into(),
+            description: "Fetch a public HTTP(S) URL and return plain text (HTML stripped, line \
+structure kept). Use it to read documentation, changelogs, release notes, a README, an API \
+reference or a raw file from a repository before relying on how something works — checking beats \
+remembering, and your training has a cutoff. Long pages come back a slice at a time; the footer \
+gives the offset for the next one. For weather use https://wttr.in/City?format=3, or \
+https://wttr.in/?format=3 to auto-detect by IP.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
                         "description": "Full http:// or https:// URL."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Start this many characters in. Use the offset the previous call's footer gave you to read on."
                     }
                 },
                 "required": ["url"]
@@ -333,10 +344,40 @@ async fn web_fetch(args: &Value) -> String {
         Some(u) if !u.trim().is_empty() => u.trim(),
         _ => return "error: missing 'url'".into(),
     };
-    match fetch_text(url_str).await {
+    let text = match fetch_text_full(url_str).await {
         Ok(text) => text,
-        Err(e) => e,
+        Err(e) => return e,
+    };
+    page_of(&text, args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize)
+}
+
+/// One MAX_BODY-sized window of a fetched page, starting at `offset` characters.
+///
+/// Truncating with no way to ask for the rest makes a long page a dead end: the
+/// answer is in the part that was cut, and re-fetching returns the same first
+/// slice forever. The footer says how much is left and what offset reaches it, so
+/// the next call is obvious rather than something to be worked out.
+fn page_of(text: &str, offset: usize) -> String {
+    let start = text
+        .char_indices()
+        .nth(offset)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+    if start >= text.len() && offset > 0 {
+        return format!("(no more content — the page ends at offset {})", text.chars().count());
     }
+    let rest = &text[start..];
+    if rest.len() <= MAX_BODY {
+        return rest.to_string();
+    }
+    let window = super::text::truncate_bytes(rest, MAX_BODY);
+    let next = offset + window.chars().count();
+    let total = text.chars().count();
+    format!(
+        "{window}\n\n… [{} of {total} characters shown. For the rest call web_fetch again on the \
+         same url with offset: {next}]",
+        next.min(total)
+    )
 }
 
 /// Check if an HTTP response represents a CAPTCHA challenge, Cloudflare block, or empty SPA shell.
@@ -410,13 +451,24 @@ async fn fetch_via_ai_reader(url_str: &str) -> Result<String, String> {
         return Err("reader returned empty or error".into());
     }
 
-    Ok(truncate_text(trimmed, MAX_BODY))
+    Ok(trimmed.to_string())
 }
 
 /// Fetch a public URL and return its plain text (HTML stripped, SSRF-guarded, size-capped).
 /// If the direct fetch hits Cloudflare/CAPTCHA bot protection or an empty JS shell, automatically
 /// falls back to the Jina AI Reader service for clean markdown extraction.
+/// One bounded chunk of a page, for callers that only want a look at the top.
 pub async fn fetch_text(url_str: &str) -> Result<String, String> {
+    fetch_text_full(url_str).await.map(|t| truncate_text(&t, MAX_BODY))
+}
+
+/// The whole page as text, however long it is.
+///
+/// Split from [`fetch_text`] so `web_fetch` can hand out one window at a time and
+/// still reach the end of a long document. Truncating inside the fetch made the
+/// tail of a page permanently unreachable — every retry returned the same opening
+/// slice, and the answer, if it was further down, could not be got at at all.
+pub async fn fetch_text_full(url_str: &str) -> Result<String, String> {
     let url = validate_public_url(url_str)?;
     let client = http_client()?;
 
@@ -443,9 +495,17 @@ pub async fn fetch_text(url_str: &str) -> Result<String, String> {
             } else {
                 match resp.bytes().await {
                     Ok(bytes) => {
-                        if bytes.len() > MAX_BODY * 4 {
+                        // Only refuse what would actually hurt to hold in memory. The
+                        // old ceiling was four times MAX_BODY *of raw bytes*, which
+                        // rejected most real documentation outright: markup, inline CSS
+                        // and script are the bulk of a modern page, and a 300KB HTML
+                        // file is routinely 15KB of prose. Judging the download by the
+                        // size of the text it contains is the wrong way round — strip
+                        // it first, then decide what fits.
+                        if bytes.len() > MAX_DOWNLOAD {
                             return Err(format!(
-                                "error: response too large ({} bytes, max {MAX_BODY})",
+                                "error: response too large ({} bytes, max {MAX_DOWNLOAD}). \
+                                 Fetch a more specific URL.",
                                 bytes.len()
                             ));
                         }
@@ -458,7 +518,7 @@ pub async fn fetch_text(url_str: &str) -> Result<String, String> {
                             } else {
                                 raw.into_owned()
                             };
-                            return Ok(truncate_text(&text, MAX_BODY));
+                            return Ok(text);
                         }
                     }
                     Err(e) => (true, e.to_string()),
@@ -771,6 +831,29 @@ fn is_v6_link_local(ip: Ipv6Addr) -> bool {
     (ip.segments()[0] & 0xffc0) == 0xfe80
 }
 
+/// Whether a tag ends the line it is on.
+///
+/// Opening *and* closing forms both count. Only `<p>` and `<div>` opens used to,
+/// which left every list, heading and table row concatenated into its neighbours
+/// — a documentation sidebar came back as one unreadable run of words like
+/// "VecSectionsExamplesIndexing". A closing `</li>` is exactly where a line ends.
+fn breaks_line(tag: &str) -> bool {
+    const BLOCK: &[&str] = &[
+        "br", "p", "div", "li", "ul", "ol", "tr", "table", "section", "article", "header",
+        "footer", "nav", "aside", "blockquote", "pre", "hr", "h1", "h2", "h3", "h4", "h5", "h6",
+        "dt", "dd", "dl", "form", "fieldset", "figure", "figcaption", "main", "details",
+        "summary", "option",
+    ];
+    let name = tag.trim_start_matches('/');
+    // Match on the tag name only: `div class="x"` and `p` alike, but never `param`
+    // for `p` or `path` for `p`.
+    let name = name
+        .split(|c: char| c.is_whitespace() || c == '/' || c == '>')
+        .next()
+        .unwrap_or("");
+    BLOCK.contains(&name)
+}
+
 fn html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len().min(8192));
     let mut in_tag = false;
@@ -798,7 +881,10 @@ fn html_to_text(html: &str) -> String {
                     };
                 } else if tag.starts_with("/script") || tag.starts_with("/style") {
                     skip_until = None;
-                } else if tag.starts_with("br") || tag.starts_with("p") || tag.starts_with("div") {
+                } else if breaks_line(&tag) && !out.ends_with('\n') {
+                    // Open and close both break, so guard against the pair emitting
+                    // two: one blank line between every block is the whole page
+                    // twice as long for nothing.
                     out.push('\n');
                 }
                 tag_buf.clear();
@@ -812,7 +898,29 @@ fn html_to_text(html: &str) -> String {
         }
     }
 
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    // Collapse runs of spaces inside a line but keep the line breaks the tags above
+    // just put in. Flattening everything to one paragraph — which is what this did —
+    // destroys exactly the structure that makes a page readable: headings, list
+    // items, and the line breaks in a code sample all become one wall of words.
+    let decoded = decode_entities(&out);
+    let mut lines: Vec<&str> = Vec::new();
+    for line in decoded.lines() {
+        let t = line.trim();
+        // At most one blank line in a row: HTML is full of empty wrappers, and a
+        // page of blank lines is as useless as a page with none.
+        if t.is_empty() && lines.last().map(|l: &&str| l.is_empty()).unwrap_or(true) {
+            continue;
+        }
+        lines.push(t);
+    }
+    while lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+    lines
+        .iter()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn truncate_text(text: &str, max: usize) -> String {
@@ -877,10 +985,103 @@ mod tests {
     }
 
     #[test]
+    fn a_fetched_page_keeps_its_lines() {
+        // The parser inserts breaks for <p>/<br>/<div> and the old last line threw
+        // every one of them away, so a page came back as one wall of words —
+        // headings, list items and code samples all run together.
+        let html = "<h1>Install</h1><p>Run this:</p><div>npm i foo</div><div>npm test</div>";
+        let text = html_to_text(html);
+        assert!(text.contains("npm i foo\nnpm test"), "lines were flattened: {text:?}");
+    }
+
+    #[test]
+    fn a_fetched_page_is_readable_rather_than_escaped() {
+        // Reading a code sample full of &lt;div&gt; and &amp;&amp; is reading it
+        // wrong, and it is the samples people fetch documentation for.
+        let text = html_to_text("<p>use &lt;T&gt; where T: A &amp;&amp; B</p>");
+        assert!(text.contains("use <T> where T: A && B"), "{text:?}");
+    }
+
+    #[test]
+    fn blank_lines_do_not_pile_up() {
+        let text = html_to_text("<div></div><div></div><div>a</div><div></div><div></div><div>b</div>");
+        assert!(!text.contains("\n\n\n"), "empty wrappers became a page of blank lines: {text:?}");
+        assert!(text.contains('a') && text.contains('b'));
+    }
+
+    #[test]
+    fn a_long_page_can_be_read_past_the_first_window() {
+        // Truncating with no way to ask for more makes the tail of a document
+        // unreachable: every retry hands back the same opening slice.
+        // Every line distinct, so "the second window is not the first" is a claim
+        // about the paging and not about the shape of the fixture.
+        let text: String = (0..MAX_BODY / 4)
+            .map(|i| format!("line {i} of the document\n"))
+            .collect();
+        let first = page_of(&text, 0);
+        assert!(first.contains("line 0 of"), "the first window did not start at the top");
+        assert!(first.contains("For the rest call web_fetch again"), "no way onward");
+        let next: usize = first
+            .rsplit("offset: ")
+            .next()
+            .and_then(|t| t.trim_end_matches(']').trim().parse().ok())
+            .expect("the footer names the next offset");
+        assert!(next > 0 && next < text.chars().count());
+        let second = page_of(&text, next);
+        assert!(
+            !second.contains("line 0 of the document"),
+            "the second window started back at the top instead of where the first ended"
+        );
+        assert!(
+            second.contains(&format!("line {} of", next / 24)) || second.len() > 100,
+            "the second window came back empty"
+        );
+        assert!(page_of(&text, text.chars().count() + 1).contains("no more content"));
+    }
+
+    #[test]
+    fn a_page_that_fits_comes_back_whole_and_unadorned() {
+        let text = "short and complete";
+        assert_eq!(page_of(text, 0), text, "a small page grew a paging footer");
+    }
+
+    #[test]
+    fn an_ordinary_documentation_page_is_not_refused_for_its_size() {
+        // The old ceiling was 4x MAX_BODY of *raw bytes*. Markup, inline CSS and
+        // script are most of a modern page, so real docs were rejected unread.
+        assert!(
+            MAX_DOWNLOAD > MAX_BODY * 20,
+            "the download guard is still sized as if markup were content"
+        );
+    }
+
+    #[test]
     fn truncate_text_handles_multibyte() {
         let s = "ä".repeat(100); // 200 bytes
         // Must not panic slicing mid-codepoint, and must stay within budget.
         let out = truncate_text(&s, 51);
         assert!(out.starts_with('ä'));
+    }
+}
+
+#[cfg(test)]
+mod live_fetch_smoke {
+    /// Not part of the suite — a real fetch, run by hand with
+    /// `cargo test --lib live_fetch -- --ignored --nocapture` to see what a page
+    /// actually looks like after stripping. Unit tests prove the shape; this
+    /// proves the shape matches the web.
+    #[tokio::test]
+    #[ignore]
+    async fn a_real_documentation_page_comes_back_readable() {
+        let text = super::fetch_text_full("https://doc.rust-lang.org/std/vec/struct.Vec.html")
+            .await
+            .expect("fetch works");
+        println!(
+            "chars={} lines={}",
+            text.chars().count(),
+            text.lines().count()
+        );
+        println!("--- head ---\n{}", super::super::text::truncate_bytes(&text, 500));
+        assert!(text.lines().count() > 20, "still one flat wall of words");
     }
 }
