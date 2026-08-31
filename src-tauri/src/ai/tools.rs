@@ -164,7 +164,8 @@ run_command(background:true) instead and collect the job_ids.".into(),
             description: "Read text files from a server. Lines are numbered. Pass `paths` to open \
 several at once — a config, the file it includes and the unit that starts it is one call, not \
 three round trips. For one large file, pass offset (1-based line) and limit instead of reading \
-everything; find the line with grep_search first.".into(),
+everything; find the line with grep_search first. A negative offset reads from the end, so \
+offset:-200 is the tail of a log.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -174,7 +175,7 @@ everything; find the line with grep_search first.".into(),
                         "items": {"type": "string"},
                         "description": "Several files in one round trip (max 20). offset/limit do not apply here — read the batch to see what is there, then re-read one file with a window."
                     },
-                    "offset": {"type": "integer", "description": "1-based start line. Single file only."},
+                    "offset": {"type": "integer", "description": "1-based start line. Negative counts back from the end, so offset:-100 reads the last 100 lines of a log — cheaper and safer than shelling out to `tail`, and it keeps the file's freshness stamp. Single file only."},
                     "limit": {"type": "integer", "description": "Max lines to return. Single file only."},
                     "vps_id": {"type": "string"}
                 }
@@ -184,13 +185,15 @@ everything; find the line with grep_search first.".into(),
             name: "write_file".into(),
             description: "Write (overwrite) a text file on a server. Subject to the safety mode. \
 Use /root/ or /tmp/ on Linux (root login) — not /home/root/. Prefer hello.py over names with spaces. \
-For an existing file prefer edit_file (replace a unique snippet) — cheaper and safer."
+For an existing file prefer edit_file (replace a unique snippet) — cheaper and safer. \
+Content too long for one call: write the first part, then call again with mode:append."
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
                     "content": {"type": "string"},
+                    "mode": {"type": "string", "enum": ["overwrite", "append"], "description": "overwrite (default) replaces the file; append adds to the end. For a file too long to send in one call, write the first part then append the rest."},
                     "vps_id": {"type": "string"}
                 },
                 "required": ["path", "content"]
@@ -594,7 +597,7 @@ several at once. Use offset/limit on a single large file.".into(),
                         "items": {"type": "string"},
                         "description": "Several files at once (max 20). offset/limit do not apply."
                     },
-                    "offset": {"type": "integer", "description": "1-based start line. Single file only."},
+                    "offset": {"type": "integer", "description": "1-based start line. Negative counts back from the end, so offset:-100 reads the last 100 lines — use it to tail a log instead of shelling out to `tail`. Single file only."},
                     "limit": {"type": "integer", "description": "Max lines. Single file only."}
                 }
             }),
@@ -663,7 +666,8 @@ the parts of the file you did not mean to touch.".into(),
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
-                    "content": {"type": "string"}
+                    "content": {"type": "string"},
+                    "mode": {"type": "string", "enum": ["overwrite", "append"], "description": "overwrite (default) replaces the file; append adds to the end. For a file too long to send in one call, write the first part then append the rest."}
                 },
                 "required": ["path", "content"]
             }),
@@ -2541,7 +2545,7 @@ async fn read_file(ctx: &ToolContext, args: &Value, sink: &EventSink, id: &str) 
     }
     let (mtime, body) = split_mtime_prefix(&raw);
     let file = stdout_body(&body);
-    let offset = args.get("offset").and_then(|v| v.as_u64()).map(|n| n as u32);
+    let offset = args.get("offset").and_then(|v| v.as_i64());
     let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
     let numbered = crate::ai::file_ops::format_read(&file, offset, limit);
     let detected_encoding = crate::ai::file_ops::detect_encoding(file.as_bytes());
@@ -2671,12 +2675,18 @@ async fn write_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str
         _ => return "error: missing 'path'".into(),
     };
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let mode = WriteMode::parse(args);
     let vps_id = match resolve_target(ctx, args) {
         Ok(id) => id,
         Err(e) => return format!("error: {e}"),
     };
-    if let Some(e) = check_remote_write(ctx, &vps_id, &path).await {
-        return e;
+    // An append adds to the end and replaces nothing, so a file that grew since the
+    // read is not a reason to refuse it — that check exists to stop work being
+    // overwritten, and there is nothing here to overwrite.
+    if mode == WriteMode::Overwrite {
+        if let Some(e) = check_remote_write(ctx, &vps_id, &path).await {
+            return e;
+        }
     }
     // Capture the file's current content first so the changes panel can diff it.
     let before = ctx
@@ -2688,7 +2698,7 @@ async fn write_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str
     // The bytes go out through the same function edit_file uses. They used to be
     // two copies of the same base64 pipeline, which is how the two of them can
     // drift on encoding, on the diff record, or on re-stamping the mtime.
-    write_remote_contents(ctx, &vps_id, &path, content, sink, &before).await
+    write_remote_contents(ctx, &vps_id, &path, content, sink, &before, mode).await
 }
 
 /// Fix common bad paths from local models (e.g. /home/root/ → /root/).
@@ -2720,6 +2730,22 @@ async fn check_remote_write(ctx: &ToolContext, vps_id: &str, path: &str) -> Opti
     crate::ai::file_state::check_write(&ctx.session_id, vps_id, path, current).err()
 }
 
+/// How a write meets a file that already has something in it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WriteMode {
+    Overwrite,
+    Append,
+}
+
+impl WriteMode {
+    fn parse(args: &Value) -> Self {
+        match args.get("mode").and_then(|v| v.as_str()) {
+            Some("append") => WriteMode::Append,
+            _ => WriteMode::Overwrite,
+        }
+    }
+}
+
 async fn write_remote_contents(
     ctx: &ToolContext,
     vps_id: &str,
@@ -2727,6 +2753,7 @@ async fn write_remote_contents(
     content: &str,
     sink: &EventSink,
     before: &str,
+    mode: WriteMode,
 ) -> String {
     let parent = std::path::Path::new(path)
         .parent()
@@ -2744,8 +2771,12 @@ async fn write_remote_contents(
     // It cannot be allowed to fail the command, though. BusyBox and the BSDs have no
     // `stat -c`, and chaining it with a bare `&&` there would turn a write that
     // worked into a reported failure on exactly the small boxes people run.
+    let redirect = match mode {
+        WriteMode::Overwrite => ">",
+        WriteMode::Append => ">>",
+    };
     let command = format!(
-        "mkdir -p {} && printf %s {} | base64 -d > {} && \
+        "mkdir -p {} && printf %s {} | base64 -d {redirect} {} && \
          {{ stat -c 'xc-wrote %Y %s' -- {} 2>/dev/null || true ; }}",
         shell_quote(parent),
         shell_quote(&b64),
@@ -2767,6 +2798,12 @@ async fn write_remote_contents(
         .flatten()
         .map(|v| format!("{} ({})", v.name, v.host))
         .unwrap_or_else(|| vps_id.to_string());
+    // What the file now says, not just what this call sent — otherwise the changes
+    // panel shows an append as the whole file being replaced by the new chunk.
+    let after = match mode {
+        WriteMode::Overwrite => content.to_string(),
+        WriteMode::Append => format!("{before}{content}"),
+    };
     ctx.edits.record(
         &ctx.app,
         &ctx.session_id,
@@ -2776,16 +2813,27 @@ async fn write_remote_contents(
         &label,
         path,
         before,
-        content,
+        &after,
     );
-    let expected = encoded_bytes.len();
+    let sent = encoded_bytes.len();
+    // An append lands on top of what was already there, so the file is rightly
+    // longer than this write. Comparing against `sent` alone would report every
+    // successful append as a size mismatch.
+    let expected = match mode {
+        WriteMode::Overwrite => sent,
+        WriteMode::Append => sent + before.len(),
+    };
+    let verb = match mode {
+        WriteMode::Overwrite => "wrote",
+        WriteMode::Append => "appended",
+    };
     match size {
-        Some(n) if n == expected as u64 => format!("wrote {n} bytes to {path} (size verified)"),
+        Some(n) if n == expected as u64 => format!("{verb} {sent} bytes to {path} (size verified)"),
         Some(n) => format!(
-            "warning: wrote {path} but it is {n} bytes on disk, not the {expected} sent. \
-             Read it back before you rely on it."
+            "warning: {verb} {sent} bytes to {path} but it is {n} bytes on disk, not the \
+             {expected} expected. Read it back before you rely on it."
         ),
-        None => format!("wrote {path} ({expected} bytes sent; size could not be read back)"),
+        None => format!("{verb} {sent} bytes to {path} (size could not be read back)"),
     }
 }
 
@@ -2904,7 +2952,9 @@ async fn edit_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str)
         Ok(v) => v,
         Err(e) => return e,
     };
-    let result = write_remote_contents(ctx, &vps_id, &path, &next, sink, &before_out.stdout).await;
+    let result =
+        write_remote_contents(ctx, &vps_id, &path, &next, sink, &before_out.stdout, WriteMode::Overwrite)
+            .await;
     if result.starts_with("wrote ") {
         format!(
             "updated {path} ({n} replacement{} from {count} edit{}). {result}",
@@ -3028,7 +3078,11 @@ pub struct GrepArgs<'a> {
 }
 
 impl<'a> GrepArgs<'a> {
-    /// A plain content search, for tests and callers with nothing special to say.
+    /// A plain content search with everything else defaulted.
+    ///
+    /// Only the tests build searches this way — the dispatchers set every field
+    /// from the model's arguments — so it is compiled with them.
+    #[cfg(test)]
     pub fn new(pattern: &'a str, path: &'a str) -> Self {
         Self {
             pattern,
@@ -3915,7 +3969,7 @@ The user can open it from Settings → Artifacts or the saved path."
                     &crate::ai::file_state::local_mtime(path),
                     Some(crate::ai::file_ops::detect_encoding(s.as_bytes())),
                 );
-                let offset = args.get("offset").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let offset = args.get("offset").and_then(|v| v.as_i64());
                 let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
                 crate::ai::file_ops::format_read(&s, offset, limit)
             }
@@ -4040,20 +4094,29 @@ async fn local_write_file(ctx: &ToolContext, args: &Value) -> String {
         _ => return "error: missing 'path'".into(),
     };
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let mode = WriteMode::parse(args);
     if let Err(e) = authorize_local(ctx, &format!("write local file {path}")).await {
         return format!("error: {e}");
     }
-    if let Err(e) = crate::ai::file_state::check_write(
-        &ctx.session_id,
-        crate::ai::file_state::LOCAL,
-        path,
-        &crate::ai::file_state::local_mtime(path),
-    ) {
-        return e;
+    // See write_file: an append replaces nothing, so a file that grew is not a
+    // reason to refuse it.
+    if mode == WriteMode::Overwrite {
+        if let Err(e) = crate::ai::file_state::check_write(
+            &ctx.session_id,
+            crate::ai::file_state::LOCAL,
+            path,
+            &crate::ai::file_state::local_mtime(path),
+        ) {
+            return e;
+        }
     }
     let before = crate::local::read_local_file(path).ok();
     let target_encoding = crate::ai::file_ops::detect_encoding(before.as_deref().unwrap_or("").as_bytes());
-    let encoded_bytes = crate::ai::file_ops::encode_text_with_charset(content, target_encoding);
+    let whole = match mode {
+        WriteMode::Overwrite => content.to_string(),
+        WriteMode::Append => format!("{}{content}", before.as_deref().unwrap_or("")),
+    };
+    let encoded_bytes = crate::ai::file_ops::encode_text_with_charset(&whole, target_encoding);
     match crate::artifacts::write_verified(std::path::Path::new(path), &encoded_bytes) {
         Ok(written) => {
             crate::ai::file_state::note_write(
@@ -4071,7 +4134,10 @@ async fn local_write_file(ctx: &ToolContext, args: &Value) -> String {
                 "This PC",
                 path,
                 before.as_deref().unwrap_or(""),
-                content,
+                // The whole file as it now stands: an append recorded as `content`
+                // alone shows in the changes panel as the file being replaced by
+                // the chunk that was added to it.
+                &whole,
             );
             record_artifact(
                 ctx,
@@ -4083,7 +4149,7 @@ async fn local_write_file(ctx: &ToolContext, args: &Value) -> String {
                 "file",
                 &written.sha256,
                 written.size,
-                crate::artifacts::looks_like_private_key_content(content.as_bytes()),
+                crate::artifacts::looks_like_private_key_content(whole.as_bytes()),
                 None,
             );
             format!(
@@ -5521,6 +5587,57 @@ mod write_verification_tests {
         let (mtime, size) = parse_stat_line("exit_code: 0\nstat: invalid option -- 'c'\n");
         assert!(mtime.is_empty());
         assert_eq!(size, None);
+    }
+
+    #[test]
+    fn an_append_adds_to_the_file_rather_than_replacing_it() {
+        // Verified against a real shell, because the whole change is one character
+        // of redirection and reading `>>` as correct is not the same as it being so.
+        let dir = std::env::temp_dir().join(format!("xc-append-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("out.txt");
+        for (mode, text) in [(WriteMode::Overwrite, "one\n"), (WriteMode::Append, "two\n")] {
+            let redirect = if mode == WriteMode::Append { ">>" } else { ">" };
+            let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+            let cmd = format!(
+                "printf %s {} | base64 -d {redirect} {}",
+                shell_quote(&b64),
+                shell_quote(f.to_str().unwrap())
+            );
+            let ok = std::process::Command::new("sh")
+                .args(["-c", &cmd])
+                .status()
+                .expect("shell runs")
+                .success();
+            assert!(ok, "write failed for {mode:?}");
+        }
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "one\ntwo\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_mode_defaults_to_overwrite_and_nothing_else_turns_it_on() {
+        assert_eq!(WriteMode::parse(&json!({})), WriteMode::Overwrite);
+        assert_eq!(WriteMode::parse(&json!({"mode": "append"})), WriteMode::Append);
+        // A typo must not silently append to a file the agent meant to replace,
+        // leaving it with two copies of everything.
+        assert_eq!(WriteMode::parse(&json!({"mode": "Append"})), WriteMode::Overwrite);
+        assert_eq!(WriteMode::parse(&json!({"mode": "add"})), WriteMode::Overwrite);
+    }
+
+    #[test]
+    fn both_write_tools_offer_the_same_modes() {
+        let defs = definitions(&crate::ai::AgentHome::new(
+            std::env::temp_dir().join("xc-mode-defs-test"),
+        ));
+        for name in ["write_file", "local_write_file"] {
+            let def = defs.iter().find(|d| d.name == name).expect("declared");
+            assert!(
+                def.parameters["properties"].get("mode").is_some(),
+                "{name} cannot append, so content too long for one call cannot be written at all"
+            );
+        }
     }
 
     #[test]

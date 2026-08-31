@@ -786,7 +786,7 @@ impl McpSession {
                     Some(p) if !p.is_empty() => p,
                     _ => return ("error: missing path".into(), true),
                 };
-                let offset = args.get("offset").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let offset = args.get("offset").and_then(|v| v.as_i64());
                 let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
                 let vps_id = match self.resolve_vps(args) {
                     Ok(id) => id,

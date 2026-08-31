@@ -112,10 +112,20 @@ pub fn apply_edit(src: &str, old: &str, new: &str, replace_all: bool) -> Result<
 }
 
 /// 1-based window. `offset` defaults to 1, `limit` of 0 means "rest of file".
-pub fn slice_lines(src: &str, offset: Option<u32>, limit: Option<u32>) -> (String, u32, u32, u32) {
+/// A window of numbered lines: (body, first line number, lines shown, total lines).
+///
+/// A negative offset counts back from the end, so -100 is the last hundred lines.
+/// Tailing a log is most of what reading a file on a server is for, and without
+/// this the only way to do it was `run_command tail`, which leaves the file
+/// tooling — and with it the freshness stamp that stops the next write clobbering
+/// someone else's change.
+pub fn slice_lines(src: &str, offset: Option<i64>, limit: Option<u32>) -> (String, u32, u32, u32) {
     let lines: Vec<&str> = src.lines().collect();
     let total = lines.len() as u32;
-    let start = offset.unwrap_or(1).max(1);
+    let start = match offset.unwrap_or(1) {
+        n if n < 0 => (total as i64 + n + 1).max(1) as u32,
+        n => (n as u32).max(1),
+    };
     let start_idx = (start as usize).saturating_sub(1).min(lines.len());
     let take = match limit {
         Some(n) if n > 0 => n as usize,
@@ -130,16 +140,43 @@ pub fn number_lines(lines: &[&str], start: u32) -> String {
     lines
         .iter()
         .enumerate()
-        .map(|(i, line)| format!("{:>6}|{}", start as usize + i, line))
+        .map(|(i, line)| format!("{:>6}|{}", start as usize + i, clip_line(line)))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The longest single line returned from a read.
+///
+/// The line cap is what actually protects the context, not the line *count*: a
+/// minified bundle, a one-line JSON dump or a base64 blob is a single line
+/// megabytes long, and a 250-line ceiling lets all of it through untouched. One
+/// read of a `.min.js` could take out the whole window.
+pub const MAX_LINE_LENGTH: usize = 2000;
+
+/// One line, cut to something a reader can hold, saying what was cut.
+///
+/// Silently truncating would be worse than not truncating: an agent that cannot
+/// tell a shortened line from a complete one will edit against the half it saw.
+fn clip_line(line: &str) -> String {
+    if line.len() <= MAX_LINE_LENGTH {
+        return line.to_string();
+    }
+    let mut cut = MAX_LINE_LENGTH;
+    while cut > 0 && !line.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!(
+        "{}… [line truncated, {} more characters]",
+        &line[..cut],
+        line.chars().count().saturating_sub(line[..cut].chars().count())
+    )
 }
 
 /// If the caller did not ask for a window and the file is huge, keep a head
 /// and tell them to grep / page. 250 lines is ~enough for a unit and cheap.
 pub const DEFAULT_READ_CAP: u32 = 250;
 
-pub fn format_read(src: &str, offset: Option<u32>, limit: Option<u32>) -> String {
+pub fn format_read(src: &str, offset: Option<i64>, limit: Option<u32>) -> String {
     let explicit = offset.is_some() || limit.is_some();
     let limit = if explicit {
         limit
@@ -433,5 +470,72 @@ mod edit_tests {
         let src = "x\nx\n";
         let err = apply_edits(src, &[e("x", "y")]).unwrap_err();
         assert!(err.contains("matched 2 times"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod read_window_tests {
+    use super::*;
+
+    fn doc(n: u32) -> String {
+        (1..=n).map(|i| format!("line {i}\n")).collect()
+    }
+
+    #[test]
+    fn a_negative_offset_reads_the_tail_of_a_log() {
+        // Tailing is most of what reading a file on a server is for. Without this
+        // the only way was `run_command tail`, which leaves the file tooling — and
+        // with it the freshness stamp that stops the next write clobbering someone.
+        let (body, start, shown, total) = slice_lines(&doc(500), Some(-3), None);
+        assert_eq!((start, shown, total), (498, 3, 500));
+        assert!(body.contains("line 500"), "{body}");
+        assert!(!body.contains("line 497"), "{body}");
+    }
+
+    #[test]
+    fn asking_for_more_tail_than_the_file_has_gives_the_whole_file() {
+        let (body, start, shown, _) = slice_lines(&doc(4), Some(-99), None);
+        assert_eq!((start, shown), (1, 4));
+        assert!(body.contains("line 1") && body.contains("line 4"));
+    }
+
+    #[test]
+    fn a_positive_offset_still_counts_from_the_top() {
+        let (_, start, shown, _) = slice_lines(&doc(100), Some(10), Some(5));
+        assert_eq!((start, shown), (10, 5));
+        // 0 is not a line number; it must not wrap round to the end.
+        let (_, start, _, _) = slice_lines(&doc(100), Some(0), Some(1));
+        assert_eq!(start, 1);
+    }
+
+    #[test]
+    fn one_enormous_line_cannot_take_out_the_context() {
+        // The line *count* cap is no protection here: a minified bundle, a one-line
+        // JSON dump or a base64 blob is a single line megabytes long, and 250 lines
+        // lets all of it through.
+        let bundle = format!("var x={};\n", "a".repeat(500_000));
+        let out = format_read(&bundle, None, None);
+        assert!(out.len() < MAX_LINE_LENGTH * 2, "the whole bundle came through: {} bytes", out.len());
+        assert!(
+            out.contains("line truncated"),
+            "the line was cut without saying so, so the agent cannot tell it is \
+             looking at half a line: {}",
+            &out[..out.len().min(200)]
+        );
+    }
+
+    #[test]
+    fn an_ordinary_line_is_left_exactly_as_it_is() {
+        let out = format_read("fn main() {}\n", None, None);
+        assert!(out.contains("fn main() {}"));
+        assert!(!out.contains("truncated"));
+    }
+
+    #[test]
+    fn clipping_never_splits_a_character() {
+        // A cut in the middle of a multi-byte character panics on slicing.
+        let wide = format!("{}\n", "é".repeat(MAX_LINE_LENGTH));
+        let out = format_read(&wide, None, None);
+        assert!(out.contains("line truncated"), "{out:.120}");
     }
 }
