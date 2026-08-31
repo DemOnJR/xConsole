@@ -209,9 +209,10 @@ call per edit reads and rewrites the whole file each time.".into(),
         },
         ToolDef {
             name: "grep_search".into(),
-            description: "Search file *contents* on a server with a regex. Returns path:line:text. \
-Use this FIRST on large trees instead of reading whole files; then read_file with offset/limit \
-around the matching line. To find files by *name* instead, use find_files.".into(),
+            description: "Search file *contents* on a server with a regex. Use this FIRST on large \
+trees instead of reading whole files. Pass context_lines to see what a match is doing without a \
+second read_file call, and output_mode=files when the question is only where something lives. To \
+find files by *name* instead, use find_files.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -219,7 +220,13 @@ around the matching line. To find files by *name* instead, use find_files.".into
                     "path": {"type": "string", "description": "File or directory to search (default /)."},
                     "glob": {"type": "string", "description": "Optional filename glob, e.g. *.conf"},
                     "case_insensitive": {"type": "boolean"},
-                    "head_limit": {"type": "integer", "description": "Max matches (default 40)."},
+                    "context_lines": {"type": "integer", "description": "Lines of context around each match (like grep -C). Use 2-5 to read what a match is doing without a second call to read_file — usually that is the whole reason for the follow-up read."},
+                    "output_mode": {
+                        "type": "string",
+                        "enum": ["content", "files", "count"],
+                        "description": "content = matching lines (default); files = just which files contain it, for 'where does this live'; count = how many per file, for 'how widespread is this'."
+                    },
+                    "head_limit": {"type": "integer", "description": "Max output lines (default 40)."},
                     "vps_id": {"type": "string"}
                 },
                 "required": ["pattern"]
@@ -2550,6 +2557,75 @@ async fn find_files(ctx: &ToolContext, args: &Value, sink: &EventSink) -> String
     }
 }
 
+/// What a search should return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrepOutput {
+    /// Matching lines, optionally with surrounding context.
+    Content,
+    /// Just the file names, for "where does this live" questions.
+    Files,
+    /// One count per file, for "how widespread is this".
+    Count,
+}
+
+impl GrepOutput {
+    fn parse(s: Option<&str>) -> Self {
+        match s.unwrap_or("content") {
+            "files" | "files_with_matches" => GrepOutput::Files,
+            "count" => GrepOutput::Count,
+            _ => GrepOutput::Content,
+        }
+    }
+}
+
+/// Build the search command, preferring ripgrep and falling back to grep.
+///
+/// Pure, because the bug it was written to fix was invisible from reading it: ripgrep's
+/// `-m` caps matches *per file*, not overall, so a pattern common across five hundred
+/// files returned thousands of lines. The tool-result cap then truncated that to an
+/// arbitrary slice — the agent saw a fraction of the answer and no sign that it had.
+/// Both branches are now capped overall by `head`.
+pub fn grep_command(
+    pattern: &str,
+    path: &str,
+    glob: Option<&str>,
+    case_insensitive: bool,
+    head: u64,
+    context: u64,
+    mode: GrepOutput,
+) -> String {
+    let pat = shell_quote(pattern);
+    let dir = shell_quote(path);
+    let i = if case_insensitive { " -i" } else { "" };
+    let rg_glob = glob.map(|g| format!(" -g {}", shell_quote(g))).unwrap_or_default();
+    // `find -name` for the fallback: plain grep has no glob filter of its own.
+    let grep_glob = glob
+        .map(|g| format!(" --include={}", shell_quote(g)))
+        .unwrap_or_default();
+
+    let (rg_mode, grep_mode) = match mode {
+        // Context only makes sense around content.
+        GrepOutput::Content if context > 0 => (format!(" -n -C {context}"), format!(" -n -C {context}")),
+        GrepOutput::Content => (" -n".to_string(), " -n".to_string()),
+        GrepOutput::Files => (" -l".to_string(), " -l".to_string()),
+        GrepOutput::Count => (" -c".to_string(), " -c".to_string()),
+    };
+    // Per-file cap as well, so one enormous file cannot fill the whole budget on its own
+    // and hide every other file's matches.
+    let per_file = match mode {
+        GrepOutput::Content => format!(" -m {}", head.max(1)),
+        _ => String::new(),
+    };
+
+    format!(
+        "if command -v rg >/dev/null 2>&1; then \
+           rg --no-heading --color never{rg_mode}{i}{per_file}{rg_glob} -e {pat} -- {dir} 2>/dev/null | head -n {head}; \
+         else \
+           grep -R -E{grep_mode}{i}{grep_glob} -- {pat} {dir} 2>/dev/null | head -n {head}; \
+         fi"
+    )
+}
+
 async fn grep_search(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str) -> String {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p,
@@ -2567,26 +2643,33 @@ async fn grep_search(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &st
         Ok(id) => id,
         Err(e) => return format!("error: {e}"),
     };
-    let i = if ci { " -i" } else { "" };
-    let g = glob
-        .map(|g| format!(" -g {}", shell_quote(g)))
-        .unwrap_or_default();
-    let cmd = format!(
-        "if command -v rg >/dev/null 2>&1; then \
-           rg -n --no-heading -m {head}{i}{g} -e {pat} -- {path}; \
-         else \
-           grep -n -R -E{i} -m {head} {pat} {path} 2>/dev/null | head -n {head}; \
-         fi",
-        pat = shell_quote(pattern),
-        path = shell_quote(path),
-    );
+    let context = args.get("context_lines").and_then(|v| v.as_u64()).unwrap_or(0).min(20);
+    let mode = GrepOutput::parse(args.get("output_mode").and_then(|v| v.as_str()));
+    let cmd = grep_command(pattern, path, glob, ci, head, context, mode);
     let raw = exec(ctx, &vps_id, &cmd, Some(sink), true).await;
     let body = stdout_body(&raw);
     if body.trim().is_empty() {
-        format!("no matches for {pattern:?} under {path}")
-    } else {
-        format!("matches (path:line:text):\n{}", body.trim_end())
+        return format!("no matches for {pattern:?} under {path}");
     }
+    let header = match mode {
+        GrepOutput::Files => "files containing it".to_string(),
+        GrepOutput::Count => "matches per file".to_string(),
+        GrepOutput::Content if context > 0 => {
+            format!("matches with {context} line(s) of context")
+        }
+        GrepOutput::Content => "matches (path:line:text)".to_string(),
+    };
+    // Said when it is true, because a silently capped list reads as the whole answer.
+    let capped = body.lines().count() as u64 >= head;
+    format!(
+        "{header}:\n{}{}",
+        body.trim_end(),
+        if capped {
+            format!("\n\n(stopped at {head} lines — narrow the path or raise head_limit)")
+        } else {
+            String::new()
+        }
+    )
 }
 
 fn todo_write(ctx: &ToolContext, args: &Value) -> String {
@@ -4256,5 +4339,130 @@ mod edit_request_tests {
         .unwrap();
         assert_eq!(out, "1\nbeta\n3\n");
         assert_eq!((replacements, edits), (2, 2));
+    }
+}
+
+#[cfg(test)]
+mod grep_command_tests {
+    use super::*;
+
+    fn run(cmd: &str, dir: &std::path::Path) -> String {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(dir)
+            .output()
+            .expect("shell runs");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    /// A tree of its own per test.
+    ///
+    /// Keyed by the caller's name, not the process id: every test in a binary shares
+    /// one pid, so they were all creating and deleting the *same* directory while
+    /// running in parallel, and failing on each other's cleanup.
+    fn fixture(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("xc-grep-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // One file with many hits, one with a few: the shape that exposed the bug.
+        std::fs::write(dir.join("big.txt"), "needle\n".repeat(200)).unwrap();
+        std::fs::write(dir.join("small.txt"), "one\nneedle\nthree\n").unwrap();
+        std::fs::write(dir.join("other.log"), "needle in a log\n").unwrap();
+        dir
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn one_huge_file_cannot_crowd_out_every_other_result() {
+        const FIXTURE: &str = "one_huge_file_cannot_crowd_out_every_other_result";
+        // ripgrep's `-m` caps matches per *file*, not overall. With that as the only
+        // limit, a pattern common across many files returned thousands of lines, the
+        // result cap then truncated it to an arbitrary slice, and the agent saw a
+        // fraction of the answer with no sign that it had.
+        let dir = fixture(FIXTURE);
+        let cmd = grep_command("needle", dir.to_str().unwrap(), None, false, 10, 0, GrepOutput::Content);
+        let out = run(&cmd, &dir);
+        assert!(out.lines().count() <= 10, "returned {} lines", out.lines().count());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn context_lines_show_what_the_match_is_doing() {
+        const FIXTURE: &str = "context_lines_show_what_the_match_is_doing";
+        // The whole point: seeing the surrounding lines is usually why a read_file call
+        // followed a search at all.
+        let dir = fixture(FIXTURE);
+        let cmd = grep_command("needle", dir.join("small.txt").to_str().unwrap(), None, false, 40, 1, GrepOutput::Content);
+        let out = run(&cmd, &dir);
+        assert!(out.contains("one"), "missing the line before: {out}");
+        assert!(out.contains("three"), "missing the line after: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn files_mode_answers_where_without_the_contents() {
+        const FIXTURE: &str = "files_mode_answers_where_without_the_contents";
+        let dir = fixture(FIXTURE);
+        let cmd = grep_command("needle", dir.to_str().unwrap(), None, false, 40, 0, GrepOutput::Files);
+        let out = run(&cmd, &dir);
+        assert!(out.contains("small.txt") && out.contains("big.txt"), "{out}");
+        // Names, not 200 copies of the line.
+        assert!(out.lines().count() <= 5, "should be file names only: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_glob_narrows_to_the_files_asked_for() {
+        const FIXTURE: &str = "a_glob_narrows_to_the_files_asked_for";
+        let dir = fixture(FIXTURE);
+        let cmd = grep_command("needle", dir.to_str().unwrap(), Some("*.log"), false, 40, 0, GrepOutput::Files);
+        let out = run(&cmd, &dir);
+        assert!(out.contains("other.log"), "{out}");
+        assert!(!out.contains("big.txt"), "glob was ignored: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Force the `grep` branch by making `command -v rg` fail.
+    ///
+    /// Both branches have to behave the same, and most servers have no ripgrep — so
+    /// testing only the branch that happens to run on this machine tests the half that
+    /// matters least.
+    fn without_ripgrep(cmd: &str) -> String {
+        format!("PATH=/nonexistent-for-test:$PATH; command() {{ return 1; }}; {cmd}")
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_plain_grep_fallback_behaves_the_same() {
+        const FIXTURE: &str = "the_plain_grep_fallback_behaves_the_same";
+        let dir = fixture(FIXTURE);
+        let base = grep_command("needle", dir.to_str().unwrap(), None, false, 10, 0, GrepOutput::Content);
+        let out = run(&without_ripgrep(&base), &dir);
+        assert!(out.contains("needle"), "fallback found nothing: {out}");
+        assert!(out.lines().count() <= 10, "fallback ignored the cap: {}", out.lines().count());
+
+        // And its glob filter, which is a different flag from ripgrep's.
+        let globbed = grep_command("needle", dir.to_str().unwrap(), Some("*.log"), false, 40, 0, GrepOutput::Files);
+        let out = run(&without_ripgrep(&globbed), &dir);
+        assert!(out.contains("other.log"), "{out}");
+        assert!(!out.contains("big.txt"), "fallback ignored the glob: {out}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_pattern_with_shell_characters_is_searched_not_executed() {
+        const FIXTURE: &str = "a_pattern_with_shell_characters_is_searched_not_executed";
+        // The pattern comes from the model and reaches a shell.
+        let dir = fixture(FIXTURE);
+        let cmd = grep_command("x'; touch /tmp/xc-pwned; '", dir.to_str().unwrap(), None, false, 5, 0, GrepOutput::Content);
+        let _ = run(&cmd, &dir);
+        assert!(!std::path::Path::new("/tmp/xc-pwned").exists(), "command injection");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

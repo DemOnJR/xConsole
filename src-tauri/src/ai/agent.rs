@@ -66,13 +66,24 @@ pub async fn run_turn(
 
     // Tool-result budget: cap what rides back into context so long command outputs
     // don't blow up every subsequent request. 0 = unlimited (opt out).
+    //
+    // 1800 characters was too tight to do the job it was meant for. A failing test
+    // suite, a stack trace, the tail of a log — the things an agent reads a command's
+    // output *for* — are routinely longer, and what arrived was the first fifth of the
+    // answer with no indication that the rest existed. The agent then re-ran the command
+    // with `| tail`, which costs a whole round trip to learn something it was already
+    // told and had thrown away.
+    //
+    // `compress_and_cap` runs first and is where the real saving is: it drops build
+    // progress, deduplicates repeated log lines and keeps failures over noise. The cap
+    // behind it only has to stop a genuinely enormous output, not ration ordinary ones.
     let tool_result_max_chars: usize = tc
         .db
         .get_setting("agent.tool_result_max_chars")
         .ok()
         .flatten()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1800);
+        .unwrap_or(8000);
     // Compress by command type first (failures, not cargo progress;
     // git hints dropped; logs deduped), then apply the hard char cap.
     let cap_tool_result = |call: &crate::ai::provider::ToolCall, output: &str| -> String {
