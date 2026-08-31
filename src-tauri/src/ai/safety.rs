@@ -452,8 +452,14 @@ pub async fn authorize(
     // being watched from a phone, and a modal on the desktop is then not a question at
     // all: it blocks the turn until it times out, and the only way to clear it is to
     // walk to the PC. That turn asks in the chat instead and stops.
-    if let Some(decided) =
-        crate::ai::remote::intercept_approval(session_id, command, &shown).await
+    if let Some(decided) = crate::ai::remote::intercept_approval(
+        db,
+        session_id,
+        command,
+        &shown,
+        destroys.is_some(),
+    )
+    .await
     {
         return decided;
     }

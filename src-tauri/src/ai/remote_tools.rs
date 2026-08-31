@@ -68,7 +68,7 @@ pairs by QR code, so call remote_link_whatsapp for that instead."
                     "safety_mode": {
                         "type": "string",
                         "enum": ["approve", "allowlist", "full"],
-                        "description": "How much a remote command may do without approval. Nobody can answer a prompt from a phone, so 'approve' means nothing runs remotely."
+                        "description": "How much a remote command may do without approval. What needs approval is asked in the chat and answered there with yes or no, so 'approve' means every command waits for the user."
                     },
                     "vps_ids": {
                         "type": "array",
@@ -78,6 +78,10 @@ pairs by QR code, so call remote_link_whatsapp for that instead."
                     "answer_as": {
                         "type": "string",
                         "description": "Name of the agent that should answer chat messages itself, e.g. \"Atlas\". Without it the unnamed main agent answers and relays to whoever the work belongs to, so the user ends up talking to a middleman. Pass an empty string to go back to the main agent."
+                    },
+                    "reviewed_by": {
+                        "type": "string",
+                        "description": "Name of the agent that reviews anything irreversible before the user is asked about it, e.g. \"Adrian\". Without it the agent at the top of the answering agent's chain of command reviews. Pass an empty string to go back to that."
                     }
                 },
                 "required": ["platform"]
@@ -247,6 +251,17 @@ fn status(ctx: &ToolContext) -> String {
             // user talking to their lead agent and talking to a relay.
             .unwrap_or_else(|| "the main agent (no named agent set)".into()),
     ));
+    out.push_str(&format!(
+        "Destructive work reviewed by: {}\n",
+        ctx.db
+            .get_setting(crate::ai::escalation::SETTING_REVIEWER)
+            .ok()
+            .flatten()
+            .filter(|id| !id.trim().is_empty())
+            .and_then(|id| ctx.db.get_persona(&id).ok().flatten())
+            .map(|p| p.name)
+            .unwrap_or_else(|| "whoever is at the top of the chain of command".into()),
+    ));
     out
 }
 
@@ -292,6 +307,29 @@ async fn configure(ctx: &ToolContext, args: &Value) -> String {
         },
     };
 
+    // Absent means unchanged; an explicit empty string means "back to the chain of
+    // command". A name that is not an agent is refused rather than stored, or the review
+    // would silently never happen.
+    let reviewer_id = match str_arg("reviewed_by") {
+        None => ctx
+            .db
+            .get_setting(crate::ai::escalation::SETTING_REVIEWER)
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        Some("") => String::new(),
+        Some(name) => match crate::ai::persona::resolve(&ctx.db, name) {
+            Some(p) => p.id,
+            None => {
+                let known = ctx.db.list_personas().unwrap_or_default();
+                return format!(
+                    "error: no agent named {name:?} to review destructive work.\n{}",
+                    crate::ai::persona::format_catalog(&known)
+                );
+            }
+        },
+    };
+
     let master_enabled = args
         .get("master_enabled")
         .and_then(|v| v.as_bool())
@@ -314,6 +352,7 @@ async fn configure(ctx: &ToolContext, args: &Value) -> String {
          Allowed to command the agent: {}\n\
          Chat: {}\n\
          Answered by: {}\n\
+         Destructive work reviewed by: {}\n\
          Trust: {}   Prefix: {:?}   Servers: [{}]{}",
         if enabled && master_enabled { "ARM" } else { "configure" },
         kind.as_str(),
@@ -325,6 +364,12 @@ async fn configure(ctx: &ToolContext, args: &Value) -> String {
             .and_then(|id| ctx.db.get_persona(id).ok().flatten())
             .map(|p| p.name)
             .unwrap_or_else(|| "the main agent".into()),
+        ctx.db
+            .get_persona(&reviewer_id)
+            .ok()
+            .flatten()
+            .map(|p| p.name)
+            .unwrap_or_else(|| "whoever is at the top of the chain".into()),
         safety_mode,
         prefix,
         targets.join(", "),
@@ -345,6 +390,12 @@ async fn configure(ctx: &ToolContext, args: &Value) -> String {
         token,
     };
     if let Err(e) = crate::commands::remote::apply_transport(&ctx.db, &input) {
+        return format!("error: {e}");
+    }
+    if let Err(e) = ctx
+        .db
+        .set_setting(crate::ai::escalation::SETTING_REVIEWER, &reviewer_id)
+    {
         return format!("error: {e}");
     }
     if let Err(e) = crate::commands::remote::apply_shared(
@@ -496,6 +547,7 @@ mod tests {
             .expect("remote_configure is declared");
         let props = configure.parameters.get("properties").expect("has properties");
         assert!(props.get("answer_as").is_some(), "no way to say who answers");
+        assert!(props.get("reviewed_by").is_some(), "no way to say who reviews a delete");
     }
 
     #[test]
