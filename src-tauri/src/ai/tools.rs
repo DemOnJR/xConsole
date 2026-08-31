@@ -140,11 +140,14 @@ Signals the whole process group, so work the job spawned stops too.".into(),
         ToolDef {
             name: "run_command_all".into(),
             description: "Run the same shell command on every selected VPS target and return \
-combined output. Prefer this when the user asks about both/all/each server.".into(),
+combined output. Prefer this when the user asks about both/all/each server. Targets run one \
+after another, so the time is the sum: for anything slow, start it per server with \
+run_command(background:true) instead and collect the job_ids.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "The shell command to run on each target."}
+                    "command": {"type": "string", "description": "The shell command to run on each target."},
+                    "timeout_secs": {"type": "integer", "description": "How long to wait per target, in seconds (default 120, max 3600)."}
                 },
                 "required": ["command"]
             }),
@@ -647,7 +650,9 @@ something lives.".into(),
         ToolDef {
             name: "local_write_file".into(),
             description: "Write (overwrite) a text file on the user's local machine (this PC). \
-Parent directories are created automatically. Subject to the safety mode.".into(),
+Parent directories are created automatically. Subject to the safety mode. For a file that \
+already exists prefer local_edit_file (replace a unique snippet) — cheaper, and it cannot lose \
+the parts of the file you did not mean to touch.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -845,10 +850,16 @@ private one-off command prefer run_command. Requires an open terminal for that s
         ToolDef {
             name: "terminal_capture".into(),
             description: "Read the recent on-screen text (scrollback) of the user's live terminal for a \
-server, to see the result of what you typed.".into(),
+server, to see the result of what you typed. Returns the tail of the screen; if the answer scrolled \
+past, ask for more with max_chars rather than re-running the command. When several terminals are \
+open on one server the reply names them — pass terminal_id to read a specific one.".into(),
             parameters: json!({
                 "type": "object",
-                "properties": {"vps_id": {"type": "string"}},
+                "properties": {
+                    "vps_id": {"type": "string"},
+                    "terminal_id": {"type": "string", "description": "Which terminal to read, when more than one is open for the server."},
+                    "max_chars": {"type": "integer", "description": "How much scrollback to return (default 1800, max 40000)."}
+                },
                 "required": []
             }),
         },
@@ -2312,7 +2323,7 @@ async fn run_command_all(ctx: &ToolContext, args: &Value, sink: &EventSink, id: 
         Some(c) if !c.is_empty() => c,
         _ => return "error: missing 'command'".into(),
     };
-    run_command_all_targets_impl(ctx, command, sink, id).await
+    run_command_all_targets_impl(ctx, command, sink, id, command_timeout(args)).await
 }
 
 /// Run one command on every selected target (shared by tools and Ollama auto-collect).
@@ -2321,7 +2332,8 @@ pub async fn run_command_all_targets(
     command: &str,
     sink: &EventSink,
 ) -> String {
-    run_command_all_targets_impl(ctx, command, sink, "auto").await
+    run_command_all_targets_impl(ctx, command, sink, "auto", crate::ssh::command::COMMAND_TIMEOUT)
+        .await
 }
 
 async fn run_command_all_targets_impl(
@@ -2329,6 +2341,7 @@ async fn run_command_all_targets_impl(
     command: &str,
     sink: &EventSink,
     activity_prefix: &str,
+    timeout: std::time::Duration,
 ) -> String {
     if ctx.targets.is_empty() {
         return "error: no VPS targets selected".into();
@@ -2345,7 +2358,7 @@ async fn run_command_all_targets_impl(
             ),
             _ => format!("=== `{vps_id}` ==="),
         };
-        let mut out = exec_inner(ctx, vps_id, command).await;
+        let mut out = exec_inner_for(ctx, vps_id, command, timeout).await;
         out = crate::ai::vps_snapshot::annotate_command_output(command, &out);
         emit_command_result(sink, &activity_id, &out);
         parts.push(format!("{header}\n{out}"));
@@ -2375,11 +2388,17 @@ fn list_vps_targets(ctx: &ToolContext) -> String {
 /// turn a hung one into a long silence. What changed is that it is no longer the
 /// ceiling: a build or a migration that needs five is not a failure, and reporting it as
 /// one taught the agent to split work that has to run in one go.
+/// The wait for one command, from the model's `timeout_secs`.
+///
+/// Clamped to the hour the tool descriptions advertise. Uncapped, a fat-fingered
+/// 360000 is not a long timeout, it is a hung session: the turn would sit on a
+/// dead SSH read for days with no way for the agent to notice or recover.
 fn command_timeout(args: &Value) -> std::time::Duration {
+    const MAX_SECS: u64 = 3600;
     args.get("timeout_secs")
         .and_then(|v| v.as_u64())
         .filter(|n| *n > 0)
-        .map(std::time::Duration::from_secs)
+        .map(|n| std::time::Duration::from_secs(n.min(MAX_SECS)))
         .unwrap_or(crate::ssh::command::COMMAND_TIMEOUT)
 }
 
@@ -2628,21 +2647,9 @@ async fn write_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str
         Ok(id) => id,
         Err(e) => return format!("error: {e}"),
     };
-    if let Ok(st) = ctx
-        .sessions
-        .run_command(&vps_id, &format!("stat -c %Y -- {} 2>/dev/null", shell_quote(&path)))
-        .await
-    {
-        let current = st.stdout.lines().find(|l| l.chars().all(|c| c.is_ascii_digit())).unwrap_or("");
-        if let Err(e) = crate::ai::file_state::check_write(&ctx.session_id, &vps_id, &path, current) {
-            return e;
-        }
+    if let Some(e) = check_remote_write(ctx, &vps_id, &path).await {
+        return e;
     }
-    let parent = std::path::Path::new(&path)
-        .parent()
-        .and_then(|p| p.to_str())
-        .filter(|p| !p.is_empty())
-        .unwrap_or("/tmp");
     // Capture the file's current content first so the changes panel can diff it.
     let before = ctx
         .sessions
@@ -2650,39 +2657,10 @@ async fn write_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str
         .await
         .map(|o| o.stdout)
         .unwrap_or_default();
-    let target_encoding = crate::ai::file_state::get_encoding(&ctx.session_id, &vps_id, &path)
-        .unwrap_or_else(|| "utf-8".to_string());
-    let encoded_bytes = crate::ai::file_ops::encode_text_with_charset(content, &target_encoding);
-    // Transfer via base64 to avoid any quoting/encoding issues.
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&encoded_bytes);
-    let command = format!(
-        "mkdir -p {} && printf %s {} | base64 -d > {}",
-        shell_quote(parent),
-        shell_quote(&b64),
-        shell_quote(&path)
-    );
-    let result = exec(ctx, &vps_id, &command, Some(sink), true).await;
-    if result.starts_with("exit_code: 0") {
-        let label = ctx
-            .db
-            .get_vps(&vps_id)
-            .ok()
-            .flatten()
-            .map(|v| format!("{} ({})", v.name, v.host))
-            .unwrap_or_else(|| vps_id.clone());
-        ctx.edits.record(
-            &ctx.app,
-            &ctx.session_id,
-            ctx.workspace_id.clone(),
-            "vps",
-            Some(vps_id.clone()),
-            &label,
-            &path,
-            &before,
-            content,
-        );
-    }
-    result
+    // The bytes go out through the same function edit_file uses. They used to be
+    // two copies of the same base64 pipeline, which is how the two of them can
+    // drift on encoding, on the diff record, or on re-stamping the mtime.
+    write_remote_contents(ctx, &vps_id, &path, content, sink, &before).await
 }
 
 /// Fix common bad paths from local models (e.g. /home/root/ → /root/).
@@ -2694,6 +2672,24 @@ fn normalize_vps_write_path(path: &str) -> String {
         p = "/root".into();
     }
     p
+}
+
+/// Refuse a write whose file has moved on disk since this session read it.
+///
+/// One copy, called by both `write_file` and `edit_file`. They had a block each,
+/// which is how one of them ends up with the check and the other without it.
+async fn check_remote_write(ctx: &ToolContext, vps_id: &str, path: &str) -> Option<String> {
+    let st = ctx
+        .sessions
+        .run_command(vps_id, &format!("stat -c %Y -- {} 2>/dev/null", shell_quote(path)))
+        .await
+        .ok()?;
+    let current = st
+        .stdout
+        .lines()
+        .find(|l| l.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or("");
+    crate::ai::file_state::check_write(&ctx.session_id, vps_id, path, current).err()
 }
 
 async fn write_remote_contents(
@@ -2713,34 +2709,78 @@ async fn write_remote_contents(
         .unwrap_or_else(|| "utf-8".to_string());
     let encoded_bytes = crate::ai::file_ops::encode_text_with_charset(content, &target_encoding);
     let b64 = base64::engine::general_purpose::STANDARD.encode(&encoded_bytes);
+    // The stat is part of the write, not a second round trip: it both confirms the
+    // bytes actually landed — an exit code alone does not tell you the file has the
+    // size you meant — and hands back the new mtime for the re-stamp below.
+    //
+    // It cannot be allowed to fail the command, though. BusyBox and the BSDs have no
+    // `stat -c`, and chaining it with a bare `&&` there would turn a write that
+    // worked into a reported failure on exactly the small boxes people run.
     let command = format!(
-        "mkdir -p {} && printf %s {} | base64 -d > {}",
+        "mkdir -p {} && printf %s {} | base64 -d > {} && \
+         {{ stat -c 'xc-wrote %Y %s' -- {} 2>/dev/null || true ; }}",
         shell_quote(parent),
         shell_quote(&b64),
+        shell_quote(path),
         shell_quote(path)
     );
     let result = exec(ctx, vps_id, &command, Some(sink), true).await;
-    if result.starts_with("exit_code: 0") {
-        let label = ctx
-            .db
-            .get_vps(vps_id)
-            .ok()
-            .flatten()
-            .map(|v| format!("{} ({})", v.name, v.host))
-            .unwrap_or_else(|| vps_id.to_string());
-        ctx.edits.record(
-            &ctx.app,
-            &ctx.session_id,
-            ctx.workspace_id.clone(),
-            "vps",
-            Some(vps_id.to_string()),
-            &label,
-            path,
-            before,
-            content,
-        );
+    if !result.starts_with("exit_code: 0") {
+        return result;
     }
-    result
+    let (mtime, size) = parse_stat_line(&result);
+    // Re-stamp, or the agent's own write looks like somebody else's the next time
+    // it touches this file.
+    crate::ai::file_state::note_write(&ctx.session_id, vps_id, path, &mtime);
+    let label = ctx
+        .db
+        .get_vps(vps_id)
+        .ok()
+        .flatten()
+        .map(|v| format!("{} ({})", v.name, v.host))
+        .unwrap_or_else(|| vps_id.to_string());
+    ctx.edits.record(
+        &ctx.app,
+        &ctx.session_id,
+        ctx.workspace_id.clone(),
+        "vps",
+        Some(vps_id.to_string()),
+        &label,
+        path,
+        before,
+        content,
+    );
+    let expected = encoded_bytes.len();
+    match size {
+        Some(n) if n == expected as u64 => format!("wrote {n} bytes to {path} (size verified)"),
+        Some(n) => format!(
+            "warning: wrote {path} but it is {n} bytes on disk, not the {expected} sent. \
+             Read it back before you rely on it."
+        ),
+        None => format!("wrote {path} ({expected} bytes sent; size could not be read back)"),
+    }
+}
+
+/// Pull `mtime` and `size` out of the trailing `stat -c '%Y %s'` line of a write.
+///
+/// Kept separate from the SSH call so the parsing is testable: the line arrives at
+/// the end of whatever else the command printed, and a server whose `stat` is
+/// missing or differently spelled must degrade to "unknown", never to a wrong
+/// number that would be reported to the user as a verified write.
+fn parse_stat_line(output: &str) -> (String, Option<u64>) {
+    for line in output.lines().rev() {
+        let Some(rest) = line.trim().strip_prefix("xc-wrote ") else {
+            continue;
+        };
+        let mut parts = rest.split_whitespace();
+        let (Some(a), Some(b), None) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        if let (Ok(_), Ok(size)) = (a.parse::<u64>(), b.parse::<u64>()) {
+            return (a.to_string(), Some(size));
+        }
+    }
+    (String::new(), None)
 }
 
 /// The edits an edit tool was asked for: the `edits` array, or the single-edit form.
@@ -2816,28 +2856,17 @@ async fn edit_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str)
             before_out.exit_code
         );
     }
-    if let Ok(st) = ctx
-        .sessions
-        .run_command(&vps_id, &format!("stat -c %Y -- {} 2>/dev/null", shell_quote(&path)))
-        .await
-    {
-        let current = st
-            .stdout
-            .lines()
-            .find(|l| l.chars().all(|c| c.is_ascii_digit()))
-            .unwrap_or("");
-        if let Err(e) = crate::ai::file_state::check_write(&ctx.session_id, &vps_id, &path, current) {
-            return e;
-        }
+    if let Some(e) = check_remote_write(ctx, &vps_id, &path).await {
+        return e;
     }
     let (next, n, count) = match edit_contents(&before_out.stdout, args) {
         Ok(v) => v,
         Err(e) => return e,
     };
     let result = write_remote_contents(ctx, &vps_id, &path, &next, sink, &before_out.stdout).await;
-    if result.starts_with("exit_code: 0") {
+    if result.starts_with("wrote ") {
         format!(
-            "updated {path} ({n} replacement{} from {count} edit{}).\n{result}",
+            "updated {path} ({n} replacement{} from {count} edit{}). {result}",
             if n == 1 { "" } else { "s" },
             if count == 1 { "" } else { "s" }
         )
@@ -3386,8 +3415,33 @@ fn terminal_capture(ctx: &ToolContext, args: &Value) -> String {
         Err(e) => return format!("error: {e}"),
     };
     let sessions = ctx.sessions.live_sessions_for_vps(&vps_id);
-    let Some(sid) = sessions.first() else {
+    let Some(first) = sessions.first() else {
         return "error: no terminal is open on the canvas for that server.".into();
+    };
+    // With several terminals open on one server, reading whichever came back first
+    // and saying nothing is how you report the output of the wrong session as if it
+    // were the one you typed into. Take the named one when asked, and always say
+    // which was read.
+    let sid = match args.get("terminal_id").and_then(|v| v.as_str()) {
+        Some(want) if !want.is_empty() => match sessions.iter().find(|s| *s == want) {
+            Some(s) => s,
+            None => {
+                return format!(
+                    "error: no terminal {want} is open for that server. Open ones: {}",
+                    sessions.join(", ")
+                )
+            }
+        },
+        _ => first,
+    };
+    let others = if sessions.len() > 1 {
+        format!(
+            "[terminal {sid} — {} others open on this server: {}. Pass terminal_id to read one of them.]\n",
+            sessions.len() - 1,
+            sessions.iter().filter(|s| *s != sid).cloned().collect::<Vec<_>>().join(", ")
+        )
+    } else {
+        String::new()
     };
     let text = ctx.sessions.capture_text(sid).unwrap_or_default();
     let trimmed = text.trim_end();
@@ -3413,9 +3467,16 @@ fn terminal_capture(ctx: &ToolContext, args: &Value) -> String {
             )
         })
         .unwrap_or_default();
-    // Return the tail (recent screen) to keep it compact.
-    let body = if trimmed.len() > 1800 {
-        let start = trimmed.len() - 1800;
+    // Return the tail (recent screen) to keep it compact. A build that failed 300
+    // lines up is invisible in 1800 characters, so the cap is liftable — the agent
+    // asks for more only when the tail did not contain the answer.
+    let cap = args
+        .get("max_chars")
+        .and_then(|v| v.as_u64())
+        .map(|n| n.clamp(200, 40_000) as usize)
+        .unwrap_or(1800);
+    let body = if trimmed.len() > cap {
+        let start = trimmed.len() - cap;
         let cut = (start..trimmed.len())
             .find(|&i| trimmed.is_char_boundary(i))
             .unwrap_or(start);
@@ -3425,11 +3486,7 @@ fn terminal_capture(ctx: &ToolContext, args: &Value) -> String {
     } else {
         trimmed.to_string()
     };
-    if git_note.is_empty() {
-        body
-    } else {
-        format!("{git_note}{body}")
-    }
+    format!("{others}{git_note}{body}")
 }
 
 /// Emit a canvas action to the frontend (open/close a node). Resolves the VPS the
@@ -3714,6 +3771,16 @@ I cannot read passwords or private keys. Use artifact_list for the backup path/h
 The user can open it from Settings → Artifacts or the saved path."
                     .into()
             } else {
+                // Stamp the read, the same way the server twin does. Without this a
+                // later local write has nothing to compare against and clobbers
+                // silently — and this PC is the machine with the git checkouts on it.
+                crate::ai::file_state::note_read_with_encoding(
+                    &ctx.session_id,
+                    crate::ai::file_state::LOCAL,
+                    path,
+                    &crate::ai::file_state::local_mtime(path),
+                    Some(crate::ai::file_ops::detect_encoding(s.as_bytes())),
+                );
                 let offset = args.get("offset").and_then(|v| v.as_u64()).map(|n| n as u32);
                 let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
                 crate::ai::file_ops::format_read(&s, offset, limit)
@@ -3732,6 +3799,14 @@ async fn local_edit_file(ctx: &ToolContext, args: &Value) -> String {
     if let Err(e) = authorize_local(ctx, &format!("edit local file {path}")).await {
         return format!("error: {e}");
     }
+    if let Err(e) = crate::ai::file_state::check_write(
+        &ctx.session_id,
+        crate::ai::file_state::LOCAL,
+        path,
+        &crate::ai::file_state::local_mtime(path),
+    ) {
+        return e;
+    }
     let before = match crate::local::read_local_file(path) {
         Ok(s) => s,
         Err(e) => return format!("error: {e}"),
@@ -3742,6 +3817,12 @@ async fn local_edit_file(ctx: &ToolContext, args: &Value) -> String {
     };
     match crate::artifacts::write_verified(std::path::Path::new(path), next.as_bytes()) {
         Ok(written) => {
+            crate::ai::file_state::note_write(
+                &ctx.session_id,
+                crate::ai::file_state::LOCAL,
+                path,
+                &crate::ai::file_state::local_mtime(path),
+            );
             ctx.edits.record(
                 &ctx.app,
                 &ctx.session_id,
@@ -3816,11 +3897,25 @@ async fn local_write_file(ctx: &ToolContext, args: &Value) -> String {
     if let Err(e) = authorize_local(ctx, &format!("write local file {path}")).await {
         return format!("error: {e}");
     }
+    if let Err(e) = crate::ai::file_state::check_write(
+        &ctx.session_id,
+        crate::ai::file_state::LOCAL,
+        path,
+        &crate::ai::file_state::local_mtime(path),
+    ) {
+        return e;
+    }
     let before = crate::local::read_local_file(path).ok();
     let target_encoding = crate::ai::file_ops::detect_encoding(before.as_deref().unwrap_or("").as_bytes());
     let encoded_bytes = crate::ai::file_ops::encode_text_with_charset(content, target_encoding);
     match crate::artifacts::write_verified(std::path::Path::new(path), &encoded_bytes) {
         Ok(written) => {
+            crate::ai::file_state::note_write(
+                &ctx.session_id,
+                crate::ai::file_state::LOCAL,
+                path,
+                &crate::ai::file_state::local_mtime(path),
+            );
             ctx.edits.record(
                 &ctx.app,
                 &ctx.session_id,
@@ -5179,5 +5274,166 @@ mod grep_command_tests {
         let _ = run(&cmd, &dir);
         assert!(!std::path::Path::new("/tmp/xc-pwned").exists(), "command injection");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod write_verification_tests {
+    use super::*;
+
+    #[test]
+    fn the_size_and_mtime_come_off_the_end_of_the_write() {
+        let (mtime, size) = parse_stat_line("exit_code: 0\nxc-wrote 1735600000 4096\n");
+        assert_eq!(mtime, "1735600000");
+        assert_eq!(size, Some(4096));
+    }
+
+    #[test]
+    fn chatter_before_the_stat_line_is_ignored() {
+        // Profile scripts, sudo banners and motd all print before the command does.
+        // Including a trailing line that is two plain numbers: an unmarked reverse
+        // scan would have taken it and reported a made-up size as verified.
+        let out = "exit_code: 0\nWelcome to Ubuntu 22.04\nxc-wrote 99 7\n1 2\n";
+        assert_eq!(parse_stat_line(out), ("99".into(), Some(7)));
+    }
+
+    #[test]
+    fn a_server_without_stat_reports_unknown_rather_than_a_wrong_size() {
+        // BusyBox and some BSDs do not take `-c`. Reporting "wrote 0 bytes,
+        // verified" there would be a lie told confidently, which is worse than
+        // admitting the size could not be read back.
+        let (mtime, size) = parse_stat_line("exit_code: 0\nstat: invalid option -- 'c'\n");
+        assert!(mtime.is_empty());
+        assert_eq!(size, None);
+    }
+
+    #[test]
+    fn a_timeout_the_model_asks_for_is_capped_at_the_advertised_hour() {
+        // The tool description promises max 3600. Without the clamp a typo'd
+        // 360000 parks the turn on a dead SSH read for four days.
+        assert_eq!(
+            command_timeout(&serde_json::json!({"timeout_secs": 360_000})),
+            std::time::Duration::from_secs(3600)
+        );
+        assert_eq!(
+            command_timeout(&serde_json::json!({"timeout_secs": 600})),
+            std::time::Duration::from_secs(600)
+        );
+        // Nonsense falls back to the default rather than to zero, which would
+        // time out every command instantly.
+        assert_eq!(
+            command_timeout(&serde_json::json!({"timeout_secs": 0})),
+            crate::ssh::command::COMMAND_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn every_target_of_run_command_all_honours_the_timeout() {
+        let defs = definitions(&crate::ai::AgentHome::new(
+            std::env::temp_dir().join("xc-all-defs-test"),
+        ));
+        let def = defs
+            .iter()
+            .find(|d| d.name == "run_command_all")
+            .expect("run_command_all is declared");
+        assert!(
+            def.parameters["properties"].get("timeout_secs").is_some(),
+            "run_command_all could not be given more than the default 120s, so the one \
+             tool meant for every server was the one that could not wait for a build"
+        );
+    }
+
+    #[test]
+    fn reading_a_terminal_can_ask_for_more_than_the_default_screen() {
+        let defs = definitions(&crate::ai::AgentHome::new(
+            std::env::temp_dir().join("xc-term-defs-test"),
+        ));
+        let def = defs
+            .iter()
+            .find(|d| d.name == "terminal_capture")
+            .expect("terminal_capture is declared");
+        let props = &def.parameters["properties"];
+        assert!(props.get("max_chars").is_some(), "the 1800-char tail was not liftable");
+        assert!(
+            props.get("terminal_id").is_some(),
+            "with several terminals on one server there was no way to say which to read"
+        );
+    }
+}
+
+#[cfg(test)]
+mod local_freshness_tests {
+    use crate::ai::file_state::{self, LOCAL};
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("xc-fresh-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_local_file_changed_under_the_agent_is_not_overwritten() {
+        // The machine running xConsole is the one with the git checkouts on it, and
+        // the user has agents pulling in the background. Read, someone else writes,
+        // write back: without the stamp that is a silent loss of their commit.
+        let dir = fixture("clobber");
+        let path = dir.join("app.rs");
+        std::fs::write(&path, "original\n").unwrap();
+        let p = path.to_str().unwrap();
+
+        file_state::note_read("s1", LOCAL, p, &file_state::local_mtime(p));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, "somebody else's work\n").unwrap();
+
+        let err = file_state::check_write("s1", LOCAL, p, &file_state::local_mtime(p))
+            .expect_err("the stale write was allowed through");
+        assert!(err.contains("changed on disk"), "{err}");
+        assert!(
+            err.contains("local_read_file"),
+            "a local path was told to re-read with the server tool: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_writes_in_a_row_to_a_local_file_are_allowed() {
+        let dir = fixture("twice");
+        let path = dir.join("notes.md");
+        std::fs::write(&path, "one\n").unwrap();
+        let p = path.to_str().unwrap();
+
+        file_state::note_read("s2", LOCAL, p, &file_state::local_mtime(p));
+        std::fs::write(&path, "two\n").unwrap();
+        file_state::note_write("s2", LOCAL, p, &file_state::local_mtime(p));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, "three\n").unwrap();
+        file_state::note_write("s2", LOCAL, p, &file_state::local_mtime(p));
+
+        assert!(
+            file_state::check_write("s2", LOCAL, p, &file_state::local_mtime(p)).is_ok(),
+            "the agent's own consecutive writes were reported as another process"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_that_does_not_exist_yet_is_never_a_clobber() {
+        let dir = fixture("fresh");
+        let p = dir.join("new.txt");
+        assert!(file_state::local_mtime(p.to_str().unwrap()).is_empty());
+        assert!(file_state::check_write("s3", LOCAL, p.to_str().unwrap(), "").is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_and_remote_paths_do_not_share_a_stamp() {
+        // /etc/nginx.conf exists on this PC and on every server. One key each, or
+        // reading it here would authorise a write there.
+        file_state::note_read("s4", LOCAL, "/etc/nginx.conf", "100");
+        assert!(
+            file_state::check_write("s4", "vps-uuid", "/etc/nginx.conf", "999").is_ok(),
+            "a read of the local copy was accepted as a read of the server's"
+        );
     }
 }
