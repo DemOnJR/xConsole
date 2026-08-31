@@ -152,18 +152,23 @@ combined output. Prefer this when the user asks about both/all/each server.".int
         },
         ToolDef {
             name: "read_file".into(),
-            description: "Read a text file from a server. Lines are numbered. For large files \
-pass offset (1-based line) and limit instead of reading everything — find the line with \
-grep_search first.".into(),
+            description: "Read text files from a server. Lines are numbered. Pass `paths` to open \
+several at once — a config, the file it includes and the unit that starts it is one call, not \
+three round trips. For one large file, pass offset (1-based line) and limit instead of reading \
+everything; find the line with grep_search first.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
-                    "offset": {"type": "integer", "description": "1-based start line."},
-                    "limit": {"type": "integer", "description": "Max lines to return."},
+                    "path": {"type": "string", "description": "One file. Use `paths` for several."},
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Several files in one round trip (max 20). offset/limit do not apply here — read the batch to see what is there, then re-read one file with a window."
+                    },
+                    "offset": {"type": "integer", "description": "1-based start line. Single file only."},
+                    "limit": {"type": "integer", "description": "Max lines to return. Single file only."},
                     "vps_id": {"type": "string"}
-                },
-                "required": ["path"]
+                }
             }),
         },
         ToolDef {
@@ -547,16 +552,20 @@ in sh. For remote servers use run_command instead.".into(),
         },
         ToolDef {
             name: "local_read_file".into(),
-            description: "Read a text file from this PC. Lines are numbered. Use offset/limit \
-on large files.".into(),
+            description: "Read text files from this PC. Lines are numbered. Pass `paths` to open \
+several at once. Use offset/limit on a single large file.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
-                    "offset": {"type": "integer"},
-                    "limit": {"type": "integer"}
-                },
-                "required": ["path"]
+                    "path": {"type": "string", "description": "One file. Use `paths` for several."},
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Several files at once (max 20). offset/limit do not apply."
+                    },
+                    "offset": {"type": "integer", "description": "1-based start line. Single file only."},
+                    "limit": {"type": "integer", "description": "Max lines. Single file only."}
+                }
             }),
         },
         ToolDef {
@@ -590,7 +599,9 @@ call.".into(),
         },
         ToolDef {
             name: "local_grep_search".into(),
-            description: "Search file contents on this PC. Returns path:line:text.".into(),
+            description: "Search file contents on this PC. Pass context_lines to see what a \
+match is doing without a second read, and output_mode=files when the question is only where \
+something lives.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -598,7 +609,13 @@ call.".into(),
                     "path": {"type": "string"},
                     "glob": {"type": "string"},
                     "case_insensitive": {"type": "boolean"},
-                    "head_limit": {"type": "integer"}
+                    "context_lines": {"type": "integer", "description": "Lines of context around each match (like grep -C)."},
+                    "output_mode": {
+                        "type": "string",
+                        "enum": ["content", "files", "count"],
+                        "description": "content = matching lines (default); files = which files contain it; count = how many per file."
+                    },
+                    "head_limit": {"type": "integer", "description": "Max output lines (default 40)."}
                 },
                 "required": ["pattern"]
             }),
@@ -2226,11 +2243,39 @@ fn list_vps_targets(ctx: &ToolContext) -> String {
     format_targets_catalog(&ctx.db, &ctx.targets)
 }
 
-async fn read_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str) -> String {
-    let path = match args.get("path").and_then(|v| v.as_str()) {
-        Some(p) if !p.is_empty() => p,
-        _ => return "error: missing 'path'".into(),
+/// The files a read was asked for: the `paths` array, or the single `path`.
+///
+/// Both spellings, for the same reason the edit tools keep both: opening one file
+/// should not need a list, and opening five should not need five calls.
+fn requested_paths(args: &Value) -> Result<Vec<String>, String> {
+    if let Some(list) = args.get("paths").and_then(|v| v.as_array()) {
+        let paths: Vec<String> = list
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect();
+        if paths.is_empty() {
+            return Err("error: 'paths' was empty".into());
+        }
+        return Ok(paths);
+    }
+    match args.get("path").and_then(|v| v.as_str()) {
+        Some(p) if !p.trim().is_empty() => Ok(vec![p.trim().to_string()]),
+        _ => Err("error: give either 'path' or a non-empty 'paths' array".into()),
+    }
+}
+
+async fn read_file(ctx: &ToolContext, args: &Value, sink: &EventSink, id: &str) -> String {
+    let paths = match requested_paths(args) {
+        Ok(p) => p,
+        Err(e) => return e,
     };
+    if paths.len() > 1 {
+        return read_many(ctx, args, sink, id, &paths).await;
+    }
+    let path = paths[0].as_str();
     let vps_id = match resolve_target(ctx, args) {
         Ok(id) => id,
         Err(e) => return format!("error: {e}"),
@@ -2265,6 +2310,76 @@ async fn read_file(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str)
     } else {
         numbered
     }
+}
+
+/// Read several files in one SSH round trip.
+///
+/// Each read is a full round trip, so opening a config, the file it includes and the
+/// unit that starts it was three of them — and that is the ordinary shape of finding
+/// something out, not an unusual one. One command, separated by a marker.
+///
+/// Offset and limit are deliberately not accepted here: they would apply to every file
+/// at once, which is never what anyone means. Read the batch to see what is there, then
+/// read one file with a window.
+async fn read_many(
+    ctx: &ToolContext,
+    args: &Value,
+    sink: &EventSink,
+    _id: &str,
+    paths: &[String],
+) -> String {
+    let vps_id = match resolve_target(ctx, args) {
+        Ok(id) => id,
+        Err(e) => return format!("error: {e}"),
+    };
+    // A cap, because "read the whole directory" through this would be one enormous
+    // result that the tool-result budget then truncates from the end — losing the last
+    // files entirely rather than any of them partially.
+    const MAX_FILES: usize = 20;
+    let paths = &paths[..paths.len().min(MAX_FILES)];
+
+    const SEP: &str = "__XCONS_FILE__";
+    let script = paths
+        .iter()
+        .map(|p| {
+            let q = shell_quote(p);
+            // The mtime rides along, so a later edit can still refuse to clobber a file
+            // that changed since it was read.
+            format!("echo '{SEP}'; echo {q}; stat -c %Y -- {q} 2>/dev/null || echo 0; cat -- {q} 2>&1")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let raw = exec(ctx, &vps_id, &script, Some(sink), true).await;
+    if raw.starts_with("error") {
+        return raw;
+    }
+    let body = stdout_body(&raw);
+
+    let mut out = String::new();
+    for chunk in body.split(SEP).skip(1) {
+        let mut lines = chunk.trim_start_matches('\n').splitn(3, '\n');
+        let Some(path) = lines.next() else { continue };
+        let mtime = lines.next().unwrap_or("0").trim();
+        let content = lines.next().unwrap_or("");
+        if mtime.chars().all(|c| c.is_ascii_digit()) && mtime != "0" {
+            crate::ai::file_state::note_read_with_encoding(
+                &ctx.session_id,
+                &vps_id,
+                path,
+                mtime,
+                Some(crate::ai::file_ops::detect_encoding(content.as_bytes())),
+            );
+        }
+        out.push_str(&format!(
+            "\n===== {path} =====\n{}\n",
+            crate::ai::file_ops::format_read(content, None, None)
+        ));
+    }
+    if out.is_empty() {
+        return format!("error: read nothing back for {} file(s)", paths.len());
+    }
+    format!("{} file(s):{out}", paths.len())
 }
 
 fn stdout_body(wrapped: &str) -> String {
@@ -2661,6 +2776,26 @@ pub fn grep_command(
     )
 }
 
+/// What the result is, so a list of file names is not read as a list of matches.
+fn grep_header(mode: GrepOutput, context: u64) -> String {
+    match mode {
+        GrepOutput::Files => "files containing it".to_string(),
+        GrepOutput::Count => "matches per file".to_string(),
+        GrepOutput::Content if context > 0 => format!("matches with {context} line(s) of context"),
+        GrepOutput::Content => "matches (path:line:text)".to_string(),
+    }
+}
+
+/// Said when the output hit the cap, because a silently truncated list reads as the
+/// whole answer — and the agent then concludes something is not there when it is.
+fn grep_note(body: &str, head: u64) -> String {
+    if body.lines().count() as u64 >= head {
+        format!("\n\n(stopped at {head} lines — narrow the path or raise head_limit)")
+    } else {
+        String::new()
+    }
+}
+
 async fn grep_search(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &str) -> String {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p,
@@ -2686,24 +2821,11 @@ async fn grep_search(ctx: &ToolContext, args: &Value, sink: &EventSink, _id: &st
     if body.trim().is_empty() {
         return format!("no matches for {pattern:?} under {path}");
     }
-    let header = match mode {
-        GrepOutput::Files => "files containing it".to_string(),
-        GrepOutput::Count => "matches per file".to_string(),
-        GrepOutput::Content if context > 0 => {
-            format!("matches with {context} line(s) of context")
-        }
-        GrepOutput::Content => "matches (path:line:text)".to_string(),
-    };
-    // Said when it is true, because a silently capped list reads as the whole answer.
-    let capped = body.lines().count() as u64 >= head;
     format!(
-        "{header}:\n{}{}",
+        "{}:\n{}{}",
+        grep_header(mode, context),
         body.trim_end(),
-        if capped {
-            format!("\n\n(stopped at {head} lines — narrow the path or raise head_limit)")
-        } else {
-            String::new()
-        }
+        grep_note(&body, head)
     )
 }
 
@@ -3349,10 +3471,26 @@ async fn local_run_command(ctx: &ToolContext, args: &Value) -> String {
 }
 
 async fn local_read_file(ctx: &ToolContext, args: &Value) -> String {
-    let path = match args.get("path").and_then(|v| v.as_str()) {
-        Some(p) if !p.is_empty() => p,
-        _ => return "error: missing 'path'".into(),
+    let paths = match requested_paths(args) {
+        Ok(p) => p,
+        Err(e) => return e,
     };
+    // Several files reads the same way as it does on a server. Not for the round trip —
+    // there is none here — but because an agent should not have to remember which of two
+    // tools takes a list, and the secret checks below then apply to every file rather
+    // than only the first.
+    if paths.len() > 1 {
+        let mut out = String::new();
+        for p in paths.iter().take(20) {
+            let one = serde_json::json!({ "path": p });
+            out.push_str(&format!(
+                "\n===== {p} =====\n{}\n",
+                Box::pin(local_read_file(ctx, &one)).await
+            ));
+        }
+        return format!("{} file(s):{out}", paths.len().min(20));
+    }
+    let path = paths[0].as_str();
     // Gate as a read (allowlisted, so it auto-runs under allowlist mode).
     if let Err(e) = authorize_local(ctx, &format!("cat -- {}", shell_quote(path))).await {
         return format!("error: {e}");
@@ -3419,6 +3557,13 @@ async fn local_edit_file(ctx: &ToolContext, args: &Value) -> String {
     }
 }
 
+/// The same search as `grep_search`, run here instead of over SSH.
+///
+/// Built by the same function, deliberately. This was a near-copy of it, and the copy
+/// drifted the way copies do: it had no plain-grep fallback at all, so local search
+/// simply failed on a machine without ripgrep; it kept the per-file `-m` that let one
+/// large file crowd out every other result; and it never gained context lines or output
+/// modes. Every one of those was fixed once, in the other copy.
 async fn local_grep_search(ctx: &ToolContext, args: &Value) -> String {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p,
@@ -3436,35 +3581,22 @@ async fn local_grep_search(ctx: &ToolContext, args: &Value) -> String {
         .and_then(|v| v.as_u64())
         .unwrap_or(40)
         .clamp(1, 200);
-    let i = if ci { " -i" } else { "" };
-    let g = glob
-        .map(|g| format!(" -g {}", shell_quote(g)))
-        .unwrap_or_default();
-    let cmd = format!(
-        "rg -n --no-heading -m {head}{i}{g} -e {pat} -- {path}",
-        pat = shell_quote(pattern),
-        path = shell_quote(path),
-    );
+    let context = args.get("context_lines").and_then(|v| v.as_u64()).unwrap_or(0).min(20);
+    let mode = GrepOutput::parse(args.get("output_mode").and_then(|v| v.as_str()));
+
+    let cmd = grep_command(pattern, path, glob, ci, head, context, mode);
     if let Err(e) = authorize_local(ctx, &cmd).await {
         return format!("error: {e}");
     }
     match crate::local::run_local_command(&cmd).await {
         Ok(out) => {
-            let text = if out.stdout.trim().is_empty() {
-                out.stderr.clone()
-            } else {
-                out.stdout.clone()
-            };
+            let text = if out.stdout.trim().is_empty() { out.stderr.clone() } else { out.stdout.clone() };
             if text.trim().is_empty() {
-                format!("no matches for {pattern:?} under {path}")
-            } else {
-                let clipped: String = text.lines().take(head as usize).collect::<Vec<_>>().join("\n");
-                format!("matches (path:line:text):\n{clipped}")
+                return format!("no matches for {pattern:?} under {path}");
             }
+            format!("{}:\n{}{}", grep_header(mode, context), text.trim_end(), grep_note(&text, head))
         }
-        Err(e) => format!(
-            "error: {e}. Install ripgrep (rg) for fast local search, or pass a narrower path."
-        ),
+        Err(e) => format!("error: {e}"),
     }
 }
 
@@ -4481,6 +4613,46 @@ mod edit_request_tests {
         .unwrap();
         assert_eq!(out, "1\nbeta\n3\n");
         assert_eq!((replacements, edits), (2, 2));
+    }
+}
+
+#[cfg(test)]
+mod read_request_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn one_file_still_needs_no_array() {
+        assert_eq!(requested_paths(&json!({"path": "/etc/nginx.conf"})).unwrap(), vec!["/etc/nginx.conf"]);
+    }
+
+    #[test]
+    fn several_files_come_back_in_order() {
+        // The ordinary shape of finding something out: a config, what it includes, and
+        // the unit that starts it. Three round trips over SSH became one.
+        let got = requested_paths(&json!({"paths": ["/a.conf", "/b.conf", "/c.service"]})).unwrap();
+        assert_eq!(got, vec!["/a.conf", "/b.conf", "/c.service"]);
+    }
+
+    #[test]
+    fn blanks_are_dropped_rather_than_read_as_a_file() {
+        // An empty string reaches `cat` as the current directory, which errors in a way
+        // that looks like the file being missing.
+        let got = requested_paths(&json!({"paths": ["/a", "", "  ", "/b"]})).unwrap();
+        assert_eq!(got, vec!["/a", "/b"]);
+    }
+
+    #[test]
+    fn nothing_to_read_says_so_instead_of_reading_nothing() {
+        assert!(requested_paths(&json!({})).unwrap_err().contains("path"));
+        assert!(requested_paths(&json!({"paths": []})).unwrap_err().contains("empty"));
+        assert!(requested_paths(&json!({"paths": ["", " "]})).unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn the_array_wins_when_both_are_given() {
+        let got = requested_paths(&json!({"path": "/ignored", "paths": ["/wanted"]})).unwrap();
+        assert_eq!(got, vec!["/wanted"]);
     }
 }
 
