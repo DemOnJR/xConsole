@@ -216,16 +216,27 @@ async fn web_search(args: &Value) -> String {
         Err(e) => return e,
     };
 
-    // Primary: real web results (titles + snippets). DuckDuckGo's instant-answer API
-    // returns nothing for most queries (place names, "X weather", etc.), so scrape the
-    // HTML results endpoint, which returns actual search hits.
-    if let Ok(results) = ddg_html_results(&client, query).await {
-        if !results.is_empty() {
-            let mut block = format!("Top web results for \"{query}\":");
-            for (i, r) in results.iter().take(6).enumerate() {
-                block.push_str(&format!("\n{}. {r}", i + 1));
+    // Real web results, from whichever engine will answer. DuckDuckGo's
+    // instant-answer API returns nothing for most queries (place names, "X
+    // weather", and anything technical), so the HTML endpoints are the primary and
+    // it is only consulted at the end.
+    let mut blocked = 0;
+    for engine in [Engine::DuckDuckGo, Engine::Brave] {
+        let found = match engine {
+            Engine::DuckDuckGo => ddg_html_results(&client, query).await,
+            Engine::Brave => brave_results(&client, query).await,
+        };
+        match found {
+            Ok(results) if !results.is_empty() => {
+                let mut block = format!("Top web results for \"{query}\" (via {engine}):");
+                for (i, r) in results.iter().take(6).enumerate() {
+                    block.push_str(&format!("\n{}. {r}", i + 1));
+                }
+                block.push_str("\n\nweb_fetch any of these urls to read the page itself.");
+                return truncate_text(&block, MAX_BODY);
             }
-            return truncate_text(&block, MAX_BODY);
+            Err(e) if e == CHALLENGED => blocked += 1,
+            _ => {}
         }
     }
 
@@ -234,16 +245,188 @@ async fn web_search(args: &Value) -> String {
         return truncate_text(&ia, MAX_BODY);
     }
 
+    // Say which happened. "No results" when every engine refused to search is a
+    // statement about the web that is not true, and it is the kind of untruth that
+    // gets repeated to the user as fact.
+    if blocked > 0 {
+        return format!(
+            "error: search is blocked from this machine — {blocked} engine(s) answered with a bot \
+             check rather than results. This says nothing about whether \"{query}\" has answers. \
+             Use web_fetch on a url directly if you know one, or ask the user to search."
+        );
+    }
+
     format!(
-        "No results for \"{query}\". For weather, web_fetch https://wttr.in/CITY?format=3 \
-(URL-encode spaces as +). For a specific site, call web_fetch with its URL directly."
+        "No results for \"{query}\". The engines answered and had nothing. For weather, web_fetch \
+https://wttr.in/CITY?format=3 (URL-encode spaces as +). For a specific site, call web_fetch with \
+its URL directly."
     )
+}
+
+/// The engines tried, in order.
+#[derive(Clone, Copy)]
+enum Engine {
+    DuckDuckGo,
+    Brave,
+}
+
+impl std::fmt::Display for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Engine::DuckDuckGo => "DuckDuckGo",
+            Engine::Brave => "Brave",
+        })
+    }
 }
 
 const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+/// One search result: what it is, where it is, and what it says.
+///
+/// The url is the point. Results used to come back as title-and-snippet prose with
+/// the link thrown away, which severs search from web_fetch — the agent could see
+/// that an answer existed and had no way to open it, and guessing URLs from titles
+/// is how you end up fetching 404s.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchHit {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+}
+
+impl std::fmt::Display for SearchHit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}\n   {}", self.title, self.url)?;
+        if !self.snippet.is_empty() {
+            write!(f, "\n   {}", self.snippet)?;
+        }
+        Ok(())
+    }
+}
+
+/// Whether a search engine served a bot check instead of results.
+///
+/// Worth naming separately from "nothing found". They call for opposite things —
+/// try another engine, versus accept that the web has no answer — and reporting a
+/// block as an empty result set tells the agent something false about the world.
+fn is_search_challenge(html: &str) -> bool {
+    let lower = html.to_lowercase();
+    ["anomaly-modal", "challenge-form", "anomaly.js", "captcha", "confirm this search was made by a human", "detected unusual", "automated queries"]
+        .iter()
+        .any(|m| lower.contains(m))
+}
+
 /// Real search results (title — snippet) scraped from DuckDuckGo's HTML endpoint.
-async fn ddg_html_results(client: &reqwest::Client, query: &str) -> Result<Vec<String>, String> {
+/// Search results from Brave, used when DuckDuckGo answers with a bot check.
+///
+/// Not a nicety: DDG's HTML endpoint serves a CAPTCHA to datacentre addresses, and
+/// a good number of the machines xConsole runs an agent from are datacentre
+/// addresses. One engine meant search simply stopped working there, and said
+/// "no results" while it did.
+async fn brave_results(client: &reqwest::Client, query: &str) -> Result<Vec<SearchHit>, String> {
+    let resp = client
+        .get("https://search.brave.com/search")
+        .query(&[("q", query)])
+        .send()
+        .await
+        .map_err(|e| format!("error: search request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("error: search HTTP {}", resp.status()));
+    }
+    let html = resp
+        .text()
+        .await
+        .map_err(|e| format!("error: read search body: {e}"))?;
+    let hits = parse_brave(&html);
+    // Order matters: a page with results is a page with results, whatever else is
+    // on it. Brave ships captcha wording in its own scripts, so testing for the
+    // challenge first would throw away perfectly good results.
+    if hits.is_empty() && is_search_challenge(&html) {
+        return Err(CHALLENGED.into());
+    }
+    Ok(hits)
+}
+
+/// Pull hits out of a Brave results page.
+///
+/// Brave's markup is generated, and its class names carry a build hash that will
+/// change without warning — so the only things trusted here are the `snippet`
+/// container and the first outbound link inside it. Titles are taken as the first
+/// substantial line of the block, which is right for most results and occasionally
+/// yields the site name instead of the page title; the url and the snippet, which
+/// are what the agent acts on, are exact.
+fn parse_brave(html: &str) -> Vec<SearchHit> {
+    let mut out = Vec::new();
+    for block in html.split("<div class=\"snippet").skip(1) {
+        // Stop at the next block so one result cannot borrow the next one's link.
+        let Some(url) = first_outbound_link(block) else { continue };
+        let lines: Vec<String> = html_to_text(block)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| {
+                l.chars().count() > 12
+                    && !l.contains("svelte-")
+                    && !l.starts_with('\u{203a}')
+            })
+            .collect();
+        let snippet = lines
+            .iter()
+            .max_by_key(|l| l.len())
+            .cloned()
+            .unwrap_or_default();
+        // Brave's block leads with the site name and a breadcrumb before the actual
+        // page title. Skip both: a list of results that all say "Stack Overflow" is
+        // a list you cannot choose from.
+        let host = url
+            .split('/')
+            .nth(2)
+            .unwrap_or("")
+            .trim_start_matches("www.")
+            .to_string();
+        let title = lines
+            .iter()
+            .find(|l| {
+                **l != snippet
+                    && !l.contains('\u{203a}')
+                    && !l.trim_start_matches("www.").eq_ignore_ascii_case(&host)
+                    && l.contains(' ')
+            })
+            .or_else(|| lines.iter().find(|l| **l != snippet))
+            .or_else(|| lines.first())
+            .cloned()
+            .unwrap_or_default();
+        if title.is_empty() {
+            continue;
+        }
+        if out.iter().any(|h: &SearchHit| h.url == url) {
+            continue;
+        }
+        out.push(SearchHit { title, url, snippet });
+        if out.len() >= 6 {
+            break;
+        }
+    }
+    out
+}
+
+/// The first https link in a result block that points somewhere other than the
+/// search engine itself (favicons and thumbnails are served from its own domains).
+fn first_outbound_link(block: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(rel) = block[from..].find("href=\"https://") {
+        let start = from + rel + 6;
+        let rest = &block[start..];
+        let end = rest.find('"')?;
+        let url = &rest[..end];
+        from = start + end;
+        if !url.contains("search.brave.com") && !url.contains("imgs.search.brave") {
+            return Some(decode_entities(url));
+        }
+    }
+    None
+}
+
+async fn ddg_html_results(client: &reqwest::Client, query: &str) -> Result<Vec<SearchHit>, String> {
     let resp = client
         .get("https://html.duckduckgo.com/html/")
         .query(&[("q", query)])
@@ -258,28 +441,66 @@ async fn ddg_html_results(client: &reqwest::Client, query: &str) -> Result<Vec<S
         .await
         .map_err(|e| format!("error: read search body: {e}"))?;
 
-    if html.contains("anomaly-modal") || html.contains("challenge-form") {
-        return Err("error: search rate limited by anomaly challenge".into());
+    if is_search_challenge(&html) {
+        return Err(CHALLENGED.into());
     }
+    Ok(parse_ddg(&html))
+}
 
-    let titles = anchor_inner_texts(&html, "result__a");
-    let snippets = anchor_inner_texts(&html, "result__snippet");
+/// The marker an engine returns when it served a bot check rather than results.
+const CHALLENGED: &str = "challenged";
+
+/// Pull hits out of DuckDuckGo's HTML endpoint.
+///
+/// Separated from the request so the parsing is testable without the network —
+/// which matters more than usual here, because the endpoint answers datacentre
+/// addresses with a CAPTCHA, and a parser that can only be exercised from a
+/// machine that gets real results is a parser that never gets exercised.
+fn parse_ddg(html: &str) -> Vec<SearchHit> {
+    let titles = anchor_inner_texts(html, "result__a");
+    let snippets = anchor_inner_texts(html, "result__snippet");
+    let urls = anchor_hrefs(html, "result__a");
     let mut out = Vec::new();
     for i in 0..titles.len() {
         let title = titles.get(i).cloned().unwrap_or_default();
-        let snip = snippets.get(i).cloned().unwrap_or_default();
-        let line = match (title.is_empty(), snip.is_empty()) {
-            (false, false) => format!("{title} — {snip}"),
-            (false, true) => title,
-            (true, false) => snip,
-            (true, true) => continue,
-        };
-        out.push(line);
+        let snippet = snippets.get(i).cloned().unwrap_or_default();
+        let url = urls.get(i).cloned().unwrap_or_default();
+        if title.is_empty() && snippet.is_empty() {
+            continue;
+        }
+        out.push(SearchHit { title, url, snippet });
         if out.len() >= 6 {
             break;
         }
     }
-    Ok(out)
+    out
+}
+
+/// The href of every `<a class="<class>" …>`, unwrapped from DuckDuckGo's redirector.
+///
+/// DDG hands back `//duckduckgo.com/l/?uddg=<percent-encoded real url>`. Passing
+/// that on would be worse than passing nothing: it looks like a usable link right
+/// up to the moment web_fetch follows it somewhere else.
+fn anchor_hrefs(html: &str, class: &str) -> Vec<String> {
+    let needle = format!("class=\"{class}\"");
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = html[from..].find(&needle) {
+        let cls = from + rel;
+        // The href may sit either side of the class inside the same tag, so look
+        // from the tag's own opening bracket.
+        let open = html[..cls].rfind('<').unwrap_or(cls);
+        let Some(gt) = html[cls..].find('>') else { break };
+        let tag = &html[open..cls + gt];
+        from = cls + gt;
+        let Some(h) = tag.find("href=\"") else { continue };
+        let rest = &tag[h + 6..];
+        let Some(end) = rest.find('"') else { continue };
+        if let Some(u) = decode_ddg_href(&rest[..end]) {
+            out.push(u);
+        }
+    }
+    out
 }
 
 /// DuckDuckGo Instant Answer (definitions, calculations, direct facts). Often empty.
@@ -1056,6 +1277,87 @@ mod tests {
     }
 
     #[test]
+    fn a_search_result_carries_the_link_not_just_the_prose() {
+        // Results used to be title-and-snippet with the url discarded, which cuts
+        // search off from web_fetch: the agent can see an answer exists and has no
+        // way to open it.
+        let html = r#"<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.rs%2Ftokio%2Flatest%2F&amp;rut=x">spawn_blocking in tokio</a>
+            <a class="result__snippet" href="//y">Runs the provided closure on a thread.</a>"#;
+        let hits = parse_ddg(html);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].url, "https://docs.rs/tokio/latest/");
+        assert!(hits[0].title.contains("spawn_blocking"));
+        assert!(hits[0].snippet.contains("closure"));
+        assert!(
+            format!("{}", hits[0]).contains("https://docs.rs/tokio/latest/"),
+            "the url is parsed but not shown to the agent"
+        );
+    }
+
+    #[test]
+    fn a_redirect_wrapper_is_never_passed_off_as_a_real_link() {
+        // duckduckgo.com/l/?uddg=… looks like a usable url right up to the point
+        // web_fetch follows it somewhere else.
+        let html = r#"<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa%20b">T</a>"#;
+        let urls = anchor_hrefs(html, "result__a");
+        assert_eq!(urls, vec!["https://example.com/a b"]);
+    }
+
+    #[test]
+    fn a_bot_check_is_not_reported_as_an_empty_web() {
+        // These call for opposite responses — try another engine, versus accept
+        // that there is no answer — so telling them apart is the whole point.
+        assert!(is_search_challenge(
+            "<div>Please complete the following challenge to confirm this search was made by a human</div>"
+        ));
+        assert!(is_search_challenge("<div id=\"anomaly-modal\">"));
+        assert!(is_search_challenge("your network appears to be sending automated queries"));
+        assert!(!is_search_challenge(
+            "<a class=\"result__a\" href=\"//x\">An ordinary page about ducks</a>"
+        ));
+    }
+
+    #[test]
+    fn brave_results_are_read_out_of_the_generated_markup() {
+        // The class names carry a build hash, so only the container and the first
+        // outbound link are trusted. This is the shape the live page has.
+        let html = r#"<div class="snippet svelte-jmfu5f" data-pos="0" data-type="web">
+            <a href="https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html" class="svelte-14r20fy l1">
+            <img src="https://imgs.search.brave.com/abc" alt=""/>
+            <div>spawn_blocking in tokio::task - Rust</div>
+            <div>This function runs the provided closure on a dedicated thread pool.</div>
+            </a></div>"#;
+        let hits = parse_brave(html);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(
+            hits[0].url,
+            "https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html"
+        );
+        assert!(hits[0].snippet.contains("dedicated thread pool"));
+    }
+
+    #[test]
+    fn the_engines_own_images_are_not_mistaken_for_results() {
+        let block = r#"<a href="https://imgs.search.brave.com/favicon"></a>
+                       <a href="https://search.brave.com/settings"></a>
+                       <a href="https://real-result.example/page"></a>"#;
+        assert_eq!(
+            first_outbound_link(block).as_deref(),
+            Some("https://real-result.example/page")
+        );
+    }
+
+    #[test]
+    fn one_result_cannot_borrow_the_next_ones_link() {
+        let html = r#"<div class="snippet a"><a href="https://first.example/">First result title here</a></div>
+                      <div class="snippet b"><a href="https://second.example/">Second result title here</a></div>"#;
+        let hits = parse_brave(html);
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert_eq!(hits[0].url, "https://first.example/");
+        assert_eq!(hits[1].url, "https://second.example/");
+    }
+
+    #[test]
     fn truncate_text_handles_multibyte() {
         let s = "ä".repeat(100); // 200 bytes
         // Must not panic slicing mid-codepoint, and must stay within budget.
@@ -1070,6 +1372,22 @@ mod live_fetch_smoke {
     /// `cargo test --lib live_fetch -- --ignored --nocapture` to see what a page
     /// actually looks like after stripping. Unit tests prove the shape; this
     /// proves the shape matches the web.
+    /// The whole search chain against the live web.
+    #[tokio::test]
+    #[ignore]
+    async fn a_real_search_returns_links_worth_following() {
+        let out = super::web_search(&serde_json::json!({"query": "rust tokio spawn_blocking"})).await;
+        println!("{out}");
+        assert!(
+            out.contains("https://"),
+            "search came back with no url to follow: {out}"
+        );
+        assert!(
+            !out.starts_with("No results"),
+            "an engine was blocked and it was reported as an empty web"
+        );
+    }
+
     #[tokio::test]
     #[ignore]
     async fn a_real_documentation_page_comes_back_readable() {
