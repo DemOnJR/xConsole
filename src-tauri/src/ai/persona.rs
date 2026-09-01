@@ -126,6 +126,34 @@ pub fn hierarchy_block(all: &[Persona], me: &Persona) -> String {
     out
 }
 
+/// How this persona shares a git repository with the rest of the team.
+///
+/// Without this, every agent checks out the same tree, the second one to `git
+/// checkout` destroys the first one's uncommitted work, and "I shipped it" is a
+/// report about a file that no longer exists. Isolation is a worktree on a
+/// `wip/<name>/<task>` branch; finishing deletes it.
+pub fn gitops_block(me: &Persona) -> String {
+    let you = crate::ai::repo::slug_part(&me.name, 16);
+    format!(
+        "\n\nSharing the repository with the team:\n\
+         - You are {name}. Never commit on main, master, or dev. Before you edit, \
+           repo_start — that creates a worktree on wip/{you}/<task>. Work only in \
+           the path it prints.\n\
+         - Before you start: repo_status and agent_inbox. If a teammate's wip/ branch \
+           already covers the files you need, agent_send them and join that work. \
+           Two rewrites of the same file is how one of you gets deleted.\n\
+         - Tell the team once, with agent_send: the branch name and the files.\n\
+         - When the task is actually done: repo_finish. That merges if the main \
+           checkout is free, then deletes the worktree and the branch. Leftover \
+           wip/ branches are garbage; do not leave them.\n\
+         - Never force-push, never reset --hard a branch you do not own, never \
+           checkout the default branch in a dirty shared tree.\n\
+         - Load skill gitops/team-branches if you need the commands.",
+        name = me.name,
+        you = you,
+    )
+}
+
 /// The safety mode a persona's runs use, falling back to the global default.
 ///
 /// A persona is how the user says "this one may restart services unattended, that one
@@ -571,6 +599,16 @@ mod tests {
         // The whole point of a background persona.
         assert!(block.contains("in the background"), "{block}");
         assert!(block.contains("cannot proceed without their decision"), "{block}");
+    }
+
+    #[test]
+    fn gitops_tells_a_named_agent_to_isolate_and_to_clean_up() {
+        let block = gitops_block(&persona("Razvan"));
+        assert!(block.contains("Razvan"), "{block}");
+        assert!(block.contains("wip/razvan/"), "{block}");
+        assert!(block.contains("repo_start"), "{block}");
+        assert!(block.contains("repo_finish"), "{block}");
+        assert!(block.contains("garbage"), "{block}");
     }
 
     #[test]

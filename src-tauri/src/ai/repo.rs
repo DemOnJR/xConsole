@@ -253,6 +253,201 @@ pub fn parse_pull_requests(stdout: &str, now: chrono::DateTime<chrono::Utc>) -> 
 }
 
 // ---------------------------------------------------------------------------
+// Team isolation: wip/<agent>/<task> on a worktree, not on the shared default.
+// ---------------------------------------------------------------------------
+
+const PROTECTED: &[&str] = &[
+    "main",
+    "master",
+    "dev",
+    "develop",
+    "production",
+    "prod",
+    "staging",
+    "HEAD",
+];
+
+/// One segment of a branch name: lowercase, hyphens, bounded.
+pub fn slug_part(s: &str, max: usize) -> String {
+    let raw: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let joined = raw
+        .split('-')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let cut: String = joined.chars().take(max).collect();
+    let cut = cut.trim_end_matches('-').to_string();
+    if cut.is_empty() {
+        "agent".into()
+    } else {
+        cut
+    }
+}
+
+pub fn wip_branch(persona: &str, task: &str) -> String {
+    let task = slug_part(task, 32);
+    format!("wip/{}/{}", slug_part(persona, 16), task)
+}
+
+pub fn is_protected(branch: &str) -> bool {
+    let b = branch.trim().trim_start_matches("origin/").trim_start_matches("refs/heads/");
+    PROTECTED.iter().any(|p| p.eq_ignore_ascii_case(b))
+}
+
+pub fn wip_owner(branch: &str) -> Option<&str> {
+    let rest = branch.strip_prefix("wip/")?;
+    let owner = rest.split('/').next()?;
+    if owner.is_empty() {
+        None
+    } else {
+        Some(owner)
+    }
+}
+
+/// Who else is on a wip/ branch, and where their worktree is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TeamRepo {
+    pub default_branch: String,
+    pub worktrees: Vec<(String, String)>, // path, branch
+    pub wip: Vec<String>,
+}
+
+pub fn parse_team(stdout: &str) -> TeamRepo {
+    let mut t = TeamRepo::default();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("default:") {
+            t.default_branch = v.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("worktree ") {
+            let mut bits = rest.splitn(2, ' ');
+            let path = bits.next().unwrap_or("").to_string();
+            let branch = bits.next().unwrap_or("").to_string();
+            if !path.is_empty() {
+                t.worktrees.push((path, branch));
+            }
+        } else if let Some(b) = line.strip_prefix("wip ") {
+            let b = b.trim();
+            if !b.is_empty() && !t.wip.iter().any(|x| x == b) {
+                t.wip.push(b.to_string());
+            }
+        }
+    }
+    t
+}
+
+/// One script: default branch, worktrees, wip/ branches. Same quoting lesson as
+/// [`status_command`] — substitutions in `"$d"` inside `$( )`.
+pub fn team_command(dir: &str) -> String {
+    let q = crate::ssh::remote_ops::shell_quote(dir);
+    format!(
+        "d={q}; \
+         git -C \"$d\" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {{ echo 'default:'; exit 0; }}; \
+         def=$(git -C \"$d\" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@'); \
+         if [ -z \"$def\" ]; then \
+           for c in main master dev; do \
+             git -C \"$d\" rev-parse --verify -q origin/$c >/dev/null && {{ def=$c; break; }}; \
+           done; \
+         fi; \
+         echo \"default: $def\"; \
+         git -C \"$d\" worktree list --porcelain 2>/dev/null | awk '\
+           /^worktree / {{ p=$2 }} \
+           /^branch / {{ b=$2; sub(/^refs\\/heads\\//,\"\",b); print \"worktree\", p, b }} \
+         '; \
+         git -C \"$d\" branch -a --list 'wip/*' --list 'remotes/origin/wip/*' 2>/dev/null | \
+           sed 's/^[* ]*//; s@^remotes/origin/@@' | awk 'NF {{ print \"wip\", $0 }}'"
+    )
+}
+
+/// Open a worktree on `wip/<persona>/<task>` from the default branch.
+pub fn start_command(dir: &str, branch: &str, worktree: &str, base: &str) -> String {
+    let d = crate::ssh::remote_ops::shell_quote(dir);
+    let b = crate::ssh::remote_ops::shell_quote(branch);
+    let w = crate::ssh::remote_ops::shell_quote(worktree);
+    let base = crate::ssh::remote_ops::shell_quote(base);
+    format!(
+        "d={d}; b={b}; w={w}; base={base}; \
+         cd \"$d\" || exit 1; \
+         git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {{ echo 'not a git repository'; exit 1; }}; \
+         mkdir -p \"$d/.git/info\" 2>/dev/null; \
+         grep -qxF '.worktrees/' \"$d/.git/info/exclude\" 2>/dev/null || echo '.worktrees/' >> \"$d/.git/info/exclude\"; \
+         git fetch -q origin 2>/dev/null; \
+         if [ -d \"$w\" ]; then echo \"path: $w\"; echo \"branch: $b\"; echo 'already: yes'; exit 0; fi; \
+         mkdir -p \"$(dirname \"$w\")\" || exit 1; \
+         if git rev-parse --verify -q \"$b\" >/dev/null || git rev-parse --verify -q origin/\"$b\" >/dev/null; then \
+           git worktree add \"$w\" \"$b\" || git worktree add \"$w\" origin/\"$b\" || exit 1; \
+         else \
+           git worktree add -b \"$b\" \"$w\" origin/\"$base\" 2>/dev/null \
+             || git worktree add -b \"$b\" \"$w\" \"$base\" || exit 1; \
+         fi; \
+         echo \"path: $w\"; echo \"branch: $b\"; echo \"base: $base\""
+    )
+}
+
+/// Push the current wip branch, drop the worktree, merge into default if the
+/// main checkout is free, delete the branch. Refuses protected names.
+pub fn finish_command(dir: &str, worktree: &str, branch: &str, default: &str, merge: bool) -> String {
+    let d = crate::ssh::remote_ops::shell_quote(dir);
+    let w = crate::ssh::remote_ops::shell_quote(worktree);
+    let b = crate::ssh::remote_ops::shell_quote(branch);
+    let def = crate::ssh::remote_ops::shell_quote(default);
+    let merge_flag = if merge { "1" } else { "0" };
+    format!(
+        "d={d}; w={w}; b={b}; def={def}; merge={merge_flag}; \
+         cd \"$w\" 2>/dev/null || cd \"$d\" || exit 1; \
+         git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {{ echo 'not a git repository'; exit 1; }}; \
+         cur=$(git rev-parse --abbrev-ref HEAD); \
+         case \"$cur\" in wip/*) ;; *) echo \"not on a wip/ branch (on $cur) — nothing to finish\"; exit 1 ;; esac; \
+         git add -A; \
+         if git diff --cached --quiet; then :; else git commit -q -m \"wip: finish $cur\" || exit 1; fi; \
+         git push -q -u origin HEAD || exit 1; \
+         echo \"pushed $cur\"; \
+         if [ \"$merge\" = 1 ]; then \
+           main=$(git worktree list --porcelain | awk '/^worktree /{{print $2; exit}}'); \
+           if [ -n \"$main\" ] && [ -d \"$main\" ]; then \
+             dirty=$(git -C \"$main\" status --porcelain | grep -c .); \
+             on=$(git -C \"$main\" rev-parse --abbrev-ref HEAD); \
+             if [ \"$dirty\" = 0 ] && [ \"$on\" = \"$def\" ]; then \
+               git -C \"$main\" fetch -q origin || exit 1; \
+               git -C \"$main\" merge --ff-only origin/\"$cur\" || git -C \"$main\" merge --no-ff -m \"merge $cur\" origin/\"$cur\" || {{ echo 'merge failed; remote branch kept'; merge=0; }}; \
+               if [ \"$merge\" = 1 ]; then git -C \"$main\" push -q origin \"$def\" || true; echo \"merged into $def\"; fi; \
+             else \
+               echo \"main checkout busy (branch $on, dirty $dirty) — lead must merge $cur\"; merge=0; \
+             fi; \
+           fi; \
+         fi; \
+         if [ -d \"$w\" ] && [ \"$w\" != \"$d\" ]; then git -C \"$d\" worktree remove --force \"$w\" 2>/dev/null || rm -rf \"$w\"; echo \"worktree removed $w\"; fi; \
+         if [ \"$merge\" = 1 ]; then \
+           git -C \"$d\" branch -D \"$cur\" 2>/dev/null; \
+           git -C \"$d\" push origin --delete \"$cur\" 2>/dev/null; \
+           echo \"deleted $cur\"; \
+         else \
+           echo \"remote $cur kept until merged — do not leave it\"; \
+         fi"
+    )
+}
+
+pub fn sync_command(dir: &str, default: &str) -> String {
+    let d = crate::ssh::remote_ops::shell_quote(dir);
+    let def = crate::ssh::remote_ops::shell_quote(default);
+    format!(
+        "d={d}; def={def}; cd \"$d\" || exit 1; \
+         git fetch -q origin || exit 1; \
+         cur=$(git rev-parse --abbrev-ref HEAD); \
+         git rebase origin/\"$def\" && echo \"rebased $cur onto $def\" \
+           || {{ echo \"rebase conflict on $cur — fix, do not force-push\"; exit 1; }}"
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
 
@@ -261,7 +456,10 @@ pub fn definitions() -> Vec<crate::ai::provider::ToolDef> {
     vec![
         crate::ai::provider::ToolDef {
             name: "repo_status".into(),
-            description: "The state of a project's repository: which branch, what is uncommitted, what is committed but not pushed, and which pull requests are open or have gone stale. Check it before starting work — so you branch from something current instead of on top of somebody's half-finished tree — and before finishing, so nothing is left only on one machine."
+            description: "The state of a project's repository: which branch, what is uncommitted, \
+what is committed but not pushed, which wip/<agent>/<task> branches the team has open, and \
+which pull requests are stale. Check it before starting work so you join a teammate instead \
+of rewriting the same files, and before finishing so nothing is left only on one machine."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -271,8 +469,51 @@ pub fn definitions() -> Vec<crate::ai::provider::ToolDef> {
             }),
         },
         crate::ai::provider::ToolDef {
+            name: "repo_start".into(),
+            description: "Isolate this agent's work: create a git worktree on \
+wip/<you>/<task> from the default branch, so you do not checkout the shared tree out \
+from under a teammate. Returns the path you must work in. Call this before you edit. \
+Named agents only — a user-driven session stays on the branch the tree is already on."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Short name for the branch, e.g. \"fake-detection\". Defaults to the current goal."},
+                    "project": {"type": "string", "description": "Project name. Defaults to the one currently open."}
+                }
+            }),
+        },
+        crate::ai::provider::ToolDef {
+            name: "repo_sync".into(),
+            description: "Fetch and rebase this wip/ branch onto the default branch so you \
+pick up what teammates merged. Call it when you have been away, or after someone else \
+finished. Do not force-push if it conflicts — fix the conflict."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Project name. Defaults to the one currently open."}
+                }
+            }),
+        },
+        crate::ai::provider::ToolDef {
+            name: "repo_finish".into(),
+            description: "End this agent's isolated work: commit anything left, push, merge \
+into the default branch if the main checkout is free, then delete the worktree and the \
+wip/ branch. Leftover wip/ branches are garbage. If the main checkout is busy it pushes \
+and drops the worktree, and the lead merges."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "merge": {"type": "boolean", "description": "Try to merge into the default branch (default true). False = push and drop the worktree, leave the remote for the lead."},
+                    "project": {"type": "string", "description": "Project name. Defaults to the one currently open."}
+                }
+            }),
+        },
+        crate::ai::provider::ToolDef {
             name: "repo_save".into(),
-            description: "Commit everything outstanding and push it, on the branch the tree is already on. Call this whenever you are about to stop, hand over, or wait for something — never leave work uncommitted. It does not choose a branch or open a pull request: the branch you are on is the one the user set up, and moving the work elsewhere is how it ends up somewhere nobody looks."
+            description: "Commit everything outstanding and push it, on the branch the tree is already on. Call this whenever you are about to stop, hand over, or wait for something — never leave work uncommitted. It does not choose a branch or open a pull request: the branch you are on is the one isolation already picked (or the user set up)."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -287,13 +528,16 @@ pub fn definitions() -> Vec<crate::ai::provider::ToolDef> {
 }
 
 pub fn is_repo_tool(name: &str) -> bool {
-    matches!(name, "repo_status" | "repo_save")
+    matches!(
+        name,
+        "repo_status" | "repo_save" | "repo_start" | "repo_sync" | "repo_finish"
+    )
 }
 
-/// Reading the state changes nothing; committing and pushing is a write that leaves the
-/// machine, so plan mode withholds it.
+/// Reading the state changes nothing; committing, branching and merging leave the
+/// machine, so plan mode withholds them.
 pub fn tool_is_mutating(name: &str) -> bool {
-    name == "repo_save"
+    matches!(name, "repo_save" | "repo_start" | "repo_sync" | "repo_finish")
 }
 
 /// The project a call is about: named, or the one open.
@@ -342,6 +586,30 @@ pub async fn dispatch(
                      before you stop.\n",
                 );
             }
+            if is_protected(&status.branch) {
+                out.push_str(
+                    "You are on the default/protected branch. Named agents must repo_start \
+                     a worktree before editing, or they will checkout this tree out from \
+                     under each other.\n",
+                );
+            }
+            let team = team_of(&ctx.db, &ctx.sessions, &ws_id).await;
+            if !team.default_branch.is_empty() {
+                out.push_str(&format!("Default branch: {}\n", team.default_branch));
+            }
+            if !team.wip.is_empty() || team.worktrees.len() > 1 {
+                out.push_str("\nTeam in flight (do not rewrite these files; agent_send and join):\n");
+                for (path, branch) in team.worktrees.iter().take(12) {
+                    let who = wip_owner(branch).unwrap_or("shared");
+                    out.push_str(&format!("- {branch} @ {path} ({who})\n"));
+                }
+                for b in team.wip.iter().take(12) {
+                    if !team.worktrees.iter().any(|(_, br)| br == b) {
+                        let who = wip_owner(b).unwrap_or("?");
+                        out.push_str(&format!("- {b} (no worktree, owner {who})\n"));
+                    }
+                }
+            }
             let prs = pull_requests(&ctx.db, &ctx.sessions, &ws_id).await;
             let (stale, fresh): (Vec<_>, Vec<_>) = prs.iter().partition(|p| p.is_stale());
             out.push_str(&format!("\nOpen pull requests: {}\n", prs.len()));
@@ -361,6 +629,114 @@ pub async fn dispatch(
                 );
             }
             out
+        }
+        "repo_start" => {
+            let Some(persona) = crate::ai::persona_tools::current_persona(ctx) else {
+                return "You are the user's session — stay on the branch the tree is already \
+                        on. repo_start is for named agents working in parallel."
+                    .into();
+            };
+            let loc = match location(&ctx.db, &ws_id) {
+                Some(l) => l,
+                None => return format!("error: {ws_name} has no location set"),
+            };
+            let root = loc.path.as_deref().unwrap_or("");
+            let team = team_of(&ctx.db, &ctx.sessions, &ws_id).await;
+            let default = if team.default_branch.is_empty() {
+                "master".into()
+            } else {
+                team.default_branch.clone()
+            };
+            let task = args
+                .get("task")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    ctx.goal_id
+                        .as_deref()
+                        .and_then(|id| ctx.db.get_goal(id).ok().flatten())
+                        .map(|g| g.title)
+                })
+                .unwrap_or_else(|| "task".into());
+            let branch = wip_branch(&persona.name, &task);
+            if is_protected(&branch) {
+                return format!("error: {branch} is a protected name — pick a task slug");
+            }
+            let wt = format!(
+                "{}/.worktrees/{}-{}",
+                root.trim_end_matches('/'),
+                slug_part(&persona.name, 16),
+                slug_part(&task, 32)
+            );
+            match run_there(&ctx.sessions, &loc, start_command(root, &branch, &wt, &default)).await {
+                Ok(out) => format!(
+                    "{ws_name}: isolated on {branch}\n{}\nWork only inside that path. \
+                     agent_send the team the branch and the files you will touch. \
+                     repo_finish when the task is done so this is deleted.",
+                    out.trim()
+                ),
+                Err(e) => format!("error: could not isolate {ws_name}: {e}"),
+            }
+        }
+        "repo_sync" => {
+            let loc = match location(&ctx.db, &ws_id) {
+                Some(l) => l,
+                None => return format!("error: {ws_name} has no location set"),
+            };
+            let team = team_of(&ctx.db, &ctx.sessions, &ws_id).await;
+            let default = if team.default_branch.is_empty() {
+                "master".into()
+            } else {
+                team.default_branch
+            };
+            let root = loc.path.as_deref().unwrap_or("");
+            match run_there(&ctx.sessions, &loc, sync_command(root, &default)).await {
+                Ok(out) => format!("{ws_name}: {}", out.trim()),
+                Err(e) => format!("error: could not sync {ws_name}: {e}"),
+            }
+        }
+        "repo_finish" => {
+            let loc = match location(&ctx.db, &ws_id) {
+                Some(l) => l,
+                None => return format!("error: {ws_name} has no location set"),
+            };
+            let status = match status_of(&ctx.db, &ctx.sessions, &ws_id).await {
+                Ok(s) => s,
+                Err(e) => return format!("error reading {ws_name}: {e}"),
+            };
+            if is_protected(&status.branch) {
+                return format!(
+                    "error: on protected branch {} — nothing to finish. Isolation is \
+                     wip/<you>/<task>, not this.",
+                    status.branch
+                );
+            }
+            let team = team_of(&ctx.db, &ctx.sessions, &ws_id).await;
+            let default = if team.default_branch.is_empty() {
+                "master".into()
+            } else {
+                team.default_branch
+            };
+            let root = loc.path.as_deref().unwrap_or("");
+            let wt = team
+                .worktrees
+                .iter()
+                .find(|(_, b)| b == &status.branch)
+                .map(|(p, _)| p.clone())
+                .unwrap_or_else(|| root.to_string());
+            let merge = args.get("merge").and_then(|v| v.as_bool()).unwrap_or(true);
+            match run_there(
+                &ctx.sessions,
+                &loc,
+                finish_command(root, &wt, &status.branch, &default, merge),
+            )
+            .await
+            {
+                Ok(out) => format!("{ws_name}: {}", out.trim()),
+                Err(e) => format!("error: could not finish {ws_name}: {e}"),
+            }
         }
         "repo_save" => {
             let message = args.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
@@ -426,6 +802,21 @@ pub async fn status_of(
     Ok(parse_status(&out))
 }
 
+async fn team_of(
+    db: &crate::storage::Db,
+    sessions: &crate::ssh::SessionManager,
+    workspace_id: &str,
+) -> TeamRepo {
+    let Some(loc) = location(db, workspace_id) else {
+        return TeamRepo::default();
+    };
+    let cmd = team_command(loc.path.as_deref().unwrap_or(""));
+    match run_there(sessions, &loc, cmd).await {
+        Ok(out) => parse_team(&out),
+        Err(_) => TeamRepo::default(),
+    }
+}
+
 /// Open pull requests, when a host CLI is installed where the project lives.
 pub async fn pull_requests(
     db: &crate::storage::Db,
@@ -483,6 +874,40 @@ mod tests {
 
     fn utc(s: &str) -> chrono::DateTime<chrono::Utc> {
         chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn every_declared_tool_is_recognised() {
+        for def in definitions() {
+            assert!(is_repo_tool(&def.name), "{}", def.name);
+        }
+        assert!(tool_is_mutating("repo_start"));
+        assert!(!tool_is_mutating("repo_status"));
+    }
+
+    #[test]
+    fn wip_branches_are_namespaced_and_safe() {
+        assert_eq!(wip_branch("Razvan", "Fake server detection"), "wip/razvan/fake-server-detection");
+        assert_eq!(slug_part("!!!", 8), "agent");
+        assert!(is_protected("main"));
+        assert!(is_protected("origin/master"));
+        assert!(!is_protected("wip/ada/design"));
+        assert_eq!(wip_owner("wip/ada/design"), Some("ada"));
+        assert_eq!(wip_owner("master"), None);
+    }
+
+    #[test]
+    fn team_listing_names_who_is_on_what() {
+        let t = parse_team(
+            "default: master\n\
+             worktree /root/pgt master\n\
+             worktree /root/pgt/.worktrees/razvan-detect wip/razvan/detect\n\
+             wip wip/razvan/detect\n\
+             wip wip/ada/design\n",
+        );
+        assert_eq!(t.default_branch, "master");
+        assert_eq!(t.worktrees.len(), 2);
+        assert!(t.wip.iter().any(|b| b == "wip/ada/design"));
     }
 
     #[test]

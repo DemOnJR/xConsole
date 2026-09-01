@@ -185,6 +185,7 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
             let all = ctx.db.list_personas().unwrap_or_default();
             let mut block = crate::ai::persona::prompt_block(p);
             block.push_str(&crate::ai::persona::hierarchy_block(&all, p));
+            block.push_str(&crate::ai::persona::gitops_block(p));
             if let Ok(unread) =
                 ctx.db.unread_agent_messages(Some(&p.id))
             {
@@ -232,6 +233,7 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
          - Do NOT call goal_schedule_wait unless the user specified a delay/timeout.\n\
          - If nothing is waiting, keep going: next check, next card.\n\
          - goal_check_criteria(met) is refused unless the board, the edit journal or a command transcript records what you did. A paragraph is not evidence.\n\
+         - Editing a git repo: repo_status first, then repo_start, then work only in that worktree. agent_send the team the branch and the files. repo_finish when the card is done so the branch does not rot.\n\
          This cycle: pick the next unfinished card (or add one), execute it with tools, update the board, then goal_check_criteria (verdict not_yet unless truly done).",
         persona_block = persona_block,
         epoch_hash = epoch_hash,

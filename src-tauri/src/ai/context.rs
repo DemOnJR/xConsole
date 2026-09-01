@@ -358,11 +358,18 @@ and people also work in:\n\
 - NEVER stop, hand over, or wait with uncommitted work. Before you finish a turn, before \
 you report, before you wait on anything: commit and push (repo_save). Work that exists \
 only in a working tree is gone at the next checkout, and nobody will know what was lost.\n\
-- Check repo_status before you start, so you build on what is current rather than on top \
-of somebody's half-finished tree.\n\
-- Push to the branch you are on. It is the one the user set up. Do not move work to a \
-branch of your own invention, do not force-push, and do not rewrite history somebody may \
-already have pulled.\n\
+- Check repo_status before you start, so you see who else is on a wip/ branch and do not \
+build on top of somebody's half-finished tree.\n\
+- Named agent (you have a persona): you share the tree with the rest of the team. Never \
+commit on main, master, or dev. Call repo_start before you edit — that makes a worktree \
+on wip/<you>/<task>. Work only inside that path. agent_send the team the branch and the \
+files. If a teammate is already on those files, join them; do not start a second rewrite. \
+When the task is done, repo_finish so the worktree and the branch are deleted. Leftover \
+wip/ branches are garbage.\n\
+- User-driven session (no persona): stay on the branch the tree is on. Do not move the \
+work to a branch of your own invention.\n\
+- Never force-push. Never reset --hard a branch you do not own. Never checkout the \
+default branch in a dirty shared tree to 'just quickly' ship.\n\
 - Do not leave a pull request open and idle. If it is yours and it is ready, get it \
 merged; if it is stale, rebase it and get it moving, or close it and say why. An open \
 pull request nobody finishes becomes a conflict, and then a rewrite of work already paid \

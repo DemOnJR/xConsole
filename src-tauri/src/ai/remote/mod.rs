@@ -1258,6 +1258,7 @@ async fn run_remote_turn(
             let all = db.list_personas().unwrap_or_default();
             let mut block = crate::ai::persona::prompt_block(p);
             block.push_str(&crate::ai::persona::hierarchy_block(&all, p));
+            block.push_str(&crate::ai::persona::gitops_block(p));
             block.push_str(
                 "\n\nYou are answering the user directly over chat. Do not hand this \
                  conversation to another agent just to have it answered — delegate only \

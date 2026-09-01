@@ -210,6 +210,11 @@ pub fn ensure_bundled(home: &AgentHome) {
             "terraform-tfc",
             include_str!("../../bundled-skills/infra/terraform-tfc/SKILL.md"),
         ),
+        (
+            "gitops",
+            "team-branches",
+            include_str!("../../bundled-skills/gitops/team-branches/SKILL.md"),
+        ),
     ];
     for (cat, name, body) in SKILLS {
         // Only seed when missing: the agent is invited to edit bundled skills,

@@ -553,6 +553,10 @@ pub fn start_persona_task(
             "Do not claim done without tool output, a file change, or a kanban note \
              that cites what you actually ran."
                 .into(),
+            "Do not edit the shared default branch. repo_start a wip/<you>/<task> \
+             worktree first; tell the team the branch and files; repo_finish when \
+             done so the branch is deleted."
+                .into(),
         ],
         max_cycles,
         vps_targets: targets,
@@ -605,7 +609,9 @@ pub fn duty_task(persona: &Persona) -> String {
             kubectl, docker).\n\
          5. One verified result this run, then agent_report and stop. If you checked \
             and nothing needs doing, say so with the commands you ran and stop.\n\
-         Do not pad the cycle with plans. Do not invent status.",
+         Do not pad the cycle with plans. Do not invent status.\n\
+         Do not trample a teammate: repo_status first, join their wip/ if they already \
+         cover the files, otherwise repo_start your own worktree.",
         persona.name
     )
 }
@@ -884,7 +890,7 @@ fn agent_check(ctx: &ToolContext, args: &Value) -> String {
 /// A tool call has no idea who is running it; the goal session does. Without this,
 /// `agent_report` could not tell who is reporting to whom, and the main chat agent
 /// (which has no persona) would appear to be a nameless employee of someone.
-fn current_persona(ctx: &ToolContext) -> Option<crate::storage::models::Persona> {
+pub(crate) fn current_persona(ctx: &ToolContext) -> Option<crate::storage::models::Persona> {
     // Set directly when the turn *is* an agent without being a goal — a message
     // arriving over remote chat, answered by the agent the user put in charge.
     if let Some(id) = ctx.persona_id.as_deref().filter(|s| !s.is_empty()) {
@@ -1234,8 +1240,8 @@ pub fn role_defaults(role: &str) -> (&'static str, &'static str, Option<&'static
             "You lead this project. Route work to your team rather than doing it all \
              yourself, keep an eye on the project's numbers, and report upward: what \
              changed, what you decided, what you need. Nothing your team does may end \
-             with uncommitted work or a pull request left to rot — check repo_status. Be \
-             brief: it is often read on a phone.",
+             with uncommitted work, a leftover wip/ branch, or a pull request left to \
+             rot — check repo_status. Be brief: it is often read on a phone.",
             None,
         ),
         "engineer" | "dev" | "developer" => (
@@ -1519,7 +1525,9 @@ fn review_prompt(project: &str, focus: Option<&str>) -> String {
          A report is a claim, and an unchecked one gets built on.\n\
          - A stale pull request is not a small thing: left open, the code around it moves \
          until merging it is a rewrite of work already paid for. Get it rebased and \
-         merged, or closed with a reason. Never leave it.\n\n\
+         merged, or closed with a reason. Never leave it.\n\
+         - Leftover wip/<agent>/<task> branches and worktrees are garbage. repo_status, \
+         then repo_finish (or delete) anything whose task is done.\n\n\
          Finish with agent_report so it reaches the user: what changed, what you decided, \
          and what you need from them. Keep it short — it is read on a phone."
     );
