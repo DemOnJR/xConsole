@@ -1,8 +1,8 @@
 {
   "id": "xconsole-plugin-teams",
   "name": "Teams",
-  "version": "1.0.0",
-  "description": "Watch each named agent: live status (thinking, working, verifying), what they are on, and the conversation they have with each other per team.",
+  "version": "1.1.0",
+  "description": "Slack-style channels per project and reporting team, direct messages, and a live view of what each named agent is doing.",
   "author": "xConsole Team",
   "repository": "https://github.com/DemOnJR/xconsole-plugin-teams",
   "icon": "UsersIcon",

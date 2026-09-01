@@ -1,13 +1,13 @@
 # xConsole Plugin: Teams
 
-Live view of named agents in xConsole: what each one is doing, the task they are on, and the conversation they have with each other.
+Live view of named agents in xConsole: Slack-style channels per project and reporting team, who said what, and what each agent is on.
 
 ## Features
 
-- One list per project team, plus a company-wide group
+- Channels: `#company`, one `#project` per workspace, one team channel per lead (even when agents were hired company-wide)
+- Direct messages: one thread per agent, with initials so the feed is not an anonymous list
 - Per-person live status (thinking, working, waiting, verifying) from the tool that is actually running
-- Team chat: what they say to each other, plus messages you send into the thread
-- Click a person to see their current task and recent messages
+- Click a member to open their DM
 
 Status is the same event the canvas agent uses (`agent://persona-status`). The canvas status line also shows the running tool instead of a rotating verb.
 

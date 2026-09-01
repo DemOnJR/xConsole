@@ -271,6 +271,18 @@ export function UsersIcon(props: IconProps) {
   );
 }
 
+/** Channel prefix — a Slack-style hash for project/team channels. */
+export function HashIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M10 4L8 20" />
+      <path d="M16 4L14 20" />
+      <path d="M5 9h14" />
+      <path d="M5 15h14" />
+    </svg>
+  );
+}
+
 export function BrainIcon(props: IconProps) {
   return (
     <svg {...base(props)}>
