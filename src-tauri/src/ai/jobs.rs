@@ -24,6 +24,35 @@ const JOB_DIR: &str = "/tmp/.xconsole-jobs";
 /// without pushing the rest of the conversation out of the context window.
 pub const DEFAULT_TAIL_LINES: u32 = 40;
 
+/// First pause between `job_status(wait_secs)` polls. Short enough to notice a
+/// 5-second job finishing, long enough that a 2-minute build is not 60 SSH trips.
+pub const WAIT_BACKOFF_START: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Cap on the pause between polls while waiting. A docker build does not get
+/// faster because we ask more often; 15s keeps the activity feed alive without
+/// turning one wait into a tight loop.
+pub const WAIT_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Whether a `job_status` payload means "stop waiting".
+///
+/// Finished and stopped are the outcomes the next step can act on. Unknown and
+/// error are terminal too: retrying the same wait cannot create a job that was
+/// never started, and it must not hide a broken SSH check behind more sleeping.
+pub fn status_is_terminal(text: &str) -> bool {
+    let t = text.trim();
+    t.contains("STATE=finished")
+        || t.contains("STATE=stopped")
+        || t.contains("STATE=unknown")
+        || t.starts_with("No job ")
+        || t.starts_with("error")
+}
+
+/// Double the pause, capped. Used by `job_status(wait_secs)` so a long build
+/// costs a handful of SSH round-trips instead of one per model turn.
+pub fn next_wait_backoff(prev: std::time::Duration) -> std::time::Duration {
+    prev.saturating_mul(2).min(WAIT_BACKOFF_MAX)
+}
+
 /// Job ids are generated here and interpolated into remote paths, so they must not
 /// be able to carry anything a shell or a path would interpret.
 pub fn is_valid_job_id(id: &str) -> bool {
@@ -297,6 +326,29 @@ mod tests {
         assert!(s.contains("STATE=finished"), "{s}");
         assert!(s.contains("STATE=unknown"), "{s}");
         assert!(s.contains("tail -n 10"), "{s}");
+    }
+
+    #[test]
+    fn a_finished_or_missing_job_stops_a_wait() {
+        assert!(status_is_terminal("STATE=finished\nEXIT=0"));
+        assert!(status_is_terminal("STATE=stopped"));
+        assert!(status_is_terminal("STATE=unknown"));
+        assert!(status_is_terminal(
+            "No job job-abc on this server (it may have been started somewhere else, or the temp directory was cleared). Use job_list."
+        ));
+        assert!(status_is_terminal("error checking job job-abc: ssh timeout"));
+        assert!(!status_is_terminal("STATE=running\nPID=12"));
+    }
+
+    #[test]
+    fn wait_backoff_doubles_then_caps() {
+        let a = next_wait_backoff(WAIT_BACKOFF_START);
+        assert_eq!(a, std::time::Duration::from_secs(4));
+        let b = next_wait_backoff(a);
+        assert_eq!(b, std::time::Duration::from_secs(8));
+        let c = next_wait_backoff(b);
+        assert_eq!(c, WAIT_BACKOFF_MAX);
+        assert_eq!(next_wait_backoff(WAIT_BACKOFF_MAX), WAIT_BACKOFF_MAX);
     }
 
     #[test]

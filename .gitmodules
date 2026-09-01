@@ -13,3 +13,6 @@
 [submodule "plugins/xconsole-plugin-sftp"]
 	path = plugins/xconsole-plugin-sftp
 	url = https://github.com/DemOnJR/xconsole-plugin-sftp.git
+[submodule "plugins/xconsole-plugin-teams"]
+	path = plugins/xconsole-plugin-teams
+	url = https://github.com/DemOnJR/xconsole-plugin-teams.git

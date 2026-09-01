@@ -1,0 +1,20 @@
+{
+  "id": "xconsole-plugin-teams",
+  "name": "Teams",
+  "version": "1.0.0",
+  "description": "Watch each named agent: live status (thinking, working, verifying), what they are on, and the conversation they have with each other per team.",
+  "author": "xConsole Team",
+  "repository": "https://github.com/DemOnJR/xconsole-plugin-teams",
+  "icon": "UsersIcon",
+  "category": "ai",
+  "enabled": true,
+  "isBuiltin": true,
+  "capabilities": {
+    "navItem": {
+      "id": "teams",
+      "label": "Teams",
+      "icon": "UsersIcon",
+      "order": 20
+    }
+  }
+}

@@ -171,6 +171,17 @@ export function liveGerund(item: AgentActivityItem): string {
   if (tool === "todo_write") return "Updating checklist";
   if (tool === "canvas_open_terminal") return "Opening terminal";
   if (tool === "canvas_refresh") return "Reconnecting terminal";
+  if (tool === "job_status") {
+    if (/wait/i.test(item.label)) return truncate(item.label.replace(/^Wait /, "Waiting "), 72);
+    return truncate(item.label.replace(/^Check /, "Checking "), 72);
+  }
+  if (tool === "web_search") return `Searching the web ${truncate(item.detail || item.label, 40)}`;
+  if (tool === "web_fetch") return `Fetching ${truncate(item.detail || item.label, 48)}`;
+  if (tool === "present_plan") return "Presenting a plan";
+  if (tool === "agent_delegate") return `Delegating ${truncate(item.detail || item.label, 40)}`;
+  if (tool === "explore" || tool === "find_files") {
+    return `Finding ${truncate(item.detail || item.label.replace(/^Find\s+/i, ""), 48)}`;
+  }
   if (isCommandItem(item)) {
     const host = hostFromCommandLabel(label);
     const cmd = commandTitle(item);
@@ -501,48 +512,30 @@ function ActivityItemRow({
   );
 }
 
-/** Dynamic thinking verbs. Text opacity only — no blur, canvas, or GPU filters. */
-const THINKING_VERBS = [
-  "Analyzing",
-  "Architecting",
-  "Brainstorming",
-  "Checking",
-  "Comparing",
-  "Compiling",
-  "Connecting",
-  "Evaluating",
-  "Examining",
-  "Exploring",
-  "Formulating",
-  "Generating",
-  "Inspecting",
-  "Investigating",
-  "Mapping",
-  "Optimizing",
-  "Parsing",
-  "Planning",
-  "Processing",
-  "Reasoning",
-  "Reflecting",
-  "Scanning",
-  "Searching",
-  "Synthesizing",
-  "Thinking",
-  "Validating",
-  "Verifying",
-];
+/**
+ * The sentence shown while a turn is live. Driven by the running tool, not a
+ * rotating list of verbs — Claude Code's status line is the model: "Reading
+ * foo.rs", "Running deploy.sh", "Thinking" when nothing is in flight.
+ */
+export function liveStatusFromActivity(items: AgentActivityItem[]): string {
+  const visible = visibleActivityItems(items);
+  const running = visible.filter((i) => i.state === "running");
+  if (running.length > 1) return `Running ${running.length} tools`;
+  if (running.length === 1) return liveGerund(running[0]);
+  return "Thinking";
+}
 
 export function AgentThinking() {
-  const [i, setI] = useState(() => Math.floor(Math.random() * THINKING_VERBS.length));
+  const activity = useAgentStore((s) => s.activity);
   const turnStartTime = useAgentStore((s) => s.turnStartTime);
   const [elapsedSecs, setElapsedSecs] = useState(0);
 
-  useEffect(() => {
-    const t = window.setInterval(() => {
-      setI((n) => (n + 1) % THINKING_VERBS.length);
-    }, 2400);
-    return () => window.clearInterval(t);
-  }, []);
+  const visible = useMemo(() => visibleActivityItems(activity), [activity]);
+  const running = useMemo(
+    () => visible.filter((i) => i.state === "running"),
+    [visible],
+  );
+  const status = useMemo(() => liveStatusFromActivity(activity), [activity]);
 
   useEffect(() => {
     const updateElapsed = () => {
@@ -568,13 +561,13 @@ export function AgentThinking() {
   };
 
   return (
-    <div className="flex items-center gap-2 px-1 py-1 font-mono text-[11px]">
-      <HashSpinner kind="think" />
-      <span className="xc-think-verb text-[11px] text-[var(--text-faint)]">
-        {THINKING_VERBS[i]}…
+    <div className="flex min-w-0 items-center gap-2 px-1 py-1 font-mono text-[11px]">
+      {running[0] ? <HashSpinner item={running[0]} /> : <HashSpinner kind="think" />}
+      <span className="xc-think-verb min-w-0 truncate text-[11px] text-[var(--text-faint)]">
+        {status}…
       </span>
       {turnStartTime && (
-        <span className="flex items-center gap-1 rounded bg-cyan-950/60 px-1.5 py-0.5 text-[10px] text-cyan-300 font-mono border border-cyan-500/20">
+        <span className="flex shrink-0 items-center gap-1 rounded bg-cyan-950/60 px-1.5 py-0.5 text-[10px] text-cyan-300 font-mono border border-cyan-500/20">
           <span className="relative flex h-1.5 w-1.5">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-400 opacity-75"></span>
             <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-cyan-500"></span>

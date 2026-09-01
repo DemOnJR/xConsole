@@ -102,6 +102,11 @@ pub async fn run_turn(
         }
     };
     emit_ws(if tc.plan_mode { "planning" } else { "working" });
+    tools::emit_live_status(
+        tc,
+        if tc.plan_mode { "planning" } else { "thinking" },
+        if tc.plan_mode { "Planning" } else { "Thinking" },
+    );
 
     let preferred_id = registry::active_provider_id(&tc.db, choice.provider_id.as_deref())?;
     let (resolved, fallback_note) =
@@ -163,6 +168,7 @@ pub async fn run_turn(
                 .unwrap_or_else(|| "blocked by a UserPromptSubmit hook".to_string());
             emit(Some(sink), StreamEvent::Error(reason.clone()));
             emit_ws("idle");
+            tools::emit_live_status(tc, "idle", "");
             return Err(reason);
         }
         hook_user_context = decision.additional_context;
@@ -894,6 +900,7 @@ pub async fn run_turn(
                 tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
                 emit(Some(sink), StreamEvent::Error(e.clone()));
                 emit_ws("idle");
+                tools::emit_live_status(tc, "idle", "");
                 return Err(e);
             }
         };
@@ -1074,6 +1081,11 @@ pub async fn run_turn(
             break;
         }
         emit_ws(if testing { "testing" } else { "working" });
+        tools::emit_live_status(
+            tc,
+            if testing { "verifying" } else { "working" },
+            if testing { "Verifying" } else { "Working" },
+        );
         // Pre-execution tool call auto-repair (Rick-style resilience against malformed calls,
         // markdown file link syntax, string-quoted numbers, and single-item arrays).
         let mut repaired_calls = resp.tool_calls.clone();
@@ -1293,6 +1305,7 @@ pub async fn run_turn(
     );
     emit(Some(sink), StreamEvent::Done);
     emit_ws("idle");
+    tools::emit_live_status(tc, "idle", "");
 
     if last.content.trim().is_empty() && !last.tool_calls.is_empty() {
         // Tool loop will continue on the next iteration; no placeholder needed.

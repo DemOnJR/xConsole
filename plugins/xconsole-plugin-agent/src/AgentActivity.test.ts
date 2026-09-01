@@ -1,5 +1,11 @@
 ﻿import { describe, expect, it } from "vitest";
-import { activitySummary, isCommandItem, liveGerund, visibleActivityItems } from "./AgentActivity";
+import {
+  activitySummary,
+  isCommandItem,
+  liveGerund,
+  liveStatusFromActivity,
+  visibleActivityItems,
+} from "./AgentActivity";
 import type { AgentActivityItem } from "../../../src/stores/agentStore";
 
 const item = (partial: Partial<AgentActivityItem> & Pick<AgentActivityItem, "id" | "kind" | "label">): AgentActivityItem => ({
@@ -56,6 +62,39 @@ describe("liveGerund", () => {
     expect(
       liveGerund(item({ id: "w", kind: "file_edit", label: "cowrie.service", path: "/etc/systemd/system/cowrie.service" })),
     ).toMatch(/^Writing /);
+  });
+});
+
+describe("liveStatusFromActivity", () => {
+  it("names the running tool instead of a rotating verb", () => {
+    expect(
+      liveStatusFromActivity([
+        item({
+          id: "r",
+          kind: "tool",
+          label: "Read file · /etc/hosts",
+          tool: "read_file",
+          state: "running",
+        }),
+      ]),
+    ).toMatch(/^Reading /);
+  });
+
+  it("says Thinking when the model has no tool in flight", () => {
+    expect(
+      liveStatusFromActivity([
+        item({ id: "r", kind: "tool", label: "Read /etc/hosts", tool: "read_file", state: "done" }),
+      ]),
+    ).toBe("Thinking");
+  });
+
+  it("counts parallel running tools", () => {
+    expect(
+      liveStatusFromActivity([
+        item({ id: "a", kind: "tool", label: "Read a", tool: "read_file", state: "running" }),
+        item({ id: "b", kind: "tool", label: "Read b", tool: "read_file", state: "running" }),
+      ]),
+    ).toBe("Running 2 tools");
   });
 });
 

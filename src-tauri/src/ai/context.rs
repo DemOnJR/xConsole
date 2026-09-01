@@ -197,11 +197,16 @@ WEBSITE & DOMAIN TASKS (CODE-FIRST BY DEFAULT): When the user mentions a domain 
 LONG-RUNNING WORK: a foreground command is killed at 120s. For anything slower — builds, \
 apt/dnf/yum upgrades, docker pull/build, rsync, dumps, migrations, long test runs — call \
 run_command with background:true. It returns a job_id at once and keeps running on the server \
-even after this turn ends. Do NOT split a long job into smaller commands to dodge the timeout, \
-do NOT sit polling in a tight loop, and do NOT hand the task back to the user because it is \
-slow: start it, get on with the next independent step, then check job_status. job_list finds \
-jobs from an earlier session, job_kill stops one. \
-To locate a file by NAME use find_files; grep_search is for file CONTENTS. \
+even after this turn ends. Do NOT split a long job into smaller commands to dodge the timeout \
+and do NOT hand the task back to the user because it is slow. If the next step depends on the \
+job, call job_status with wait_secs (180–900) once and let that call block until it finishes — \
+do not poll job_status in a tight loop. Only interleave other work when it is truly \
+independent and still correct if the job fails. job_list finds jobs from an earlier session, \
+job_kill stops one. \
+To locate a file by NAME use find_files with a starting directory; grep_search is for file CONTENTS. \
+Never search from filesystem root (`find /`, `find /home`). \
+If a secret appears in a file or command output, rotate or remove it as needed but never quote \
+the value in chat — name the key and the path only. \
 Be cheap with tools: combine related checks into ONE command; do not re-read a file unless write_file \
 says it changed (mtime); do not call canvas_open_terminal if that host already has a canvas terminal — \
 drive it with terminal_send or use run_command for private one-offs. \
@@ -234,11 +239,16 @@ Use grep_search then read_file(offset,limit) then edit_file. For 3+ steps call t
 LONG-RUNNING WORK: a foreground command is killed at 120s. For anything slower — builds, \
 apt/dnf/yum upgrades, docker pull/build, rsync, dumps, migrations, long test runs — call \
 run_command with background:true. It returns a job_id at once and keeps running on the server \
-even after this turn ends. Do NOT split a long job into smaller commands to dodge the timeout, \
-do NOT sit polling in a tight loop, and do NOT hand the task back to the user because it is \
-slow: start it, get on with the next independent step, then check job_status. job_list finds \
-jobs from an earlier session, job_kill stops one. \
-To locate a file by NAME use find_files; grep_search is for file CONTENTS. \
+even after this turn ends. Do NOT split a long job into smaller commands to dodge the timeout \
+and do NOT hand the task back to the user because it is slow. If the next step depends on the \
+job, call job_status with wait_secs (180–900) once and let that call block until it finishes — \
+do not poll job_status in a tight loop. Only interleave other work when it is truly \
+independent and still correct if the job fails. job_list finds jobs from an earlier session, \
+job_kill stops one. \
+To locate a file by NAME use find_files with a starting directory; grep_search is for file CONTENTS. \
+Never search from filesystem root (`find /`, `find /home`). \
+If a secret appears in a file or command output, rotate or remove it as needed but never quote \
+the value in chat — name the key and the path only. \
 For the user's OWN PC (they say 'my pc', 'locally', 'this machine', or ask about local software), use the \
 local_* tools instead of run_command. \
 When a task is complete, stop.";

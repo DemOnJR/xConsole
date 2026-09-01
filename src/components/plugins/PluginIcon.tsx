@@ -1,6 +1,7 @@
 import {
   ChartIcon,
   BotIcon,
+  UsersIcon,
   FolderIcon,
   DatabaseIcon,
   CloudIcon,
@@ -55,6 +56,17 @@ export function PluginIcon({
     normIcon === "robot"
   ) {
     return <BotIcon size={size} className={className} />;
+  }
+
+  if (
+    normIcon === "usersicon" ||
+    normIcon === "users" ||
+    normIcon === "team" ||
+    normIcon === "teams" ||
+    normIcon === "people" ||
+    normIcon === "org"
+  ) {
+    return <UsersIcon size={size} className={className} />;
   }
 
   if (

@@ -18,6 +18,8 @@ const MARKERS: &[&str] = &[
     "password:",
     "passwd=",
     "passwd:",
+    "pass=",
+    "pass:",
     "token=",
     "token:",
     "api_key=",
@@ -26,6 +28,8 @@ const MARKERS: &[&str] = &[
     "apikey:",
     "secret=",
     "secret:",
+    "auth=",
+    "auth:",
     "access_token=",
     "client_secret=",
     "connection_string=",
@@ -245,6 +249,16 @@ mod tests {
         assert!(!output.contains("admin:secret"));
         assert!(!output.contains("PRIVATE KEY"));
         assert!(output.contains("PASSWORD=[REDACTED]"));
+    }
+
+    #[test]
+    fn redacts_yaml_auth_assignments() {
+        // docker-compose `REDIS_AUTH: <live password>` was served from a public
+        // URL and then quoted in the agent chat. The value must not survive.
+        let out = redact_text("REDIS_AUTH: fixture-redis-pass\nSMTP_PASS=fixture-smtp");
+        assert!(!out.contains("fixture-redis-pass"), "{out}");
+        assert!(!out.contains("fixture-smtp"), "{out}");
+        assert!(out.contains("[REDACTED]"), "{out}");
     }
 
     #[test]

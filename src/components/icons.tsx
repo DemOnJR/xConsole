@@ -259,6 +259,18 @@ export function BotIcon(props: IconProps) {
   );
 }
 
+/** Two people — teams / org chart. */
+export function UsersIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <circle cx="9" cy="8" r="2.8" />
+      <path d="M4.2 18v-.2c0-2.5 2.1-4.3 4.8-4.3s4.8 1.8 4.8 4.3" />
+      <circle cx="16.2" cy="9" r="2.3" />
+      <path d="M13.4 18c.3-1.7 1.8-3 3.7-3 1.9 0 3.4 1.3 3.7 3" />
+    </svg>
+  );
+}
+
 export function BrainIcon(props: IconProps) {
   return (
     <svg {...base(props)}>

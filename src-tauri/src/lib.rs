@@ -544,6 +544,7 @@ pub fn run() {
             commands::project::project_metrics,
             commands::persona::unread_user_messages,
             commands::persona::mark_agent_messages_read,
+            commands::persona::post_agent_message,
             commands::goal::start_goal,
             commands::goal::confirm_goal,
             commands::goal::pause_goal,

@@ -55,9 +55,10 @@ const SNAPSHOT_KEYWORDS: &[&str] = &[
     "log",
     "logs",
     "ssh",
-    "deploy",
-    "deployment",
-    "restart",
+    // Not "deploy" / "redeploy" / "restart": those are actions the agent will
+    // run. Prefetching uptime/RAM on every selected host does not make the
+    // deploy safer — it just delays it. A URL path `/deploy/foo` is also not a
+    // health question (see `strip_urls`).
     "inspect",
     "monitor",
     "listening",
@@ -365,8 +366,67 @@ pub fn should_collect_snapshot(last_user_message: &str) -> bool {
         return false;
     }
     let lower = last_user_message.trim().to_lowercase();
-    SNAPSHOT_KEYWORDS.iter().any(|kw| lower.contains(kw))
-        || (lower.contains("docker") && !lower.contains("installed") && !lower.contains("version"))
+    // URLs are stripped first: `/deploy/Dockerfile` is a path, not a request to
+    // prefetch uptime/RAM on every selected host. Short keywords (`host`, `log`,
+    // `port`) must be whole words or `hostname` / `login` / `important` fire too.
+    let haystack = strip_urls(&lower);
+    SNAPSHOT_KEYWORDS.iter().any(|kw| contains_keyword(&haystack, kw))
+        || (contains_keyword(&haystack, "docker")
+            && !haystack.contains("installed")
+            && !haystack.contains("version"))
+}
+
+/// Drop `http(s)://…` tokens so a path like `/deploy/` inside a URL cannot
+/// trigger a full VPS health snapshot.
+fn strip_urls(lower: &str) -> String {
+    let mut out = String::with_capacity(lower.len());
+    let mut rest = lower;
+    while let Some(pos) = rest.find("://") {
+        let prefix = &rest[..pos];
+        let scheme_start = prefix
+            .rfind(|c: char| !c.is_ascii_alphabetic())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        out.push_str(&prefix[..scheme_start]);
+        out.push(' ');
+        let after = &rest[pos + 3..];
+        let end = after
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | ']' | '<'))
+            .unwrap_or(after.len());
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Phrase keywords (`check the`) stay substring matches. Single tokens must sit
+/// on a word boundary so `host` does not fire on `hostname`.
+fn contains_keyword(haystack: &str, kw: &str) -> bool {
+    if kw.is_empty() {
+        return false;
+    }
+    if kw.contains(' ') {
+        return haystack.contains(kw);
+    }
+    let bytes = haystack.as_bytes();
+    let needle = kw.as_bytes();
+    let mut i = 0;
+    while i + needle.len() <= bytes.len() {
+        if &bytes[i..i + needle.len()] == needle {
+            let before_ok = i == 0 || !is_keyword_word_char(bytes[i - 1]);
+            let after = i + needle.len();
+            let after_ok = after == bytes.len() || !is_keyword_word_char(bytes[after]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_keyword_word_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// Whether this turn needs live SSH data (direct server question or follow-up approval).
@@ -799,6 +859,34 @@ mod tests {
         assert!(should_collect("what is running on my vps?"));
         assert!(should_collect("check memory on the servers"));
         assert!(should_collect("show me listening ports"));
+    }
+
+    #[test]
+    fn a_public_url_is_not_a_health_snapshot() {
+        // The "security check" session: the user pasted
+        // https://example.com/deploy/Dockerfile and xConsole SSHed to every
+        // selected host for uptime/RAM/disk before the agent even started looking
+        // at the file. `deploy` in a URL is a path, not "how is the server".
+        let url = "vezi ca avem expuse fisiere public adica exemplu \
+                   https://counter-strike-boost.com/deploy/Dockerfile poate fi accesat de oricine";
+        assert!(!should_collect_snapshot(url), "{url:?} must not prefetch host health");
+        assert!(!should_collect(url), "{url:?} must not prefetch host health");
+        assert!(!should_collect_snapshot(
+            "pull for counter-strike-boost.com then redeploy we changed two files"
+        ));
+        assert!(!should_collect_snapshot("please deploy the website"));
+        // Real host questions still prefetch.
+        assert!(should_collect("what is running on my vps?"));
+        assert!(should_collect("check memory on the servers"));
+    }
+
+    #[test]
+    fn short_keywords_need_a_word_boundary() {
+        assert!(!should_collect_snapshot("the hostname is example.com"));
+        assert!(!should_collect_snapshot("user login failed"));
+        assert!(!should_collect_snapshot("this is important"));
+        assert!(should_collect_snapshot("check the host"));
+        assert!(should_collect_snapshot("show me the logs"));
     }
 
     #[test]

@@ -61,7 +61,8 @@ import { useUiStore } from "./stores/uiStore";
 import { useThemeStore } from "./stores/themeStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { useAgentStatusStore } from "./stores/agentStatusStore";
-import { onAgentWorkspaceStatus, onFileChange, onFileChangeReverted, onVpsUpdated } from "./lib/tauri";
+import { usePersonaStatusStore } from "./stores/personaStatusStore";
+import { onAgentWorkspaceStatus, onFileChange, onFileChangeReverted, onPersonaStatus, onVpsUpdated } from "./lib/tauri";
 import { useVpsStore } from "./stores/vpsStore";
 import { useLockStore } from "./stores/lockStore";
 import { useAutoLock } from "./hooks/useAutoLock";
@@ -199,6 +200,13 @@ function UnlockedApp() {
     onAgentWorkspaceStatus((s) => setStatus(s.workspace_id, s.status)).then(
       (u) => (unlisten = u),
     );
+    return () => unlisten?.();
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    const ingest = usePersonaStatusStore.getState().ingest;
+    onPersonaStatus(ingest).then((u) => (unlisten = u));
     return () => unlisten?.();
   }, []);
 

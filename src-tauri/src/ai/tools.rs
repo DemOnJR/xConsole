@@ -22,6 +22,25 @@ use uuid::Uuid;
 /// before giving up. Generous — plans and questions can take a while to answer.
 const PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
 
+/// Broadcast the sentence the teams view and the canvas status line should show.
+///
+/// The canvas used to rotate a list of verbs ("Architecting…", "Synthesizing…")
+/// that had nothing to do with the running tool. This event carries the same
+/// label the activity feed already has, keyed by persona so a background agent
+/// can be watched without opening its transcript.
+pub fn emit_live_status(ctx: &ToolContext, status: &str, detail: &str) {
+    let _ = ctx.app.emit(
+        "agent://persona-status",
+        json!({
+            "persona_id": ctx.persona_id,
+            "session_id": ctx.session_id,
+            "workspace_id": ctx.workspace_id,
+            "status": status,
+            "detail": detail,
+        }),
+    );
+}
+
 /// Everything a tool needs to run. Holds owned clones (all cheap to clone).
 pub struct ToolContext {
     pub app: AppHandle,
@@ -83,7 +102,8 @@ npm in the home directory. Chain what belongs together in one command — `cd /s
 Commands run in the foreground time out after 120s — for anything slower (builds, apt/dnf \
 upgrades, docker pulls, rsync, migrations) pass background:true instead of splitting the work \
 up or asking the user to run it. That returns a job_id immediately and the command keeps \
-running on the server; check it later with job_status.".into(),
+running on the server; if the next step needs it, follow with job_status(wait_secs) rather \
+than polling.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -102,14 +122,16 @@ running on the server; check it later with job_status.".into(),
             name: "job_status".into(),
             description: "Check a background job started with run_command(background:true) or \
 local_run_command(background:true): whether it is still running, its exit code once finished, \
-and the tail of its output. Poll this instead of waiting — do other useful work between \
-checks.".into(),
+and the tail of its output. When the next step depends on this job, pass wait_secs (180–900) \
+so this one call blocks with backoff until the job finishes — do not poll in a tight loop. \
+Only omit wait_secs when you have truly independent work to do first.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "local": {"type": "boolean", "description": "The job is on this PC rather than a server. Set it when the job was started by local_run_command."},
                     "job_id": {"type": "string", "description": "The job_id returned when the job was started."},
                     "tail_lines": {"type": "integer", "description": "Lines of output to return (default 40, max 500)."},
+                    "wait_secs": {"type": "integer", "description": "Block up to this many seconds (max 3600) until the job finishes, polling the host with backoff. Use when the next step depends on this job. 0 (default) returns immediately."},
                     "vps_id": {"type": "string", "description": "The server the job runs on. Required when more than one VPS is selected."}
                 },
                 "required": ["job_id"]
@@ -586,7 +608,7 @@ instead.".into(),
                 "properties": {
                     "command": {"type": "string", "description": "The shell command to run on this PC."},
                     "timeout_secs": {"type": "integer", "description": "How long to wait, in seconds (default 120, max 3600). Raise it for a build or an install rather than splitting work that has to run in one go."},
-                    "background": {"type": "boolean", "description": "Run detached and return a job_id straight away. Use for anything over a few minutes — a build, an install, a large copy. The job outlives this turn and an xConsole restart; follow it with job_status(local: true)."}
+                    "background": {"type": "boolean", "description": "Run detached and return a job_id straight away. Use for anything over a few minutes — a build, an install, a large copy. The job outlives this turn and an xConsole restart; if the next step needs it, follow with job_status(job_id, local: true, wait_secs: 180)."}
                 },
                 "required": ["command"]
             }),
@@ -1171,6 +1193,14 @@ pub async fn dispatch_with_telemetry(
             detail: None,
         }),
     );
+    let phase = if call.name == "job_status" {
+        "waiting"
+    } else if call.name == "present_plan" {
+        "planning"
+    } else {
+        "working"
+    };
+    emit_live_status(ctx, phase, &label);
     emit_skill_activity(ctx, call, sink);
 
     let args = &call.arguments;
@@ -1502,10 +1532,13 @@ fn tool_activity_label(ctx: &ToolContext, call: &ToolCall) -> String {
             args.get("pattern").and_then(|v| v.as_str()).unwrap_or("files"),
             vps_label(ctx, args)
         ),
-        "job_status" => format!(
-            "Check background job {}",
-            args.get("job_id").and_then(|v| v.as_str()).unwrap_or("…")
-        ),
+        "job_status" => {
+            let id = args.get("job_id").and_then(|v| v.as_str()).unwrap_or("…");
+            match args.get("wait_secs").and_then(|v| v.as_u64()).unwrap_or(0) {
+                0 => format!("Check background job {id}"),
+                wait => format!("Wait up to {wait}s for background job {id}"),
+            }
+        }
         "job_list" => format!("List background jobs on {}", vps_label(ctx, args)),
         "job_kill" => format!(
             "Stop background job {}",
@@ -2197,8 +2230,9 @@ async fn start_background_job(ctx: &ToolContext, vps_id: &str, command: &str) ->
         "Started background job {job_id} on this server.\n\
          The command keeps running after this turn; it is not affected by the 120s \
          foreground timeout.\n\
-         Check progress with job_status(job_id: \"{job_id}\"). Do not wait idly — \
-         continue with other work and check back."
+         If the next step needs this job to finish, call \
+         job_status(job_id: \"{job_id}\", wait_secs: 180) once — do not poll in a \
+         tight loop. Only do other work in between if it is truly independent of this job."
     )
 }
 
@@ -2223,8 +2257,9 @@ async fn start_local_background_job(command: &str) -> String {
     match crate::local::run_local_command(&script).await {
         Ok(out) if out.stdout.contains("started") => format!(
             "Started background job {job_id} on this PC.\n\
-             It keeps running after this turn ends. Check it with \
-             job_status(job_id: \"{job_id}\", local: true), and stop it with job_kill."
+             It keeps running after this turn ends. If the next step needs it, call \
+             job_status(job_id: \"{job_id}\", local: true, wait_secs: 180) once — do not \
+             poll in a tight loop. Stop it with job_kill."
         ),
         Ok(out) => format!(
             "error: could not start the job. {}",
@@ -2283,10 +2318,49 @@ async fn job_status(ctx: &ToolContext, args: &Value) -> String {
         .get("tail_lines")
         .and_then(|v| v.as_u64())
         .unwrap_or(jobs::DEFAULT_TAIL_LINES as u64) as u32;
-    // Reading a log is read-only, so it does not need the approval gate the job
-    // itself already passed — asking again for every poll would defeat the point.
-    let id = job_id.clone();
-    let id2 = job_id.clone();
+    let wait_secs = args
+        .get("wait_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        .min(3600);
+
+    let mut last = job_status_once(ctx, args, &job_id, tail).await;
+    if wait_secs == 0 || jobs::status_is_terminal(&last) {
+        return last;
+    }
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+    let mut backoff = jobs::WAIT_BACKOFF_START;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        tokio::time::sleep(backoff.min(deadline.saturating_duration_since(now))).await;
+        last = job_status_once(ctx, args, &job_id, tail).await;
+        if jobs::status_is_terminal(&last) {
+            return last;
+        }
+        backoff = jobs::next_wait_backoff(backoff);
+    }
+    format!(
+        "{last}\n\n(still running after {wait_secs}s wait; call job_status again with wait_secs \
+         if you need to wait more)"
+    )
+}
+
+/// One SSH/local read of a job's pid/log/exit files.
+///
+/// Reading a log is read-only, so it does not need the approval gate the job
+/// itself already passed — asking again for every poll would defeat the point.
+async fn job_status_once(
+    ctx: &ToolContext,
+    args: &Value,
+    job_id: &str,
+    tail: u32,
+) -> String {
+    let id = job_id.to_string();
+    let id2 = job_id.to_string();
     match run_job_script(
         ctx,
         args,
@@ -2298,7 +2372,11 @@ async fn job_status(ctx: &ToolContext, args: &Value) -> String {
         Ok(out) => {
             let text = out.trim().to_string();
             if text.contains("STATE=unknown") {
-                let where_ = if job_is_local(ctx, args) { "this PC" } else { "this server" };
+                let where_ = if job_is_local(ctx, args) {
+                    "this PC"
+                } else {
+                    "this server"
+                };
                 format!("No job {job_id} on {where_} (it may have been started somewhere else, or the temp directory was cleared). Use job_list.")
             } else {
                 text
@@ -5786,6 +5864,29 @@ mod write_verification_tests {
             def.parameters["properties"].get("timeout_secs").is_some(),
             "run_command_all could not be given more than the default 120s, so the one \
              tool meant for every server was the one that could not wait for a build"
+        );
+    }
+
+    #[test]
+    fn job_status_can_wait_instead_of_polling() {
+        // A 2-minute docker build used to cost ~60 model turns of job_status, each
+        // an SSH round-trip plus a 60k-token prompt. wait_secs is the one call that
+        // replaces that loop without changing what the job actually does.
+        let defs = definitions(&crate::ai::AgentHome::new(
+            std::env::temp_dir().join("xc-job-wait-defs-test"),
+        ));
+        let def = defs
+            .iter()
+            .find(|d| d.name == "job_status")
+            .expect("job_status is declared");
+        assert!(
+            def.parameters["properties"].get("wait_secs").is_some(),
+            "job_status has no wait_secs, so the model can only poll"
+        );
+        assert!(
+            def.description.contains("wait_secs"),
+            "the model is not told that waiting exists: {}",
+            def.description
         );
     }
 

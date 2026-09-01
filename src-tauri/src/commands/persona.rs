@@ -1,8 +1,8 @@
 //! CRUD for named agents (personas), plus the list the UI shows.
 
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
-use crate::storage::models::{Persona, PersonaInput};
+use crate::storage::models::{AgentMessage, Persona, PersonaInput};
 use crate::storage::Db;
 
 #[tauri::command]
@@ -158,6 +158,48 @@ pub async fn create_team(
 #[tauri::command]
 pub async fn mark_agent_messages_read(db: State<'_, Db>, ids: Vec<String>) -> Result<(), String> {
     db.mark_agent_messages_read(&ids).map_err(|e| e.to_string())
+}
+
+/// Post a message into a team thread as the user.
+///
+/// Agents already write via `agent_send` / `agent_report`. The teams view needs the
+/// same table from the other direction: you talking to a person or to the whole
+/// team (to_id empty), so the chat is not a one-way log.
+#[tauri::command]
+pub async fn post_agent_message(
+    app: AppHandle,
+    db: State<'_, Db>,
+    body: String,
+    to_id: Option<String>,
+    workspace_id: Option<String>,
+    kind: Option<String>,
+) -> Result<AgentMessage, String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err("message is empty".into());
+    }
+    let to = to_id.filter(|s| !s.trim().is_empty());
+    let ws = workspace_id.filter(|s| !s.trim().is_empty());
+    let kind = kind
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "note".into());
+    if !matches!(kind.as_str(), "note" | "request" | "report") {
+        return Err("kind must be note, request, or report".into());
+    }
+    let msg = AgentMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        from_id: None,
+        to_id: to,
+        kind,
+        body: body.to_string(),
+        goal_id: None,
+        workspace_id: ws,
+        read_at: None,
+        created_at: Some(chrono::Utc::now().to_rfc3339()),
+    };
+    db.insert_agent_message(&msg).map_err(|e| e.to_string())?;
+    let _ = app.emit("agent://message", &msg);
+    Ok(msg)
 }
 
 #[tauri::command]

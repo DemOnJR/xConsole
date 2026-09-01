@@ -1365,6 +1365,19 @@ export const api = {
     invoke<ProjectHistory>("project_history", { workspaceId, limit: limit ?? null }),
   markAgentMessagesRead: (ids: string[]) =>
     invoke<void>("mark_agent_messages_read", { ids }),
+  /** Post into a team thread as you. `toId` empty = the whole team. */
+  postAgentMessage: (
+    body: string,
+    toId?: string | null,
+    workspaceId?: string | null,
+    kind?: string | null,
+  ) =>
+    invoke<AgentMessage>("post_agent_message", {
+      body,
+      toId: toId ?? null,
+      workspaceId: workspaceId ?? null,
+      kind: kind ?? null,
+    }),
 
   saveProvider: (input: AiProviderInput) =>
     invoke<AiProvider>("save_provider", { input }),
@@ -1857,6 +1870,21 @@ export function onAgentWorkspaceStatus(
   return listen<AgentWorkspaceStatus>("agent://workspace-status", (e) =>
     cb(e.payload),
   );
+}
+
+/** What one named agent (or the canvas agent) is doing right now. */
+export interface PersonaLiveStatus {
+  persona_id: string | null;
+  session_id: string;
+  workspace_id: string | null;
+  status: string;
+  detail: string;
+}
+
+export function onPersonaStatus(
+  cb: (s: PersonaLiveStatus) => void,
+): Promise<UnlistenFn> {
+  return listen<PersonaLiveStatus>("agent://persona-status", (e) => cb(e.payload));
 }
 
 /** Subscribe to model-download progress. */

@@ -37,6 +37,7 @@ export function normalizePluginId(pluginId: string): string {
   if (id === "database" || id === "db" || id === "xconsole-plugin-database") return "xconsole-plugin-database";
   if (id === "agent" || id === "xconsole-plugin-agent") return "xconsole-plugin-agent";
   if (id === "sftp" || id === "ftp" || id === "xconsole-plugin-sftp") return "xconsole-plugin-sftp";
+  if (id === "teams" || id === "xconsole-plugin-teams") return "xconsole-plugin-teams";
   return id;
 }
 
