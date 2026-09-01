@@ -231,6 +231,7 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
          - Never invent 'blocked' cards that just say they depend on another card — do the work.\n\
          - Do NOT call goal_schedule_wait unless the user specified a delay/timeout.\n\
          - If nothing is waiting, keep going: next check, next card.\n\
+         - goal_check_criteria(met) is refused unless the board, the edit journal or a command transcript records what you did. A paragraph is not evidence.\n\
          This cycle: pick the next unfinished card (or add one), execute it with tools, update the board, then goal_check_criteria (verdict not_yet unless truly done).",
         persona_block = persona_block,
         epoch_hash = epoch_hash,
@@ -542,6 +543,86 @@ pub async fn resume_due_goals(ctx: &GoalContext) {
     }
 }
 
+/// Restart loops that say they are running but nobody is driving them.
+///
+/// `status = active` survives a process restart; the in-memory set does not. Without
+/// this, an agent looks busy on the board, messages addressed to it sit unread, and
+/// the work it was in the middle of is frozen until a human notices. `run_loop`
+/// already no-ops when the id is in the set, so a live loop is not doubled.
+pub fn resume_orphaned_active(ctx: &GoalContext) {
+    let Ok(goals) = ctx.db.list_goals() else {
+        return;
+    };
+    for g in goals {
+        if g.status != "active" {
+            continue;
+        }
+        if ctx.running.goals.contains(&g.id) {
+            continue;
+        }
+        crate::diag(&format!(
+            "goal {}: active but no loop — restarting",
+            g.id
+        ));
+        spawn_from_app(&ctx.app, &g.id);
+    }
+}
+
+/// Hand standing work to enabled agents who have nothing assigned.
+///
+/// Assigned tasks still start immediately via agent_delegate. This is the other
+/// half of "do not sit idle": when the inbox is empty and no goal is open, the
+/// remit they were hired for is the work. Capped so a large team does not all
+/// wake on the same tick and burn the provider on overlapping "I should do
+/// something" cycles.
+pub fn tick_idle_duties(ctx: &GoalContext) {
+    let in_flight = ctx.running.goals.len();
+    let room = crate::ai::persona_tools::MAX_PERSONA_LOOPS.saturating_sub(in_flight);
+    let cap = room.min(crate::ai::persona_tools::MAX_DUTY_SPAWNS);
+    if cap == 0 {
+        return;
+    }
+    let personas = ctx.db.list_personas().unwrap_or_default();
+    let goals = ctx.db.list_goals().unwrap_or_default();
+    let mut unread = std::collections::HashSet::new();
+    for p in &personas {
+        if let Ok(m) = ctx.db.unread_agent_messages(Some(&p.id)) {
+            if !m.is_empty() {
+                unread.insert(p.id.clone());
+            }
+        }
+    }
+    let picks = crate::ai::persona_tools::idle_duty_picks(
+        &personas,
+        &goals,
+        &unread,
+        chrono::Utc::now(),
+        crate::ai::persona_tools::DUTY_COOLDOWN,
+        cap,
+    );
+    for id in picks {
+        let Some(p) = personas.iter().find(|p| p.id == id) else {
+            continue;
+        };
+        match crate::ai::persona_tools::start_persona_task(
+            &ctx.app,
+            &ctx.db,
+            p,
+            &crate::ai::persona_tools::duty_task(p),
+            vec![
+                "Did real work in your remit, verified with tool output".into(),
+                "OR confirmed with commands that nothing needs doing right now".into(),
+            ],
+            p.targets.clone(),
+            p.workspace_id.clone(),
+            None,
+        ) {
+            Ok(gid) => crate::diag(&format!("standing duty for {}: {gid}", p.name)),
+            Err(e) => crate::diag(&format!("standing duty for {}: {e}", p.name)),
+        }
+    }
+}
+
 /// Spawn the goal-resume ticker on the Tauri async runtime (same 30s cadence as
 /// cron's scheduler; resumes due "waiting" goals after an app restart too).
 /// Start a goal's loop using whatever the app already has in managed state.
@@ -568,9 +649,21 @@ pub fn spawn_from_app(app: &tauri::AppHandle, goal_id: &str) {
 
 pub fn spawn_tick(ctx: GoalContext) {
     tauri::async_runtime::spawn(async move {
+        // State is managed just after this task is spawned. A short wait so
+        // `spawn_from_app` can read GoalRunning from the app; without it an
+        // immediate resume would panic on `app.state`.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        // Restart leftover loops before the 30s cadence: an "active" goal whose
+        // process died with the previous run would otherwise sit labelled busy
+        // while nobody is driving it.
+        resume_orphaned_active(&ctx);
+        resume_due_goals(&ctx).await;
+        tick_idle_duties(&ctx);
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            resume_orphaned_active(&ctx);
             resume_due_goals(&ctx).await;
+            tick_idle_duties(&ctx);
         }
     });
 }

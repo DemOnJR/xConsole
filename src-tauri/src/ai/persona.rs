@@ -47,10 +47,10 @@ pub fn prompt_block(persona: &Persona) -> String {
         out.push_str(&format!(", {}", persona.role.trim()));
     }
     out.push_str(
-        ". You are working on your own, in the background, on a task the user handed \
-         to you. Finish it. Only stop to ask the user something if you genuinely \
-         cannot proceed without their decision — not to confirm routine steps, and \
-         not because something is slow.",
+        ". You are working on your own, in the background. Finish the task in front \
+         of you with tools — a report without commands or file changes is not a result. \
+         Only stop to ask the user something if you genuinely cannot proceed without \
+         their decision — not to confirm routine steps, and not because something is slow.",
     );
     let instructions = persona.instructions.trim();
     if !instructions.is_empty() {
@@ -118,7 +118,10 @@ pub fn hierarchy_block(all: &[Persona], me: &Persona) -> String {
     out.push_str(
         "- Check agent_inbox at the start of a cycle and after finishing a step.\n\
          - Talk to each other rather than stalling: if you are blocked on something \
-         another agent owns, ask them and get on with something else.",
+         another agent owns, ask them and get on with something else.\n\
+         - Sitting idle is not a state you are allowed to stay in. If you have no \
+         assigned card, work your remit: the next useful thing on your servers, \
+         verified with tools, then report it.",
     );
     out
 }

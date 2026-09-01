@@ -199,6 +199,11 @@ pub async fn post_agent_message(
     };
     db.insert_agent_message(&msg).map_err(|e| e.to_string())?;
     let _ = app.emit("agent://message", &msg);
+    // Same as agent_send: a request sitting unread in an idle inbox is not a
+    // request. Wake the named recipient so they actually run.
+    if let Some(to) = msg.to_id.as_deref() {
+        crate::ai::persona_tools::wake_persona(&app, &db, to);
+    }
     Ok(msg)
 }
 

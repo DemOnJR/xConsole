@@ -226,7 +226,8 @@ pub fn run() {
                 running: cron_running.clone(),
             });
 
-            // Goal-resume ticker: wakes "waiting" /goal sessions when due.
+            // Goal ticker: restarts orphaned "active" loops, wakes waiting sessions
+            // when due, and hands standing work to idle personas so they do not sit.
             ai::goal::spawn_tick(ai::goal::GoalContext {
                 app: app.handle().clone(),
                 db: db.clone(),

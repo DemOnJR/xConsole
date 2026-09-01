@@ -9,12 +9,34 @@
 //! inherits the loop that already exists: plan → act → verify, a live kanban, cycle
 //! limits, pause/stop, and a notification when it finishes.
 
+use std::collections::{HashMap, HashSet};
+
+use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Value};
-use tauri::Emitter;
+use tauri::{AppHandle, Emitter};
 
 use crate::ai::provider::ToolDef;
 use crate::ai::tools::ToolContext;
-use crate::storage::models::{GoalSession, GoalSpec};
+use crate::storage::models::{GoalSession, GoalSpec, Persona};
+use crate::storage::Db;
+
+/// Marker in a standing-duty objective so the ticker can tell assigned work from
+/// "you were idle, go do your job".
+pub const DUTY_MARK: &str = "[standing-duty]";
+
+/// How long after a run we leave someone alone before handing them the next
+/// unsolicited piece of their own remit. Unread mail bypasses this — a message
+/// is work, not a suggestion.
+pub const DUTY_COOLDOWN: Duration = Duration::minutes(20);
+
+/// Cap on new standing-duty loops started in one tick. Assigned tasks still start
+/// immediately; this only stops an idle office of fifteen from all waking at once
+/// and burning the provider on overlapping "I should do something" cycles.
+pub const MAX_DUTY_SPAWNS: usize = 3;
+
+/// Cap on persona loops in flight (assigned + duty). New standing work waits;
+/// a task the user or a lead actually handed over does not.
+pub const MAX_PERSONA_LOOPS: usize = 6;
 
 // A delegated task has no cycle ceiling by default.
 //
@@ -471,45 +493,19 @@ fn agent_delegate(ctx: &ToolContext, args: &Value) -> String {
         .and_then(|v| v.as_i64())
         .filter(|n| *n > 0);
 
-    let spec = GoalSpec {
-        objective: task.to_string(),
+    let id = match start_persona_task(
+        &ctx.app,
+        &ctx.db,
+        &persona,
+        task,
         success_criteria,
-        check_method: "Verify with tools against the servers before claiming done.".into(),
-        check_tooling: vec![],
-        hard_constraints: vec![],
+        targets.clone(),
+        project.clone(),
         max_cycles,
-        vps_targets: targets.clone(),
+    ) {
+        Ok(id) => id,
+        Err(e) => return format!("error creating delegated task: {e}"),
     };
-    let id = uuid::Uuid::new_v4().to_string();
-    let goal = GoalSession {
-        id: id.clone(),
-        title: title_for(&persona.name, task),
-        raw_request: task.to_string(),
-        spec_json: serde_json::to_string(&spec).unwrap_or_else(|_| "{}".into()),
-        // Straight to active: the user already approved by asking for the work, and a
-        // delegated task that sat in "intake" waiting for a second confirmation would
-        // reintroduce exactly the interruption delegation exists to remove.
-        status: "active".into(),
-        kanban_json: "[]".into(),
-        memory_json: "{}".into(),
-        next_check_at: None,
-        cycles: 0,
-        created_at: None,
-        updated_at: None,
-        finished_at: None,
-        persona_id: Some(persona.id.clone()),
-        // The project the work is about — the one named, or the one open. It is the
-        // only way the delegated agent can know which codebase the objective concerns:
-        // it does not see this conversation, and an objective without a project is a
-        // guess.
-        workspace_id: project.clone(),
-        // Written when it finishes, by the agent that finishes it.
-        outcome: None,
-    };
-    if let Err(e) = ctx.db.insert_goal(&goal) {
-        return format!("error creating delegated task: {e}");
-    }
-    crate::ai::goal::spawn_from_app(&ctx.app, &id);
 
     let where_ = match targets.len() {
         0 => "no servers selected — it will ask if it needs one".to_string(),
@@ -531,6 +527,297 @@ fn agent_delegate(ctx: &ToolContext, args: &Value) -> String {
             .map(|n| format!(", capped at {n} cycles"))
             .unwrap_or_default(),
     )
+}
+
+/// Start a goal as this persona and drive it. Used by delegation, inbox-wake, and
+/// standing duty — one insert path so a duty cannot skip the project stamp or the
+/// verify-before-done check that assigned work already has.
+pub fn start_persona_task(
+    app: &AppHandle,
+    db: &Db,
+    persona: &Persona,
+    task: &str,
+    success_criteria: Vec<String>,
+    targets: Vec<String>,
+    workspace_id: Option<String>,
+    max_cycles: Option<i64>,
+) -> Result<String, String> {
+    let spec = GoalSpec {
+        objective: task.to_string(),
+        success_criteria,
+        check_method: "Verify with tools against the servers before claiming done. \
+                       goal_check_criteria(met) is refused when nothing was recorded."
+            .into(),
+        check_tooling: vec![],
+        hard_constraints: vec![
+            "Do not claim done without tool output, a file change, or a kanban note \
+             that cites what you actually ran."
+                .into(),
+        ],
+        max_cycles,
+        vps_targets: targets,
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let goal = GoalSession {
+        id: id.clone(),
+        title: title_for(&persona.name, task),
+        raw_request: task.to_string(),
+        spec_json: serde_json::to_string(&spec).unwrap_or_else(|_| "{}".into()),
+        // Straight to active: the user already approved by asking for the work, and a
+        // delegated task that sat in "intake" waiting for a second confirmation would
+        // reintroduce exactly the interruption delegation exists to remove.
+        status: "active".into(),
+        kanban_json: "[]".into(),
+        memory_json: "{}".into(),
+        next_check_at: None,
+        cycles: 0,
+        created_at: None,
+        updated_at: None,
+        finished_at: None,
+        persona_id: Some(persona.id.clone()),
+        workspace_id,
+        outcome: None,
+    };
+    db.insert_goal(&goal).map_err(|e| e.to_string())?;
+    crate::ai::goal::spawn_from_app(app, &id);
+    Ok(id)
+}
+
+/// The prompt an idle agent wakes up to. Named as a task because that is all a
+/// goal loop is: it does not remember being idle, so the reason it is awake has
+/// to be in front of it.
+pub fn duty_task(persona: &Persona) -> String {
+    let remit = if persona.role.trim().is_empty() {
+        "your standing role"
+    } else {
+        persona.role.trim()
+    };
+    format!(
+        "Standing work on your remit\n\n\
+         {DUTY_MARK} Nobody assigned you a task. That is not permission to sit idle. \
+         You are {}, {remit}.\n\
+         1. Read agent_inbox first. If there is work, do it.\n\
+         2. Otherwise do the next useful piece of work in your remit, on your servers, \
+            with tools — not a plan, the work.\n\
+         3. Verify every claim with tool output before you report it. A 'done' with no \
+            file change and no kanban note citing what you ran will be refused.\n\
+         4. Claude Code CLI is disabled. Do the work yourself (run_command, files, git, \
+            kubectl, docker).\n\
+         5. One verified result this run, then agent_report and stop. If you checked \
+            and nothing needs doing, say so with the commands you ran and stop.\n\
+         Do not pad the cycle with plans. Do not invent status.",
+        persona.name
+    )
+}
+
+/// Drive an existing open task, or start a standing-duty run, so a message is not
+/// a note in a drawer nobody opens. An "active" goal whose loop died with the
+/// process is restarted rather than stacked with a second task.
+pub fn wake_persona(app: &AppHandle, db: &Db, persona_id: &str) {
+    let Some(p) = crate::ai::persona::resolve(db, persona_id) else {
+        return;
+    };
+    if !p.enabled {
+        return;
+    }
+    let goals = db.list_goals().unwrap_or_default();
+    if let Some(g) = goals.iter().find(|g| {
+        g.persona_id.as_deref() == Some(p.id.as_str())
+            && (g.status == "active" || g.status == "waiting")
+    }) {
+        if g.status == "waiting" {
+            let mut g = g.clone();
+            g.status = "active".into();
+            g.next_check_at = None;
+            if let Err(e) = db.update_goal(&g) {
+                crate::diag(&format!("wake {}: could not resume waiting task: {e}", p.name));
+                return;
+            }
+        }
+        crate::ai::goal::spawn_from_app(app, &g.id);
+        return;
+    }
+    let targets = p.targets.clone();
+    let ws = p.workspace_id.clone();
+    if let Err(e) = start_persona_task(
+        app,
+        db,
+        &p,
+        &duty_task(&p),
+        vec![
+            "Did real work in your remit, verified with tool output".into(),
+            "OR confirmed with commands that nothing needs doing right now".into(),
+        ],
+        targets,
+        ws,
+        None,
+    ) {
+        crate::diag(&format!("wake {}: could not start standing work: {e}", p.name));
+    }
+}
+
+pub fn parse_goal_ts(s: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                .ok()
+                .map(|n| n.and_utc())
+        })
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+                .ok()
+                .map(|n| n.and_utc())
+        })
+}
+
+/// Who should get a standing-duty run this tick: enabled, not already on a task,
+/// either holding unread mail or past the cooldown, oldest-idle first, capped.
+pub fn idle_duty_picks(
+    personas: &[Persona],
+    goals: &[GoalSession],
+    unread: &HashSet<String>,
+    now: DateTime<Utc>,
+    cooldown: Duration,
+    cap: usize,
+) -> Vec<String> {
+    if cap == 0 {
+        return Vec::new();
+    }
+    let mut busy: HashSet<String> = HashSet::new();
+    let mut last: HashMap<String, DateTime<Utc>> = HashMap::new();
+    for g in goals {
+        let Some(pid) = g.persona_id.as_deref() else {
+            continue;
+        };
+        if g.status == "active" || g.status == "waiting" {
+            busy.insert(pid.to_string());
+        }
+        for ts in [
+            g.finished_at.as_deref(),
+            g.updated_at.as_deref(),
+            g.created_at.as_deref(),
+        ] {
+            if let Some(t) = ts.and_then(parse_goal_ts) {
+                last.entry(pid.to_string())
+                    .and_modify(|e| {
+                        if t > *e {
+                            *e = t;
+                        }
+                    })
+                    .or_insert(t);
+            }
+        }
+    }
+    let mut cands: Vec<(String, DateTime<Utc>)> = personas
+        .iter()
+        .filter(|p| p.enabled && !busy.contains(&p.id))
+        .filter(|p| {
+            if unread.contains(&p.id) {
+                return true;
+            }
+            match last.get(&p.id) {
+                Some(t) => now.signed_duration_since(*t) >= cooldown,
+                None => true,
+            }
+        })
+        .map(|p| {
+            (
+                p.id.clone(),
+                last.get(&p.id)
+                    .copied()
+                    .unwrap_or(DateTime::<Utc>::MIN_UTC),
+            )
+        })
+        .collect();
+    cands.sort_by_key(|(_, t)| *t);
+    cands.into_iter().take(cap).map(|(id, _)| id).collect()
+}
+
+/// What the machine recorded for a run, not what the agent wrote in the report.
+#[derive(Debug, Clone)]
+pub struct WorkRecord {
+    pub evidence: String,
+    pub file_changes: usize,
+    pub kanban_notes: usize,
+    pub commands: Option<usize>,
+}
+
+/// Notes the agent put on the board. Empty cards do not count — "in_progress" with
+/// no result is a label, not a finding.
+pub fn kanban_note_count(kanban_json: &str) -> usize {
+    let tasks: Vec<Value> = serde_json::from_str(kanban_json).unwrap_or_default();
+    tasks
+        .iter()
+        .filter(|t| {
+            let result = t
+                .get("result")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            let history = t
+                .get("history")
+                .and_then(|v| v.as_array())
+                .map(|h| {
+                    h.iter().any(|ev| {
+                        ev.get("note")
+                            .and_then(|v| v.as_str())
+                            .map(|s| !s.trim().is_empty())
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            result || history
+        })
+        .count()
+}
+
+/// Combinations that cannot both be true: a "done" with nothing behind it, or a
+/// test/deploy claim with no commands and no files. Used by task_audit (after the
+/// fact) and by goal_check_criteria (so the lie never lands).
+pub fn done_contradictions(rec: &WorkRecord) -> Vec<String> {
+    let mut flags: Vec<String> = Vec::new();
+    if rec.evidence.trim().is_empty() {
+        flags.push(
+            "no evidence was given. A 'done' without what you ran or observed is a \
+             claim, not a result."
+                .into(),
+        );
+    }
+    let no_files = rec.file_changes == 0;
+    let no_notes = rec.kanban_notes == 0;
+    // commands == None means the transcript was cleaned up, not that nothing ran.
+    // Still refuse when the board and the edit journal are empty too — that
+    // combination is "I say I did it" with nowhere to look.
+    if no_files && no_notes && rec.commands.is_none() {
+        flags.push(
+            "nothing was recorded: no file change, no kanban note, and no transcript \
+             of commands. Either the work was already done — in which case say that, \
+             with what you checked — or it was not done."
+                .into(),
+        );
+    }
+    if no_files && no_notes && rec.commands == Some(0) {
+        flags.push(
+            "reported done, but nothing was changed, no command was run, and the \
+             board has no notes. Either the work was already done — in which case \
+             the report should say so, with what you checked — or it was not done."
+                .into(),
+        );
+    }
+    let claim_lower = rec.evidence.to_lowercase();
+    if claim_lower.contains("test") && rec.commands == Some(0) && no_files {
+        flags.push("claims testing, but the session ran no commands and changed no files.".into());
+    }
+    if (claim_lower.contains("deploy") || claim_lower.contains("push"))
+        && no_files
+        && no_notes
+        && rec.commands == Some(0)
+    {
+        flags.push("claims a deploy or push with nothing recorded behind it.".into());
+    }
+    flags
 }
 
 fn agent_check(ctx: &ToolContext, args: &Value) -> String {
@@ -658,6 +945,12 @@ fn record_message(
     // The UI mirrors the exchange live, so the user can watch the agents talk rather
     // than discovering afterwards that they did.
     let _ = ctx.app.emit("agent://message", &msg);
+    // A message nobody is running to read is a message that never arrived. Wake the
+    // recipient so they actually do the work, instead of waiting for a cycle that
+    // will not start because they are idle.
+    if let Some(to) = to_id.as_deref().filter(|s| !s.is_empty()) {
+        wake_persona(&ctx.app, &ctx.db, to);
+    }
     Ok(())
 }
 
@@ -686,7 +979,7 @@ fn agent_send(ctx: &ToolContext, args: &Value) -> String {
         return format!("error sending message: {e}");
     }
     format!(
-        "Message sent from {from_name} to {}. They read it at the start of their next cycle — \
+        "Message sent from {from_name} to {}. They are being woken to read it — \
          do not wait for a reply, carry on and check agent_inbox later.",
         recipient.name
     )
@@ -1593,24 +1886,12 @@ async fn task_audit(ctx: &ToolContext, args: &Value) -> String {
     // The combinations that cannot both be true.
     let mut flags: Vec<String> = Vec::new();
     if goal.status == "done" {
-        if changes.is_empty() && cmd_count == Some(0) {
-            flags.push(
-                "reported done, but nothing was changed and no command was run. Either the \
-                 work was already done — in which case the report should say so — or it was \
-                 not done."
-                    .into(),
-            );
-        }
-        let claim_lower = claim.to_lowercase();
-        if claim_lower.contains("test") && cmd_count == Some(0) {
-            flags.push("claims testing, but the session ran no commands.".into());
-        }
-        if (claim_lower.contains("deploy") || claim_lower.contains("push"))
-            && changes.is_empty()
-            && cmd_count == Some(0)
-        {
-            flags.push("claims a deploy or push with nothing recorded behind it.".into());
-        }
+        flags.extend(done_contradictions(&WorkRecord {
+            evidence: claim.to_string(),
+            file_changes: changes.len(),
+            kanban_notes: kanban_note_count(&goal.kanban_json),
+            commands: cmd_count,
+        }));
         if goal.cycles <= 1 && changes.is_empty() && cmd_count.unwrap_or(0) <= 1 {
             flags.push(
                 "finished in one cycle with almost nothing recorded — worth reading the \
@@ -1963,5 +2244,172 @@ mod tests {
         assert!(long.chars().count() <= 46, "{long}");
         // A multi-line task uses only its first line.
         assert_eq!(title_for("CEO", "audit\nthen report"), "CEO: audit");
+    }
+
+    fn persona(name: &str, id: &str) -> Persona {
+        Persona {
+            id: id.into(),
+            name: name.into(),
+            role: "does the job".into(),
+            instructions: String::new(),
+            targets: vec![],
+            safety_mode: None,
+            provider_id: None,
+            model: None,
+            enabled: true,
+            reports_to: None,
+            workspace_id: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    fn goal(pid: &str, status: &str, when: &str) -> GoalSession {
+        GoalSession {
+            id: format!("g-{pid}-{status}"),
+            title: "t".into(),
+            raw_request: "r".into(),
+            spec_json: "{}".into(),
+            status: status.into(),
+            kanban_json: "[]".into(),
+            memory_json: "{}".into(),
+            next_check_at: None,
+            cycles: 1,
+            created_at: Some(when.into()),
+            updated_at: Some(when.into()),
+            finished_at: if status == "done" {
+                Some(when.into())
+            } else {
+                None
+            },
+            persona_id: Some(pid.into()),
+            workspace_id: None,
+            outcome: None,
+        }
+    }
+
+    #[test]
+    fn idle_duty_skips_anyone_already_on_a_task() {
+        let people = vec![persona("Ada", "ada"), persona("Bruno", "bruno")];
+        let goals = vec![goal("ada", "active", "2026-01-01 00:00:00")];
+        let picks = idle_duty_picks(
+            &people,
+            &goals,
+            &HashSet::new(),
+            parse_goal_ts("2026-01-01 12:00:00").unwrap(),
+            Duration::minutes(20),
+            3,
+        );
+        assert_eq!(picks, vec!["bruno".to_string()]);
+    }
+
+    #[test]
+    fn idle_duty_respects_cooldown_unless_mail_is_waiting() {
+        let people = vec![persona("Ada", "ada"), persona("Bruno", "bruno")];
+        let now = parse_goal_ts("2026-01-01 12:00:00").unwrap();
+        let goals = vec![
+            goal("ada", "done", "2026-01-01 11:50:00"),
+            goal("bruno", "done", "2026-01-01 11:50:00"),
+        ];
+        let picks = idle_duty_picks(
+            &people,
+            &goals,
+            &HashSet::new(),
+            now,
+            Duration::minutes(20),
+            3,
+        );
+        assert!(picks.is_empty(), "{picks:?}");
+        let mut unread = HashSet::new();
+        unread.insert("ada".into());
+        let picks = idle_duty_picks(&people, &goals, &unread, now, Duration::minutes(20), 3);
+        assert_eq!(picks, vec!["ada".to_string()]);
+    }
+
+    #[test]
+    fn idle_duty_picks_the_one_who_has_been_idle_longest() {
+        let people = vec![
+            persona("Ada", "ada"),
+            persona("Bruno", "bruno"),
+            persona("Cypher", "cypher"),
+        ];
+        let goals = vec![
+            goal("ada", "done", "2026-01-01 08:00:00"),
+            goal("bruno", "done", "2026-01-01 06:00:00"),
+            goal("cypher", "done", "2026-01-01 07:00:00"),
+        ];
+        let picks = idle_duty_picks(
+            &people,
+            &goals,
+            &HashSet::new(),
+            parse_goal_ts("2026-01-01 12:00:00").unwrap(),
+            Duration::minutes(20),
+            2,
+        );
+        assert_eq!(picks, vec!["bruno".to_string(), "cypher".to_string()]);
+    }
+
+    #[test]
+    fn a_done_with_nothing_behind_it_is_refused() {
+        let flags = done_contradictions(&WorkRecord {
+            evidence: "shipped it, tests pass".into(),
+            file_changes: 0,
+            kanban_notes: 0,
+            commands: Some(0),
+        });
+        assert!(!flags.is_empty(), "{flags:?}");
+        assert!(flags.iter().any(|f| f.contains("nothing was changed")), "{flags:?}");
+    }
+
+    #[test]
+    fn a_done_with_a_file_change_and_evidence_is_accepted() {
+        let flags = done_contradictions(&WorkRecord {
+            evidence: "wrote deploy.sh and ran it; health 200".into(),
+            file_changes: 1,
+            kanban_notes: 0,
+            commands: None,
+        });
+        assert!(flags.is_empty(), "{flags:?}");
+    }
+
+    #[test]
+    fn a_qa_verdict_with_board_notes_is_accepted_without_files() {
+        // Reviewers are read-only. The board note is the record; demanding a file
+        // change would force them to mutate something just to be believed.
+        let flags = done_contradictions(&WorkRecord {
+            evidence: "APPROVE: migration additive, 23/23 tests passed in pgt-app-1".into(),
+            file_changes: 0,
+            kanban_notes: 1,
+            commands: None,
+        });
+        assert!(flags.is_empty(), "{flags:?}");
+    }
+
+    #[test]
+    fn empty_evidence_is_not_a_result() {
+        let flags = done_contradictions(&WorkRecord {
+            evidence: "  ".into(),
+            file_changes: 3,
+            kanban_notes: 1,
+            commands: Some(4),
+        });
+        assert!(flags.iter().any(|f| f.contains("no evidence")), "{flags:?}");
+    }
+
+    #[test]
+    fn kanban_note_count_ignores_empty_cards() {
+        let json = r#"[{"id":"1","column":"in_progress","title":"x","result":""},{"id":"2","column":"done","title":"y","result":"df / is 71%"}]"#;
+        assert_eq!(kanban_note_count(json), 1);
+        assert_eq!(kanban_note_count("[]"), 0);
+    }
+
+    #[test]
+    fn duty_task_names_the_person_and_forbids_sitting_idle() {
+        let p = persona("Bruno", "bruno");
+        let t = duty_task(&p);
+        assert!(t.contains(DUTY_MARK), "{t}");
+        assert!(t.contains("Bruno"), "{t}");
+        assert!(t.starts_with("Standing work on your remit"), "{t}");
+        assert!(t.contains("sit idle"), "{t}");
     }
 }

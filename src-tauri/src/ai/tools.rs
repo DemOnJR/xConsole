@@ -5134,6 +5134,31 @@ async fn goal_check_criteria(ctx: &ToolContext, args: &Value) -> String {
     let evidence = args.get("evidence").and_then(|v| v.as_str()).unwrap_or("");
     match verdict {
         "met" => {
+            // A "done" is a claim. The file journal, the board notes and the command
+            // transcript are the record; if none of them show work, the report is
+            // refused rather than filed as success for the next agent to build on.
+            let files = ctx
+                .db
+                .list_file_changes(Some(&format!("goal:{goal_id}")), None, 500)
+                .map(|c| c.len())
+                .unwrap_or(0);
+            let flags = crate::ai::persona_tools::done_contradictions(
+                &crate::ai::persona_tools::WorkRecord {
+                    evidence: evidence.to_string(),
+                    file_changes: files,
+                    kanban_notes: crate::ai::persona_tools::kanban_note_count(&goal.kanban_json),
+                    commands: None,
+                },
+            );
+            if !flags.is_empty() {
+                emit_goal_event(&ctx.app, &goal_id, StreamEvent::Status("active".into()));
+                return format!(
+                    "Not accepted as done — the report does not match what was recorded:\n- {}\n\
+                     Keep working: run the command or make the change, put what you observed \
+                     on the board (goal_update_task note=...), then call this again.",
+                    flags.join("\n- ")
+                );
+            }
             goal.status = "done".to_string();
             goal.finished_at = Some(chrono::Utc::now().to_rfc3339());
             // The evidence was already being asked for and then thrown away. Kept, it
