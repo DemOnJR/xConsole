@@ -1291,6 +1291,10 @@ export const api = {
     invoke<void>("set_setting", { key, value }),
   listSettings: () => invoke<Setting[]>("list_settings"),
   deleteSetting: (key: string) => invoke<void>("delete_setting", { key }),
+  getAutostart: () =>
+    invoke<{ enabled: boolean; supported: boolean }>("get_autostart"),
+  setAutostart: (enabled: boolean) =>
+    invoke<{ enabled: boolean; supported: boolean }>("set_autostart", { enabled }),
 
   listProviders: () => invoke<AiProvider[]>("list_providers"),
   getRemoteStatus: () => invoke<RemoteStatus>("get_remote_status"),

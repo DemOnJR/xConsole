@@ -89,3 +89,8 @@ tauri-plugin-clipboard-manager = "2"
 # Render the WhatsApp pairing code. Done in Rust so the webview needs no QR library
 # and the code is drawn from the exact bytes the sidecar produced.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
+# Per-user "Run at sign-in" on Windows (HKCU Run). Same crate the installer
+# already uses for the uninstall key; no admin, no extra service.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

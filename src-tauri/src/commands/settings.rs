@@ -68,6 +68,29 @@ pub fn delete_provider(db: State<'_, Db>, id: String) -> Result<(), String> {
     db.delete_provider(&id).map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+pub struct AutostartStatus {
+    pub enabled: bool,
+    pub supported: bool,
+}
+
+/// Whether xConsole launches when this user signs in to Windows.
+#[tauri::command]
+pub fn get_autostart() -> Result<AutostartStatus, String> {
+    Ok(AutostartStatus {
+        enabled: crate::autostart::is_enabled()?,
+        supported: crate::autostart::is_supported(),
+    })
+}
+
+/// Turn launch-at-sign-in on or off. Writes the current executable into the
+/// per-user Run key; no admin, and uninstall removes it.
+#[tauri::command]
+pub fn set_autostart(enabled: bool) -> Result<AutostartStatus, String> {
+    crate::autostart::set_enabled(enabled)?;
+    get_autostart()
+}
+
 /// Write a line into `xconsole.log` from the frontend.
 ///
 /// Exists to answer one question that the Rust-side events cannot: when the window gets a

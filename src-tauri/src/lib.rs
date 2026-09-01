@@ -10,6 +10,7 @@ pub mod crypto;
 pub mod lock;
 mod infra;
 mod artifacts;
+mod autostart;
 mod local;
 pub mod mcp;
 pub mod plugins;
@@ -260,6 +261,9 @@ pub fn run() {
             app.manage(cron_running);
             app.manage(goal_running);
 
+            // Keep the Run key pointing at this build if the user opted in.
+            crate::autostart::refresh_if_enabled();
+
             // Idle auto-lock. The timer lives in the backend on purpose: a JS timer stops
             // with a hung or crashed webview, and "the lock quietly stopped working" is the
             // failure mode you never notice. The frontend only reports activity.
@@ -453,6 +457,8 @@ pub fn run() {
             commands::settings::list_providers,
             commands::settings::save_provider,
             commands::settings::delete_provider,
+            commands::settings::get_autostart,
+            commands::settings::set_autostart,
             commands::update::check_for_update,
             commands::update::start_app_update,
             commands::update::get_update_channel,

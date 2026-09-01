@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
+import { api } from "../../../lib/tauri";
 import { useSettingsStore } from "../../../stores/settingsStore";
 import { useUpdateStore, type UpdateChannel } from "../../../stores/updateStore";
 import { Field, SectionHeader, Select, TextInput, Toggle, SettingsGroup, SettingsRow, Button } from "../ui";
@@ -34,9 +35,14 @@ export function GeneralSection() {
   const loadChannel = useUpdateStore((s) => s.loadChannel);
 
   const [appVersion, setAppVersion] = useState("");
+  const [autostart, setAutostart] = useState<{ enabled: boolean; supported: boolean } | null>(null);
+  const [autostartError, setAutostartError] = useState<string | null>(null);
   useEffect(() => {
     getVersion().then(setAppVersion).catch(() => {});
     void loadChannel();
+    api.getAutostart()
+      .then(setAutostart)
+      .catch((e) => setAutostartError(String(e)));
   }, [loadChannel]);
   const checking = updateStatus === "checking" || updateStatus === "updating";
 
@@ -47,7 +53,33 @@ export function GeneralSection() {
         description="System defaults, AI assistant state, remote editor bindings, and release channels."
       />
 
-      <SettingsGroup title="AI Assistant">
+      <SettingsGroup title="Application">
+        <SettingsRow
+          label="Launch at Windows sign-in"
+          description={
+            autostart && !autostart.supported
+              ? "Only available on Windows. Adds xConsole to this user's startup list (no admin)."
+              : "Open xConsole when you sign in to Windows. Per-user, no administrator rights."
+          }
+        >
+          <Toggle
+            checked={autostart?.enabled ?? false}
+            disabled={!autostart || !autostart.supported}
+            onChange={(v) => {
+              setAutostartError(null);
+              void api
+                .setAutostart(v)
+                .then(setAutostart)
+                .catch((e) => setAutostartError(String(e)));
+            }}
+          />
+        </SettingsRow>
+        {autostartError && (
+          <p className="text-[11px] text-red-400">{autostartError}</p>
+        )}
+      </SettingsGroup>
+
+      <SettingsGroup title="AI Assistant" className="pt-4 border-t border-[var(--border)]">
         <SettingsRow
           label="Autonomous AI Agent"
           description="Enable or disable the AI pairing engine across the workspace canvas."

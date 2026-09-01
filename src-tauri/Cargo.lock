@@ -7346,6 +7346,7 @@ dependencies = [
  "tiktoken-rs",
  "tokio",
  "uuid",
+ "winreg",
  "zeroize",
  "zip",
 ]

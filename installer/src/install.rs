@@ -2132,6 +2132,14 @@ pub fn run_uninstall() {
         );
     }
     let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(UNINSTALL_KEY);
+    // Launch-at-sign-in is a HKCU Run value the app writes itself. Leaving it
+    // after uninstall would try to start a binary that is gone.
+    if let Ok(run) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(
+        r"Software\Microsoft\Windows\CurrentVersion\Run",
+        KEY_SET_VALUE,
+    ) {
+        let _ = run.delete_value(APP_NAME);
+    }
     // `base\uninstall.exe` is THIS still-running process's image, so it can't be deleted
     // until we exit and Windows releases the handle. A single fixed wait can lose that
     // race on a loaded machine (leaving an orphaned dir), so try a few times with
