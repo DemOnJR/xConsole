@@ -300,6 +300,11 @@ impl OllamaProvider {
         }
         out.stop_reason = parsed.done_reason.unwrap_or_else(|| "stop".into());
         out.completion_tokens = parsed.eval_count.map(|n| n as u32);
+        // Ollama reports the prompt side as `prompt_eval_count`. It was parsed and
+        // handed to the stats event but never stored, so every local-model turn
+        // reported no prompt tokens at all — the token readout sat at 0 while real
+        // context was being sent.
+        out.prompt_tokens = parsed.prompt_eval_count.map(|n| n as u32);
         Ok(out)
     }
 }
@@ -430,6 +435,7 @@ impl Provider for OllamaProvider {
 
                 if chunk.done {
                     out.completion_tokens = chunk.eval_count.map(|n| n as u32);
+                    out.prompt_tokens = chunk.prompt_eval_count.map(|n| n as u32);
                     if let Some(ev) =
                         stats_event(chunk.eval_count, chunk.eval_duration, chunk.prompt_eval_count)
                     {
@@ -470,5 +476,25 @@ impl Provider for OllamaProvider {
             out.stop_reason = "stop".into();
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_local_turn_reports_both_sides_of_its_token_usage() {
+        // `prompt_eval_count` was parsed and handed to the stats event but never stored
+        // on the response, so a local model's turn reported no prompt tokens however
+        // much context it had just been sent — the readout said "0 tok" on a turn
+        // carrying a full system prompt.
+        let chunk: OllamaStreamChunk = serde_json::from_str(
+            r#"{"message":{"role":"assistant","content":"hi"},"done":true,
+                "done_reason":"stop","eval_count":39,"prompt_eval_count":1284}"#,
+        )
+        .expect("parses");
+        assert_eq!(chunk.prompt_eval_count, Some(1284));
+        assert_eq!(chunk.eval_count, Some(39));
     }
 }

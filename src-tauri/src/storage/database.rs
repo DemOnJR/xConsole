@@ -456,6 +456,110 @@ impl Db {
                 finished_at   TEXT
             );
 
+            -- Named agents the user can hand work to. A persona is an identity the
+            -- goal loop runs under: its own instructions, default servers, safety
+            -- mode, and optionally its own provider so cheap grunt work and
+            -- architectural judgement do not have to share one model.
+            CREATE TABLE IF NOT EXISTS persona (
+                id            TEXT PRIMARY KEY,
+                name          TEXT NOT NULL,
+                role          TEXT NOT NULL DEFAULT '',
+                instructions  TEXT NOT NULL DEFAULT '',
+                -- JSON array of vps ids this persona works on by default.
+                targets_json  TEXT NOT NULL DEFAULT '[]',
+                -- Overrides the global safety mode when set ('full'|'allowlist'|'approve').
+                safety_mode   TEXT,
+                -- Overrides the active provider/model when set.
+                provider_id   TEXT,
+                model         TEXT,
+                enabled       INTEGER NOT NULL DEFAULT 1,
+                -- The persona this one reports to. NULL = reports to the user.
+                -- Forms the org chart; only a persona with no manager may address
+                -- the user directly, everyone else escalates upward.
+                reports_to    TEXT REFERENCES persona(id) ON DELETE SET NULL,
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- What the agents say to each other.
+            --
+            -- Kept as rows rather than buried in each goal's transcript so the whole
+            -- exchange can be read as one conversation: who asked whom for what, who
+            -- reported back, and what finally reached the user.
+            -- What a project is actually producing.
+            --
+            -- The teams exist to make the projects earn, and without figures that is
+            -- unmeasurable: an agent can report that it shipped three fixes and still
+            -- have no idea whether anything got better. One row is one number for one
+            -- day, so periods can be compared — which is the only way "sales are down"
+            -- becomes a fact rather than a feeling.
+            CREATE TABLE IF NOT EXISTS project_metric (
+                id           TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                -- 'revenue', 'orders', 'signups', 'refunds' — whatever the project has.
+                name         TEXT NOT NULL,
+                -- The day the figure is *about*, not when it was written: a number
+                -- recorded late still belongs to its own day.
+                period       TEXT NOT NULL,
+                value        REAL NOT NULL,
+                unit         TEXT,
+                note         TEXT,
+                -- Persona that recorded it. NULL = the user.
+                source_id    TEXT,
+                created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                -- Re-recording a day corrects it instead of double-counting. Agents
+                -- re-read the same source, and a duplicated day would quietly invent
+                -- revenue.
+                UNIQUE(workspace_id, name, period)
+            );
+            CREATE INDEX IF NOT EXISTS idx_project_metric_lookup
+                ON project_metric (workspace_id, name, period);
+
+            -- How to fetch a number, so it does not have to be fetched by hand.
+            --
+            -- A figure nobody records is a figure nobody has, and asking a person to
+            -- type in yesterday's revenue every morning means it stops happening by
+            -- Thursday. One command per metric per project, defined once, run on a
+            -- schedule: whatever prints the number — a SQL query, a log count, an API
+            -- call — is the same shape from here.
+            CREATE TABLE IF NOT EXISTS metric_source (
+                id           TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                name         TEXT NOT NULL,
+                -- Server it runs on.
+                vps_id       TEXT NOT NULL,
+                -- Must print one number on stdout. Refused unless read-only: this runs
+                -- unattended forever after one approval, and a metric that changes
+                -- something is not a measurement.
+                command      TEXT NOT NULL,
+                unit         TEXT,
+                enabled      INTEGER NOT NULL DEFAULT 1,
+                created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(workspace_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS agent_message (
+                id           TEXT PRIMARY KEY,
+                -- Sender. NULL = the user.
+                from_id      TEXT,
+                -- Recipient. NULL = the user.
+                to_id        TEXT,
+                -- 'report' (upward), 'request' (downward/sideways), 'note' (broadcast).
+                kind         TEXT NOT NULL DEFAULT 'note',
+                body         TEXT NOT NULL,
+                -- The delegated task this concerns, when there is one.
+                goal_id      TEXT,
+                -- The project this was said about. NULL for messages from before
+                -- projects existed, and for anything genuinely cross-project.
+                workspace_id TEXT,
+                -- Set once the recipient has been shown it.
+                read_at      TEXT,
+                created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS agent_message_to_idx
+                ON agent_message(to_id, read_at);
+
             -- Pending/!resolved approvals for agent commands (approve safety mode).
             CREATE TABLE IF NOT EXISTS agent_approval (
                 id          TEXT PRIMARY KEY,
@@ -589,6 +693,31 @@ impl Db {
         let _ = conn.execute("ALTER TABLE workspace ADD COLUMN color_mode TEXT", []);
         let _ = conn.execute("ALTER TABLE workspace ADD COLUMN project_json TEXT", []);
         let _ = conn.execute("ALTER TABLE vps ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0", []);
+        // Which persona is running this goal. NULL = the default agent, which is what
+        // every goal created before personas existed was.
+        let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN persona_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE persona ADD COLUMN reports_to TEXT", []);
+        // Scope the council to a project. Existing rows keep NULL: they were said
+        // before there was a project to say them about, and guessing one retroactively
+        // would file real history under a workspace it may have nothing to do with.
+        let _ = conn.execute("ALTER TABLE agent_message ADD COLUMN workspace_id TEXT", []);
+        // One team per project. Existing agents stay company-wide (NULL) rather than
+        // being assigned to whichever project happens to be open — an agent silently
+        // acquiring a home would change who routing picks.
+        let _ = conn.execute("ALTER TABLE persona ADD COLUMN workspace_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN workspace_id TEXT", []);
+        // What came of the task, not just that it ended.
+        let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN outcome TEXT", []);
+        // A schedule that is a member of staff rather than a script: it runs as an
+        // agent, on a project.
+        let _ = conn.execute("ALTER TABLE cron_job ADD COLUMN workspace_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE cron_job ADD COLUMN persona_id TEXT", []);
+        // The inbox and the per-project history are both read on every agent cycle.
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_message_workspace
+             ON agent_message (workspace_id, created_at)",
+            [],
+        );
         let _ = conn.execute("ALTER TABLE infra_project ADD COLUMN backend TEXT DEFAULT 'vps'", []);
         let _ = conn.execute("ALTER TABLE infra_project ADD COLUMN cloud_account_id TEXT", []);
         let _ = conn.execute("ALTER TABLE infra_project ADD COLUMN config_json TEXT", []);
@@ -1048,13 +1177,16 @@ impl Db {
             last_run: r.get(7)?,
             last_status: r.get(8)?,
             created_at: r.get(9)?,
+            workspace_id: r.get(10)?,
+            persona_id: r.get(11)?,
         })
     }
 
     pub fn list_cron_jobs(&self) -> Result<Vec<CronJob>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, schedule, kind, payload, targets_json, enabled, last_run, last_status, created_at
+            "SELECT id, name, schedule, kind, payload, targets_json, enabled, last_run, last_status, created_at,
+                    workspace_id, persona_id
              FROM cron_job ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], Self::row_to_cron)?;
@@ -1064,7 +1196,8 @@ impl Db {
     pub fn get_cron_job(&self, id: &str) -> Result<Option<CronJob>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, schedule, kind, payload, targets_json, enabled, last_run, last_status, created_at
+            "SELECT id, name, schedule, kind, payload, targets_json, enabled, last_run, last_status, created_at,
+                    workspace_id, persona_id
              FROM cron_job WHERE id = ?1",
         )?;
         let mut rows = stmt.query([id])?;
@@ -1079,15 +1212,18 @@ impl Db {
         {
             let conn = self.conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO cron_job (id, name, schedule, kind, payload, targets_json, enabled)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "INSERT INTO cron_job (id, name, schedule, kind, payload, targets_json, enabled,
+                                       workspace_id, persona_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     schedule = excluded.schedule,
                     kind = excluded.kind,
                     payload = excluded.payload,
                     targets_json = excluded.targets_json,
-                    enabled = excluded.enabled",
+                    enabled = excluded.enabled,
+                    workspace_id = excluded.workspace_id,
+                    persona_id = excluded.persona_id",
                 params![
                     id,
                     input.name,
@@ -1096,6 +1232,8 @@ impl Db {
                     input.payload,
                     input.targets_json,
                     input.enabled as i64,
+                    input.workspace_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+                    input.persona_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
                 ],
             )?;
         }
@@ -1134,6 +1272,9 @@ impl Db {
             created_at: r.get(9)?,
             updated_at: r.get(10)?,
             finished_at: r.get(11)?,
+            persona_id: r.get(12)?,
+            workspace_id: r.get(13)?,
+            outcome: r.get(14)?,
         })
     }
 
@@ -1141,7 +1282,8 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
-                    next_check_at, cycles, created_at, updated_at, finished_at
+                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
+                    workspace_id, outcome
              FROM goal_sessions ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], Self::row_to_goal)?;
@@ -1152,7 +1294,8 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
-                    next_check_at, cycles, created_at, updated_at, finished_at
+                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
+                    workspace_id, outcome
              FROM goal_sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query([id])?;
@@ -1167,8 +1310,8 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO goal_sessions
-               (id, title, raw_request, spec_json, status, kanban_json, memory_json, next_check_at, cycles)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+               (id, title, raw_request, spec_json, status, kanban_json, memory_json, next_check_at, cycles, persona_id, workspace_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 goal.id,
                 goal.title,
@@ -1179,6 +1322,8 @@ impl Db {
                 goal.memory_json,
                 goal.next_check_at,
                 goal.cycles,
+                goal.persona_id,
+                goal.workspace_id,
             ],
         )?;
         Ok(())
@@ -1190,7 +1335,7 @@ impl Db {
             "UPDATE goal_sessions SET
                 title = ?2, raw_request = ?3, spec_json = ?4, status = ?5,
                 kanban_json = ?6, memory_json = ?7, next_check_at = ?8, cycles = ?9,
-                updated_at = datetime('now'), finished_at = ?10
+                updated_at = datetime('now'), finished_at = ?10, outcome = ?11
              WHERE id = ?1",
             params![
                 goal.id,
@@ -1203,8 +1348,264 @@ impl Db {
                 goal.next_check_at,
                 goal.cycles,
                 goal.finished_at,
+                goal.outcome,
             ],
         )?;
+        Ok(())
+    }
+
+    // ----- Personas (named background agents) -----
+
+    fn row_to_persona(r: &rusqlite::Row) -> rusqlite::Result<crate::storage::models::Persona> {
+        let targets_json: String = r.get(4)?;
+        Ok(crate::storage::models::Persona {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            role: r.get(2)?,
+            instructions: r.get(3)?,
+            // A malformed targets blob must not make the persona unreadable — an
+            // unusable persona row is worse than one that has forgotten its defaults.
+            targets: serde_json::from_str(&targets_json).unwrap_or_default(),
+            safety_mode: r.get(5)?,
+            provider_id: r.get(6)?,
+            model: r.get(7)?,
+            enabled: r.get::<_, i64>(8)? != 0,
+            reports_to: r.get(9)?,
+            created_at: r.get(10)?,
+            updated_at: r.get(11)?,
+            workspace_id: r.get(12)?,
+        })
+    }
+
+    const PERSONA_COLS: &'static str =
+        "id, name, role, instructions, targets_json, safety_mode, provider_id, model,
+         enabled, reports_to, created_at, updated_at, workspace_id";
+
+    pub fn list_personas(&self) -> Result<Vec<crate::storage::models::Persona>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("SELECT {} FROM persona ORDER BY name", Self::PERSONA_COLS);
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], Self::row_to_persona)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_persona(&self, id: &str) -> Result<Option<crate::storage::models::Persona>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("SELECT {} FROM persona WHERE id = ?1", Self::PERSONA_COLS);
+        match conn.query_row(&sql, [id], Self::row_to_persona) {
+            Ok(p) => Ok(Some(p)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Find a persona by name, case-insensitively.
+    ///
+    /// The agent and the user refer to a persona by name ("ask Ada to…"), never by
+    /// uuid, and neither will reliably match its capitalisation.
+    pub fn get_persona_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::storage::models::Persona>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {} FROM persona WHERE lower(name) = lower(?1)",
+            Self::PERSONA_COLS
+        );
+        match conn.query_row(&sql, [name.trim()], Self::row_to_persona) {
+            Ok(p) => Ok(Some(p)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn upsert_persona(
+        &self,
+        input: &crate::storage::models::PersonaInput,
+    ) -> Result<crate::storage::models::Persona> {
+        let id = input
+            .id
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let targets_json = serde_json::to_string(&input.targets).unwrap_or_else(|_| "[]".into());
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO persona
+                   (id, name, role, instructions, targets_json, safety_mode, provider_id, model, enabled, reports_to, workspace_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(id) DO UPDATE SET
+                   name = excluded.name,
+                   role = excluded.role,
+                   instructions = excluded.instructions,
+                   targets_json = excluded.targets_json,
+                   safety_mode = excluded.safety_mode,
+                   provider_id = excluded.provider_id,
+                   model = excluded.model,
+                   enabled = excluded.enabled,
+                   reports_to = excluded.reports_to,
+                   workspace_id = excluded.workspace_id,
+                   updated_at = datetime('now')",
+                params![
+                    id,
+                    input.name.trim(),
+                    input.role.trim(),
+                    input.instructions,
+                    targets_json,
+                    input.safety_mode,
+                    input.provider_id,
+                    input.model,
+                    input.enabled as i64,
+                    input.reports_to,
+                    input.workspace_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+                ],
+            )?;
+        }
+        Ok(self
+            .get_persona(&id)?
+            .expect("persona just upserted"))
+    }
+
+    pub fn delete_persona(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM persona WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    // ----- Inter-agent messages -----
+
+    fn row_to_agent_message(
+        r: &rusqlite::Row,
+    ) -> rusqlite::Result<crate::storage::models::AgentMessage> {
+        Ok(crate::storage::models::AgentMessage {
+            id: r.get(0)?,
+            from_id: r.get(1)?,
+            to_id: r.get(2)?,
+            kind: r.get(3)?,
+            body: r.get(4)?,
+            goal_id: r.get(5)?,
+            workspace_id: r.get(6)?,
+            read_at: r.get(7)?,
+            created_at: r.get(8)?,
+        })
+    }
+
+    const AGENT_MESSAGE_COLS: &'static str =
+        "id, from_id, to_id, kind, body, goal_id, workspace_id, read_at, created_at";
+
+    pub fn insert_agent_message(
+        &self,
+        msg: &crate::storage::models::AgentMessage,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agent_message (id, from_id, to_id, kind, body, goal_id, workspace_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                msg.id,
+                msg.from_id,
+                msg.to_id,
+                msg.kind,
+                msg.body,
+                msg.goal_id,
+                msg.workspace_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Unread messages addressed to `to_id` (None = the user's own inbox).
+    ///
+    /// `workspace` of `Some(id)` returns only what was said about that project. This is
+    /// the difference between an agent reading its own project's thread and reading
+    /// every project at once, which is unusable the moment there are two. `None` means
+    /// no project is selected, and everything is in scope.
+    /// Unread messages addressed to `to_id` (None = the user's own inbox).
+    ///
+    /// Everything addressed to you is delivered, whichever project it is about. Scoping
+    /// this the way the *thread* is scoped looked right and was not: a lead writing to
+    /// another project's lead had the message stamped with their own project, so it
+    /// never appeared in the recipient's inbox and the two could not talk at all.
+    ///
+    /// The original complaint about mixed projects was not knowing which was which, so
+    /// the answer is a label rather than a filter — see `agent_inbox`. Nothing addressed
+    /// to somebody should be silently withheld from them.
+    pub fn unread_agent_messages(
+        &self,
+        to_id: Option<&str>,
+    ) -> Result<Vec<crate::storage::models::AgentMessage>> {
+        let conn = self.conn.lock().unwrap();
+        // `to_id IS ?1` rather than `=`, so NULL (the user) matches instead of
+        // silently returning nothing the way SQL equality against NULL would.
+        let sql = format!(
+            "SELECT {} FROM agent_message
+             WHERE to_id IS ?1 AND read_at IS NULL
+             ORDER BY created_at",
+            Self::AGENT_MESSAGE_COLS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![to_id], Self::row_to_agent_message)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// The whole exchange, oldest first, so the UI can show it as one conversation.
+    ///
+    /// `goal_id` narrows it to a single delegated task; `workspace` narrows it to one
+    /// project. Both are `NULL`-tolerant in SQL rather than branching in Rust, which is
+    /// how the previous version grew two near-identical query paths.
+    pub fn list_agent_messages(
+        &self,
+        goal_id: Option<&str>,
+        workspace: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<crate::storage::models::AgentMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let limit = limit.clamp(1, 1000);
+        let sql = format!(
+            "SELECT {} FROM agent_message
+             WHERE (?1 IS NULL OR goal_id = ?1)
+               AND (?2 IS NULL OR workspace_id = ?2)
+             ORDER BY created_at DESC LIMIT ?3",
+            Self::AGENT_MESSAGE_COLS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![goal_id, workspace, limit], Self::row_to_agent_message)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        // Newest-first in SQL so LIMIT keeps the *recent* end; reversed here so the
+        // caller reads it as a conversation.
+        Ok(rows.into_iter().rev().collect())
+    }
+
+    /// Delegated tasks belonging to one project, newest first.
+    pub fn list_goals_for_workspace(&self, workspace: Option<&str>) -> Result<Vec<GoalSession>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
+                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
+                    workspace_id, outcome
+             FROM goal_sessions
+             WHERE (?1 IS NULL OR workspace_id = ?1)
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![workspace], Self::row_to_goal)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn mark_agent_messages_read(&self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for id in ids {
+            tx.execute(
+                "UPDATE agent_message SET read_at = datetime('now') WHERE id = ?1",
+                [id],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1213,7 +1614,8 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
-                    next_check_at, cycles, created_at, updated_at, finished_at
+                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
+                    workspace_id, outcome
              FROM goal_sessions
              WHERE status = 'waiting' AND next_check_at IS NOT NULL
                AND next_check_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now')
@@ -1989,6 +2391,219 @@ impl Db {
             ],
         )?;
         Ok(())
+    }
+
+    /// What one agent did over a window, assembled from what was already recorded.
+    ///
+    /// Three tables answer three halves of "what has it been doing": the tasks it was
+    /// given (`goal_sessions.persona_id`), the files it changed while running them
+    /// (`agent_file_change`, joined through the `goal:<id>` session id its runs use),
+    /// and what it said (`agent_message`). Kept as one query per source rather than one
+    /// join, because a task with no edits and an edit outside any task are both normal
+    /// and a join would quietly drop one of them.
+    /// Define (or redefine) how one of a project's numbers is fetched.
+    pub fn upsert_metric_source(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        vps_id: &str,
+        command: &str,
+        unit: Option<&str>,
+        enabled: bool,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO metric_source (id, workspace_id, name, vps_id, command, unit, enabled)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(workspace_id, name) DO UPDATE SET
+               vps_id = excluded.vps_id,
+               command = excluded.command,
+               unit = COALESCE(excluded.unit, metric_source.unit),
+               enabled = excluded.enabled",
+            params![
+                Uuid::new_v4().to_string(),
+                workspace_id,
+                name.trim().to_lowercase(),
+                vps_id,
+                command.trim(),
+                unit,
+                enabled as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every way this project knows to fetch a number. `(name, vps_id, command, unit, enabled)`.
+    pub fn list_metric_sources(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<(String, String, String, Option<String>, bool)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT name, vps_id, command, unit, enabled FROM metric_source
+             WHERE workspace_id = ?1 ORDER BY name",
+        )?;
+        let rows = stmt.query_map(params![workspace_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)? != 0))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Record one figure for one day, correcting it if that day is already recorded.
+    pub fn upsert_metric(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        period: &str,
+        value: f64,
+        unit: Option<&str>,
+        note: Option<&str>,
+        source_id: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO project_metric (id, workspace_id, name, period, value, unit, note, source_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(workspace_id, name, period) DO UPDATE SET
+               value = excluded.value,
+               unit = COALESCE(excluded.unit, project_metric.unit),
+               note = excluded.note,
+               source_id = excluded.source_id,
+               created_at = datetime('now')",
+            params![
+                Uuid::new_v4().to_string(),
+                workspace_id,
+                name.trim().to_lowercase(),
+                period,
+                value,
+                unit,
+                note,
+                source_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Which metrics a project has figures for.
+    pub fn metric_names(&self, workspace_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT name FROM project_metric WHERE workspace_id = ?1 ORDER BY name")?;
+        let rows = stmt.query_map(params![workspace_id], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Daily figures for one metric, newest first.
+    pub fn metric_series(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        since_period: &str,
+    ) -> Result<Vec<(String, f64, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT period, value, unit FROM project_metric
+             WHERE workspace_id = ?1 AND name = ?2 AND period >= ?3
+             ORDER BY period DESC",
+        )?;
+        let rows = stmt.query_map(params![workspace_id, name.trim().to_lowercase(), since_period], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Total for one metric over a closed period, for comparing one window to the last.
+    pub fn metric_total(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        from_period: &str,
+        to_period: &str,
+    ) -> Result<(f64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn.query_row(
+            "SELECT COALESCE(SUM(value), 0), COUNT(*) FROM project_metric
+             WHERE workspace_id = ?1 AND name = ?2 AND period >= ?3 AND period < ?4",
+            params![workspace_id, name.trim().to_lowercase(), from_period, to_period],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(row)
+    }
+
+    pub fn agent_tasks_since(
+        &self,
+        persona_id: &str,
+        since_rfc3339: &str,
+    ) -> Result<Vec<GoalSession>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
+                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
+                    workspace_id, outcome
+             FROM goal_sessions
+             WHERE persona_id = ?1
+               AND COALESCE(finished_at, updated_at, created_at) >= ?2
+             ORDER BY COALESCE(finished_at, updated_at, created_at) DESC",
+        )?;
+        let rows = stmt.query_map(params![persona_id, since_rfc3339], Self::row_to_goal)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Files an agent changed over a window, found through the goal sessions it ran.
+    pub fn agent_file_changes_since(
+        &self,
+        persona_id: &str,
+        since_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<EditRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.session_id, c.workspace_id, c.scope, c.vps_id, c.label, c.path,
+                    c.before, c.after, c.is_new, c.reverted, c.ts
+             FROM agent_file_change c
+             JOIN goal_sessions g ON c.session_id = 'goal:' || g.id
+             WHERE g.persona_id = ?1 AND c.ts >= ?2
+             ORDER BY c.ts DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![persona_id, since_ms, limit], |r| {
+            Ok(EditRecord {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                workspace_id: r.get(2)?,
+                scope: r.get(3)?,
+                vps_id: r.get(4)?,
+                label: r.get(5)?,
+                path: r.get(6)?,
+                before: r.get(7)?,
+                after: r.get(8)?,
+                is_new: r.get::<_, i64>(9)? != 0,
+                reverted: r.get::<_, i64>(10)? != 0,
+                ts: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// What an agent said, and what was said to it, over a window.
+    pub fn agent_messages_since(
+        &self,
+        persona_id: &str,
+        since_rfc3339: &str,
+        limit: i64,
+    ) -> Result<Vec<crate::storage::models::AgentMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {} FROM agent_message
+             WHERE (from_id = ?1 OR to_id = ?1) AND created_at >= ?2
+             ORDER BY created_at DESC LIMIT ?3",
+            Self::AGENT_MESSAGE_COLS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![persona_id, since_rfc3339, limit],
+            Self::row_to_agent_message,
+        )?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn list_file_changes(

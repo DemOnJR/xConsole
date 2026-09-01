@@ -261,11 +261,61 @@ impl SessionManager {
     pub async fn run_command(&self, vps_id: &str, command: &str) -> Result<CommandOutput, String> {
         super::command::run_vps_command(&self.db, vps_id, command).await
     }
+
+    /// Run one command with a caller-chosen deadline. See `command::run_vps_command_for`.
+    pub async fn run_command_for(
+        &self,
+        vps_id: &str,
+        command: &str,
+        timeout: std::time::Duration,
+    ) -> Result<CommandOutput, String> {
+        super::command::run_vps_command_for(&self.db, vps_id, command, timeout).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::strip_ansi;
+    use super::{strip_ansi, RingBuffer, OUTPUT_FLUSH_BYTES};
+
+    #[test]
+    fn ring_keeps_everything_under_capacity() {
+        let mut ring = RingBuffer::new(8);
+        ring.push(b"abc");
+        ring.push(b"de");
+        assert_eq!(ring.snapshot(), b"abcde");
+    }
+
+    #[test]
+    fn ring_drops_oldest_bytes_past_capacity() {
+        let mut ring = RingBuffer::new(4);
+        ring.push(b"abcdef");
+        // Scrollback replay shows the most recent bytes, not the first ones.
+        assert_eq!(ring.snapshot(), b"cdef");
+        ring.push(b"gh");
+        assert_eq!(ring.snapshot(), b"efgh");
+    }
+
+    #[test]
+    fn ring_handles_a_single_push_larger_than_capacity() {
+        let mut ring = RingBuffer::new(3);
+        ring.push(b"0123456789");
+        assert_eq!(ring.snapshot(), b"789");
+    }
+
+    #[test]
+    fn ring_push_of_nothing_is_a_no_op() {
+        let mut ring = RingBuffer::new(4);
+        ring.push(b"ab");
+        ring.push(b"");
+        assert_eq!(ring.snapshot(), b"ab");
+    }
+
+    #[test]
+    fn output_flush_threshold_is_below_the_ring_capacity() {
+        // A burst big enough to force an immediate emit must still fit in the replay
+        // ring, otherwise a reconnect right after one would replay a truncated screen.
+        assert!(OUTPUT_FLUSH_BYTES < super::RING_CAPACITY);
+    }
 
     #[test]
     fn strips_csi_and_keeps_text() {
@@ -332,13 +382,28 @@ pub struct CommandOutput {
     pub exit_code: i32,
 }
 
-fn emit_output(
-    app: &AppHandle,
-    session_id: &str,
-    data: &[u8],
-    ring: &Arc<Mutex<RingBuffer>>,
-) {
-    ring.lock().unwrap().push(data);
+/// Longest an output byte may wait in the coalescing buffer before it is emitted.
+///
+/// russh hands us one `ChannelMsg::Data` per SSH packet, and a noisy command
+/// (`tail -f`, a build, `cat` on a large file) produces hundreds per second. Emitting
+/// each one separately means hundreds of base64 encodes, JSON serialisations, IPC
+/// hops, `atob` decodes and `term.write` calls per second — the terminal's dominant
+/// cost, and it is all per-message overhead rather than per-byte work.
+///
+/// One frame at 60 Hz is 16.7 ms, so an 8 ms window is invisible to someone typing
+/// (their echo still lands well inside the same frame) while collapsing a firehose
+/// into at most ~125 emits per second.
+const OUTPUT_FLUSH: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// Flush as soon as this much output is pending, regardless of the timer. Bounds the
+/// buffer against a producer faster than the window, and keeps the UI painting
+/// steadily instead of receiving one enormous blob.
+const OUTPUT_FLUSH_BYTES: usize = 64 * 1024;
+
+fn emit_output(app: &AppHandle, session_id: &str, data: &[u8]) {
+    if data.is_empty() {
+        return;
+    }
     let b64 = base64::engine::general_purpose::STANDARD.encode(data);
     let _ = app.emit(&SessionManager::event_output(session_id), b64);
 }
@@ -351,6 +416,11 @@ async fn run_session(
     session_id: String,
     ring: Arc<Mutex<RingBuffer>>,
 ) {
+    // Output waiting to be emitted, and when it must go out by. `flush_at` is armed
+    // only while something is pending, so an idle session never wakes on a timer.
+    let mut pending: Vec<u8> = Vec::new();
+    let mut flush_at: Option<tokio::time::Instant> = None;
+
     loop {
         tokio::select! {
             cmd = rx.recv() => {
@@ -367,13 +437,33 @@ async fn run_session(
                     }
                 }
             }
+            _ = async {
+                match flush_at {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    // Nothing pending: never completes, so this branch stays inert.
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                emit_output(&app, &session_id, &pending);
+                pending.clear();
+                flush_at = None;
+            }
             msg = channel.wait() => {
                 match msg {
-                    Some(ChannelMsg::Data { ref data }) => {
-                        emit_output(&app, &session_id, data, &ring);
-                    }
-                    Some(ChannelMsg::ExtendedData { ref data, .. }) => {
-                        emit_output(&app, &session_id, data, &ring);
+                    Some(ChannelMsg::Data { ref data })
+                    | Some(ChannelMsg::ExtendedData { ref data, .. }) => {
+                        // The replay ring is fed immediately, never on the flush
+                        // schedule, so a reconnect or re-focus during the window
+                        // still replays every byte the server sent.
+                        ring.lock().unwrap().push(data);
+                        pending.extend_from_slice(data);
+                        if pending.len() >= OUTPUT_FLUSH_BYTES {
+                            emit_output(&app, &session_id, &pending);
+                            pending.clear();
+                            flush_at = None;
+                        } else if flush_at.is_none() {
+                            flush_at = Some(tokio::time::Instant::now() + OUTPUT_FLUSH);
+                        }
                     }
                     Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
                         break;
@@ -383,6 +473,9 @@ async fn run_session(
             }
         }
     }
+    // The session ended with output still inside the coalescing window — a command
+    // whose last line arrived just before EOF must not be lost.
+    emit_output(&app, &session_id, &pending);
     let _ = handle
         .disconnect(Disconnect::ByApplication, "", "en")
         .await;

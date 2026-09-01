@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, Suspense } from "react";
 import { usePluginStore } from "../../stores/pluginStore";
 
 export const DynamicPluginNode = memo(function DynamicPluginNode({
@@ -27,7 +27,15 @@ export const DynamicPluginNode = memo(function DynamicPluginNode({
   const Component = def?.renderCanvasNode || def?.renderNode;
 
   if (Component) {
-    return <Component id={id} data={data} selected={selected} />;
+    // Plugin views are code-split, so the first mount of a given plugin waits on a
+    // chunk fetch. Keep the node's own frame on screen while that happens — the
+    // canvas has already laid out a slot for it, and swapping in a differently
+    // shaped placeholder would make the node jump.
+    return (
+      <Suspense fallback={<PluginNodeLoading />}>
+        <Component id={id} data={data} selected={selected} />
+      </Suspense>
+    );
   }
 
   return (
@@ -49,3 +57,11 @@ export const DynamicPluginNode = memo(function DynamicPluginNode({
     </div>
   );
 });
+
+function PluginNodeLoading() {
+  return (
+    <div className="flex h-full w-full items-center justify-center border border-[var(--border)] bg-[var(--surface)] font-mono text-[11px] text-[var(--text-faint)]">
+      Loading…
+    </div>
+  );
+}

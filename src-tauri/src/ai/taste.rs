@@ -20,44 +20,16 @@ pub fn save(home: &AgentHome, content: &str) -> Result<(), String> {
 
 /// Append a preference (normalized to one bullet per non-empty line).
 pub fn append(home: &AgentHome, entry: &str) -> Result<String, String> {
-    let lines: Vec<String> = entry
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(|l| strip_single_marker(l).to_string())
-        .collect();
-    if lines.is_empty() {
-        return Err("taste entry is empty".into());
-    }
-    let mut content = load(home);
-    let mut added = false;
-    for line in lines {
-        if content.lines().any(|l| l.trim() == line) {
-            continue; // dedup exact lines only
-        }
-        if !content.is_empty() && !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push_str("- ");
-        content.push_str(&line);
-        content.push('\n');
-        added = true;
-    }
-    if added {
-        save(home, &content)?;
-    }
-    Ok(content)
-}
-
-/// Strip a single leading bullet marker + space (never `--flag`'s dashes).
-fn strip_single_marker(line: &str) -> &str {
-    let l = line.trim_start();
-    for m in ["- ", "* ", "• ", "-", "*", "•"] {
-        if let Some(rest) = l.strip_prefix(m) {
-            return rest.trim_start();
+    use crate::ai::text::BulletAppend;
+    let existing = load(home);
+    match crate::ai::text::append_bullets(&existing, entry) {
+        BulletAppend::Empty => Err("taste entry is empty".into()),
+        BulletAppend::Unchanged => Ok(existing),
+        BulletAppend::Updated(content) => {
+            save(home, &content)?;
+            Ok(content)
         }
     }
-    l
 }
 
 pub fn format_for_prompt(home: &AgentHome) -> String {
@@ -66,15 +38,9 @@ pub fn format_for_prompt(home: &AgentHome) -> String {
     if t.is_empty() {
         return String::new();
     }
-    let body = if t.len() <= TASTE_MAX_CHARS {
-        t.to_string()
-    } else {
-        let mut cut = TASTE_MAX_CHARS;
-        while !t.is_char_boundary(cut) && cut > 0 {
-            cut -= 1;
-        }
-        format!("{}\n…(truncated)", t[..cut].trim())
-    };
+    // Preferences are appended, so the most recently learned ones are at the end —
+    // keep those when the file outgrows the budget (see `text::keep_newest`).
+    let body = crate::ai::text::keep_newest(t, TASTE_MAX_CHARS);
     format!(
         "# Preferences (TASTE.md)\n\
          User profile + working style. Follow these preferences when choosing commands, paths, \

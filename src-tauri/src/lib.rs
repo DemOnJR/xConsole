@@ -301,6 +301,11 @@ pub fn run() {
                 });
             }
 
+            // Remote control (Discord). Polls outbound only when the user has enabled
+            // and configured it, so this costs nothing otherwise — and xConsole never
+            // opens a port, which is the security promise the README makes.
+            ai::remote::spawn(app.handle().clone());
+
             // The Cursor MCP runs as a SEPARATE process (Cursor spawns it) and can't
             // emit Tauri events, so its canvas tools drop request files in this shared
             // queue dir. Watch it and forward each request to the live canvas.
@@ -308,17 +313,36 @@ pub fn run() {
                 let app_handle = app.handle().clone();
                 let queue_dir = dir.join("canvas-queue");
                 tauri::async_runtime::spawn(async move {
+                    // Adaptive backoff. Most users never run the Cursor MCP, so this
+                    // directory usually does not exist — a flat 500 ms poll was a
+                    // `read_dir` syscall twice a second, forever, for nothing.
+                    //
+                    // Poll quickly while requests are arriving (a burst of canvas
+                    // commands is one interaction, so the follow-ups are already
+                    // queued), then back off toward a slow idle tick. First request
+                    // after an idle stretch waits up to IDLE_MAX; after that the queue
+                    // drains at FAST, which is quicker than the old fixed interval.
+                    const FAST: std::time::Duration = std::time::Duration::from_millis(250);
+                    const IDLE_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+                    let mut delay = FAST;
                     loop {
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        let rd = match std::fs::read_dir(&queue_dir) {
-                            Ok(r) => r,
-                            Err(_) => continue, // dir doesn't exist yet — nothing queued
+                        tokio::time::sleep(delay).await;
+                        let Ok(rd) = std::fs::read_dir(&queue_dir) else {
+                            // Directory doesn't exist yet — nothing is queued and
+                            // nothing will be until an MCP client creates it.
+                            delay = IDLE_MAX;
+                            continue;
                         };
                         let mut paths: Vec<std::path::PathBuf> = rd
                             .flatten()
                             .map(|e| e.path())
                             .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
                             .collect();
+                        if paths.is_empty() {
+                            delay = (delay * 2).min(IDLE_MAX);
+                            continue;
+                        }
+                        delay = FAST;
                         paths.sort();
                         for path in paths {
                             if let Ok(bytes) = std::fs::read(&path) {
@@ -497,6 +521,29 @@ pub fn run() {
             commands::ai::save_cron_job,
             commands::ai::delete_cron_job,
             commands::ai::run_cron_job,
+            commands::remote::get_remote_status,
+            commands::remote::save_remote_config,
+            commands::remote::clear_remote_token,
+            commands::remote::reset_remote_conversation,
+            commands::remote::test_remote_token,
+            commands::remote::whatsapp_status,
+            commands::remote::whatsapp_link_start,
+            commands::remote::whatsapp_link_cancel,
+            commands::remote::whatsapp_unlink,
+            commands::remote::whatsapp_chats,
+            commands::remote::whatsapp_rebuild_helper,
+            commands::remote::whatsapp_auto_install,
+            commands::persona::list_personas,
+            commands::persona::save_persona,
+            commands::persona::delete_persona,
+            commands::persona::persona_org_chart,
+            commands::persona::list_agent_messages,
+            commands::project::project_history,
+            commands::persona::agent_activity,
+            commands::persona::create_team,
+            commands::project::project_metrics,
+            commands::persona::unread_user_messages,
+            commands::persona::mark_agent_messages_read,
             commands::goal::start_goal,
             commands::goal::confirm_goal,
             commands::goal::pause_goal,

@@ -1,9 +1,8 @@
-import { useEffect, useRef } from "react";
+import { lazy, Suspense, useEffect, useRef } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { WorkspacePanel } from "./components/WorkspacePanel";
 import { ServerPanel } from "./components/ServerPanel";
 import { CanvasFlow } from "./components/CanvasFlow";
-import { SettingsModal } from "./components/settings/SettingsModal";
 import { DialogHost } from "./components/Dialog";
 import { TooltipHost } from "./components/Tooltip";
 import { AppToolbar } from "./components/AppToolbar";
@@ -13,9 +12,47 @@ import { ChangesPanel } from "../plugins/xconsole-plugin-agent/src/ChangesPanel"
 import { PlanModal } from "../plugins/xconsole-plugin-agent/src/PlanModal";
 import { UpdateNotice } from "./components/UpdateNotice";
 import { TransfersPanel } from "./components/TransfersPanel";
-import { PluginMarketplaceModal } from "./components/plugins/PluginMarketplaceModal";
 import { QuickOpenPalette } from "./components/QuickOpenPalette";
 import { usePluginStore, normalizePluginId } from "./stores/pluginStore";
+
+// Settings and the plugin marketplace are modals: they render nothing until the
+// user opens them, but statically importing them pulled every settings section
+// (providers, models, skills, hooks, voice, …) and the marketplace into the chunk
+// that has to parse before the first frame. Mounting them only while open also
+// stops the marketplace — which subscribes to the whole plugin store — from
+// re-rendering on unrelated plugin state changes in the background.
+const SettingsModal = lazy(() =>
+  import("./components/settings/SettingsModal").then((m) => ({ default: m.SettingsModal })),
+);
+const PluginMarketplaceModal = lazy(() =>
+  import("./components/plugins/PluginMarketplaceModal").then((m) => ({
+    default: m.PluginMarketplaceModal,
+  })),
+);
+
+// Each gate subscribes on its own rather than from App: reading `settingsOpen` in
+// App would reconcile the entire shell — canvas included — every time the user
+// opened or closed a modal. Suspense has no fallback because a modal that has not
+// appeared yet should stay invisible, not flash an empty overlay for one chunk fetch.
+function SettingsModalHost() {
+  const open = useUiStore((s) => s.settingsOpen);
+  if (!open) return null;
+  return (
+    <Suspense fallback={null}>
+      <SettingsModal />
+    </Suspense>
+  );
+}
+
+function PluginMarketplaceHost() {
+  const open = usePluginStore((s) => s.marketplaceOpen);
+  if (!open) return null;
+  return (
+    <Suspense fallback={null}>
+      <PluginMarketplaceModal />
+    </Suspense>
+  );
+}
 import { useUpdateStore } from "./stores/updateStore";
 import { useCanvasStore } from "./stores/canvasStore";
 import { useAgentStore } from "./stores/agentStore";
@@ -272,8 +309,8 @@ function UnlockedApp() {
 
         <StatusStrip />
       </div>
-      <SettingsModal />
-      <PluginMarketplaceModal />
+      <SettingsModalHost />
+      <PluginMarketplaceHost />
       <QuickOpenPalette />
 
       {/* Dynamic Plugin Views / Modals (Harness Extension Point) */}
@@ -297,7 +334,15 @@ function UnlockedApp() {
               }
             >
               <div className="h-[90vh] w-[min(1340px,96vw)] overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl flex flex-col animate-in fade-in zoom-in-95 duration-150">
-                <ViewComp onClose={() => usePluginStore.getState().closePluginView(normId)} />
+                <Suspense
+                  fallback={
+                    <div className="flex flex-1 items-center justify-center font-mono text-xs text-[var(--text-faint)]">
+                      Loading…
+                    </div>
+                  }
+                >
+                  <ViewComp onClose={() => usePluginStore.getState().closePluginView(normId)} />
+                </Suspense>
               </div>
             </div>
           );

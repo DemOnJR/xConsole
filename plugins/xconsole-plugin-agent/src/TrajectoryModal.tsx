@@ -3,13 +3,7 @@ import { useAgentStore, type AgentActivityItem } from "../../../src/stores/agent
 import { segmentsFromMessage } from "../../../src/stores/turnSegments";
 import { isCommandItem, isFileEditItem, isSearchItem, isFileReadItem } from "./AgentActivity";
 import { useMaskHost } from "../../../src/lib/privacy";
-import {
-  ToolsIcon,
-  CloseIcon,
-  ClockIcon,
-  ChevronDownIcon,
-  ChevronRightIcon,
-} from "../../../src/components/icons";
+import { ChevronDownIcon, ChevronRightIcon, ClockIcon, CloseIcon, ICON, ToolsIcon } from "../../../src/components/icons";
 
 export const TrajectoryModal = memo(function TrajectoryModal({
   onClose,
@@ -229,7 +223,7 @@ export const TrajectoryModal = memo(function TrajectoryModal({
         <div className="flex select-none items-center justify-between border-b border-[var(--border)] bg-[#111827]/80 px-4 py-3">
           <div className="flex items-center gap-3">
             <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-cyan-950/80 border border-cyan-500/30 text-cyan-400 font-mono text-xs">
-              <ToolsIcon size={14} className="text-amber-400" />
+              <ToolsIcon size={ICON.base} className="text-amber-400" />
             </span>
             <div>
               <h2 className="text-sm font-semibold text-gray-100 flex items-center gap-2 font-mono">
@@ -258,7 +252,7 @@ export const TrajectoryModal = memo(function TrajectoryModal({
               className="flex h-7 w-7 items-center justify-center rounded-md text-gray-400 hover:bg-[var(--border)] hover:text-white"
               title="Close (Esc)"
             >
-              <CloseIcon size={14} />
+              <CloseIcon size={ICON.base} />
             </button>
           </div>
         </div>
@@ -362,14 +356,14 @@ export const TrajectoryModal = memo(function TrajectoryModal({
 
                     <div className="flex shrink-0 items-center gap-2 text-[10px] text-gray-400">
                       {ev.durationFormatted && (
-                        <span className="text-cyan-400"><ClockIcon size={11} className="inline mr-0.5" /> {ev.durationFormatted}</span>
+                        <span className="text-cyan-400"><ClockIcon size={ICON.small} className="inline mr-0.5" /> {ev.durationFormatted}</span>
                       )}
                       {ev.tokenStats?.completionTokens ? (
                         <span className="text-gray-400">
                           {ev.tokenStats.completionTokens} tok
                         </span>
                       ) : null}
-                      <span className="text-gray-500">{isExpanded ? <ChevronDownIcon size={11} /> : <ChevronRightIcon size={11} />}</span>
+                      <span className="text-gray-500">{isExpanded ? <ChevronDownIcon size={ICON.small} /> : <ChevronRightIcon size={ICON.small} />}</span>
                     </div>
                   </div>
 

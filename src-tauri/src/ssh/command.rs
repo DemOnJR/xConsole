@@ -19,11 +19,36 @@ pub async fn run_vps_command(
     vps_id: &str,
     command: &str,
 ) -> Result<CommandOutput, String> {
-    match tokio::time::timeout(COMMAND_TIMEOUT, run_vps_command_inner(db, vps_id, command)).await {
+    run_vps_command_for(db, vps_id, command, COMMAND_TIMEOUT).await
+}
+
+/// Longest a caller may wait for one command.
+///
+/// Not a safety limit — the work is happening either way — so it exists only to stop a
+/// hung command holding a turn open forever. An hour is past the point where waiting
+/// synchronously was the right choice at all; use `background: true` beyond it.
+pub const MAX_COMMAND_TIMEOUT: Duration = Duration::from_secs(3600);
+
+/// Run one command with a caller-chosen deadline.
+///
+/// The fixed two minutes was the right default and the wrong ceiling: a build, an
+/// `npm install`, a migration or a large rsync passes it routinely, and the only reply
+/// was "timed out" for work that was in fact progressing. The caller now says how long
+/// it is prepared to wait, and the error says what to do when that runs out.
+pub async fn run_vps_command_for(
+    db: &Db,
+    vps_id: &str,
+    command: &str,
+    timeout: Duration,
+) -> Result<CommandOutput, String> {
+    let timeout = timeout.min(MAX_COMMAND_TIMEOUT);
+    match tokio::time::timeout(timeout, run_vps_command_inner(db, vps_id, command)).await {
         Ok(r) => r,
         Err(_) => Err(format!(
-            "command timed out after {}s",
-            COMMAND_TIMEOUT.as_secs()
+            "command timed out after {}s. It may still be running on the server. For work \
+             that takes this long, start it with background:true instead — the job survives \
+             the turn, the session and an xConsole restart, and job_status reports on it.",
+            timeout.as_secs()
         )),
     }
 }

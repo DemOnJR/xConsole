@@ -255,6 +255,22 @@ pub fn clear() {
 mod tests {
     use super::*;
 
+    /// `CACHE` is one process-global map, so tests that put/clear entries are not
+    /// independent: run in parallel, one test's `clear()` wipes another's entries and
+    /// both fail intermittently. Every test that touches the cache takes this lock, so
+    /// they serialise against each other while the rest of the suite still runs in
+    /// parallel. Poisoning is recovered from — one failing test must not cascade into
+    /// "all cache tests panicked" and hide the original failure.
+    static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Take the cache lock and hand back a pristine cache. Hold the guard for the whole
+    /// test (`let _guard = cache_guard();`).
+    fn cache_guard() -> std::sync::MutexGuard<'static, ()> {
+        let guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        guard
+    }
+
     #[test]
     fn telemetry_tracks_cacheable_calls_and_hit_rate() {
         let telemetry = new_turn_telemetry();
@@ -281,7 +297,7 @@ mod tests {
 
     #[test]
     fn cache_isolated_by_tool_and_arguments() {
-        clear();
+        let _guard = cache_guard();
         let first = serde_json::json!({ "path": "a" });
         let second = serde_json::json!({ "path": "b" });
         put("local_read_file", &first, "a-result");
@@ -293,7 +309,7 @@ mod tests {
 
     #[test]
     fn invalid_and_non_cacheable_values_are_not_stored() {
-        clear();
+        let _guard = cache_guard();
         let args = serde_json::json!({ "x": 1 });
         put("local_read_file", &args, "");
         assert_eq!(get("local_read_file", &args), None);
@@ -306,7 +322,7 @@ mod tests {
 
     #[test]
     fn targeted_invalidation_removes_only_related_entries() {
-        clear();
+        let _guard = cache_guard();
         let remote = serde_json::json!({ "vps_id": "vps-a", "path": "/etc/app.conf" });
         let other_remote = serde_json::json!({ "vps_id": "vps-a", "path": "/etc/other.conf" });
         put("read_file", &remote, "old");
@@ -322,7 +338,7 @@ mod tests {
 
     #[test]
     fn local_invalidation_removes_file_and_parent_listing() {
-        clear();
+        let _guard = cache_guard();
         let file = serde_json::json!({ "path": "C:/work/app.env" });
         let dir = serde_json::json!({ "path": "C:/work" });
         put("local_read_file", &file, "old");
@@ -335,7 +351,7 @@ mod tests {
 
     #[test]
     fn host_and_skill_invalidation_remove_their_reads() {
-        clear();
+        let _guard = cache_guard();
         let host = serde_json::json!({ "vps_id": "vps-a" });
         let skill = serde_json::json!({ "category": "ops", "name": "deploy" });
         put("host_memory_get", &host, "profile");
@@ -351,6 +367,7 @@ mod tests {
 
     #[test]
     fn cache_scope_canonicalizes_targets_and_isolates_contexts() {
+        let _guard = cache_guard();
         let home = std::path::Path::new("C:/agent");
         let first = CacheScope::new("session-a", Some("workspace-a"), &["vps-b".into(), "vps-a".into(), "vps-a".into()], home);
         let equivalent = CacheScope::new("session-a", Some("workspace-a"), &["vps-a".into(), "vps-b".into()], home);
@@ -368,7 +385,7 @@ mod tests {
 
     #[test]
     fn directory_invalidation_respects_component_boundaries() {
-        clear();
+        let _guard = cache_guard();
         let work = serde_json::json!({ "path": "C:/work" });
         let workspace = serde_json::json!({ "path": "C:/workspace" });
         put("local_list_dir", &work, "work");
@@ -381,7 +398,7 @@ mod tests {
 
     #[test]
     fn clear_removes_cached_entries() {
-        clear();
+        let _guard = cache_guard();
         let args = serde_json::json!({ "path": "reset" });
         put("local_read_file", &args, "value");
         assert!(get("local_read_file", &args).is_some());

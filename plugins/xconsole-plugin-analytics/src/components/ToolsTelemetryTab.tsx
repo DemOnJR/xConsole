@@ -1,10 +1,12 @@
 import React, { useState, useMemo, useDeferredValue } from "react";
 import type { AgentAnalytics, ToolCount } from "../types";
 import {
-  ToolIcon,
+  LayersIcon,
   SearchIcon,
   ZapIcon,
-  LayersIcon,
+} from "../../../../src/components/icons";
+import {
+  ToolIcon,
 } from "../icons";
 
 interface ToolsTelemetryTabProps {

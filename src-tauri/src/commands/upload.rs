@@ -110,6 +110,18 @@ pub async fn terminal_upload(
     inline: Vec<InlineFile>,
 ) -> Result<Vec<Uploaded>, String> {
     let session_id = sftp.session_for_vps(&vps_id).await?;
+
+    // The caller often knows only ".", because the shell has not reported a cwd yet.
+    // Resolving it here is what makes every path we hand back absolute: joining onto "."
+    // produces "./shot.png", which reads like the home directory but is not — the server
+    // resolves it, and the file lands wherever that points (often /). Nobody could tell
+    // from the path where their screenshot went. A server that refuses to canonicalize
+    // still gets the old behaviour rather than a failed upload.
+    let dir = match sftp.resolve(&session_id, &dir).await {
+        Ok(resolved) => resolved,
+        Err(_) => dir,
+    };
+
     let mut out = Vec::new();
 
     for path in local_paths {

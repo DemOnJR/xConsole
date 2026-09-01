@@ -172,12 +172,21 @@ const NODE_SHA256: &str = "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d
 /// short-circuits and keeps the old one forever. This is what that check compares against.
 const NODE_MIN: (u32, u32) = (22, 13);
 
+// Go, for the WhatsApp helper in src-tauri/sidecar/whatsapp. Its go.mod asks for 1.26,
+// and the toolchain is only fetched when a build actually needs it — see step 9, which
+// treats the whole thing as optional. Digest from https://go.dev/dl/?mode=json.
+const GO_VER: &str = "go1.27.0";
+const GO_SHA256: &str = "f0c0a0d33ba94f4d2c5dbc887334ce678b21813504ddb3aafcb06e60a5a667c4";
+
 // WebView2 evergreen bootstrapper: rolling URL, but Authenticode-signed by Microsoft.
 const WEBVIEW2_URL: &str = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
 const WEBVIEW2_SIGNER: &str = "Microsoft Corporation";
 
 const APP_NAME: &str = "xConsole";
 const EXE_NAME: &str = "xconsole.exe";
+/// WhatsApp pairing runs in this separate Go binary. `sidecar_path` in
+/// src-tauri/src/ai/remote/whatsapp.rs looks for it beside the app executable.
+const SIDECAR_NAME: &str = "xconsole-whatsapp.exe";
 const VERSION: &str = "0.1.0";
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\xConsole";
 
@@ -201,7 +210,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 // place.)
 const BUILD_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
 
-const STEPS: [&str; 11] = [
+const STEPS: [&str; 12] = [
     "Preparing",
     "Setting up Git",
     "Setting up Rust (GNU)",
@@ -211,6 +220,7 @@ const STEPS: [&str; 11] = [
     "Downloading xConsole source",
     "Installing dependencies",
     "Building xConsole (this can take a while)",
+    "Building the WhatsApp helper",
     "Installing app + shortcuts",
     "Finishing up",
 ];
@@ -327,10 +337,15 @@ impl Reporter {
 
 // ---- toolchain environment --------------------------------------------------
 
+#[derive(Clone)]
 struct BuildEnv {
     path: String,
     rustup_home: Option<PathBuf>,
     cargo_home: Option<PathBuf>,
+    /// Extra variables for one particular command, on top of the shared ones below.
+    /// The Go build uses this to pin CGO/GOOS/GOARCH without touching the environment
+    /// every other tool in the install runs under.
+    extra: Vec<(String, String)>,
 }
 
 fn current_env(base: &Path) -> BuildEnv {
@@ -339,6 +354,7 @@ fn current_env(base: &Path) -> BuildEnv {
         base.join(r"tools\git\cmd"),
         base.join(r"tools\mingw\mingw64\bin"),
         base.join(r"tools\node"),
+        base.join(r"tools\go\bin"),
         base.join(r".cargo\bin"),
     ] {
         if c.exists() {
@@ -352,12 +368,16 @@ fn current_env(base: &Path) -> BuildEnv {
         path: parts.join(";"),
         rustup_home: Some(base.join(".rustup")).filter(|p| p.exists()),
         cargo_home: Some(base.join(".cargo")).filter(|p| p.exists()),
+        extra: Vec::new(),
     }
 }
 
 impl BuildEnv {
     fn apply(&self, cmd: &mut Command) {
         cmd.env("PATH", &self.path);
+        for (k, v) in &self.extra {
+            cmd.env(k, v);
+        }
         if let Some(r) = &self.rustup_home {
             cmd.env("RUSTUP_HOME", r);
         }
@@ -1108,6 +1128,7 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
                 path: env.path.clone(),
                 rustup_home: Some(base.join(".rustup")),
                 cargo_home: Some(base.join(".cargo")),
+                extra: Vec::new(),
             };
             run_with_retry(rep, "rustup install", MAX_ATTEMPTS, IDLE_TIMEOUT, true, || {
                 let mut c = Command::new(&init);
@@ -1471,8 +1492,26 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
         Ok(())
     });
 
-    // 9. Install built app + shortcuts
+    // 9. WhatsApp helper (optional)
+    //
+    // Deliberately never fatal. It is one of three remote-control transports, and the
+    // main app is already built and working by this point — failing a 20-minute install
+    // because a Go download hiccupped would be absurd. Everything here reports and
+    // continues, and step 10 simply finds no binary to copy.
     step!(9, {
+        if let Err(e) = build_whatsapp_sidecar(rep, &base) {
+            rep.log(format!("WhatsApp helper not built: {e}"));
+            rep.log(
+                "xConsole will work normally with Discord and Telegram. To add WhatsApp \
+                 later, install Go and run src-tauri\\sidecar\\whatsapp\\build.sh, then point \
+                 at the result from Settings > Remote control.",
+            );
+        }
+        Ok(())
+    });
+
+    // 10. Install built app + shortcuts
+    step!(10, {
         let built = src_dir().join(r"src-tauri\target\release");
         let exe = built.join(EXE_NAME);
         if !exe.exists() {
@@ -1490,6 +1529,14 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
             let _ = std::fs::copy(&dll, app_dir().join("WebView2Loader.dll"));
             rep.log("Installed WebView2Loader.dll");
         }
+        // Absent whenever step 9 could not build it, which is a supported outcome.
+        let sidecar = src_dir().join(r"src-tauri\sidecar\whatsapp").join(SIDECAR_NAME);
+        if sidecar.exists() {
+            match std::fs::copy(&sidecar, app_dir().join(SIDECAR_NAME)) {
+                Ok(_) => rep.log(format!("Installed {SIDECAR_NAME}")),
+                Err(e) => rep.log(format!("WhatsApp helper copy warning: {e}")),
+            }
+        }
         match create_shortcuts(&app_dir().join(EXE_NAME)) {
             Ok(made) => {
                 for m in made {
@@ -1502,7 +1549,7 @@ fn run_install(rep: &Reporter) -> Result<(), String> {
     });
 
     // 10. Finishing up
-    step!(10, {
+    step!(11, {
         // Install `uninstall.exe` — re-used for both "Apps & Features" removal AND the
         // in-app `uninstall.exe --update`. It MUST be runnable on its own. When we were
         // launched from the single-exe self-extracting stub (GNU build), our own
@@ -1696,6 +1743,75 @@ fn package_manager_pnpm_version(package_json: &Path) -> Option<String> {
 /// the supply-chain guarantee is kept; it just does not carry a key set that expires with
 /// the Node pin. Non-fatal: if this cannot work out or install the right version, the
 /// install proceeds with whatever pnpm is there, which may well be fine.
+/// Build the WhatsApp helper, fetching a portable Go first if the machine has none.
+///
+/// The sources are tracked in the repo and the binary is not — 25MB, platform-specific,
+/// and rebuilt from source in seconds. Until this existed nothing built them, so every
+/// installed copy silently shipped two remote-control transports instead of three.
+///
+/// CGO stays off, as `build.sh` does it: the SQLite driver is pure Go, so this needs no
+/// C compiler and cannot be broken by the MinGW that step 3 set up for Rust.
+fn build_whatsapp_sidecar(rep: &Reporter, base: &Path) -> Result<(), String> {
+    let sidecar_src = src_dir().join(r"src-tauri\sidecar\whatsapp");
+    if !sidecar_src.join("main.go").exists() {
+        return Err(format!(
+            "no sources at {} (an older checkout predates the helper)",
+            sidecar_src.display()
+        ));
+    }
+
+    let env = current_env(base);
+    if env.check("go version") {
+        rep.log(format!("Go is already available ({}).", env.capture("go version")));
+    } else {
+        rep.log("Installing a portable Go for the WhatsApp helper...");
+        let zip = base.join("tools").join("go.zip");
+        let url = format!("https://go.dev/dl/{GO_VER}.windows-amd64.zip");
+        download(rep, &url, &zip)?;
+        verify_sha256(rep, &zip, GO_SHA256, "Go")?;
+        // The archive contains a top-level `go\`, so extracting into tools\ lands it at
+        // tools\go — which is what `current_env` puts on PATH.
+        remove_dir_robust(&base.join(r"tools\go"));
+        unzip(rep, &zip, &base.join("tools"))?;
+        let _ = std::fs::remove_file(&zip);
+        if !current_env(base).check("go version") {
+            return Err("Go was downloaded but `go version` still fails".into());
+        }
+    }
+
+    let env = current_env(base);
+    rep.log("Building the WhatsApp helper...");
+    // GOFLAGS rather than a `go build` arg list, so the flags survive whatever the module
+    // does. `-trimpath -s -w` matches build.sh: smaller binary, no local paths embedded.
+    let mut cmd_env = env.clone();
+    cmd_env.extra.push(("CGO_ENABLED".into(), "0".into()));
+    cmd_env.extra.push(("GOOS".into(), "windows".into()));
+    cmd_env.extra.push(("GOARCH".into(), "amd64".into()));
+    run_tool(
+        rep,
+        &cmd_env,
+        Some(&sidecar_src),
+        "go",
+        &["build", "-trimpath", "-ldflags=-s -w", "-o", SIDECAR_NAME, "."],
+        "go build (whatsapp helper)",
+    )?;
+
+    let out = sidecar_src.join(SIDECAR_NAME);
+    if !out.exists() {
+        return Err(format!("go build reported success but {} is missing", out.display()));
+    }
+    rep.log(format!("WhatsApp helper built ({}).", human_bytes(&out)));
+    Ok(())
+}
+
+/// Size of a file for a log line, or "unknown" if it cannot be read.
+fn human_bytes(p: &Path) -> String {
+    match std::fs::metadata(p) {
+        Ok(m) => format!("{:.1} MB", m.len() as f64 / (1024.0 * 1024.0)),
+        Err(_) => "unknown size".to_string(),
+    }
+}
+
 fn ensure_pnpm(rep: &Reporter, env: &BuildEnv, src: &Path) {
     let Some(want) = package_manager_pnpm_version(&src.join("package.json")) else {
         return;

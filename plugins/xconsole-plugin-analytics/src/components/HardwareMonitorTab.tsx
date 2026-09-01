@@ -4,9 +4,11 @@ import { AreaChart } from "./AreaChart";
 import { Gauge } from "./Gauge";
 import {
   CpuIcon,
-  RamIcon,
-  GpuIcon,
   ServerIcon,
+} from "../../../../src/components/icons";
+import {
+  GpuIcon,
+  RamIcon,
 } from "../icons";
 
 interface HardwareMonitorTabProps {

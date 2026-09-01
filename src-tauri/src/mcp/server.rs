@@ -41,7 +41,7 @@ fn truncate_output(s: &str) -> String {
     )
 }
 
-struct McpSession {
+pub(crate) struct McpSession {
     db: Db,
     home: AgentHome,
     targets: Vec<String>,
@@ -106,6 +106,45 @@ impl McpSession {
             token,
             abort_handles: Arc::new(DashMap::new()),
         })
+    }
+
+    /// Set the token this session will demand. Called by the transport that mints it.
+    pub(crate) fn set_token(&mut self, token: String) {
+        self.token = Some(token);
+    }
+
+    /// The token every HTTP request must present. Empty when none is configured, which
+    /// the HTTP transport treats as "refuse everything" rather than "allow everything".
+    pub(crate) fn token_for_auth(&self) -> &str {
+        self.token.as_deref().unwrap_or("")
+    }
+
+    /// Build a session inside the running app, rather than from a subprocess's
+    /// environment.
+    ///
+    /// `from_env` exists because the stdio transport *is* a separate process. The HTTP
+    /// transport runs in the app itself and already holds the db and agent home, so
+    /// re-deriving them from env vars would mean re-opening (and possibly failing to
+    /// unlock) a database this process has open.
+    pub(crate) fn in_process(
+        db: Db,
+        home: AgentHome,
+        data_dir: &std::path::Path,
+        targets: Vec<String>,
+        safety: String,
+        workspace_id: String,
+        token: String,
+    ) -> Self {
+        Self {
+            db,
+            home,
+            targets,
+            safety,
+            workspace_id,
+            queue_dir: data_dir.join("canvas-queue"),
+            token: Some(token),
+            abort_handles: Arc::new(DashMap::new()),
+        }
     }
 
     /// Drop a canvas action file for the running app to pick up and forward.
@@ -747,7 +786,7 @@ impl McpSession {
                     Some(p) if !p.is_empty() => p,
                     _ => return ("error: missing path".into(), true),
                 };
-                let offset = args.get("offset").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let offset = args.get("offset").and_then(|v| v.as_i64());
                 let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
                 let vps_id = match self.resolve_vps(args) {
                     Ok(id) => id,
@@ -1163,7 +1202,7 @@ pub async fn run_stdio_server() -> Result<(), String> {
     Ok(())
 }
 
-async fn dispatch_message(
+pub(crate) async fn dispatch_message(
     session: &Arc<McpSession>,
     method: &str,
     id: &Value,

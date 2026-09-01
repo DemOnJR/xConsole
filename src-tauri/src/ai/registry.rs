@@ -3,7 +3,9 @@
 
 use crate::ai::provider::Provider;
 use crate::ai::providers::{
-    anthropic::AnthropicProvider, cli::CliProvider, ollama::{parse_ollama_extra, OllamaProvider},
+    anthropic::AnthropicProvider,
+    cli::{CliProvider, RemoteTarget},
+    ollama::{parse_ollama_extra, OllamaProvider},
     openai_compat::OpenAiProvider,
 };
 use crate::secrets;
@@ -46,12 +48,53 @@ pub fn active_provider_id(db: &Db, override_id: Option<&str>) -> Result<String, 
         .ok_or_else(|| "no AI provider configured".to_string())
 }
 
+/// Which provider and which model a turn should run on.
+///
+/// The two are separate choices. A persona that pins a provider is saying "use my
+/// Anthropic account"; one that pins a model is saying "and use the cheap one on it".
+/// Kept as a struct rather than two `Option<String>` parameters, which are trivially
+/// swapped at a call site and fail silently when they are.
+#[derive(Debug, Clone, Default)]
+pub struct ModelChoice {
+    pub provider_id: Option<String>,
+    pub model: Option<String>,
+}
+
+impl ModelChoice {
+    /// The active provider and its configured model — what an ordinary desktop turn uses.
+    pub fn active() -> Self {
+        Self::default()
+    }
+
+    pub fn provider(provider_id: Option<String>) -> Self {
+        Self { provider_id, model: None }
+    }
+}
+
 /// Build a ready-to-use provider for the given provider id.
 pub fn build(db: &Db, provider_id: &str) -> Result<ResolvedProvider, String> {
-    let p = db
+    build_with_model(db, provider_id, None)
+}
+
+/// Build a provider, optionally overriding the model it is configured with.
+///
+/// The override is applied to the stored row *before* the provider is constructed, not
+/// to the returned struct: a CLI provider bakes the model into its `--model` flag at
+/// construction, so patching `ResolvedProvider.model` afterwards would change what the
+/// UI reports without changing what actually runs.
+pub fn build_with_model(
+    db: &Db,
+    provider_id: &str,
+    model_override: Option<&str>,
+) -> Result<ResolvedProvider, String> {
+    let mut p = db
         .get_provider(provider_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "provider not found".to_string())?;
+
+    if let Some(m) = model_override.map(str::trim).filter(|m| !m.is_empty()) {
+        p.model = Some(m.to_string());
+    }
 
     let secret = secrets::get_secret(&secrets::provider_key(&p.id))
         .ok()
@@ -92,15 +135,18 @@ pub fn build(db: &Db, provider_id: &str) -> Result<ResolvedProvider, String> {
             p.model.clone(),
             secret,
         )),
-        "codex_cli" | "opencode_cli" | "antigravity_cli" => Box::new(CliProvider::new(
-            p.kind.clone(),
-            p.bin_path
-                .clone()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| CliProvider::default_bin(&p.kind)),
-            p.model.clone(),
-            secret,
-        )),
+        "codex_cli" | "opencode_cli" | "antigravity_cli" | "claude_code" => Box::new(
+            CliProvider::new(
+                p.kind.clone(),
+                p.bin_path
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| CliProvider::default_bin(&p.kind)),
+                p.model.clone(),
+                secret,
+            )
+            .with_remote(remote_target(db, &p)),
+        ),
         other => return Err(format!("unknown provider kind: {other}")),
     };
 
@@ -111,6 +157,90 @@ pub fn build(db: &Db, provider_id: &str) -> Result<ResolvedProvider, String> {
         kind: p.kind,
         ollama_num_ctx,
     })
+}
+
+/// Where a CLI provider runs, read from its `extra_json`.
+///
+/// `{"vps_id": "...", "permission_mode": "acceptEdits"}`. Absent or blank `vps_id` means
+/// this machine, which is the default and stays the default — moving an agent onto a
+/// server is a decision the user makes explicitly, per provider.
+fn remote_target(db: &Db, p: &crate::storage::models::AiProvider) -> Option<RemoteTarget> {
+    if p.kind != "claude_code" {
+        return None;
+    }
+    let extra: serde_json::Value = serde_json::from_str(p.extra_json.as_deref()?).ok()?;
+    let vps_id = extra.get("vps_id")?.as_str()?.trim();
+    if vps_id.is_empty() {
+        return None;
+    }
+    Some(RemoteTarget {
+        vps_id: vps_id.to_string(),
+        db: db.clone(),
+        permission_mode: extra
+            .get("permission_mode")
+            .and_then(|m| m.as_str())
+            .unwrap_or("acceptEdits")
+            .to_string(),
+    })
+}
+
+#[cfg(test)]
+mod remote_target_tests {
+    use super::*;
+
+    fn provider(kind: &str, extra: Option<&str>) -> crate::storage::models::AiProvider {
+        crate::storage::models::AiProvider {
+            id: "p1".into(),
+            name: "test".into(),
+            kind: kind.to_string(),
+            model: None,
+            base_url: None,
+            bin_path: None,
+            extra_json: extra.map(str::to_string),
+            enabled: true,
+            has_secret: false,
+            created_at: None,
+        }
+    }
+
+    fn db() -> Db {
+        Db::open(std::path::Path::new(":memory:")).unwrap()
+    }
+
+    #[test]
+    fn a_server_is_used_only_when_one_is_named() {
+        let d = db();
+        // Default is this machine. Anything else would move a user's agent onto a server
+        // because a config field happened to exist.
+        assert!(remote_target(&d, &provider("claude_code", None)).is_none());
+        assert!(remote_target(&d, &provider("claude_code", Some("{}"))).is_none());
+        assert!(remote_target(&d, &provider("claude_code", Some(r#"{"vps_id":"  "}"#))).is_none());
+        assert!(remote_target(&d, &provider("claude_code", Some("not json"))).is_none());
+    }
+
+    #[test]
+    fn only_claude_code_runs_remotely_for_now() {
+        let d = db();
+        let cfg = Some(r#"{"vps_id":"web-1"}"#);
+        assert!(remote_target(&d, &provider("codex_cli", cfg)).is_none());
+        assert!(remote_target(&d, &provider("claude_code", cfg)).is_some());
+    }
+
+    #[test]
+    fn the_permission_mode_carries_through_with_a_working_default() {
+        let d = db();
+        let t = remote_target(&d, &provider("claude_code", Some(r#"{"vps_id":"web-1"}"#))).unwrap();
+        assert_eq!(t.vps_id, "web-1");
+        // A remote target is configured on purpose for a named box, so it can act there.
+        assert_eq!(t.permission_mode, "acceptEdits");
+
+        let t = remote_target(
+            &d,
+            &provider("claude_code", Some(r#"{"vps_id":"web-1","permission_mode":"dontAsk"}"#)),
+        )
+        .unwrap();
+        assert_eq!(t.permission_mode, "dontAsk");
+    }
 }
 
 /// First enabled provider that can run the agent tool loop.
@@ -127,7 +257,8 @@ pub fn find_tool_provider_id(db: &Db) -> Option<String> {
 pub fn resolve_for_turn(
     db: &Db,
     preferred_id: &str,
+    model_override: Option<&str>,
 ) -> Result<(ResolvedProvider, Option<String>), String> {
-    let preferred = build(db, preferred_id)?;
+    let preferred = build_with_model(db, preferred_id, model_override)?;
     Ok((preferred, None))
 }

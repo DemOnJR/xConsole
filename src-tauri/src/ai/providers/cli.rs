@@ -11,33 +11,62 @@ use crate::ai::provider::{
     XConsoleExec,
 };
 use crate::mcp::prepare_agent_workspace;
+use crate::ssh::remote_ops::shell_quote;
 
-static AGY_SESSIONS: LazyLock<Mutex<HashMap<String, String>>> =
+/// The bridge's token, or empty when no bridge is in play.
+fn bridge_token(bridge: &Option<crate::ssh::agent_exec::McpBridge>) -> String {
+    bridge.as_ref().map(|b| b.token.clone()).unwrap_or_default()
+}
+
+/// xConsole session id -> the CLI's own conversation/session id.
+///
+/// Both Antigravity (`--conversation`) and Claude Code (`--resume`) can continue a
+/// thread across invocations, but only if we remember the id they handed back on the
+/// first run. Without this every message would start the CLI from scratch.
+static CLI_SESSIONS: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn get_agy_conversation(session_id: &str) -> Option<String> {
+/// The CLI's own session id for one xConsole session, when there is one.
+///
+/// Public so a session can be read back: an agent's report is a claim, and the CLI's
+/// transcript is the record it can be checked against.
+pub fn get_cli_conversation(session_id: &str) -> Option<String> {
     if session_id.is_empty() {
         return None;
     }
-    AGY_SESSIONS.lock().ok()?.get(session_id).cloned()
+    CLI_SESSIONS.lock().ok()?.get(session_id).cloned()
 }
 
-fn store_agy_conversation(session_id: &str, conversation_id: &str) {
+fn store_cli_conversation(session_id: &str, conversation_id: &str) {
     if session_id.is_empty() || conversation_id.is_empty() {
         return;
     }
-    if let Ok(mut map) = AGY_SESSIONS.lock() {
+    if let Ok(mut map) = CLI_SESSIONS.lock() {
         map.insert(session_id.to_string(), conversation_id.to_string());
     }
 }
 
-fn remove_agy_conversation(session_id: &str) {
+fn remove_cli_conversation(session_id: &str) {
     if session_id.is_empty() {
         return;
     }
-    if let Ok(mut map) = AGY_SESSIONS.lock() {
+    if let Ok(mut map) = CLI_SESSIONS.lock() {
         map.remove(session_id);
     }
+}
+
+/// Run the CLI on a server instead of this machine.
+///
+/// Configured per provider, so "Claude Code on my laptop" and "Claude Code on the build
+/// box" are two provider rows and two personas can each pick one.
+#[derive(Clone)]
+pub struct RemoteTarget {
+    pub vps_id: String,
+    /// Needed to resolve the server's credentials and open the SSH session.
+    pub db: crate::storage::Db,
+    /// What the agent may do on that box without asking. Nobody is at a prompt, so this
+    /// is decided here rather than deferred to one that would never be answered.
+    pub permission_mode: String,
 }
 
 pub struct CliProvider {
@@ -45,6 +74,19 @@ pub struct CliProvider {
     bin: String,
     model: Option<String>,
     api_key: Option<String>,
+    remote: Option<RemoteTarget>,
+}
+
+/// Whether a failure is the CLI refusing to resume a conversation it no longer has.
+///
+/// Worth telling apart from every other non-zero exit: the thread is gone whatever
+/// happens next, so the only useful response is to start a new one rather than to hand
+/// somebody on a phone an error they cannot act on.
+fn is_missing_conversation(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("no conversation found")
+        || s.contains("session not found")
+        || (s.contains("conversation") && s.contains("not found"))
 }
 
 impl CliProvider {
@@ -59,7 +101,241 @@ impl CliProvider {
             bin,
             model: model.filter(|s| !s.is_empty()),
             api_key: api_key.filter(|s| !s.is_empty()),
+            remote: None,
         }
+    }
+
+    /// What Claude Code may do without asking.
+    ///
+    /// Local runs stay read-only: a CLI on the user's own desktop, driven by a
+    /// background persona, editing files nobody asked it to touch is a surprise. A
+    /// remote target is configured deliberately for a named server, so it carries
+    /// whatever mode that provider row was given.
+    fn permission_mode(&self) -> &str {
+        match &self.remote {
+            Some(r) if !r.permission_mode.trim().is_empty() => r.permission_mode.trim(),
+            Some(_) => "acceptEdits",
+            None => "dontAsk",
+        }
+    }
+
+    /// Run the CLI on a server, with xConsole's own tools tunnelled back to it.
+    ///
+    /// The local path pipes a child process; there is no child here, so this drives an
+    /// SSH channel instead and reuses the same stream parser on the far side of it.
+    async fn chat_remote(
+        &self,
+        req: &ChatRequest,
+        sink: Option<&EventSink>,
+        remote: RemoteTarget,
+    ) -> Result<ChatResponse, String> {
+        if self.kind != "claude_code" {
+            return Err(format!(
+                "running {} on a server is not supported yet — only Claude Code is",
+                self.kind
+            ));
+        }
+
+        let existing = (!req.session_id.is_empty())
+            .then(|| get_cli_conversation(&req.session_id))
+            .flatten();
+        let prompt = Self::build_prompt(req, existing.is_some());
+        let prompt_tokens_est = crate::ai::text::count_tokens(&prompt) as u32;
+
+        emit(
+            sink,
+            StreamEvent::Status(format!("Starting Claude Code on {}…", remote.vps_id)),
+        );
+
+        // Serve xConsole's tools on loopback for the duration of the run. Held in scope:
+        // dropping it stops the listener, so the bridge dies with the turn.
+        let bridge_server = match &req.xconsole {
+            Some(xc) => {
+                let session = crate::mcp::server_session_for_bridge(
+                    remote.db.clone(),
+                    &xc.data_dir,
+                    xc.targets.clone(),
+                    xc.safety.clone(),
+                    xc.workspace_id.clone(),
+                );
+                Some(crate::mcp::http::serve(session).await?)
+            }
+            None => None,
+        };
+        let bridge = bridge_server.as_ref().map(|b| crate::ssh::agent_exec::McpBridge {
+            local_port: b.port,
+            token: b.token.clone(),
+        });
+
+        let bin = shell_quote(&self.bin);
+        let flags = self.run_flags(req.xconsole.as_ref(), None, existing.as_deref(), &req.reasoning);
+        let model_flags: Vec<String> = flags.iter().map(|f| shell_quote(f)).collect();
+
+        let out_cell = std::sync::Arc::new(std::sync::Mutex::new(ChatResponse::default()));
+        let started = std::time::Instant::now();
+        let session_id = req.session_id.clone();
+
+        let sink_ref = sink;
+        let out_for_lines = out_cell.clone();
+        let run = crate::ssh::agent_exec::run_agent(
+            &remote.db,
+            &remote.vps_id,
+            bridge.as_ref(),
+            &prompt,
+            |mcp_url| {
+                let mut cmd = format!("{bin} {}", model_flags.join(" "));
+                // Logged before the MCP argument is appended: that one carries this
+                // run's bearer token, and the log is a file on disk. The flags are what
+                // matter anyway — "what did it actually run" was unanswerable without
+                // reproducing the whole path by hand.
+                crate::diag(&format!("cli(remote): {cmd}"));
+                if let Some(url) = mcp_url {
+                    cmd.push_str(" --mcp-config ");
+                    cmd.push_str(&crate::ssh::agent_exec::mcp_config_arg(url, &bridge_token(&bridge)));
+                }
+                cmd
+            },
+            req.cancel.clone(),
+            |line| {
+                let mut out = out_for_lines.lock().unwrap();
+                parse_claude_code_stream_line(&line, &session_id, &mut out, sink_ref);
+            },
+        )
+        .await?;
+
+        let mut out = std::sync::Arc::try_unwrap(out_cell)
+            .map(|m| m.into_inner().unwrap())
+            .unwrap_or_default();
+
+        // A `--output-format stream-json` run always ends with a `result` event, and
+        // that event is where the token counts come from. Text arriving without one
+        // means the CLI answered in some other format — an older build that does not
+        // know the flag, or a launcher printing plain text — and the parser fell back
+        // to treating each line as prose. It still shows an answer, so the only visible
+        // symptom is a turn that reports no tokens, which reads as a display glitch
+        // rather than as "this ran in a mode we do not understand".
+        if out.prompt_tokens.is_none() && out.completion_tokens.is_none() {
+            crate::diag(&format!(
+                "cli(remote): no result event from {} — output was not stream-json, so \
+                 token counts and the resume id are missing. stderr: {}",
+                remote.vps_id,
+                run.stderr.trim().chars().take(400).collect::<String>()
+            ));
+            emit(
+                sink,
+                StreamEvent::Status(format!(
+                    "Claude Code on {} did not report a result — check its version there \
+                     (`claude --version`); xConsole needs one that supports \
+                     `--output-format stream-json`.",
+                    remote.vps_id
+                )),
+            );
+        }
+
+        // Exit 0 with nothing to show is the case that has been hardest to explain: the
+        // run "worked", so no error is raised, and the caller can only report that the
+        // agent said nothing. Whatever the far side did print is the only account of
+        // why, so it is written down here rather than discarded.
+        if run.exit_code == 0 && out.content.trim().is_empty() {
+            crate::diag(&format!(
+                "cli(remote): {} exited 0 with no answer. stderr: {:?}",
+                remote.vps_id,
+                run.stderr.trim().chars().take(1000).collect::<String>()
+            ));
+            emit(
+                sink,
+                StreamEvent::Status(format!(
+                    "Claude Code on {} finished without answering{}",
+                    remote.vps_id,
+                    match run.stderr.trim() {
+                        "" => " and printed nothing — check xconsole.log for the command it ran".to_string(),
+                        e => format!(": {}", e.chars().take(200).collect::<String>()),
+                    }
+                )),
+            );
+        }
+
+        if run.exit_code != 0 {
+            // A failed run's session id is not worth resuming into.
+            remove_cli_conversation(&req.session_id);
+            if out.content.trim().is_empty() {
+                let detail = run.stderr.trim();
+                // The conversation this was resuming into is gone — the server was
+                // rebuilt, or the CLI expired it. That is not a failure to report to
+                // somebody on a phone: the thread is lost either way, and the only
+                // useful thing is to answer them. Retried once, fresh, and only once,
+                // because a second identical failure is a real problem.
+                if is_missing_conversation(detail) && existing.is_some() {
+                    crate::diag(&format!(
+                        "cli(remote): the conversation on {} is gone; starting a new one",
+                        remote.vps_id
+                    ));
+                    emit(
+                        sink,
+                        StreamEvent::Status(
+                            "The previous conversation is gone on that server — starting a \
+                             new one."
+                                .into(),
+                        ),
+                    );
+                    let mut fresh = req.clone();
+                    // A fresh CLI session has none of the thread, so the whole prompt has
+                    // to be rebuilt rather than reduced to the last message.
+                    fresh.session_id = String::new();
+                    return Box::pin(self.chat_remote(&fresh, sink, remote)).await;
+                }
+                return Err(if detail.is_empty() {
+                    format!(
+                        "Claude Code exited with code {} on {}. Check it is installed and \
+                         signed in there (`claude setup-token`).",
+                        run.exit_code, remote.vps_id
+                    )
+                } else if crate::ssh::agent_exec::is_command_not_found(detail) {
+                    // The one failure the user fixes in xConsole rather than on the
+                    // server, and the raw shell error points the wrong way: it reads as
+                    // "not installed" on a box where `which claude` answers fine, because
+                    // an SSH command runs in a shell that never sourced the profile that
+                    // sets PATH.
+                    format!(
+                        "'{}' was not found on {}. Run `which claude` on that server and \
+                         put the full path (e.g. /root/.local/bin/claude) in this \
+                         provider's Binary path — an SSH command does not get the PATH \
+                         you see when you log in by hand.",
+                        self.bin, remote.vps_id
+                    )
+                } else {
+                    format!("Claude Code failed on {}: {detail}", remote.vps_id)
+                });
+            }
+        }
+
+        let completion_tokens = out
+            .completion_tokens
+            .unwrap_or_else(|| crate::ai::text::count_tokens(&out.content) as u32);
+        let prompt_tokens = out.prompt_tokens.unwrap_or(prompt_tokens_est);
+        let ms = started.elapsed().as_millis() as u64;
+        let secs = (ms as f64 / 1000.0).max(0.05);
+        emit(
+            sink,
+            StreamEvent::Stats(crate::ai::provider::StreamStats {
+                completion_tokens,
+                prompt_tokens: Some(prompt_tokens),
+                cached_tokens: out.cached_tokens,
+                cache_creation_tokens: None,
+                duration_ms: ms,
+                tokens_per_sec: (completion_tokens as f64 / secs) as f32,
+            }),
+        );
+        if out.stop_reason.is_empty() {
+            out.stop_reason = "stop".into();
+        }
+        Ok(out)
+    }
+
+    /// Same CLI, running over SSH on `remote.vps_id`.
+    pub fn with_remote(mut self, remote: Option<RemoteTarget>) -> Self {
+        self.remote = remote;
+        self
     }
 
     pub fn default_bin(kind: &str) -> String {
@@ -92,6 +368,29 @@ impl CliProvider {
                     }
                 }
                 "agent".into()
+            }
+            "claude_code" => {
+                // The native installer puts it under the user's home rather than on a
+                // system path, and a GUI app does not inherit the shell's PATH edits.
+                #[cfg(windows)]
+                {
+                    if let Ok(profile) = std::env::var("USERPROFILE") {
+                        let native = format!(r"{profile}\.local\bin\claude.exe");
+                        if Path::new(&native).exists() {
+                            return native;
+                        }
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    if let Some(home) = std::env::var_os("HOME") {
+                        let native = PathBuf::from(home).join(".local/bin/claude");
+                        if native.exists() {
+                            return native.to_string_lossy().into_owned();
+                        }
+                    }
+                }
+                "claude".into()
             }
             _ => "codex".into(),
         }
@@ -135,6 +434,44 @@ impl CliProvider {
                 }
                 a
             }
+            "claude_code" => {
+                // `claude -p` is the documented non-interactive entry point. Kept off
+                // `--bare`: bare mode refuses to read the OAuth credentials, so it would
+                // demand an ANTHROPIC_API_KEY from a user whose whole reason for picking
+                // this provider is that they have a subscription and no key.
+                let mut a = vec![
+                    "-p".to_string(),
+                    "--output-format".into(),
+                    "stream-json".into(),
+                    // stream-json refuses to run without it.
+                    "--verbose".into(),
+                ];
+                // Manual is the starting mode for -p, and nobody is watching a prompt
+                // here, so one is always passed: the alternative is a run that denies
+                // everything by default and reports it as the agent's own conclusion.
+                a.push("--permission-mode".into());
+                a.push(self.permission_mode().into());
+                if let Some(conv_id) = agy_conv {
+                    a.push("--resume".into());
+                    a.push(conv_id.to_string());
+                }
+                if let Some(m) = &self.model {
+                    a.push("--model".into());
+                    a.push(m.clone());
+                }
+                // Claude Code spells the same knob `--effort`, with two levels xConsole
+                // does not offer; passing only what it accepts keeps an unknown value
+                // from failing the whole run.
+                if matches!(reasoning, "low" | "medium" | "high") {
+                    a.push("--effort".into());
+                    a.push(reasoning.to_string());
+                }
+                if let Some(ws) = workspace {
+                    a.push("--add-dir".into());
+                    a.push(ws.to_string_lossy().into_owned());
+                }
+                a
+            }
             "cursor" => {
                 let mut a = vec![
                     "-p".into(),
@@ -171,10 +508,46 @@ impl CliProvider {
         }
     }
 
+    /// The text handed to the CLI on stdin.
+    ///
+    /// A resumed conversation only needs what is new, because the CLI still holds the
+    /// thread on its side. What is new is the user's message — **not** whatever message
+    /// happens to be last.
+    ///
+    /// Every request ends with a synthetic `# Runtime context` user message carrying the
+    /// date, the VPS snapshot and the canvas (see `context::inject_dynamic_into_last_user`).
+    /// Taking the last user message therefore sent the model a block of context and
+    /// nothing the user had typed. It answered the only thing it had been given: it
+    /// narrated the snapshot, or — with nothing worth narrating — said "I'm here, tell me
+    /// what you want to do". Asking "why is the disk full?" produced a diff against the
+    /// previous snapshot; asking it to delete something produced an offer to help. The
+    /// replies looked like a model ignoring the conversation because it never saw it.
+    ///
+    /// So: the real message, with the runtime context ahead of it as context rather than
+    /// in place of it.
     fn build_prompt(req: &ChatRequest, is_resumed_agy: bool) -> String {
+        let is_runtime = crate::ai::context::is_runtime_message;
         if is_resumed_agy {
-            if let Some(last_user) = req.messages.iter().rev().find(|m| m.role == "user") {
-                return last_user.content.clone();
+            if let Some(last_user) = req
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == "user" && !is_runtime(m))
+            {
+                let runtime = req
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| is_runtime(m))
+                    .map(|m| m.content.as_str())
+                    .unwrap_or("");
+                return if runtime.is_empty() {
+                    last_user.content.clone()
+                } else {
+                    // The ask goes last so it is the thing being answered, not the
+                    // thing buried under a screenful of context.
+                    format!("{runtime}\n\n{}", last_user.content)
+                };
             }
         }
         let mut s = String::new();
@@ -184,6 +557,12 @@ impl CliProvider {
         }
         for m in &req.messages {
             match m.role.as_str() {
+                // The runtime block is context, not something the user said. Labelling
+                // it "User:" invites the model to answer it.
+                "user" if is_runtime(m) => {
+                    s.push_str(&m.content);
+                    s.push('\n');
+                }
                 "user" => {
                     s.push_str("User: ");
                     s.push_str(&m.content);
@@ -310,6 +689,13 @@ async fn spawn_with_stdin(
             cmd.env("CURSOR_API_KEY", key);
         }
     }
+    // Optional on purpose. With no key set, Claude Code falls back to the machine's own
+    // subscription login — which is the whole reason to run the CLI instead of the API.
+    if kind == "claude_code" {
+        if let Some(key) = api_key {
+            cmd.env("ANTHROPIC_API_KEY", key);
+        }
+    }
 
     crate::proc::hide_console(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| {
@@ -411,10 +797,10 @@ async fn read_child_output(
                     next = lines.next_line() => match next {
                         Ok(Some(line)) => {
                             if stream_json {
-                                if kind_owned == "antigravity_cli" {
-                                    parse_antigravity_stream_line(&line, &session_id_owned, &mut out, sink);
-                                } else {
-                                    parse_cursor_stream_line(&line, &mut out, sink);
+                                match kind_owned.as_str() {
+                                    "antigravity_cli" => parse_antigravity_stream_line(&line, &session_id_owned, &mut out, sink),
+                                    "claude_code" => parse_claude_code_stream_line(&line, &session_id_owned, &mut out, sink),
+                                    _ => parse_cursor_stream_line(&line, &mut out, sink),
                                 }
                             } else {
                                 out.content.push_str(&line);
@@ -470,8 +856,8 @@ async fn read_child_output(
 
     let status = child.wait().await.map_err(|e| e.to_string())?;
     if !status.success() {
-        if kind == "antigravity_cli" {
-            remove_agy_conversation(session_id);
+        if matches!(kind, "antigravity_cli" | "claude_code") {
+            remove_cli_conversation(session_id);
         }
         let hint = if kind == "cursor"
             && (err.contains("invalid") || err.contains("Not logged in") || err.contains("API key"))
@@ -650,7 +1036,7 @@ fn parse_antigravity_stream_line(
         "init" => {
             if let Some(conv_id) = v.get("conversation_id").and_then(|c| c.as_str()) {
                 if !conv_id.is_empty() && !session_id.is_empty() {
-                    store_agy_conversation(session_id, conv_id);
+                    store_cli_conversation(session_id, conv_id);
                 }
             }
         }
@@ -660,7 +1046,7 @@ fn parse_antigravity_stream_line(
             };
             if let Some(conv_id) = su.get("conversation_id").and_then(|c| c.as_str()) {
                 if !conv_id.is_empty() && !session_id.is_empty() {
-                    store_agy_conversation(session_id, conv_id);
+                    store_cli_conversation(session_id, conv_id);
                 }
             }
             let step_type = su.get("step_type").and_then(|s| s.as_str()).unwrap_or("");
@@ -730,7 +1116,7 @@ fn parse_antigravity_stream_line(
             };
             if let Some(conv_id) = res.get("conversation_id").and_then(|c| c.as_str()) {
                 if !conv_id.is_empty() && !session_id.is_empty() {
-                    store_agy_conversation(session_id, conv_id);
+                    store_cli_conversation(session_id, conv_id);
                 }
             }
             if let Some(resp_text) = res.get("response").and_then(|r| r.as_str()) {
@@ -834,6 +1220,206 @@ fn parse_cursor_stream_line(line: &str, out: &mut ChatResponse, sink: Option<&Ev
             }
         }
         _ => {}
+    }
+}
+
+/// Claude Code's `--output-format stream-json`.
+///
+/// Deliberately not the Cursor parser: that one *replaces* accumulated content on each
+/// assistant message, which is right for Cursor's repeated flushes of one growing
+/// answer and wrong here. Claude Code emits a separate assistant message per model
+/// response, so a turn that stops to call a tool and then keeps talking arrives as two —
+/// replacing would silently drop everything it said before the first tool call.
+fn parse_claude_code_stream_line(
+    line: &str,
+    session_id: &str,
+    out: &mut ChatResponse,
+    sink: Option<&EventSink>,
+) {
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        // Not JSON: almost always a launcher warning on stdout. Surfacing it beats
+        // swallowing the one line that explains why the run produced nothing.
+        emit(sink, StreamEvent::Text(format!("{line}\n")));
+        out.content.push_str(line);
+        out.content.push('\n');
+        return;
+    };
+
+    match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        "system" => {
+            if v.get("subtype").and_then(|s| s.as_str()) == Some("init") {
+                // Remembered so the next message in this chat resumes the thread rather
+                // than re-explaining itself to a fresh session.
+                if let Some(id) = v.get("session_id").and_then(|c| c.as_str()) {
+                    store_cli_conversation(session_id, id);
+                }
+                if let Some(model) = v.get("model").and_then(|m| m.as_str()) {
+                    emit(sink, StreamEvent::Status(format!("Claude Code on {model}")));
+                }
+                // Whether xConsole's own tools actually attached.
+                //
+                // A server the CLI could not reach is reported here and then simply not
+                // offered — the run continues, tool-less, and the agent explains to the
+                // user that it cannot touch their servers and hands them shell commands
+                // to paste. Nothing in xConsole said the bridge had failed, so that read
+                // as the agent being unhelpful rather than as a broken tunnel.
+                let failed: Vec<String> = v
+                    .get("mcp_servers")
+                    .and_then(|m| m.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter(|s| {
+                                s.get("status").and_then(|st| st.as_str()).unwrap_or("") != "connected"
+                            })
+                            .map(|s| {
+                                format!(
+                                    "{} ({})",
+                                    s.get("name").and_then(|n| n.as_str()).unwrap_or("?"),
+                                    s.get("status").and_then(|st| st.as_str()).unwrap_or("unknown")
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !failed.is_empty() {
+                    let msg = format!(
+                        "xConsole's tools did not attach to Claude Code: {}. It will answer \
+                         from the snapshot but cannot run anything on your servers this turn.",
+                        failed.join(", ")
+                    );
+                    crate::diag(&format!("cli: {msg}"));
+                    emit(sink, StreamEvent::Status(msg));
+                }
+            }
+        }
+        "assistant" => {
+            // Subagent chatter carries the spawning tool call's id; only the main
+            // conversation's text is this turn's answer.
+            if v.get("parent_tool_use_id").map(|p| !p.is_null()).unwrap_or(false) {
+                return;
+            }
+            for block in v
+                .pointer("/message/content")
+                .and_then(|c| c.as_array())
+                .into_iter()
+                .flatten()
+            {
+                match block.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                    "text" => {
+                        if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                            if !t.is_empty() {
+                                emit(sink, StreamEvent::Text(t.to_string()));
+                                out.content.push_str(t);
+                            }
+                        }
+                    }
+                    "tool_use" => {
+                        let id = block
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("tool")
+                            .to_string();
+                        let tool = block
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("tool")
+                            .to_string();
+                        emit(
+                            sink,
+                            StreamEvent::Activity(ActivityEvent::ToolStart {
+                                id,
+                                label: tool.clone(),
+                                detail: claude_code_tool_detail(block),
+                                tool,
+                            }),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Tool results come back addressed to the agent as a `user` message.
+        "user" => {
+            for block in v
+                .pointer("/message/content")
+                .and_then(|c| c.as_array())
+                .into_iter()
+                .flatten()
+            {
+                if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                    continue;
+                }
+                let id = block
+                    .get("tool_use_id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("tool")
+                    .to_string();
+                let ok = !block.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
+                emit(
+                    sink,
+                    StreamEvent::ToolResult {
+                        id: id.clone(),
+                        output: claude_code_result_text(block),
+                    },
+                );
+                emit(sink, StreamEvent::Activity(ActivityEvent::ToolEnd { id, ok }));
+            }
+        }
+        "result" => {
+            if let Some(u) = v.get("usage") {
+                let n = |k: &str| u.get(k).and_then(|x| x.as_u64()).map(|x| x as u32);
+                out.prompt_tokens = n("input_tokens");
+                out.completion_tokens = n("output_tokens");
+                out.cached_tokens = n("cache_read_input_tokens");
+            }
+            let final_text = v.get("result").and_then(|r| r.as_str()).unwrap_or("");
+            // The result line repeats the final answer. Take it only when the assistant
+            // messages gave us nothing — appending it to text we already streamed would
+            // show the user the same paragraph twice.
+            if out.content.trim().is_empty() && !final_text.is_empty() {
+                out.content = final_text.to_string();
+                emit(sink, StreamEvent::Text(final_text.to_string()));
+            }
+            if v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false) {
+                out.stop_reason = "error".into();
+            } else if let Some(reason) = v.get("stop_reason").and_then(|r| r.as_str()) {
+                out.stop_reason = reason.to_string();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A one-line "what is it doing" for a tool call, for the activity row.
+fn claude_code_tool_detail(block: &serde_json::Value) -> Option<String> {
+    let input = block.get("input")?;
+    for key in ["command", "file_path", "path", "pattern", "url", "description"] {
+        if let Some(v) = input.get(key).and_then(|v| v.as_str()) {
+            if !v.is_empty() {
+                return Some(truncate_str(v, 160));
+            }
+        }
+    }
+    None
+}
+
+/// Tool-result content is either a plain string or a list of content blocks.
+fn claude_code_result_text(block: &serde_json::Value) -> String {
+    match block.get("content") {
+        Some(serde_json::Value::String(s)) => truncate_str(s, 4000),
+        Some(serde_json::Value::Array(parts)) => {
+            let joined: String = parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("");
+            truncate_str(&joined, 4000)
+        }
+        _ => String::new(),
     }
 }
 
@@ -1334,16 +1920,22 @@ impl Provider for CliProvider {
         req: &ChatRequest,
         sink: Option<&EventSink>,
     ) -> Result<ChatResponse, String> {
-        let existing_agy_conv = if self.kind == "antigravity_cli" && !req.session_id.is_empty() {
-            get_agy_conversation(&req.session_id)
+        if let Some(remote) = self.remote.clone() {
+            return self.chat_remote(req, sink, remote).await;
+        }
+        let resumable = matches!(self.kind.as_str(), "antigravity_cli" | "claude_code");
+        let existing_agy_conv = if resumable && !req.session_id.is_empty() {
+            get_cli_conversation(&req.session_id)
         } else {
             None
         };
+        // A resumed CLI already holds the thread, so replaying it would send the whole
+        // history a second time — send only what is new.
         let is_resumed_agy = existing_agy_conv.is_some();
         let prompt = Self::build_prompt(req, is_resumed_agy);
         let prompt_tokens_est = crate::ai::text::count_tokens(&prompt) as u32;
         let stream_json = (self.kind == "cursor" && req.xconsole.is_some())
-            || self.kind == "antigravity_cli";
+            || matches!(self.kind.as_str(), "antigravity_cli" | "claude_code");
 
         let workspace = if let Some(xc) = &req.xconsole {
             let label = match self.kind.as_str() {
@@ -1351,6 +1943,7 @@ impl Provider for CliProvider {
                     "Starting Antigravity CLI with xConsole MCP (SSH to your VPS)…"
                 }
                 "cursor" => "Starting Cursor with xConsole MCP (SSH to your VPS)…",
+                "claude_code" => "Starting Claude Code with xConsole MCP (SSH to your VPS)…",
                 _ => "Starting agent with xConsole MCP (SSH to your VPS)…",
             };
             emit(sink, StreamEvent::Status(label.into()));
@@ -1428,12 +2021,18 @@ impl Provider for CliProvider {
 fn login_args(kind: &str) -> Vec<String> {
     match kind {
         "opencode_cli" => vec!["auth".into(), "login".into()],
+        // `claude login` is terminal-only and unavailable under -p. `setup-token` is the
+        // documented way to authorise a non-interactive caller from a subscription.
+        "claude_code" => vec!["setup-token".into()],
         _ => vec!["login".into()],
     }
 }
 
 pub fn is_cli_kind(kind: &str) -> bool {
-    matches!(kind, "codex_cli" | "opencode_cli" | "cursor" | "antigravity_cli")
+    matches!(
+        kind,
+        "codex_cli" | "opencode_cli" | "cursor" | "antigravity_cli" | "claude_code"
+    )
 }
 
 /// Run `opencode models` / `agy models` and return available model IDs.
@@ -1621,7 +2220,7 @@ pub async fn login(kind: &str, bin: &str, sink: Option<&EventSink>) -> Result<St
 
 #[cfg(test)]
 mod tests {
-    use super::parse_cli_model_ids;
+    use super::*;
 
     #[test]
     fn parses_agy_tab_separated_gemini_ids() {
@@ -1639,6 +2238,102 @@ claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n";
         );
     }
 
+    fn claude_code() -> CliProvider {
+        CliProvider::new(
+            "claude_code".into(),
+            "claude".into(),
+            Some("claude-opus-5".into()),
+            None,
+        )
+    }
+
+    #[test]
+    fn claude_code_runs_headless_without_demanding_an_api_key() {
+        let flags = claude_code().run_flags(None, None, None, "");
+        let joined = flags.join(" ");
+        assert!(joined.starts_with("-p "), "must be the print/headless entry point");
+        assert!(joined.contains("--output-format stream-json"));
+        // stream-json is rejected without it.
+        assert!(flags.iter().any(|f| f == "--verbose"));
+        assert!(joined.contains("--model claude-opus-5"));
+        // `--bare` refuses to read the OAuth credentials and would force an API key on
+        // a subscription user — the exact reason this provider exists.
+        assert!(!flags.iter().any(|f| f == "--bare"));
+        // Nobody is watching a permission prompt in a background turn.
+        assert!(joined.contains("--permission-mode dontAsk"));
+    }
+
+    #[test]
+    fn claude_code_resumes_a_known_thread_instead_of_starting_over() {
+        let flags = claude_code().run_flags(None, None, Some("sess-123"), "");
+        assert!(flags.join(" ").contains("--resume sess-123"));
+    }
+
+    #[test]
+    fn claude_code_forwards_only_effort_levels_it_accepts() {
+        assert!(claude_code().run_flags(None, None, None, "high").join(" ").contains("--effort high"));
+        // xConsole has reasoning values Claude Code does not take; passing one through
+        // would fail the whole run rather than just that setting.
+        assert!(!claude_code().run_flags(None, None, None, "ludicrous").join(" ").contains("--effort"));
+    }
+
+    /// Lines captured from a real `claude -p --output-format stream-json --verbose` run.
+    #[test]
+    fn claude_code_stream_keeps_text_from_before_a_tool_call() {
+        let mut out = ChatResponse::default();
+        let lines = [
+            r#"{"type":"system","subtype":"init","session_id":"abc-1","model":"claude-opus-5"}"#,
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"Checking. "}]}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"uptime"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"up 3 days"}]}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"text","text":"Up 3 days."}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"Up 3 days.","session_id":"abc-1","usage":{"input_tokens":9,"output_tokens":39,"cache_read_input_tokens":13615}}"#,
+        ];
+        for line in lines {
+            parse_claude_code_stream_line(line, "xc-session", &mut out, None);
+        }
+
+        // The Cursor parser replaces content per assistant message; doing that here would
+        // lose "Checking. " the moment the tool call arrived.
+        assert_eq!(out.content, "Checking. Up 3 days.");
+        // Thinking blocks are not the answer and must not reach the transcript.
+        assert!(!out.content.contains("hidden"));
+        assert_eq!(out.prompt_tokens, Some(9));
+        assert_eq!(out.completion_tokens, Some(39));
+        assert_eq!(out.cached_tokens, Some(13615));
+        // The id from `init` is what lets the next message resume this thread.
+        assert_eq!(get_cli_conversation("xc-session").as_deref(), Some("abc-1"));
+        remove_cli_conversation("xc-session");
+    }
+
+    #[test]
+    fn claude_code_takes_the_result_line_when_nothing_streamed() {
+        // A run that only produced a result (short answers sometimes arrive this way)
+        // must not come back empty.
+        let mut out = ChatResponse::default();
+        parse_claude_code_stream_line(
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"OK"}"#,
+            "",
+            &mut out,
+            None,
+        );
+        assert_eq!(out.content, "OK");
+    }
+
+    #[test]
+    fn claude_code_ignores_subagent_chatter() {
+        // Subagent text carries the spawning call's id. Counting it as the answer would
+        // splice a worker's monologue into what the user reads.
+        let mut out = ChatResponse::default();
+        parse_claude_code_stream_line(
+            r#"{"type":"assistant","parent_tool_use_id":"t9","message":{"content":[{"type":"text","text":"inner"}]}}"#,
+            "",
+            &mut out,
+            None,
+        );
+        assert!(out.content.is_empty());
+    }
+
     #[test]
     fn parses_opencode_one_id_per_line() {
         assert_eq!(
@@ -1647,3 +2342,89 @@ claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n";
         );
     }
 }
+#[cfg(test)]
+mod build_prompt_tests {
+    use super::*;
+    use crate::ai::context::RUNTIME_MARKER;
+    use crate::ai::provider::ChatMessage;
+
+    fn req(messages: Vec<ChatMessage>) -> ChatRequest {
+        let mut r = ChatRequest::new("claude-opus-5");
+        r.system = "You are the xConsole DevOps copilot.".into();
+        r.messages = messages;
+        r
+    }
+
+    fn runtime() -> ChatMessage {
+        ChatMessage::user(format!(
+            "{RUNTIME_MARKER}\nDate: Saturday\nDisk /: 600G / 698G — 87%"
+        ))
+    }
+
+    #[test]
+    fn a_vanished_conversation_is_told_apart_from_a_real_failure() {
+        // Verified against the real CLI: resuming an id it no longer has exits 1 and
+        // prints this on stderr, with no answer on stdout. The thread is gone either
+        // way, so the only useful response is a fresh one — not an error handed to
+        // somebody on a phone who cannot act on it.
+        assert!(is_missing_conversation(
+            "No conversation found with session ID: 00000000-1111-2222-3333-444444444444"
+        ));
+        assert!(is_missing_conversation("Session not found"));
+        // Everything else is a real failure and must still be reported.
+        assert!(!is_missing_conversation("Invalid API key"));
+        assert!(!is_missing_conversation("bash: line 1: claude: command not found"));
+        assert!(!is_missing_conversation(""));
+    }
+
+    #[test]
+    fn a_resumed_turn_sends_what_the_user_typed() {
+        // The bug: every request ends with a synthetic runtime block, so taking the
+        // *last* user message sent the model context and none of the question. It
+        // narrated the snapshot instead of answering, and on a turn with nothing worth
+        // narrating it offered to help — which read as the agent ignoring the
+        // conversation entirely.
+        let p = CliProvider::build_prompt(
+            &req(vec![ChatMessage::user("sterge fivem si txadmin"), runtime()]),
+            true,
+        );
+        assert!(p.contains("sterge fivem si txadmin"), "the ask is missing: {p}");
+        // Context still travels, but behind the ask, so the ask is what gets answered.
+        assert!(p.contains("87%"), "runtime context should still be carried");
+        assert!(
+            p.trim_end().ends_with("sterge fivem si txadmin"),
+            "the ask must come last: {p}"
+        );
+    }
+
+    #[test]
+    fn a_resumed_turn_with_no_context_sends_the_ask_alone() {
+        // The CLI holds the thread on its side, so nothing else needs repeating.
+        let p = CliProvider::build_prompt(
+            &req(vec![ChatMessage::user("ce model esti?")]),
+            true,
+        );
+        assert_eq!(p, "ce model esti?");
+    }
+
+    #[test]
+    fn a_fresh_turn_does_not_label_the_runtime_block_as_the_user_speaking() {
+        // "User: # Runtime context …" invites the model to answer the context.
+        let p = CliProvider::build_prompt(
+            &req(vec![ChatMessage::user("hi"), runtime()]),
+            false,
+        );
+        assert!(p.contains("User: hi"));
+        assert!(!p.contains(&format!("User: {RUNTIME_MARKER}")), "runtime is not an ask: {p}");
+        assert!(p.contains(RUNTIME_MARKER), "runtime context should still be carried");
+    }
+
+    #[test]
+    fn a_resumed_turn_with_only_context_has_nothing_to_ask() {
+        // Nothing the user said: fall through rather than handing the model a block of
+        // context and letting it invent a question to answer.
+        let p = CliProvider::build_prompt(&req(vec![runtime()]), true);
+        assert!(p.contains("You are the xConsole DevOps copilot."));
+    }
+}
+

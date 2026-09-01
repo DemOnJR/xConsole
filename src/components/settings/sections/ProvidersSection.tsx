@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSettingsStore } from "../../../stores/settingsStore";
+import { useVpsStore } from "../../../stores/vpsStore";
 import { dialog } from "../../../stores/dialogStore";
 import { api, onAiLoginOutput } from "../../../lib/tauri";
 import type { AiProvider, AiProviderInput, ProviderKind } from "../../../lib/tauri";
@@ -22,6 +23,7 @@ const KIND_LABELS: Record<ProviderKind, string> = {
   codex_cli: "Codex CLI",
   opencode_cli: "OpenCode CLI",
   antigravity_cli: "Antigravity CLI (agy)",
+  claude_code: "Claude Code CLI",
 };
 
 const OLLAMA_CTX_PRESETS: { value: number; label: string }[] = [
@@ -62,6 +64,13 @@ const KIND_DEFAULTS: Record<ProviderKind, Partial<AiProviderInput>> = {
   codex_cli: { bin_path: "codex" },
   opencode_cli: { bin_path: "opencode" },
   antigravity_cli: { bin_path: "agy", model: "gemini-3.7-flash-high" },
+  // No api_key default: Claude Code uses the machine's own subscription login unless one
+  // is supplied, which is the reason to run the CLI rather than the Anthropic API kind.
+  claude_code: {
+    bin_path: "claude",
+    model: "claude-opus-5",
+    extra_json: JSON.stringify({ vps_id: "", permission_mode: "acceptEdits" }),
+  },
 };
 
 // One-click presets for popular providers. Most are OpenAI-compatible, so they
@@ -123,7 +132,31 @@ const isHttpApi = (kind: ProviderKind) =>
 const isOllama = (kind: ProviderKind) => kind === "ollama";
 
 const isCli = (kind: ProviderKind) =>
-  kind === "codex_cli" || kind === "opencode_cli" || kind === "cursor" || kind === "antigravity_cli";
+  kind === "codex_cli" ||
+  kind === "opencode_cli" ||
+  kind === "cursor" ||
+  kind === "antigravity_cli" ||
+  kind === "claude_code";
+
+type ClaudeCodeExtra = { vps_id: string; permission_mode: string };
+
+/** Blank means this PC, which is the default and the safe reading of a missing value. */
+function parseClaudeCodeExtra(raw?: string | null): ClaudeCodeExtra {
+  const empty: ClaudeCodeExtra = { vps_id: "", permission_mode: "acceptEdits" };
+  if (!raw?.trim()) return empty;
+  try {
+    const v = JSON.parse(raw) as Partial<ClaudeCodeExtra>;
+    return {
+      vps_id: typeof v.vps_id === "string" ? v.vps_id : "",
+      permission_mode:
+        v.permission_mode === "dontAsk" || v.permission_mode === "acceptEdits"
+          ? v.permission_mode
+          : "acceptEdits",
+    };
+  } catch {
+    return empty;
+  }
+}
 
 function parseOllamaExtra(raw?: string | null) {
   if (!raw?.trim()) return { ...OLLAMA_EXTRA_DEFAULT };
@@ -427,6 +460,13 @@ function ProviderForm({
   const http = isHttpApi(form.kind);
   const ollama = isOllama(form.kind);
   const cursor = form.kind === "cursor";
+
+  // Where Claude Code runs, and what it may do there. Kept in extra_json rather than new
+  // columns: it is provider-kind-specific config, which is what that field is for.
+  const claudeCodeExtra = parseClaudeCodeExtra(form.extra_json);
+  const patchClaudeCode = (next: Partial<ClaudeCodeExtra>) =>
+    patch({ extra_json: JSON.stringify({ ...claudeCodeExtra, ...next }) });
+  const vpsList = useVpsStore((s) => s.vpsList);
 
   return (
     <div
@@ -837,6 +877,41 @@ function ProviderForm({
                 />
               )}
             </Field>
+          </>
+        )}
+
+        {form.kind === "claude_code" && (
+          <>
+            <Field
+              label="Runs on"
+              hint="This PC, or a server with Claude Code installed and signed in (`claude setup-token` there). On a server it reaches xConsole's own tools back through the SSH connection — no port is opened."
+            >
+              <Select
+                value={claudeCodeExtra.vps_id}
+                onChange={(e) => patchClaudeCode({ vps_id: e.target.value })}
+              >
+                <option value="">This PC</option>
+                {vpsList.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            {claudeCodeExtra.vps_id && (
+              <Field
+                label="What it may do there"
+                hint="Nobody can answer a permission prompt during a background run, so this is decided up front."
+              >
+                <Select
+                  value={claudeCodeExtra.permission_mode}
+                  onChange={(e) => patchClaudeCode({ permission_mode: e.target.value })}
+                >
+                  <option value="acceptEdits">Edit files and run commands</option>
+                  <option value="dontAsk">Read-only (inspect and report)</option>
+                </Select>
+              </Field>
+            )}
           </>
         )}
 

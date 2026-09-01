@@ -388,7 +388,175 @@ export type ProviderKind =
   | "cursor"
   | "codex_cli"
   | "opencode_cli"
-  | "antigravity_cli";
+  | "antigravity_cli"
+  | "claude_code";
+
+
+
+/** Which chat platform a remote-control bridge speaks. */
+export type RemoteKind = "discord" | "telegram" | "whatsapp";
+
+/** One transport's configuration. Bot tokens are never returned. */
+export interface TransportStatus {
+  kind: RemoteKind;
+  enabled: boolean;
+  chat_id: string;
+  allowed_user_ids: string;
+  has_token: boolean;
+  /** Whether this platform needs a credential pasted in at all. WhatsApp does not. */
+  needs_token: boolean;
+  /** Whether this platform refuses to arm without a chat id. Only Discord does. */
+  chat_required: boolean;
+  /** False when this transport would refuse to run, so the UI can say why. */
+  usable: boolean;
+}
+
+/** Remote-control status: the shared settings plus every transport. */
+export interface RemoteStatus {
+  /** The master switch. Every transport is off while this is. */
+  enabled: boolean;
+  prefix: string;
+  safety_mode: string;
+  targets: string[];
+  /** The named agent that answers, if one is set. */
+  persona_id: string | null;
+  /** Its name, so the UI can say who is answering without a second lookup. */
+  persona_name: string | null;
+  transports: TransportStatus[];
+  /** True when at least one transport is armed. */
+  usable: boolean;
+  /** Transport the shared conversation is on — where the user last spoke. */
+  last_route: string | null;
+  /** Messages in the shared thread. */
+  conversation_len: number;
+}
+
+/** One chat the WhatsApp bridge can be restricted to. */
+export interface WhatsAppChat {
+  /** Full JID — what the bridge matches an incoming chat against. */
+  id: string;
+  name: string;
+  /** "self" (Note to Self) or "group". */
+  kind: string;
+}
+
+/** Pairing state for the WhatsApp bridge. */
+export interface WhatsAppStatus {
+  /** The sidecar binary was found. False means WhatsApp needs building or is not ready yet. */
+  available: boolean;
+  /** Currently building/installing the helper binary or Go toolchain. */
+  building?: boolean;
+  /** Progress step message (e.g. "Downloading Go compiler...", "Building WhatsApp helper..."). */
+  build_step?: string | null;
+  running: boolean;
+  connected: boolean;
+  /** A device is paired. Survives restarts — the session lives on disk. */
+  linked: boolean;
+  jid?: string | null;
+  phone?: string | null;
+  push_name?: string | null;
+  /** The pairing QR, already rendered as SVG by the Rust side. */
+  qr_svg?: string | null;
+  error?: string | null;
+}
+
+/** A named background agent: an identity the autonomous goal loop runs under. */
+export interface Persona {
+  id: string;
+  name: string;
+  role: string;
+  instructions: string;
+  targets: string[];
+  safety_mode?: string | null;
+  provider_id?: string | null;
+  model?: string | null;
+  enabled: boolean;
+  /** Who this agent reports to. null = reports to you directly. */
+  reports_to?: string | null;
+  /** The project this agent works on. Null = company-wide, answers on any project. */
+  workspace_id?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface PersonaInput {
+  id?: string;
+  name: string;
+  role: string;
+  instructions: string;
+  targets: string[];
+  safety_mode?: string | null;
+  provider_id?: string | null;
+  model?: string | null;
+  enabled: boolean;
+  reports_to?: string | null;
+  /** The project this agent works on. Null = company-wide, answers on any project. */
+  workspace_id?: string | null;
+}
+
+/** One message between agents. `from_id`/`to_id` null means the user. */
+export interface AgentMessage {
+  id: string;
+  from_id?: string | null;
+  to_id?: string | null;
+  kind: string;
+  body: string;
+  goal_id?: string | null;
+  /** The project this was said about. Null for anything genuinely cross-project. */
+  workspace_id?: string | null;
+  read_at?: string | null;
+  created_at?: string | null;
+}
+
+/** One agent's record over a window. */
+export interface AgentActivity {
+  persona_id: string;
+  name: string;
+  /** The project it belongs to, if any. */
+  project?: string | null;
+  days: number;
+  tasks: GoalSession[];
+  changes: FileChange[];
+  messages: AgentMessage[];
+}
+
+/** How one of a project's numbers moved against the period before. */
+export interface MetricMovement {
+  name: string;
+  current: number;
+  previous: number;
+  /** Null when the previous period was zero — a first sale is not a percentage. */
+  change_pct?: number | null;
+  unit?: string | null;
+  days_with_data: number;
+}
+
+/** One commit in a project's repository. */
+export interface Commit {
+  sha: string;
+  author: string;
+  date: string;
+  subject: string;
+}
+
+/**
+ * Everything one project has to show for itself.
+ *
+ * Four sources assembled per project — tasks, conversation, file changes, commits —
+ * rather than four screens the user has to correlate by timestamp.
+ */
+export interface ProjectHistory {
+  workspace_id: string;
+  name: string;
+  location?: string | null;
+  tasks: GoalSession[];
+  messages: AgentMessage[];
+  changes: FileChange[];
+  branch?: string | null;
+  commits: Commit[];
+  /** Why the git half is empty, when it is. */
+  git_note?: string | null;
+}
 
 export interface AiProvider {
   id: string;
@@ -515,6 +683,10 @@ export interface CronJob {
   enabled: boolean;
   last_run?: string | null;
   last_status?: string | null;
+  /** Project this job is about. The run gets that project's brief. */
+  workspace_id?: string | null;
+  /** The named agent it runs as. Null = the main agent. */
+  persona_id?: string | null;
   created_at?: string | null;
 }
 
@@ -526,6 +698,10 @@ export interface CronJobInput {
   payload: string;
   targets_json?: string | null;
   enabled: boolean;
+  /** Project this job is about. The run gets that project's brief and files work there. */
+  workspace_id?: string | null;
+  /** The named agent it runs as. Null = the main agent. */
+  persona_id?: string | null;
 }
 
 /** A persistent autonomous goal session (/goal). */
@@ -542,6 +718,12 @@ export interface GoalSession {
   created_at?: string | null;
   updated_at?: string | null;
   finished_at?: string | null;
+  /** The named agent running this task. Null = the default agent. */
+  persona_id?: string | null;
+  /** The project this task belongs to. */
+  workspace_id?: string | null;
+  /** What came of it, in the agent's own words. Null while it is still running. */
+  outcome?: string | null;
 }
 
 /** The locked-in definition of "done" for a goal. */
@@ -1111,6 +1293,79 @@ export const api = {
   deleteSetting: (key: string) => invoke<void>("delete_setting", { key }),
 
   listProviders: () => invoke<AiProvider[]>("list_providers"),
+  getRemoteStatus: () => invoke<RemoteStatus>("get_remote_status"),
+  saveRemoteConfig: (
+    shared: {
+      enabled: boolean;
+      prefix: string;
+      safetyMode: string;
+      targets: string[];
+      /** Which named agent answers. Null or "" = the unnamed main agent. */
+      personaId?: string | null;
+    },
+    transports: {
+      kind: RemoteKind;
+      enabled: boolean;
+      chatId: string;
+      allowedUserIds: string;
+      /** Null or empty keeps the stored credential; the UI is never shown it. */
+      token?: string | null;
+    }[],
+  ) => invoke<RemoteStatus>("save_remote_config", { shared, transports }),
+  clearRemoteToken: (kind: RemoteKind) =>
+    invoke<RemoteStatus>("clear_remote_token", { kind }),
+  /** Forget the thread every transport shares. */
+  resetRemoteConversation: () => invoke<RemoteStatus>("reset_remote_conversation"),
+  /** Ask the platform who a saved token belongs to. Telegram only, so far. */
+  testRemoteToken: (kind: RemoteKind) => invoke<string>("test_remote_token", { kind }),
+
+  whatsappStatus: () => invoke<WhatsAppStatus>("whatsapp_status"),
+  /** Start pairing. Automatically builds the helper if needed. Progress arrives on `remote://whatsapp`. */
+  whatsappLinkStart: () => invoke<WhatsAppStatus>("whatsapp_link_start"),
+  whatsappLinkCancel: () => invoke<WhatsAppStatus>("whatsapp_link_cancel"),
+  whatsappUnlink: () => invoke<WhatsAppStatus>("whatsapp_unlink"),
+  /** Chats the WhatsApp bridge can be restricted to: your own chat, and your groups. */
+  whatsappChats: () => invoke<WhatsAppChat[]>("whatsapp_chats"),
+  /** Rebuild the WhatsApp helper from source. An app rebuild does not touch it. */
+  whatsappRebuildHelper: () => invoke<string>("whatsapp_rebuild_helper"),
+  whatsappAutoInstall: () => invoke<WhatsAppStatus>("whatsapp_auto_install"),
+
+  listPersonas: () => invoke<Persona[]>("list_personas"),
+  savePersona: (input: PersonaInput) => invoke<Persona>("save_persona", { input }),
+  deletePersona: (id: string) => invoke<void>("delete_persona", { id }),
+  /** Create a standard team for a project: a lead that answers to you, and its reports. */
+  createTeam: (workspaceId: string, roles?: string[], about?: string) =>
+    invoke<Persona[]>("create_team", {
+      workspaceId,
+      roles: roles ?? null,
+      about: about ?? null,
+    }),
+  personaOrgChart: () => invoke<string>("persona_org_chart"),
+  listAgentMessages: (
+    goalId?: string | null,
+    /** Limit to one project. Null reads across all of them. */
+    workspaceId?: string | null,
+    limit?: number,
+  ) =>
+    invoke<AgentMessage[]>("list_agent_messages", {
+      goalId: goalId ?? null,
+      workspaceId: workspaceId ?? null,
+      limit: limit ?? null,
+    }),
+  /** Messages waiting for you, from any project — each carries the project it concerns. */
+  unreadUserMessages: () => invoke<AgentMessage[]>("unread_user_messages"),
+  /** What one agent has done lately: tasks and outcomes, files changed, what it said. */
+  agentActivity: (personaId: string, days?: number) =>
+    invoke<AgentActivity>("agent_activity", { personaId, days: days ?? null }),
+  /** How a project's numbers moved against the period before. */
+  projectMetrics: (workspaceId: string, days?: number) =>
+    invoke<MetricMovement[]>("project_metrics", { workspaceId, days: days ?? null }),
+  /** One project's record: tasks, conversation, file changes and commits. */
+  projectHistory: (workspaceId: string, limit?: number) =>
+    invoke<ProjectHistory>("project_history", { workspaceId, limit: limit ?? null }),
+  markAgentMessagesRead: (ids: string[]) =>
+    invoke<void>("mark_agent_messages_read", { ids }),
+
   saveProvider: (input: AiProviderInput) =>
     invoke<AiProvider>("save_provider", { input }),
   deleteProvider: (id: string) => invoke<void>("delete_provider", { id }),
@@ -1303,7 +1558,8 @@ export const api = {
   deleteCronJob: (id: string) => invoke<void>("delete_cron_job", { id }),
   runCronJob: (id: string) => invoke<void>("run_cron_job", { id }),
 
-  startGoal: (text: string) => invoke<string>("start_goal", { text }),
+  startGoal: (text: string, workspaceId?: string | null) =>
+    invoke<string>("start_goal", { text, workspaceId: workspaceId ?? null }),
   confirmGoal: (id: string, targets?: string[]) =>
     invoke<void>("confirm_goal", { id, targets: targets ?? [] }),
   pauseGoal: (id: string) => invoke<void>("pause_goal", { id }),
@@ -1648,6 +1904,13 @@ export function onSessionOutput(
   return listen<string>(`ssh://${sessionId}/output`, (e) => {
     cb(b64ToBytes(e.payload));
   });
+}
+
+/** Live feed of what the agents say to each other. */
+export function onAgentMessage(
+  cb: (msg: AgentMessage) => void,
+): Promise<UnlistenFn> {
+  return listen<AgentMessage>("agent://message", (e) => cb(e.payload));
 }
 
 /** Subscribe to a session's connection status changes. */

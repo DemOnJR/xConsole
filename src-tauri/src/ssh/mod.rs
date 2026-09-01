@@ -1,4 +1,5 @@
 pub mod client;
+pub mod agent_exec;
 pub mod command;
 pub mod keygen;
 pub mod manager;

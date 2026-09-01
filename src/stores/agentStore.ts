@@ -954,6 +954,53 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
     let compactionMarker: AgentChatMessage | null = null;
 
+    // Stream deltas arrive one per token. Writing each straight to the store made
+    // every subscriber re-render per token — and the console renders `streamingText`
+    // through react-markdown + highlight.js, so a long reply re-parsed the whole
+    // growing document hundreds of times and visibly crawled.
+    //
+    // Deltas are already accumulated in the local `turnText` / `turnSegments` above,
+    // so the store only needs the latest value, not every intermediate one. Coalesce
+    // into at most one write per animation frame: nothing the user can perceive is
+    // lost (the display cannot show more than one frame anyway) and the render cost
+    // stops scaling with token count.
+    let flushHandle: number | null = null;
+    let pendingText = false;
+    let pendingActivity = false;
+    let pendingStats: TokenStats | null = null;
+
+    const flushNow = () => {
+      flushHandle = null;
+      if (!pendingText && !pendingActivity && !pendingStats) return;
+      const update: Partial<AgentState> = {};
+      if (pendingText) update.streamingText = turnText;
+      if (pendingText || pendingActivity) update.streamingSegments = turnSegments;
+      if (pendingActivity) update.activity = turnActivity;
+      if (pendingStats) update.streamStats = pendingStats;
+      pendingText = false;
+      pendingActivity = false;
+      pendingStats = null;
+      if (isCurrent()) set(update);
+    };
+
+    const scheduleFlush = () => {
+      if (flushHandle !== null) return;
+      flushHandle = requestAnimationFrame(flushNow);
+    };
+
+    // Drop anything still queued. The turn is about to write its final state, and a
+    // frame landing after that would restore stale streaming text over the finished
+    // message. Idempotent, so calling it more than once is fine.
+    const cancelFlush = () => {
+      if (flushHandle !== null) {
+        cancelAnimationFrame(flushHandle);
+        flushHandle = null;
+      }
+      pendingText = false;
+      pendingActivity = false;
+      pendingStats = null;
+    };
+
     const unlisten = await onAiChatOutput(mySession, (ev) => {
       if (ev.kind === "Text") {
         if (streamStartedAt === null) {
@@ -966,12 +1013,11 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         if (isCurrent()) {
           const now = Date.now();
           const shouldUpdateStats = !lastStatsAt || now - lastStatsAt >= 200;
-          let statsUpdate: TokenStats | null = null;
           if (shouldUpdateStats) {
             lastStatsAt = now;
             const live = liveGenerationStats(turnText, streamStartedAt, tokensBeforeBurst);
             const curStats = get().streamStats;
-            statsUpdate =
+            pendingStats =
               curStats?.source === "provider"
                 ? {
                     ...curStats,
@@ -980,11 +1026,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                   }
                 : live;
           }
-          set({
-            streamingText: turnText,
-            streamingSegments: turnSegments,
-            ...(statsUpdate ? { streamStats: statsUpdate } : {}),
-          });
+          pendingText = true;
+          scheduleFlush();
         }
         return;
       }
@@ -1071,7 +1114,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       }
       turnSegments = applyActivityEvent(turnSegments, ev);
       turnActivity = flattenActivity(turnSegments);
-      if (isCurrent()) set({ activity: turnActivity, streamingSegments: turnSegments });
+      if (isCurrent()) {
+        pendingActivity = true;
+        scheduleFlush();
+      }
     });
 
     try {
@@ -1086,6 +1132,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         conversation: opts?.conversation ?? false,
         goalId: opts?.goalId ?? get().activeIntakeGoalId,
       });
+      cancelFlush();
       const tokenStats =
         latestStats ??
         (turnText && streamStartedAt ? liveTokenStats(turnText, streamStartedAt) : undefined);
@@ -1134,6 +1181,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         }
       }
     } catch (e) {
+      cancelFlush();
       const hasAssistantContent =
         Boolean(turnText.trim()) ||
         turnActivity.length > 0 ||
@@ -1167,6 +1215,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         await persistConversation({ sessionId: mySession, messages, targets }).catch(() => {});
       }
     } finally {
+      cancelFlush();
       unlisten();
     }
   },

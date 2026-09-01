@@ -1,11 +1,11 @@
 import React, { useState, useMemo } from "react";
 import type { AgentAnalytics, ResourceSnapshot, ToolCount, CachePoint } from "../types";
 import {
-  DownloadIcon,
-  CopyIcon,
   CheckIcon,
+  CopyIcon,
+  DownloadIcon,
   InfoIcon,
-} from "../icons";
+} from "../../../../src/components/icons";
 
 interface ExportReportsTabProps {
   data: AgentAnalytics;

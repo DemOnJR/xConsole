@@ -1,11 +1,13 @@
 import React, { useState, useMemo, useDeferredValue } from "react";
 import type { AgentAnalytics, ConversationStat, ToolCount } from "../types";
 import {
-  ChatIcon,
-  SearchIcon,
-  ToolIcon,
   ChevronRightIcon,
+  SearchIcon,
+} from "../../../../src/components/icons";
+import {
   ActivityIcon,
+  ChatIcon,
+  ToolIcon,
 } from "../icons";
 
 interface ConversationsTabProps {

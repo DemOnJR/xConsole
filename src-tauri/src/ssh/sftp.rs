@@ -353,6 +353,27 @@ impl SftpManager {
     /// A stat that fails for any reason is reported as "missing", which is the safe answer
     /// here only because the write that follows is atomic and will fail loudly rather than
     /// half-replace an existing file.
+    /// Resolve a path against the session's own working directory — the login home on a
+    /// fresh connection — so a caller that only knows "." still gets an absolute path.
+    ///
+    /// `normalize_path` cannot do this on its own: with no round trip to the server, "."
+    /// can only become "/", which is how an upload meant for the home directory ends up
+    /// at the filesystem root under a name that still reads as "./shot.png".
+    pub async fn resolve(&self, session_id: &str, path: &str) -> Result<String, String> {
+        let entry = self
+            .map
+            .get(session_id)
+            .ok_or_else(|| "SFTP session not found".to_string())?;
+        let sftp = entry.sftp.clone();
+        drop(entry);
+
+        let sftp = sftp.lock().await;
+        sftp.canonicalize(path)
+            .await
+            .map(|p| normalize_path(&p))
+            .map_err(|e| format!("cannot resolve {path}: {e}"))
+    }
+
     pub async fn stat_missing(&self, session_id: &str, path: &str) -> bool {
         let Some(entry) = self.map.get(session_id) else {
             return true;

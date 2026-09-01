@@ -113,6 +113,9 @@ pub async fn ai_chat(
         hooks: hooks_cfg,
         turn_images,
         goal_id: goal_id.filter(|s| !s.is_empty()),
+        // A desktop turn is the user talking to the main agent, not to a named one.
+        persona_id: None,
+        read_only: false,
     };
 
     // If the chosen provider runs a local server, make sure it's up first so the
@@ -200,7 +203,7 @@ pub async fn ai_chat(
     apply_chat_plan_decision(&tc, &mut messages);
     let result = agent::run_turn(
         &tc,
-        provider_id.filter(|s| !s.is_empty()),
+        crate::ai::registry::ModelChoice::provider(provider_id.filter(|s| !s.is_empty())),
         messages,
         conversation.unwrap_or(false),
         &tx,

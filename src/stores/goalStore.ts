@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { api, type GoalSession } from "../lib/tauri";
+import { useWorkspaceStore } from "./workspaceStore";
 
 interface GoalState {
   goals: GoalSession[];
@@ -18,7 +19,9 @@ export const useGoalStore = create<GoalState>((set, get) => ({
   goals: [],
   load: async () => set({ goals: await api.listGoals() }),
   start: async (text) => {
-    const id = await api.startGoal(text);
+    // Filed under the project that is open, so the goal's agent gets that project's
+    // brief and its messages stay out of every other project's thread.
+    const id = await api.startGoal(text, useWorkspaceStore.getState().activeId);
     await get().load();
     return id;
   },

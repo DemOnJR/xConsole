@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { useCronStore } from "../../../stores/cronStore";
 import { useVpsStore } from "../../../stores/vpsStore";
+import { useWorkspaceStore } from "../../../stores/workspaceStore";
 import { dialog } from "../../../stores/dialogStore";
-import type { CronJob, CronJobInput } from "../../../lib/tauri";
+import { api, type CronJob, type CronJobInput, type Persona } from "../../../lib/tauri";
 import { PlusIcon, TrashIcon } from "../../icons";
 import { Button, Card, Field, SectionHeader, Select, TextArea, TextInput, Toggle } from "../ui";
 
@@ -14,6 +15,8 @@ function emptyJob(): CronJobInput {
     payload: "",
     targets_json: "[]",
     enabled: true,
+    workspace_id: null,
+    persona_id: null,
   };
 }
 
@@ -27,6 +30,8 @@ function CronForm({
   const save = useCronStore((s) => s.save);
   const vpsList = useVpsStore((s) => s.vpsList);
   const loadVps = useVpsStore((s) => s.load);
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  const [personas, setPersonas] = useState<Persona[]>([]);
 
   const [form, setForm] = useState<CronJobInput>(
     initial
@@ -38,6 +43,8 @@ function CronForm({
           payload: initial.payload,
           targets_json: initial.targets_json ?? "[]",
           enabled: initial.enabled,
+          workspace_id: initial.workspace_id ?? null,
+          persona_id: initial.persona_id ?? null,
         }
       : emptyJob(),
   );
@@ -45,6 +52,7 @@ function CronForm({
 
   useEffect(() => {
     loadVps();
+    void api.listPersonas().then(setPersonas).catch(() => setPersonas([]));
   }, [loadVps]);
 
   const targets: string[] = (() => {
@@ -112,6 +120,50 @@ function CronForm({
             </Field>
           </div>
         </div>
+
+        {form.kind === "prompt" && (
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <Field
+                label="Project"
+                hint="The run gets this project's brief, and files its work there."
+              >
+                <Select
+                  value={form.workspace_id ?? ""}
+                  onChange={(e) => patch({ workspace_id: e.target.value || null })}
+                >
+                  <option value="">No project</option>
+                  {workspaces.map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
+            <div className="flex-1">
+              <Field
+                label="Runs as"
+                hint="Under that agent's instructions and trust level. This is what makes a schedule a member of staff rather than a script."
+              >
+                <Select
+                  value={form.persona_id ?? ""}
+                  onChange={(e) => patch({ persona_id: e.target.value || null })}
+                >
+                  <option value="">The main agent</option>
+                  {personas
+                    .filter((p) => p.enabled)
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                        {p.role ? ` — ${p.role}` : ""}
+                      </option>
+                    ))}
+                </Select>
+              </Field>
+            </div>
+          </div>
+        )}
 
         <Field
           label={form.kind === "command" ? "Command" : "Prompt"}
@@ -182,10 +234,20 @@ export function CronSection() {
   const { jobs, load, remove, runNow } = useCronStore();
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<CronJob | null>(null);
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  const [personas, setPersonas] = useState<Persona[]>([]);
 
   useEffect(() => {
     load();
+    void api.listPersonas().then(setPersonas).catch(() => setPersonas([]));
   }, [load]);
+
+  // An id in the row would tell the reader nothing; a deleted one still has to render
+  // as something rather than as a blank.
+  const nameOfPersona = (id: string) =>
+    personas.find((p) => p.id === id)?.name ?? "a deleted agent";
+  const nameOfWorkspace = (id: string) =>
+    workspaces.find((w) => w.id === id)?.name ?? "a deleted project";
 
   return (
     <div>
@@ -224,6 +286,15 @@ export function CronSection() {
                   </span>
                 )}
               </div>
+              {/* Who it runs as and where. A schedule that acts on servers under an
+                  agent's trust level is a different thing from a shell command, and the
+                  row should not make them look alike. */}
+              {(j.persona_id || j.workspace_id) && (
+                <div className="mt-0.5 truncate font-mono text-[10px] text-gray-400">
+                  {j.persona_id ? `as ${nameOfPersona(j.persona_id)}` : "as the main agent"}
+                  {j.workspace_id ? ` on ${nameOfWorkspace(j.workspace_id)}` : ""}
+                </div>
+              )}
               <div className="mt-0.5 truncate text-xs text-gray-500">
                 {j.kind} · {j.payload}
                 {j.last_run && ` · last: ${j.last_status ?? ""} ${j.last_run}`}

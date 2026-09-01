@@ -19,11 +19,27 @@ pub const LOCAL_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 /// Returns the same [`CommandOutput`] shape as the SSH path so the tool layer can
 /// format both identically.
 pub async fn run_local_command(command: &str) -> Result<CommandOutput, String> {
-    match tokio::time::timeout(LOCAL_COMMAND_TIMEOUT, run_local_command_inner(command)).await {
+    run_local_command_for(command, LOCAL_COMMAND_TIMEOUT).await
+}
+
+/// Longest a caller may wait for one local command. See `MAX_COMMAND_TIMEOUT`.
+pub const MAX_LOCAL_COMMAND_TIMEOUT: Duration = Duration::from_secs(3600);
+
+/// Run one local command with a caller-chosen deadline.
+///
+/// The same reason as the server side: two minutes is a sensible default and a poor
+/// ceiling, and a build that needed three was reported as a failure.
+pub async fn run_local_command_for(
+    command: &str,
+    timeout: Duration,
+) -> Result<CommandOutput, String> {
+    let timeout = timeout.min(MAX_LOCAL_COMMAND_TIMEOUT);
+    match tokio::time::timeout(timeout, run_local_command_inner(command)).await {
         Ok(r) => r,
         Err(_) => Err(format!(
-            "command timed out after {}s",
-            LOCAL_COMMAND_TIMEOUT.as_secs()
+            "command timed out after {}s. It may still be running. Raise timeout_secs, or \
+             split the work so each step finishes.",
+            timeout.as_secs()
         )),
     }
 }

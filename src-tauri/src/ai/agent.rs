@@ -56,7 +56,7 @@ fn log_prompt_cache(
 /// assistant message (with any tool calls it issued).
 pub async fn run_turn(
     tc: &ToolContext,
-    provider_id: Option<String>,
+    choice: registry::ModelChoice,
     messages: Vec<ChatMessage>,
     conversation: bool,
     sink: &EventSink,
@@ -66,13 +66,24 @@ pub async fn run_turn(
 
     // Tool-result budget: cap what rides back into context so long command outputs
     // don't blow up every subsequent request. 0 = unlimited (opt out).
+    //
+    // 1800 characters was too tight to do the job it was meant for. A failing test
+    // suite, a stack trace, the tail of a log — the things an agent reads a command's
+    // output *for* — are routinely longer, and what arrived was the first fifth of the
+    // answer with no indication that the rest existed. The agent then re-ran the command
+    // with `| tail`, which costs a whole round trip to learn something it was already
+    // told and had thrown away.
+    //
+    // `compress_and_cap` runs first and is where the real saving is: it drops build
+    // progress, deduplicates repeated log lines and keeps failures over noise. The cap
+    // behind it only has to stop a genuinely enormous output, not ration ordinary ones.
     let tool_result_max_chars: usize = tc
         .db
         .get_setting("agent.tool_result_max_chars")
         .ok()
         .flatten()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1800);
+        .unwrap_or(8000);
     // Compress by command type first (failures, not cargo progress;
     // git hints dropped; logs deduped), then apply the hard char cap.
     let cap_tool_result = |call: &crate::ai::provider::ToolCall, output: &str| -> String {
@@ -92,8 +103,9 @@ pub async fn run_turn(
     };
     emit_ws(if tc.plan_mode { "planning" } else { "working" });
 
-    let preferred_id = registry::active_provider_id(&tc.db, provider_id.as_deref())?;
-    let (resolved, fallback_note) = registry::resolve_for_turn(&tc.db, &preferred_id)?;
+    let preferred_id = registry::active_provider_id(&tc.db, choice.provider_id.as_deref())?;
+    let (resolved, fallback_note) =
+        registry::resolve_for_turn(&tc.db, &preferred_id, choice.model.as_deref())?;
     if let Some(note) = &fallback_note {
         emit(Some(sink), StreamEvent::Status(note.clone()));
     }
@@ -158,6 +170,10 @@ pub async fn run_turn(
 
     let effective_intent = vps_snapshot::effective_user_intent(&messages);
     let casual_turn = vps_snapshot::is_casual_chat(&last_user_msg);
+    // Narrower: only a real greeting may swap the system prompt for "reply briefly".
+    // A question about which model this is is cheap in the same way, but it is still a
+    // question and has to be answered.
+    let small_talk = vps_snapshot::is_small_talk(&last_user_msg);
     let needs_live = vps_snapshot::needs_live_data(&messages);
     let targeted_check = vps_snapshot::is_targeted_check(&effective_intent);
     let wants_snapshot = vps_snapshot::should_collect_snapshot(&effective_intent);
@@ -352,6 +368,7 @@ pub async fn run_turn(
             ollama_num_ctx,
             target_ids: &tc.targets,
             casual_turn,
+            small_talk,
             target_selection_note: target_selection_note.clone(),
             force_minimal_prompt: force_minimal,
             plan_mode: tc.plan_mode,
@@ -548,6 +565,7 @@ pub async fn run_turn(
             ollama_num_ctx,
             target_ids: &tc.targets,
             casual_turn,
+            small_talk,
             target_selection_note: target_selection_note.clone(),
             force_minimal_prompt: false,
             plan_mode: tc.plan_mode,
@@ -588,6 +606,7 @@ pub async fn run_turn(
                 ollama_num_ctx,
                 target_ids: &tc.targets,
                 casual_turn,
+            small_talk,
                 target_selection_note: target_selection_note.clone(),
                 force_minimal_prompt: true,
                 plan_mode: tc.plan_mode,
@@ -768,6 +787,49 @@ pub async fn run_turn(
     // Repair history from a previous stop/cap so DeepSeek/OpenAI accept this turn.
     crate::ai::provider::close_unanswered_tool_calls(&mut messages);
 
+    // Request settings, read once for the whole turn.
+    //
+    // These used to be four `get_setting` calls inside the loop below, so a turn that
+    // ran 30 tool rounds took the global DB mutex 120 times to re-read values that had
+    // already been decided — competing with the SSH sessions, conversation persistence
+    // and the encryption persister that need the same lock. Reading them once also
+    // makes the turn self-consistent: every round now uses the model, token cap and
+    // reasoning level the turn started with, instead of silently switching mid-turn if
+    // a setting changed underneath it.
+    let turn_max_tokens: u32 = tc
+        .db
+        .get_setting("agent.max_tokens")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse().ok())
+        .filter(|n: &u32| *n >= 256)
+        .unwrap_or(16_384);
+    // Opt-in extended cache TTL (1h) when the user enables it — 2x write price
+    // but the prefix survives idle gaps that would evict the 5-min cache.
+    let turn_cache_retention = tc
+        .db
+        .get_setting("agent.cache_retention")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    // Reasoning effort capability control: off|low|medium|high.
+    let turn_reasoning = tc
+        .db
+        .get_setting("agent.reasoning_level")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    // Per-chat model override (set via /model); empty falls back to the provider's
+    // configured model.
+    let turn_model = tc
+        .db
+        .get_setting("agent.active_model")
+        .ok()
+        .flatten()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| resolved.model.clone());
+
     let mut iter: usize = 0;
     let mut execution_nudge = false;
     let mut truncate_continues: u8 = 0;
@@ -778,50 +840,23 @@ pub async fn run_turn(
             crate::ai::provider::close_unanswered_tool_calls(&mut messages);
             tc.session_state.store_request_messages(
                 &tc.session_id,
-                crate::ai::vision::strip_all_images(messages.clone()),
+                crate::ai::vision::without_images(&messages),
             );
             tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
             break;
         }
         iters_used = iter + 1;
         crate::ai::output_compress::age_historical_tool_results(&mut messages, 4, 1500);
-        let mut req = ChatRequest::new(&resolved.model);
+        let mut req = ChatRequest::new(&turn_model);
         req.system = system.clone();
         req.messages = messages.clone();
         req.tools = tool_defs_for_turn.clone();
-        req.max_tokens = tc
-            .db
-            .get_setting("agent.max_tokens")
-            .ok()
-            .flatten()
-            .and_then(|s| s.parse().ok())
-            .filter(|n: &u32| *n >= 256)
-            .unwrap_or(16_384);
+        req.max_tokens = turn_max_tokens;
         req.xconsole = xconsole_exec.clone();
-        // Opt-in extended cache TTL (1h) when the user enables it — 2× write price
-        // but the prefix survives idle gaps that would evict the 5-min cache.
-        req.cache_retention = tc
-            .db
-            .get_setting("agent.cache_retention")
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        req.cache_retention = turn_cache_retention.clone();
         // Stable per-session id for provider cache routing (OpenAI prompt_cache_key).
         req.session_id = tc.session_id.clone();
-        // Per-chat model override (set via /model): empty falls back to the
-        // provider's configured model.
-        if let Ok(Some(model)) = tc.db.get_setting("agent.active_model") {
-            if !model.trim().is_empty() {
-                req.model = model.trim().to_string();
-            }
-        }
-        // Reasoning effort capability control: off|low|medium|high.
-        req.reasoning = tc
-            .db
-            .get_setting("agent.reasoning_level")
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        req.reasoning = turn_reasoning.clone();
         // Let the provider's stream loop abort the moment the user presses Stop.
         req.cancel = Some(tc.session_state.cancel_flag(&tc.session_id));
 
@@ -854,7 +889,7 @@ pub async fn run_turn(
                 crate::ai::provider::close_unanswered_tool_calls(&mut messages);
                 tc.session_state.store_request_messages(
                     &tc.session_id,
-                    crate::ai::vision::strip_all_images(messages.clone()),
+                    crate::ai::vision::without_images(&messages),
                 );
                 tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
                 emit(Some(sink), StreamEvent::Error(e.clone()));
@@ -902,7 +937,7 @@ pub async fn run_turn(
         // after every tool made a long session a multi-MB/s writer.
         tc.session_state.store_request_messages(
             &tc.session_id,
-            crate::ai::vision::strip_all_images(messages.clone()),
+            crate::ai::vision::without_images(&messages),
         );
 
         // No tools to run, or an autonomous CLI that does its own tool use.
@@ -1048,35 +1083,67 @@ pub async fn run_turn(
             repair_notes.push(note);
         }
 
-        // Parallelize read-only tool batches (e.g. run_command_all-style multi-host
-        // checks issued as separate run_command calls, list/read tools). Mutating tools
-        // stay sequential so safety/approvals and ordering stay predictable.
-        let all_readonly = repaired_calls
-            .iter()
-            .all(|c| !tools::tool_is_mutating(&c.name, &c.arguments));
-        if all_readonly && repaired_calls.len() > 1 {
-            emit(
-                Some(sink),
-                StreamEvent::Status(format!(
-                    "Running {} read-only tools in parallel…",
-                    repaired_calls.len()
-                )),
-            );
-            let futs: Vec<_> = repaired_calls
-                .into_iter()
-                .zip(repair_notes.into_iter())
-                .map(|(call, repair_note)| {
-                    let telemetry = telemetry.clone();
-                    async move {
-                        let mut output = tools::dispatch_with_telemetry(tc, &call, sink, Some(&telemetry)).await;
-                        if let Some(note) = repair_note {
-                            output = format!("<repaired: {note}>\n{output}");
+        // Run each stretch of read-only calls together, and mutating ones one at a
+        // time in the order they were asked for.
+        //
+        // This used to be all-or-nothing: unless *every* call in the batch was
+        // read-only, the whole lot went one at a time. A model that reads three
+        // files and then writes one — the ordinary shape of doing a piece of work —
+        // got no parallelism at all, and the reads were the slow part, being three
+        // separate SSH round trips. Grouping by run keeps the order exactly as the
+        // model asked for it, so approvals and anything that depends on a write
+        // landing before the next read still behave, while the reads that sit next
+        // to each other go at once.
+        let mut pending: std::collections::VecDeque<(crate::ai::provider::ToolCall, Option<String>)> =
+            repaired_calls.into_iter().zip(repair_notes.into_iter()).collect();
+        let sizes = batch_sizes(
+            &pending.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>(),
+            |c| tools::tool_is_mutating(&c.name, &c.arguments),
+        );
+
+        for size in sizes {
+            let batch: Vec<(crate::ai::provider::ToolCall, Option<String>)> =
+                pending.drain(..size).collect();
+
+            let results: Vec<(crate::ai::provider::ToolCall, String)> = if batch.len() > 1 {
+                emit(
+                    Some(sink),
+                    StreamEvent::Status(format!(
+                        "Running {} read-only tools in parallel…",
+                        batch.len()
+                    )),
+                );
+                let futs: Vec<_> = batch
+                    .into_iter()
+                    .map(|(call, repair_note)| {
+                        let telemetry = telemetry.clone();
+                        async move {
+                            let mut output =
+                                tools::dispatch_with_telemetry(tc, &call, sink, Some(&telemetry))
+                                    .await;
+                            if let Some(note) = repair_note {
+                                output = format!("<repaired: {note}>\n{output}");
+                            }
+                            (call, output)
                         }
-                        (call, output)
+                    })
+                    .collect();
+                futures_util::future::join_all(futs).await
+            } else {
+                let mut out = Vec::with_capacity(1);
+                for (call, repair_note) in batch {
+                    // The provider already streamed StreamEvent::ToolCall for each call;
+                    // the single ToolResult is emitted below. No re-emit here.
+                    let mut output =
+                        tools::dispatch_with_telemetry(tc, &call, sink, Some(&telemetry)).await;
+                    if let Some(note) = repair_note {
+                        output = format!("<repaired: {note}>\n{output}");
                     }
-                })
-                .collect();
-            let results = futures_util::future::join_all(futs).await;
+                    out.push((call, output));
+                }
+                out
+            };
+
             for (call, output) in results {
                 let capped = cap_tool_result(&call, &output);
                 emit(
@@ -1088,29 +1155,11 @@ pub async fn run_turn(
                 );
                 messages.push(ChatMessage::tool_result(call.id, capped));
             }
-        } else {
-            for (call, repair_note) in repaired_calls.into_iter().zip(repair_notes.into_iter()) {
-                // The provider already streamed StreamEvent::ToolCall for each call;
-                // the single ToolResult is emitted by this loop below. No re-emit here.
-                let mut output = tools::dispatch_with_telemetry(tc, &call, sink, Some(&telemetry)).await;
-                if let Some(note) = repair_note {
-                    output = format!("<repaired: {note}>\n{output}");
-                }
-                let capped = cap_tool_result(&call, &output);
-                emit(
-                    Some(sink),
-                    StreamEvent::ToolResult {
-                        id: call.id.clone(),
-                        output: capped.clone(),
-                    },
-                );
-                messages.push(ChatMessage::tool_result(call.id.clone(), capped));
-            }
         }
 
         tc.session_state.store_request_messages(
             &tc.session_id,
-            crate::ai::vision::strip_all_images(messages.clone()),
+            crate::ai::vision::without_images(&messages),
         );
 
         iter += 1;
@@ -1118,9 +1167,36 @@ pub async fn run_turn(
     crate::ai::provider::close_unanswered_tool_calls(&mut messages);
     tc.session_state.store_request_messages(
         &tc.session_id,
-        crate::ai::vision::strip_all_images(messages.clone()),
+        crate::ai::vision::without_images(&messages),
     );
     tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
+
+    // Learn the *user*, not just the task. Reflection below learns from what went
+    // wrong; this reads the user's own standing instructions ("always use k3s",
+    // "never touch the db host") out of what they just said and records them in
+    // TASTE.md, which rides in the cached system prefix from the next turn on.
+    //
+    // Without it, a preference only stuck if the model remembered to call taste_save,
+    // which it mostly did not — so the same correction was made every week and the
+    // agent never appeared to know anyone. Pure pattern matching, no extra model
+    // call, so it costs nothing on the turn. Skipped for voice and casual turns,
+    // where the phrasing is loose enough to be a false-positive source.
+    let learn_user = tc
+        .db
+        .get_setting("agent.learn_preferences")
+        .ok()
+        .flatten()
+        .map(|v| v != "false")
+        .unwrap_or(true);
+    if learn_user && !conversation && !casual_turn && !last_user_msg.trim().is_empty() {
+        let saved = crate::ai::learn::capture_preferences(&tc.home, &last_user_msg);
+        for pref in &saved {
+            emit(
+                Some(sink),
+                StreamEvent::Status(format!("Noted your preference: {pref}")),
+            );
+        }
+    }
 
     // Self-improvement loop (ETAPA 29): before finishing, look at what went wrong this
     // turn (failed/retried tool calls, hitting the iteration cap), distill a short
@@ -1431,3 +1507,87 @@ pub async fn warm_cache_prefix(tc: &ToolContext, prompt_hint: Option<&str>) -> R
     Ok(())
 }
 
+
+/// How many calls to run together at each step, in order.
+///
+/// A maximal run of read-only calls becomes one batch that can go at once; every
+/// mutating call is a batch of one. The order the model asked for is never
+/// changed, so a write still lands before a read that was requested after it, and
+/// approvals still come up one at a time.
+///
+/// Split out from the dispatch loop so the grouping can be tested without a live
+/// session, a provider and an SSH connection — which is why it was previously
+/// only asserted by reading it.
+fn batch_sizes<T>(calls: &[T], is_mutating: impl Fn(&T) -> bool) -> Vec<usize> {
+    let mut sizes = Vec::new();
+    let mut i = 0;
+    while i < calls.len() {
+        if is_mutating(&calls[i]) {
+            sizes.push(1);
+            i += 1;
+        } else {
+            let start = i;
+            while i < calls.len() && !is_mutating(&calls[i]) {
+                i += 1;
+            }
+            sizes.push(i - start);
+        }
+    }
+    sizes
+}
+
+#[cfg(test)]
+mod batching_tests {
+    use super::batch_sizes;
+
+    /// `true` marks a mutating call.
+    fn plan(kinds: &[bool]) -> Vec<usize> {
+        batch_sizes(kinds, |m| *m)
+    }
+
+    #[test]
+    fn reads_next_to_each_other_go_at_once() {
+        assert_eq!(plan(&[false, false, false]), vec![3]);
+    }
+
+    #[test]
+    fn a_write_after_reads_no_longer_makes_the_reads_serial() {
+        // This is the ordinary shape of doing a piece of work — read a few files,
+        // then change one — and it used to defeat parallelism entirely, because the
+        // batch was only run together when every call in it was read-only. The
+        // reads were the slow part: three separate SSH round trips, one at a time.
+        assert_eq!(plan(&[false, false, false, true]), vec![3, 1]);
+    }
+
+    #[test]
+    fn every_write_stands_alone_and_in_order() {
+        // Two writes must never overlap: approvals come up one at a time, and a
+        // second write to the same file has to see the first one's result.
+        assert_eq!(plan(&[true, true]), vec![1, 1]);
+        assert_eq!(plan(&[false, true, false, true, false]), vec![1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn the_order_asked_for_is_the_order_run() {
+        // Whatever the grouping, the sizes must account for every call exactly once
+        // and in sequence — a batch that dropped or reordered one would answer a
+        // tool_call with another call's result.
+        for kinds in [
+            vec![false, true, false, false, true, false],
+            vec![true, false, false],
+            vec![false],
+            vec![true],
+        ] {
+            assert_eq!(
+                plan(&kinds).iter().sum::<usize>(),
+                kinds.len(),
+                "{kinds:?} lost or duplicated a call"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_to_run_is_no_batches() {
+        assert!(plan(&[]).is_empty());
+    }
+}

@@ -61,11 +61,25 @@ pub fn take_latest_user_images(messages: &mut [ChatMessage]) -> Vec<ChatImage> {
     images
 }
 
-pub fn strip_all_images(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    for m in &mut messages {
-        m.images.clear();
-    }
+/// Copy a transcript without its pixels.
+///
+/// Cloning the transcript and then clearing `images` — the obvious spelling —
+/// copies every attached image only to drop it. `ChatImage::data` is base64, so one
+/// screenshot is megabytes of `String`, and the agent turn loop snapshots the
+/// transcript after every tool call. Cloning only the fields we keep does the same
+/// work without ever touching the payloads.
+pub fn without_images(messages: &[ChatMessage]) -> Vec<ChatMessage> {
     messages
+        .iter()
+        .map(|m| ChatMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+            tool_calls: m.tool_calls.clone(),
+            tool_call_id: m.tool_call_id.clone(),
+            images: Vec::new(),
+            reasoning_content: m.reasoning_content.clone(),
+        })
+        .collect()
 }
 
 pub fn attach_images_to_latest_user(messages: &mut [ChatMessage], images: Vec<ChatImage>) {

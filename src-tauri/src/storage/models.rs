@@ -207,6 +207,17 @@ pub struct CronJob {
     pub last_run: Option<String>,
     #[serde(default)]
     pub last_status: Option<String>,
+    /// Project this job is about. The run gets that project's brief and files its work
+    /// there — a scheduled review of "the project" is meaningless without one.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// The named agent the job runs as. `None` runs it as the main agent.
+    ///
+    /// This is what makes a schedule a member of staff rather than a script: the review
+    /// happens as the lead of that project, under its instructions and its trust level,
+    /// and what it says goes into that team's thread.
+    #[serde(default)]
+    pub persona_id: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
 }
@@ -223,6 +234,12 @@ pub struct CronJobInput {
     pub targets_json: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Project this job is about.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// The named agent it runs as. `None` = the main agent.
+    #[serde(default)]
+    pub persona_id: Option<String>,
 }
 
 /// A persistent goal session (the /goal autonomous mode). The loop controller in
@@ -248,12 +265,146 @@ pub struct GoalSession {
     pub next_check_at: Option<String>,
     /// How many plan→act→verify cycles have run.
     pub cycles: i64,
+    /// The persona running this goal. None = the default agent.
+    #[serde(default)]
+    pub persona_id: Option<String>,
+    /// The project this task belongs to, so a delegated agent knows what it is working
+    /// on and the user can see one project's work without the others in the way.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// What actually came of it, in the agent's own words.
+    ///
+    /// The evidence it cites when it declares the goal met, or why it stopped when it
+    /// did not. Without this a finished task is a title and a status — enough to say
+    /// something happened, not enough to say whether it worked, which is the only
+    /// question worth asking a week later.
+    #[serde(default)]
+    pub outcome: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
     #[serde(default)]
     pub finished_at: Option<String>,
+}
+
+/// A named agent the user can hand work to.
+///
+/// The user asked for agents with names and roles that go away, do the job, and come
+/// back when they are done. That behaviour already exists in the goal loop; what was
+/// missing was an identity to run it under. A persona supplies one: its own standing
+/// instructions, the servers it works on, how much it is trusted, and optionally its
+/// own model — so a persona doing routine log triage need not run on the same
+/// expensive model as one making architecture calls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Persona {
+    pub id: String,
+    /// What the user calls it: "Ada", "CEO", "night-shift".
+    pub name: String,
+    /// One line on what it is for. Shown in pickers and injected into its prompt.
+    #[serde(default)]
+    pub role: String,
+    /// Standing instructions, appended to the agent's soul for this persona's runs.
+    #[serde(default)]
+    pub instructions: String,
+    /// VPS ids this persona works on unless a task says otherwise.
+    #[serde(default)]
+    pub targets: Vec<String>,
+    /// Overrides the global safety mode when set.
+    #[serde(default)]
+    pub safety_mode: Option<String>,
+    /// Overrides the active provider when set.
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    /// Overrides the provider's model when set.
+    #[serde(default)]
+    pub model: Option<String>,
+    pub enabled: bool,
+    /// The persona this one reports to. None = reports to the user directly.
+    #[serde(default)]
+    pub reports_to: Option<String>,
+    /// The project this agent works on. `None` makes it company-wide.
+    ///
+    /// One team per project is the whole shape of this: with several projects running,
+    /// "the reviewer" is ambiguous until you say whose reviewer, routing has nothing to
+    /// route on, and a per-team record of what was done cannot be assembled. The
+    /// exception is the handful of agents that answer across everything — the one the
+    /// user actually talks to, above all — which stay unassigned deliberately.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+/// One message between agents (or to the user).
+///
+/// The user asked to be able to watch what the agents say to each other, so the
+/// exchange is stored as its own rows rather than left inside each agent's private
+/// transcript — otherwise "what did the programmer tell the CEO" is unanswerable
+/// without reading two separate conversations and guessing at the join.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentMessage {
+    pub id: String,
+    /// Sender persona id. None = the user.
+    #[serde(default)]
+    pub from_id: Option<String>,
+    /// Recipient persona id. None = the user.
+    #[serde(default)]
+    pub to_id: Option<String>,
+    /// "report" (upward), "request" (downward or sideways), "note".
+    pub kind: String,
+    pub body: String,
+    /// The delegated task this concerns, when there is one.
+    #[serde(default)]
+    pub goal_id: Option<String>,
+    /// The project this was said about.
+    ///
+    /// Without it every agent's messages land in one pool, and "what did the reviewer
+    /// say" returns three answers from three unrelated codebases with no way to tell
+    /// which is which. None means genuinely un-scoped: messages predating projects, or
+    /// an exchange that belongs to no single one.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub read_at: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
+/// Fields accepted when creating or updating a persona.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonaInput {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub instructions: String,
+    #[serde(default)]
+    pub targets: Vec<String>,
+    #[serde(default)]
+    pub safety_mode: Option<String>,
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// The persona this one reports to. None = reports to the user directly.
+    #[serde(default)]
+    pub reports_to: Option<String>,
+    /// The project this agent works on. `None` makes it company-wide.
+    ///
+    /// One team per project is the whole shape of this: with several projects running,
+    /// "the reviewer" is ambiguous until you say whose reviewer, routing has nothing to
+    /// route on, and a per-team record of what was done cannot be assembled. The
+    /// exception is the handful of agents that answer across everything — the one the
+    /// user actually talks to, above all — which stay unassigned deliberately.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 /// The locked-in definition of "done" for a goal session.

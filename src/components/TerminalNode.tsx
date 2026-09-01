@@ -33,6 +33,13 @@ interface DroppedChip {
   isImage: boolean;
 }
 
+/** The directory a file landed in, so a chip reports where it went, not only what it is. */
+function parentDir(path: string): string {
+  const cut = path.lastIndexOf("/");
+  if (cut < 0) return "";
+  return cut === 0 ? "/" : path.slice(0, cut);
+}
+
 function humanSize(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
@@ -394,7 +401,8 @@ export const TerminalNode = memo(function TerminalNode({ id, data, selected, dra
       setUploading(`Uploading ${count} file${count === 1 ? "" : "s"}…`);
       try {
         // Land next to whatever the shell is looking at, so the path just typed is the
-        // one a relative command would find. Falls back to the home directory.
+        // one a relative command would find. "." is resolved server-side to the session's
+        // own directory, so an unknown cwd falls back to the login home rather than /.
         const dir = useSessionStore.getState().sessions[id]?.cwd || ".";
         const done = await api.terminalUpload(data.vpsId, dir, localPaths, inline);
         setChips((c) => [
@@ -660,7 +668,11 @@ export const TerminalNode = memo(function TerminalNode({ id, data, selected, dra
               )}
               <span className="min-w-0">
                 <span className="block truncate text-gray-200">{c.name}</span>
-                <span className="block text-gray-500">{humanSize(c.size)}</span>
+                {/* The folder, not just the size: a pasted screenshot is the one upload
+                    nobody chose a destination for, and "~" and "/" look alike in a name. */}
+                <span className="block truncate text-gray-500">
+                  {parentDir(c.path)} · {humanSize(c.size)}
+                </span>
               </span>
             </button>
           ))}

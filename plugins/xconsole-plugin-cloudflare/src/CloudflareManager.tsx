@@ -16,7 +16,7 @@ import {
   RefreshIcon,
   CloseIcon,
   SearchIcon,
-} from "./icons";
+} from "../../../src/components/icons";
 
 export function CloudflareManager({ onClose }: { onClose?: () => void }) {
   const {

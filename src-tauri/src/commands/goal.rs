@@ -19,6 +19,9 @@ pub async fn start_goal(
     app: AppHandle,
     db: State<'_, Db>,
     text: String,
+    // Which project this goal is about. The canvas passes the active workspace, so a
+    // goal started from a project stays filed under it instead of into a global pool.
+    workspace_id: Option<String>,
 ) -> Result<String, String> {
     let id = Uuid::new_v4().to_string();
     // Title = first line / first 48 chars of the request.
@@ -43,6 +46,12 @@ pub async fn start_goal(
         created_at: None,
         updated_at: None,
         finished_at: None,
+        // A goal the user starts by hand runs as the default agent; personas are
+        // attached by `agent_delegate`.
+        persona_id: None,
+        workspace_id: workspace_id.filter(|s| !s.is_empty()),
+        // Written when it finishes, by the agent that finishes it.
+        outcome: None,
     };
     db.insert_goal(&goal).map_err(|e| e.to_string())?;
     let _ = app.emit(&crate::ai::goal::goal_event(&id), crate::ai::provider::StreamEvent::Status("intake".into()));

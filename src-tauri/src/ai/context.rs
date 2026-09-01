@@ -129,8 +129,16 @@ pub struct PromptContext<'a> {
     pub ollama_num_ctx: Option<u32>,
     /// Selected VPS ids for this turn (exact values for run_command).
     pub target_ids: &'a [String],
-    /// Greeting / small talk — do not pitch server checks.
+    /// Greeting / small talk or a question about the assistant — cheap turns that need
+    /// no live server state. Suppresses VPS blocks and the prefetch.
     pub casual_turn: bool,
+    /// A greeting specifically, where a short warm reply *is* the whole answer.
+    ///
+    /// Narrower than `casual_turn` on purpose, because this one replaces the entire
+    /// system prompt with [`CASUAL_GUIDANCE`]. When the two were the same flag, "what
+    /// model are you?" was answered as if it were "hi" — the model was told it had
+    /// received a greeting, and greeted back.
+    pub small_talk: bool,
     /// When user says "both/all" but selection differs — injected into volatile tier.
     pub target_selection_note: Option<String>,
     /// Ponytail-minimal tiers when context is tight (Hermes auto-compact).
@@ -189,6 +197,14 @@ Encoded PHP requires its matching loader extension (e.g. zend_extension) and com
 When encountering unfamiliar software, proprietary loaders, or unexpected errors, use web_search to find official \
 documentation and correct configuration before taking action. \
 WEBSITE & DOMAIN TASKS (CODE-FIRST BY DEFAULT): When the user mentions a domain or website (e.g. example.com or /sitemap.xml), ALWAYS check if the domain is hosted on the connected VPS target(s) FIRST. Inspect web server configs (/etc/nginx/, /etc/apache2/, /etc/caddy/, docker) to locate its document root / project directory (e.g. /var/www/, /root/...). Read, inspect, and modify the source code files directly on the server filesystem. Do NOT treat the website as an external black box or rely primarily on curl when you have direct server filesystem access. \
+LONG-RUNNING WORK: a foreground command is killed at 120s. For anything slower — builds, \
+apt/dnf/yum upgrades, docker pull/build, rsync, dumps, migrations, long test runs — call \
+run_command with background:true. It returns a job_id at once and keeps running on the server \
+even after this turn ends. Do NOT split a long job into smaller commands to dodge the timeout, \
+do NOT sit polling in a tight loop, and do NOT hand the task back to the user because it is \
+slow: start it, get on with the next independent step, then check job_status. job_list finds \
+jobs from an earlier session, job_kill stops one. \
+To locate a file by NAME use find_files; grep_search is for file CONTENTS. \
 Be cheap with tools: combine related checks into ONE command; do not re-read a file unless write_file \
 says it changed (mtime); do not call canvas_open_terminal if that host already has a canvas terminal — \
 drive it with terminal_send or use run_command for private one-offs. \
@@ -218,6 +234,14 @@ and PHP version with php -v, and use web_search when encountering unfamiliar err
 SSH lockout: never ban an IP on all ports; honeypot/fail2ban dest must be the decoy port only. \
 Do not reopen a canvas terminal that is already listed. Combine related checks into one command. \
 Use grep_search then read_file(offset,limit) then edit_file. For 3+ steps call todo_write. \
+LONG-RUNNING WORK: a foreground command is killed at 120s. For anything slower — builds, \
+apt/dnf/yum upgrades, docker pull/build, rsync, dumps, migrations, long test runs — call \
+run_command with background:true. It returns a job_id at once and keeps running on the server \
+even after this turn ends. Do NOT split a long job into smaller commands to dodge the timeout, \
+do NOT sit polling in a tight loop, and do NOT hand the task back to the user because it is \
+slow: start it, get on with the next independent step, then check job_status. job_list finds \
+jobs from an earlier session, job_kill stops one. \
+To locate a file by NAME use find_files; grep_search is for file CONTENTS. \
 For the user's OWN PC (they say 'my pc', 'locally', 'this machine', or ask about local software), use the \
 local_* tools instead of run_command. \
 When a request is ambiguous, call ask_user; for a large or destructive multi-step task, call present_plan \
@@ -280,6 +304,86 @@ fn is_minimal_prompt(ctx: &PromptContext) -> bool {
 const OLLAMA_COMPACT_CTX: u32 = 65_536;
 
 /// Guidance for the built-in memory tool.
+/// What may be claimed, and what has to be true first.
+///
+/// Not "be honest" — a model cannot be made truthful by being asked. What works is
+/// making claims cheap to check and saying so: every one of these is enforced somewhere
+/// (`session_read` opens the transcript, `agent_activity` lists what changed,
+/// `repo_status` says what was committed), so an agent that reports something it did not
+/// do is not getting away with it, it is producing a discrepancy somebody will read.
+pub const TRUTH_GUIDANCE: &str = "Reporting what you did:\n\
+- Say only what you actually did, and only what you actually verified. Everything you \
+claim is checkable: your session transcript records every command you ran, the edit \
+journal records every file you changed, and anyone can read both with session_read and \
+agent_activity. A report that does not match them is worse than no report, because work \
+gets built on it.\n\
+- \"I ran X and it returned Y\" is a claim about a command you ran. If you did not run \
+it, do not write it. If it failed, say it failed.\n\
+- Verify before you say something is done. Not 'the change looks right' — run the thing, \
+read the output, and cite it. If you could not verify it, say that instead, plainly: \
+\"changed, not yet tested\" is a useful report and \"done\" would be a false one.\n\
+- If you are unsure, say you are unsure. If you are stuck, say you are stuck. Neither \
+costs you anything; a confident wrong answer costs the user a day.\n\
+- Never pad a report to look productive. Work that did not need doing is worse than no \
+work: it has to be reviewed, maintained and eventually undone.";
+
+/// Nothing reaches production without having been run somewhere it cannot hurt.
+pub const RELEASE_GUIDANCE: &str = "Before anything reaches production:\n\
+- Run it somewhere it cannot hurt first. A staging host, a copy of the database, a \
+container, a scratch directory, `--dry-run`, a transaction you roll back — whatever that \
+system offers. \"It should work\" is not a test.\n\
+- Anything that deletes or overwrites gets looked at before it runs: count the rows, list \
+the files, check the path resolves to what you think. A wrong path looks exactly like a \
+right one, and there is no undo.\n\
+- Take a backup before a destructive change to data, and say where you put it.\n\
+- Do not ship on a red build. If tests exist, run them; if they fail on what you touched, \
+that is your work. If none exist for what you changed, write one — that is how the next \
+person finds out you broke it instead of the user finding out.\n\
+- Deploy in a way you can reverse, and say how to reverse it.";
+
+/// How to work in a repository somebody else is also working in.
+///
+/// Every rule here is one way autonomous work quietly destroys value rather than
+/// adding it, and none of them is visible from inside the turn that causes it: work
+/// that is never committed is gone at the next checkout; a pull request left open long
+/// enough has to be rewritten rather than reviewed; and the same logic pasted into a
+/// fifth file means the next fix lands in one of them.
+pub const REPO_GUIDANCE: &str = "Working in a git repository, especially one other agents \
+and people also work in:\n\
+- NEVER stop, hand over, or wait with uncommitted work. Before you finish a turn, before \
+you report, before you wait on anything: commit and push (repo_save). Work that exists \
+only in a working tree is gone at the next checkout, and nobody will know what was lost.\n\
+- Check repo_status before you start, so you build on what is current rather than on top \
+of somebody's half-finished tree.\n\
+- Push to the branch you are on. It is the one the user set up. Do not move work to a \
+branch of your own invention, do not force-push, and do not rewrite history somebody may \
+already have pulled.\n\
+- Do not leave a pull request open and idle. If it is yours and it is ready, get it \
+merged; if it is stale, rebase it and get it moving, or close it and say why. An open \
+pull request nobody finishes becomes a conflict, and then a rewrite of work already paid \
+for.\n\
+- If CI is red on what you touched, that is your work, not somebody else's. Finish it or \
+say plainly that you could not.";
+
+/// What separates a change that helps from one that adds to the pile.
+///
+/// Stated as rules rather than taste because the failure is cumulative: nobody notices
+/// the third copy of a function, and by the hundredth file the logic exists in a dozen
+/// slightly different versions and a fix lands in one of them.
+pub const CODE_GUIDANCE: &str = "Writing code:\n\
+- Reuse before you write. If the logic you need already exists somewhere in this \
+project, call it. If it exists in two places, that is a bug: extract it into one \
+function and make both call that. The same behaviour implemented separately in many \
+files means a fix reaches one of them.\n\
+- Before adding a helper, look for one that already does it. A new function that \
+duplicates an old one is worse than no function.\n\
+- Delete code that nothing calls. Dead code is read, maintained and trusted by people \
+who do not know it is dead.\n\
+- A function that does several things should be several functions. Long is not the \
+problem; doing more than one job is, because it cannot be reused or tested.\n\
+- Match the surrounding code. A file with one function written in a different style is \
+harder to read than one written badly but consistently.";
+
 const MEMORY_GUIDANCE: &str = "You have a persistent memory. Save durable, \
 reusable facts (server roles, conventions, credentials locations, recurring \
 fixes) with the memory tool; keep entries terse. Do not store secrets verbatim.";
@@ -507,7 +611,7 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
     }
     let minimal = is_minimal_prompt(ctx);
 
-    let soul = if ctx.casual_turn && ctx.vps_tools_only {
+    let soul = if ctx.small_talk && ctx.vps_tools_only {
         CASUAL_GUIDANCE.to_string()
     } else {
         soul::load(ctx.home)
@@ -531,6 +635,14 @@ pub fn measure_prompt_parts(ctx: &PromptContext) -> PromptParts {
             rules.push(LEARN_GUIDANCE.to_string());
         }
         rules.push(safety_guidance(ctx.safety).to_string());
+        // Only where the agent can actually change files. On a read-only turn these are
+        // two paragraphs of prompt that can never apply.
+        if ctx.has_tools {
+            rules.push(REPO_GUIDANCE.to_string());
+            rules.push(CODE_GUIDANCE.to_string());
+            rules.push(TRUTH_GUIDANCE.to_string());
+            rules.push(RELEASE_GUIDANCE.to_string());
+        }
         if ctx.plan_mode {
             rules.push(PLAN_MODE_GUIDANCE.to_string());
         }
@@ -733,6 +845,23 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
             stable.push(catalog);
         }
     }
+    // The team, when there is one. Stable across turns, so it belongs in the cached
+    // prefix; skipped entirely when no agents are defined, so a user who never set
+    // any pays nothing. Without it the agent has to spend a tool call on agent_list
+    // before it can even consider delegating, which it mostly will not bother to do.
+    if ctx.has_tools && !minimal {
+        let personas = ctx.db.list_personas().unwrap_or_default();
+        if personas.iter().any(|p| p.enabled) {
+            stable.push(format!(
+                "# Your team\n{}\n\
+                 Hand long-running or specialist work to them with agent_delegate (omit \
+                 `agent` to route by remit) and carry on — do not do their work yourself \
+                 while the user waits. agent_check follows progress; agent_thread shows \
+                 what they have said to each other.",
+                crate::ai::persona::format_org_chart(&personas)
+            ));
+        }
+    }
 
     // ---- DYNAMIC (volatile only): live screen, memory body, date. Keep this
     // tail under ~1.2K tokens so a 20K+ history session stays ≥95% cache hit.
@@ -752,7 +881,7 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
     }
 
     let mut volatile: Vec<String> = Vec::new();
-    if ctx.casual_turn && ctx.vps_tools_only {
+    if ctx.small_talk && ctx.vps_tools_only {
         volatile.push(CASUAL_GUIDANCE.to_string());
     }
     if ctx.plan_mode {
@@ -878,6 +1007,7 @@ mod tests {
             ollama_num_ctx: None,
             target_ids: &[],
             casual_turn: false,
+            small_talk: false,
             target_selection_note: None,
             force_minimal_prompt: false,
             plan_mode: false,
