@@ -218,6 +218,20 @@ pub fn is_allowlisted(command: &str) -> bool {
     (is_read_only(command) || is_terraform_readonly(command)) && !touches_sensitive_path(command)
 }
 
+/// Whether the safety gate should ask a person before this command runs.
+///
+/// `full` never asks — that is what "run anything" is. Allowlist asks for anything
+/// that is not a known-safe read. Approve (and any unknown value) asks for everything.
+/// Irreversible work still *annotates* the prompt when one is shown; it does not
+/// override `full`.
+pub fn command_needs_approval(safety: &str, command: &str) -> bool {
+    match safety {
+        "full" => false,
+        "allowlist" => !is_allowlisted(command),
+        _ => true,
+    }
+}
+
 /// The global default safety mode (the `agent.safety_mode` setting), falling
 /// back to the safest `approve` mode when unset or blank.
 pub fn global_safety_mode(db: &Db) -> String {
@@ -403,17 +417,16 @@ pub async fn authorize(
         return Err(format!("blocked (SSH lockout risk): {why}"));
     }
 
-    // Something that cannot be undone is approved by a person, whatever the mode says.
-    // "Run anything" is the user saying they trust the agent's judgement about ordinary
-    // work; it is not them agreeing in advance to a delete that turns out to have named
-    // the wrong path. And an unattended run has nobody to ask, so it stops instead.
-    let destroys = crate::ai::irreversible::classify(command);
-    let needs_approval = destroys.is_some()
-        || match safety {
-            "full" => false,
-            "allowlist" => !is_allowlisted(command),
-            _ => true, // "approve" and any unknown value: safest path
-        };
+    // "Run anything" means anything: the user already authorized unattended action,
+    // including work that cannot be undone. Prompting anyway made the setting a lie
+    // and trained people to click through the real prompts. SSH lockout stays a hard
+    // reject above; this gate is only "does a person have to say yes".
+    let needs_approval = command_needs_approval(safety, command);
+    let destroys = if needs_approval {
+        crate::ai::irreversible::classify(command)
+    } else {
+        None
+    };
 
     if !needs_approval {
         return Ok(());
@@ -496,19 +509,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn something_irreversible_is_approved_by_a_person_whatever_the_mode_says() {
-        // "Run anything" is the user trusting the agent's judgement about ordinary work.
-        // It is not them agreeing in advance to a delete that named the wrong path, and
-        // those are the two things a single trust setting would otherwise conflate.
-        //
-        // Asserted through the classifier the gate consults, because the gate itself
-        // needs an app handle and a database to run.
+    fn full_autonomy_does_not_prompt_even_for_a_delete() {
+        // "Run anything" is the contract. Asking anyway made the setting a lie, and a
+        // prompt the user has already answered in settings is one they click through
+        // without reading — which is worse when the next one is real.
+        assert!(!command_needs_approval("full", "rm -rf /srv/app"));
+        assert!(!command_needs_approval("full", "DROP DATABASE orders"));
+        assert!(!command_needs_approval("full", "systemctl restart nginx"));
+        assert!(!command_needs_approval("full", "ls -la"));
+        // The classifier still names the blast radius so allowlist/approve prompts
+        // can show it; it just does not override full.
         assert!(crate::ai::irreversible::classify("rm -rf /srv/app").is_some());
-        assert!(crate::ai::irreversible::classify("DROP DATABASE orders").is_some());
-        // And ordinary work still runs unattended under "full" — a guard that stops
-        // everything is one the user turns off.
         assert!(crate::ai::irreversible::classify("systemctl restart nginx").is_none());
-        assert!(crate::ai::irreversible::classify("git push origin dev").is_none());
+    }
+
+    #[test]
+    fn allowlist_and_approve_still_ask_for_writes() {
+        assert!(command_needs_approval("allowlist", "rm -rf /srv/app"));
+        assert!(command_needs_approval("allowlist", "systemctl restart nginx"));
+        assert!(!command_needs_approval("allowlist", "ls -la"));
+        assert!(!command_needs_approval("allowlist", "git status"));
+        assert!(command_needs_approval("approve", "ls -la"));
+        assert!(command_needs_approval("approve", "rm -rf /tmp/x"));
+        // Unknown values fail closed.
+        assert!(command_needs_approval("yolo", "ls"));
     }
 
     #[test]

@@ -168,7 +168,7 @@ SILENT AUTONOMOUS TOOL EXECUTION: Chain your tool calls in continuous sequence (
 until the user's objective is completed. Do NOT output conversational chatter or narrative commentary between \
 individual tool calls (e.g. do NOT say 'Checking directory now...', 'Output truncated, checking next...', 'Now running command...'). \
 The UI harness already displays live tool progress to the user. Reserve chat text for your FINAL comprehensive response \
-once the entire task is done, or when you need user clarification/approval. \
+once the entire task is done. \
 For the user's own PC (when they say 'my pc', 'locally', 'this machine', or ask about local software \
 such as local docker containers), use the local_* tools (local_run_command, local_read_file, \
 local_write_file, local_list_dir). For a remote server use run_command and the file tools. \
@@ -184,9 +184,6 @@ keeps connecting. You cannot read passwords or private keys — only update publ
 Files you create are listed with artifact_list (Settings → Artifacts). \
 For infrastructure, load skills meta/ponytail and the matching infra/terraform-* skill first, \
 then use project_*, cloud_*, tfc_*, and terraform_* tools. \
-When a request is ambiguous or needs a decision only the user can make, call ask_user (offer options). \
-For a large, multi-step, or destructive task, first call present_plan with a numbered plan and wait for \
-approval before making changes. present_plan is a USER GATE at the start — it is not a live checklist. \
 While executing a 3+ step task, call todo_write and keep exactly one item in_progress; the # Todos \
 block is your memory so you do not repeat finished steps. \
 Find bugs the cheap way: grep_search first (get path:line), then read_file with offset/limit around \
@@ -244,8 +241,6 @@ jobs from an earlier session, job_kill stops one. \
 To locate a file by NAME use find_files; grep_search is for file CONTENTS. \
 For the user's OWN PC (they say 'my pc', 'locally', 'this machine', or ask about local software), use the \
 local_* tools instead of run_command. \
-When a request is ambiguous, call ask_user; for a large or destructive multi-step task, call present_plan \
-and wait for approval before changing anything. \
 When a task is complete, stop.";
 
 /// Injected when plan mode is on: investigate read-only, then present a plan.
@@ -400,21 +395,25 @@ fixes) with the memory tool; keep entries terse. Do not store secrets verbatim."
 pub const LEARN_GUIDANCE: &str = "LEARNING: When a task needs specific commands or config for a named \
 tool and a researched skill is shown above as a 'Just-researched skill', FOLLOW it. You may also call \
 learn_skill{topic} yourself to research an unfamiliar tool/error, or skill_view to open an installed \
-skill instead of guessing. A just-learned skill is UNVERIFIED — don't run a destructive command from \
-one without the user's approval.";
+skill instead of guessing. A just-learned skill is UNVERIFIED — verify with a read first, then act. \
+In approve/allowlist mode, do not run a destructive command from one without the user's approval.";
 
 fn safety_guidance(safety: &str) -> &'static str {
     match safety {
-        "full" => "Safety mode: FULL AUTONOMY. The user has authorized you to act without \
-asking. Never ask for permission and never say things like 'do you want me to proceed?', \
-'shall I continue?', or 'let me know if you'd like me to run this' — just call the tool and do \
-it. The only time you pause is to call present_plan for a genuinely large or destructive \
-multi-step task, or ask_user when a requirement is truly ambiguous. Otherwise act.",
+        "full" => "Safety mode: FULL AUTONOMY. The user has already authorized unattended \
+action, including commands that cannot be undone. This overrides SOUL.md and any standing \
+instruction to ask first. Never ask for permission, never call present_plan to wait for \
+approval, never call ask_user, and never say things like 'do you want me to proceed?', \
+'shall I continue?', or 'let me know if you'd like me to run this' — call the tool and do it. \
+If a fact only the user knows is missing (which of two named servers, a secret), put ONE short \
+question in your reply and stop. Otherwise act until the job is done.",
         "allowlist" => "Safety mode: ALLOWLIST. Read-only/safe commands run \
 automatically; destructive or unknown commands require user approval before \
-execution.",
+execution. When a request is ambiguous, call ask_user. For a large or destructive \
+multi-step task, call present_plan and wait before making changes.",
         _ => "Safety mode: APPROVE. Every command you run must be approved by the \
-user first; propose precise commands and wait.",
+user first; propose precise commands and wait. When a request is ambiguous, call ask_user. \
+For a large multi-step task, call present_plan first.",
     }
 }
 
@@ -1045,6 +1044,42 @@ mod tests {
         assert!(second.static_system.contains("restart"));
         assert!(second.static_system.contains("reload"));
         assert!(!second.dynamic_block.contains("restart"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn full_autonomy_prompt_does_not_tell_the_model_to_wait() {
+        // "Run anything" used to still instruct present_plan/ask_user, so the model
+        // asked even though the gate would have let the command through.
+        let (home, dir) = test_home();
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        let mut ctx = context(&home, &db);
+        ctx.has_tools = true;
+        ctx.safety = "full";
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("FULL AUTONOMY"), "{prompt}");
+        assert!(prompt.contains("Never ask for permission"), "{prompt}");
+        assert!(prompt.contains("never call present_plan"), "{prompt}");
+        assert!(prompt.contains("never call ask_user"), "{prompt}");
+        // The allowlist/approve gate sentences must not leak into full.
+        assert!(
+            !prompt.contains("wait for approval before making changes"),
+            "{prompt}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn allowlist_prompt_still_has_the_user_gates() {
+        let (home, dir) = test_home();
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        let mut ctx = context(&home, &db);
+        ctx.has_tools = true;
+        ctx.safety = "allowlist";
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("ALLOWLIST"), "{prompt}");
+        assert!(prompt.contains("present_plan"), "{prompt}");
+        assert!(prompt.contains("ask_user"), "{prompt}");
         let _ = fs::remove_dir_all(dir);
     }
 

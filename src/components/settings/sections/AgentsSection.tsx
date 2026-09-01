@@ -879,7 +879,10 @@ function PersonaEditor({
       </Field>
 
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Trust" hint="Overrides the global safety mode.">
+        <Field
+          label="Trust"
+          hint="Applies when this agent answers — remote chat, goals, scheduled jobs. Run anything means no confirmation at all, including deletes. The desktop chat panel uses the permissions control on the composer (and the global default if this is left on Use global)."
+        >
           <Select
             value={draft.safety_mode ?? ""}
             onChange={(e) => set("safety_mode", e.target.value || null)}

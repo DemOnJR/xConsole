@@ -296,7 +296,7 @@ export function RemoteSection() {
 
         <Field
           label="Trust for remote commands"
-          hint="Nobody can answer an approval prompt from a phone, so a command needing one stops rather than waiting."
+          hint="A named agent's own Trust setting wins over this. Run anything means no confirmation in chat, including deletes. Allowlist auto-runs read-only and asks in this chat for the rest. Ask every command asks in this chat for everything."
         >
           <Select
             value={shared.safetyMode}

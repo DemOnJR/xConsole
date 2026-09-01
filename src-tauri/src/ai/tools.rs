@@ -299,7 +299,8 @@ compose file, logs) — do not grep the whole disk for a filename.".into(),
         ToolDef {
             name: "todo_write".into(),
             description: "Replace your live working checklist for THIS chat. Use for any task with \
-3+ steps AFTER the user is ready for you to execute (not instead of present_plan). Each item: \
+3+ steps while you execute. In allowlist/approve (or plan mode), present_plan is the user gate — \
+do not use this instead of it. Each item: \
 content, activeForm (gerund shown while in progress), status pending|in_progress|completed. \
 Keep exactly one in_progress. Mark done as you finish so you do not repeat work. The current \
 list is shown to you every turn under # Todos.".into(),
@@ -799,10 +800,11 @@ and the managed key fingerprint if present.".into(),
         },
         ToolDef {
             name: "ask_user".into(),
-            description: "Ask the user one or more clarifying questions before proceeding, when the \
-request is ambiguous or you need a decision only they can make. Each question may offer suggested \
-options (rendered as buttons); the user can also type their own answer. Use this instead of guessing. \
-Blocks until the user answers."
+            description: "Ask the user one or more clarifying questions when a fact only they know \
+is missing (which of two named servers, a secret). Each question may offer suggested options \
+(rendered as buttons); the user can also type their own answer. Do not use this to ask permission \
+to run a command. In full autonomy do not call this — decide yourself, or put one short question \
+in your reply. Blocks until the user answers when it does run."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -832,11 +834,11 @@ Blocks until the user answers."
         ToolDef {
             name: "present_plan".into(),
             description: "Present a step-by-step plan to the user and wait for approval BEFORE making \
-any changes. Use this for large, multi-step, or destructive tasks (and always when plan mode is on): \
-first investigate with read-only tools, then call present_plan with the FULL plan in the required \
-`plan` argument (title is optional). Never write the plan only as chat text — without this call the \
-review modal does not open and the user cannot approve. The user can approve in the modal or in chat \
-(you then execute) or request changes (you revise and present again). Blocks until the user responds."
+changes. Use this when plan mode is on, or when safety is allowlist/approve and the task is large or \
+destructive: first investigate with read-only tools, then call present_plan with the FULL plan in \
+the required `plan` argument (title is optional). In full autonomy do not call this — execute. \
+Never write the plan only as chat text when you do need approval — without this call the review \
+modal does not open. Blocks until the user responds when it does run."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -4630,9 +4632,23 @@ fn is_remote_session(session_id: &str) -> bool {
     session_id == crate::ai::remote::CONVERSATION_ID && crate::ai::remote::turn_in_flight()
 }
 
+/// Full autonomy (and the session "don't ask again" override) means the user already
+/// authorized unattended action. Plan mode is the exception: they toggled it on to
+/// see the plan first.
+fn full_auto_unattended(ctx: &ToolContext) -> bool {
+    !ctx.plan_mode
+        && safety::resolve_session_mode(&ctx.session_state, &ctx.session_id, &ctx.safety) == "full"
+}
+
 async fn ask_user(ctx: &ToolContext, args: &Value) -> String {
     if is_unattended_session(&ctx.session_id) {
         return "error: ask_user is not available in unattended runs (cron/goal)".into();
+    }
+    if full_auto_unattended(ctx) {
+        return "error: full autonomy is on. Do not ask permission and do not wait. Decide \
+                this yourself and continue. If you cannot proceed without a fact only the \
+                user knows, put ONE short question in your reply and stop."
+            .into();
     }
     if is_remote_session(&ctx.session_id) {
         return "error: the user is on their phone — there is no dialog to open. Decide the \
@@ -4673,12 +4689,6 @@ async fn present_plan(ctx: &ToolContext, args: &Value) -> String {
                 plan as normal text instead, and do not attempt to execute anything."
             .into();
     }
-    if is_remote_session(&ctx.session_id) {
-        return "error: the user is on their phone — there is no plan dialog to approve. Put \
-                the plan in your reply as a few short plain-text lines and stop; their next \
-                message is the answer."
-            .into();
-    }
     let plan = match crate::ai::consent::plan_body_from_args(args) {
         Some(p) => p,
         None => {
@@ -4693,6 +4703,30 @@ async fn present_plan(ctx: &ToolContext, args: &Value) -> String {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or("Plan");
     let id = Uuid::new_v4().to_string();
+    // Full autonomy: record the plan and keep going. Emitting ai://plan would open
+    // the review modal the user turned off.
+    if full_auto_unattended(ctx) {
+        let stored = crate::storage::models::AgentPlan {
+            id: id.clone(),
+            session_id: ctx.session_id.clone(),
+            workspace_id: ctx.workspace_id.clone(),
+            title: Some(title.to_string()),
+            plan: plan.to_string(),
+            status: "applied".into(),
+            created_at: None,
+            updated_at: None,
+        };
+        let _ = ctx.db.insert_agent_plan(&stored);
+        ctx.session_state.mark_plan_approved(&ctx.session_id);
+        return "FULL AUTONOMY is on. The plan is recorded. Execute it now; do not wait."
+            .into();
+    }
+    if is_remote_session(&ctx.session_id) {
+        return "error: the user is on their phone — there is no plan dialog to approve. Put \
+                the plan in your reply as a few short plain-text lines and stop; their next \
+                message is the answer."
+            .into();
+    }
     let stored = crate::storage::models::AgentPlan {
         id: id.clone(),
         session_id: ctx.session_id.clone(),

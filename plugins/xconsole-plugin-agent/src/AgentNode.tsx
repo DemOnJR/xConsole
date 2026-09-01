@@ -867,7 +867,7 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
       {
         id: "full",
         label: "Full permissions",
-        detail: "Auto-run all commands without confirmation",
+        detail: "Auto-run every command, including deletes — no confirmation",
         selected: cur === "full",
       },
       {

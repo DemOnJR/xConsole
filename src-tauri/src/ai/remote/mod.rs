@@ -1228,10 +1228,17 @@ async fn run_remote_turn(
         targets: crate::ai::persona::effective_targets(persona.as_ref(), &cfg.targets),
         // A persona's trust level wins. It is how the user said "this one may restart
         // services unattended", and a remote turn is exactly the unattended case.
-        safety: match persona.as_ref().and_then(|p| p.safety_mode.clone()) {
-            Some(mode) if !mode.trim().is_empty() => mode,
-            _ => cfg.safety_mode.clone(),
-        },
+        // Invalid values fall through to the remote setting, then to allowlist — never
+        // to a silent "approve" that would stall every command on a phone.
+        safety: persona
+            .as_ref()
+            .and_then(|p| p.safety_mode.clone())
+            .filter(|m| matches!(m.as_str(), "full" | "allowlist" | "approve"))
+            .or_else(|| {
+                matches!(cfg.safety_mode.as_str(), "full" | "allowlist" | "approve")
+                    .then(|| cfg.safety_mode.clone())
+            })
+            .unwrap_or_else(|| "allowlist".into()),
         plan_mode: false,
         workspace_id: None,
         canvas: Vec::new(),

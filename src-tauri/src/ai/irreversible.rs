@@ -1,10 +1,12 @@
 //! Commands that cannot be undone, and what they would destroy.
 //!
 //! An agent that deletes the wrong thing is not a bug you fix afterwards — the data is
-//! gone, and the only question left is what the backup covers. So a command in this
-//! class is never simply run: its *blast radius* is measured first, with a read-only
-//! command against the same target, and that measurement is what a person is shown
-//! before they approve it.
+//! gone, and the only question left is what the backup covers. So in allowlist/approve
+//! mode a command in this class is never simply run: its *blast radius* is measured
+//! first, with a read-only command against the same target, and that measurement is
+//! what a person is shown before they approve it. Full autonomy (`run anything`) is
+//! the user already having said yes; this classifier still names the blast radius,
+//! it just does not stop the command.
 //!
 //! The preview is the point. "Delete /srv/app" tells a reader nothing; "Delete
 //! /srv/app — 41,203 files, 12 GB, last written four minutes ago" is a different
