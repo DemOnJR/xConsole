@@ -1753,6 +1753,11 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
         // non-destructive canvas/UI actions.
         "read_file" | "local_read_file" | "local_list_dir" | "list_vps_targets"
         | "artifact_list" | "ssh_key_status" | "memory_save" | "skills_list" | "skill_view"
+        // The rest of the memory family, which was classified as mutating only by
+        // falling through to the catch-all. These write agent-local notes, exactly as
+        // memory_save does; skill_install stays mutating because it fetches and
+        // installs from outside.
+        | "host_memory_update" | "taste_save" | "set_project_brief" | "skill_save"
         | "learn_skill" | "ask_user" | "present_plan" | "terminal_capture" | "canvas_open_terminal"
         | "canvas_open_sftp" | "canvas_open_preview" | "canvas_tile" | "canvas_close" | "canvas_refresh" | "vision"
         | "generate_svg" | "generate_image"
@@ -1801,8 +1806,12 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
             crate::ai::transcript::tool_is_mutating(n)
         }
         // Infra tools: allow read-only verbs, treat the rest (apply/destroy/import) as mutating.
+        // `cloudflare_` needs its own test: it does not match `cloud_` (the underscore
+        // does not line up), so every Cloudflare tool -- including the read-only ones --
+        // fell through to the mutating catch-all and was withheld in plan mode.
         n if n.starts_with("terraform_")
             || n.starts_with("cloud_")
+            || n.starts_with("cloudflare_")
             || n.starts_with("tfc_")
             || n.starts_with("project_") =>
         {
@@ -6184,5 +6193,63 @@ mod ollama_tool_list_tests {
                 assert!(list.contains(&n), "{which} cannot {n}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod mutating_classification_tests {
+    use super::tool_is_mutating;
+    use serde_json::json;
+
+    /// `cloudflare_` does not start with `cloud_` — the underscore does not line up —
+    /// so the whole family used to fall through to the mutating catch-all and every
+    /// read-only Cloudflare call was withheld in plan mode.
+    #[test]
+    fn cloudflare_reads_are_not_mutating() {
+        let args = json!({});
+        for name in [
+            "cloudflare_list_zones",
+            "cloudflare_list_dns",
+            "cloudflare_list_tunnels",
+            "cloudflare_get_history",
+            "cloudflare_get_zone_analytics",
+        ] {
+            assert!(!tool_is_mutating(name, &args), "{name} only reads");
+        }
+    }
+
+    #[test]
+    fn cloudflare_writes_are_mutating() {
+        let args = json!({});
+        for name in [
+            "cloudflare_upsert_dns",
+            "cloudflare_set_security_level",
+            "cloudflare_revert_action",
+        ] {
+            assert!(tool_is_mutating(name, &args), "{name} changes live DNS or config");
+        }
+    }
+
+    /// The memory family writes agent-local notes. `memory_save` was already classified
+    /// that way and its siblings were not, which is a difference with no reason behind it.
+    #[test]
+    fn agent_local_notes_are_not_mutating() {
+        let args = json!({});
+        for name in [
+            "memory_save",
+            "host_memory_update",
+            "taste_save",
+            "set_project_brief",
+            "skill_save",
+        ] {
+            assert!(!tool_is_mutating(name, &args), "{name} writes only agent-local notes");
+        }
+    }
+
+    /// Installing reaches outside for something and puts it on disk, which is a
+    /// different act from writing a note.
+    #[test]
+    fn installing_a_skill_is_mutating() {
+        assert!(tool_is_mutating("skill_install", &json!({})));
     }
 }
