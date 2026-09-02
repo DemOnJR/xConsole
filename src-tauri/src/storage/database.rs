@@ -560,6 +560,113 @@ impl Db {
             CREATE INDEX IF NOT EXISTS agent_message_to_idx
                 ON agent_message(to_id, read_at);
 
+            -- Per-reader position in a channel. A single `read_at` on the message says
+            -- "the addressee saw it", which cannot answer "has Ada read #general" for
+            -- six readers of the same room.
+            -- reader_id is '' rather than NULL for the user: SQLite permits NULL in a
+            -- primary key, which would silently duplicate the user's cursor on every
+            -- upsert instead of conflicting.
+            CREATE TABLE IF NOT EXISTS channel_read (
+                reader_id    TEXT NOT NULL DEFAULT '',
+                channel_id   TEXT NOT NULL,
+                last_read_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (reader_id, channel_id)
+            );
+
+            -- What an agent actually did, durably. The live status event is
+            -- fire-and-forget with a 120s client-side TTL, so a per-agent log channel
+            -- built on it is empty after a restart and invisible to every other agent.
+            CREATE TABLE IF NOT EXISTS agent_log (
+                id           TEXT PRIMARY KEY,
+                persona_id   TEXT NOT NULL,
+                workspace_id TEXT,
+                goal_id      TEXT,
+                session_id   TEXT NOT NULL DEFAULT '',
+                status       TEXT NOT NULL,
+                tool         TEXT,
+                detail       TEXT NOT NULL DEFAULT '',
+                created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_log_persona
+                ON agent_log (persona_id, created_at);
+
+            -- A new feature an agent wants to build, and how far up the chain it has
+            -- got. Improvements to what exists are autonomous; this is the gate that
+            -- makes "new" different, in data rather than in prompt text.
+            CREATE TABLE IF NOT EXISTS feature_proposal (
+                id            TEXT PRIMARY KEY,
+                workspace_id  TEXT,
+                persona_id    TEXT,
+                goal_id       TEXT,
+                title         TEXT NOT NULL,
+                body          TEXT NOT NULL,
+                -- proposed | at_ceo | at_orchestrator | approved | rejected
+                state         TEXT NOT NULL DEFAULT 'proposed',
+                decided_by    TEXT,
+                decision_note TEXT,
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_feature_proposal_state
+                ON feature_proposal (state, workspace_id);
+
+            -- Who asked, on which transport, in which chat. The in-memory turn context
+            -- is cleared the instant the remote turn returns -- long before the work it
+            -- delegated finishes -- so without this row there is nobody to report back
+            -- to and the task ends in silence.
+            CREATE TABLE IF NOT EXISTS remote_request (
+                id         TEXT PRIMARY KEY,
+                transport  TEXT NOT NULL,
+                chat_id    TEXT NOT NULL,
+                author_id  TEXT NOT NULL DEFAULT '',
+                message_id TEXT,
+                persona_id TEXT,
+                ask        TEXT NOT NULL,
+                -- open | answered | abandoned
+                status     TEXT NOT NULL DEFAULT 'open',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                closed_at  TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_remote_request_status
+                ON remote_request (status, created_at);
+
+            -- Outbound messages the app owes a human. Durable because the failure this
+            -- fixes is silence: an in-memory queue loses the answer on the restart that
+            -- is most likely to happen while a long task runs.
+            CREATE TABLE IF NOT EXISTS remote_outbox (
+                id              TEXT PRIMARY KEY,
+                request_id      TEXT,
+                goal_id         TEXT,
+                transport       TEXT NOT NULL,
+                chat_id         TEXT NOT NULL,
+                body            TEXT NOT NULL,
+                -- pending | sending | sent | dead
+                state           TEXT NOT NULL DEFAULT 'pending',
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT,
+                last_error      TEXT,
+                -- One delivery per logical event. Delivery is deliberately
+                -- at-least-once: a rare duplicate beats the silence being fixed.
+                dedupe_key      TEXT NOT NULL UNIQUE,
+                created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+                sent_at         TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_remote_outbox_due
+                ON remote_outbox (state, next_attempt_at);
+
+            -- The pull requests an agent has open. Keyed on persona because that is
+            -- what every other agent-scoped table keys on.
+            CREATE TABLE IF NOT EXISTS agent_open_pr (
+                persona_id   TEXT NOT NULL,
+                workspace_id TEXT NOT NULL DEFAULT '',
+                branch       TEXT NOT NULL,
+                pr_number    INTEGER,
+                url          TEXT,
+                opened_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                closed_at    TEXT,
+                PRIMARY KEY (persona_id, workspace_id, branch)
+            );
+
             -- Pending/!resolved approvals for agent commands (approve safety mode).
             CREATE TABLE IF NOT EXISTS agent_approval (
                 id          TEXT PRIMARY KEY,
@@ -708,6 +815,35 @@ impl Db {
         let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN workspace_id TEXT", []);
         // What came of the task, not just that it ended.
         let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN outcome TEXT", []);
+        // Which room a message was said in, and which message it answers. Both NULL on
+        // every row written before channels existed: those are routed by the client's
+        // original derivation, so upgrading does not hide the existing history.
+        let _ = conn.execute("ALTER TABLE agent_message ADD COLUMN channel_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE agent_message ADD COLUMN parent_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE agent_message ADD COLUMN mentions_json TEXT", []);
+        // read_at means "delivered into a prompt" and is set on delivery, so a bug
+        // report is shown once and then looks handled whether or not it was. Resolving
+        // one is a separate, evidenced act.
+        let _ = conn.execute("ALTER TABLE agent_message ADD COLUMN resolved_at TEXT", []);
+        // Where an agent may write, and which tools it may call. NULL = the project
+        // root / every tool, which is what every persona created before this had.
+        let _ = conn.execute("ALTER TABLE persona ADD COLUMN allowed_paths TEXT", []);
+        let _ = conn.execute("ALTER TABLE persona ADD COLUMN allowed_tools TEXT", []);
+        // The chat that asked for this work, so finishing it can reach them.
+        let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN request_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN reported_at TEXT", []);
+        let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN pr_number INTEGER", []);
+        let _ = conn.execute("ALTER TABLE goal_sessions ADD COLUMN approval_state TEXT", []);
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_message_channel
+             ON agent_message (channel_id, created_at)",
+            [],
+        );
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_message_parent
+             ON agent_message (parent_id, created_at)",
+            [],
+        );
         // A schedule that is a member of staff rather than a script: it runs as an
         // agent, on a project.
         let _ = conn.execute("ALTER TABLE cron_job ADD COLUMN workspace_id TEXT", []);
@@ -1275,6 +1411,10 @@ impl Db {
             persona_id: r.get(12)?,
             workspace_id: r.get(13)?,
             outcome: r.get(14)?,
+            request_id: r.get(15)?,
+            reported_at: r.get(16)?,
+            pr_number: r.get(17)?,
+            approval_state: r.get(18)?,
         })
     }
 
@@ -1283,7 +1423,8 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
                     next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
-                    workspace_id, outcome
+                    workspace_id, outcome, request_id, reported_at, pr_number,
+                    approval_state
              FROM goal_sessions ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], Self::row_to_goal)?;
@@ -1295,7 +1436,8 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
                     next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
-                    workspace_id, outcome
+                    workspace_id, outcome, request_id, reported_at, pr_number,
+                    approval_state
              FROM goal_sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query([id])?;
@@ -1310,8 +1452,8 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO goal_sessions
-               (id, title, raw_request, spec_json, status, kanban_json, memory_json, next_check_at, cycles, persona_id, workspace_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+               (id, title, raw_request, spec_json, status, kanban_json, memory_json, next_check_at, cycles, persona_id, workspace_id, request_id, approval_state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 goal.id,
                 goal.title,
@@ -1324,6 +1466,8 @@ impl Db {
                 goal.cycles,
                 goal.persona_id,
                 goal.workspace_id,
+                goal.request_id,
+                goal.approval_state,
             ],
         )?;
         Ok(())
@@ -1335,7 +1479,8 @@ impl Db {
             "UPDATE goal_sessions SET
                 title = ?2, raw_request = ?3, spec_json = ?4, status = ?5,
                 kanban_json = ?6, memory_json = ?7, next_check_at = ?8, cycles = ?9,
-                updated_at = datetime('now'), finished_at = ?10, outcome = ?11
+                updated_at = datetime('now'), finished_at = ?10, outcome = ?11,
+                reported_at = ?12, pr_number = ?13, approval_state = ?14
              WHERE id = ?1",
             params![
                 goal.id,
@@ -1349,6 +1494,9 @@ impl Db {
                 goal.cycles,
                 goal.finished_at,
                 goal.outcome,
+                goal.reported_at,
+                goal.pr_number,
+                goal.approval_state,
             ],
         )?;
         Ok(())
@@ -1374,12 +1522,24 @@ impl Db {
             created_at: r.get(10)?,
             updated_at: r.get(11)?,
             workspace_id: r.get(12)?,
+            allowed_paths: r
+                .get::<_, Option<String>>(13)?
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default(),
+            allowed_tools: r
+                .get::<_, Option<String>>(14)?
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default(),
         })
     }
 
+    /// Append-only: `row_to_persona` reads by position.
     const PERSONA_COLS: &'static str =
         "id, name, role, instructions, targets_json, safety_mode, provider_id, model,
-         enabled, reports_to, created_at, updated_at, workspace_id";
+         enabled, reports_to, created_at, updated_at, workspace_id, allowed_paths,
+         allowed_tools";
 
     pub fn list_personas(&self) -> Result<Vec<crate::storage::models::Persona>> {
         let conn = self.conn.lock().unwrap();
@@ -1433,8 +1593,8 @@ impl Db {
             let conn = self.conn.lock().unwrap();
             conn.execute(
                 "INSERT INTO persona
-                   (id, name, role, instructions, targets_json, safety_mode, provider_id, model, enabled, reports_to, workspace_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                   (id, name, role, instructions, targets_json, safety_mode, provider_id, model, enabled, reports_to, workspace_id, allowed_paths, allowed_tools)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(id) DO UPDATE SET
                    name = excluded.name,
                    role = excluded.role,
@@ -1446,6 +1606,8 @@ impl Db {
                    enabled = excluded.enabled,
                    reports_to = excluded.reports_to,
                    workspace_id = excluded.workspace_id,
+                   allowed_paths = excluded.allowed_paths,
+                   allowed_tools = excluded.allowed_tools,
                    updated_at = datetime('now')",
                 params![
                     id,
@@ -1459,6 +1621,18 @@ impl Db {
                     input.enabled as i64,
                     input.reports_to,
                     input.workspace_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+                    // NULL, not "[]": an empty list means "scoped to nothing", and the
+                    // absence of a scope means the project root.
+                    if input.allowed_paths.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&input.allowed_paths).ok()
+                    },
+                    if input.allowed_tools.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&input.allowed_tools).ok()
+                    },
                 ],
             )?;
         }
@@ -1488,11 +1662,23 @@ impl Db {
             workspace_id: r.get(6)?,
             read_at: r.get(7)?,
             created_at: r.get(8)?,
+            channel_id: r.get(9)?,
+            parent_id: r.get(10)?,
+            // A malformed mentions blob must not make the message unreadable.
+            mentions: r
+                .get::<_, Option<String>>(11)?
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default(),
+            resolved_at: r.get(12)?,
         })
     }
 
+    /// Append-only. The row mapper reads by position, so inserting a column in the
+    /// middle silently shifts every field after it.
     const AGENT_MESSAGE_COLS: &'static str =
-        "id, from_id, to_id, kind, body, goal_id, workspace_id, read_at, created_at";
+        "id, from_id, to_id, kind, body, goal_id, workspace_id, read_at, created_at, \
+         channel_id, parent_id, mentions_json, resolved_at";
 
     pub fn insert_agent_message(
         &self,
@@ -1500,8 +1686,10 @@ impl Db {
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO agent_message (id, from_id, to_id, kind, body, goal_id, workspace_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO agent_message
+               (id, from_id, to_id, kind, body, goal_id, workspace_id, channel_id,
+                parent_id, mentions_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 msg.id,
                 msg.from_id,
@@ -1509,7 +1697,14 @@ impl Db {
                 msg.kind,
                 msg.body,
                 msg.goal_id,
-                msg.workspace_id
+                msg.workspace_id,
+                msg.channel_id,
+                msg.parent_id,
+                if msg.mentions.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&msg.mentions).ok()
+                },
             ],
         )?;
         Ok(())
@@ -1539,9 +1734,13 @@ impl Db {
         // `to_id IS ?1` rather than `=`, so NULL (the user) matches instead of
         // silently returning nothing the way SQL equality against NULL would.
         let sql = format!(
+            // `channel_id IS NULL` keeps room posts out of the inbox: a channel post
+            // carries no recipient, and `to_id IS NULL` already means "the user", so
+            // without this every broadcast lands in the user's own unread pile.
             "SELECT {} FROM agent_message
-             WHERE to_id IS ?1 AND read_at IS NULL
+             WHERE to_id IS ?1 AND read_at IS NULL AND channel_id IS NULL
              ORDER BY created_at",
+
             Self::AGENT_MESSAGE_COLS
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -1584,7 +1783,8 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
                     next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
-                    workspace_id, outcome
+                    workspace_id, outcome, request_id, reported_at, pr_number,
+                    approval_state
              FROM goal_sessions
              WHERE (?1 IS NULL OR workspace_id = ?1)
              ORDER BY created_at DESC",
@@ -1615,7 +1815,8 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
                     next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
-                    workspace_id, outcome
+                    workspace_id, outcome, request_id, reported_at, pr_number,
+                    approval_state
              FROM goal_sessions
              WHERE status = 'waiting' AND next_check_at IS NOT NULL
                AND next_check_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now')
@@ -2539,7 +2740,8 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
                     next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
-                    workspace_id, outcome
+                    workspace_id, outcome, request_id, reported_at, pr_number,
+                    approval_state
              FROM goal_sessions
              WHERE persona_id = ?1
                AND COALESCE(finished_at, updated_at, created_at) >= ?2

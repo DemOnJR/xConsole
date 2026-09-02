@@ -581,6 +581,10 @@ pub fn start_persona_task(
         persona_id: Some(persona.id.clone()),
         workspace_id,
         outcome: None,
+        request_id: None,
+        reported_at: None,
+        pr_number: None,
+        approval_state: None,
     };
     db.insert_goal(&goal).map_err(|e| e.to_string())?;
     crate::ai::goal::spawn_from_app(app, &id);
@@ -944,6 +948,10 @@ fn record_message(
         workspace_id: ctx.workspace_id.clone(),
         read_at: None,
         created_at: None,
+        channel_id: None,
+        parent_id: None,
+        mentions: Vec::new(),
+        resolved_at: None,
     };
     ctx.db
         .insert_agent_message(&msg)
@@ -1190,6 +1198,8 @@ async fn agent_hire(ctx: &ToolContext, args: &Value) -> String {
             .as_ref()
             .and_then(|p| p.workspace_id.clone())
             .or_else(|| ctx.workspace_id.clone().filter(|s| !s.is_empty())),
+        allowed_paths: Vec::new(),
+        allowed_tools: Vec::new(),
     };
 
     let manager_name = input
@@ -1366,6 +1376,8 @@ pub fn create_team(
             enabled: true,
             reports_to: if is_lead { None } else { lead_id.clone() },
             workspace_id: Some(workspace_id.to_string()),
+            allowed_paths: Vec::new(),
+            allowed_tools: Vec::new(),
         };
         match crate::commands::persona::save_persona_checked(db, input) {
             Ok(p) => {
@@ -2269,6 +2281,8 @@ mod tests {
             workspace_id: None,
             created_at: None,
             updated_at: None,
+            allowed_paths: Vec::new(),
+            allowed_tools: Vec::new(),
         }
     }
 
@@ -2293,6 +2307,10 @@ mod tests {
             persona_id: Some(pid.into()),
             workspace_id: None,
             outcome: None,
+            request_id: None,
+            reported_at: None,
+            pr_number: None,
+            approval_state: None,
         }
     }
 

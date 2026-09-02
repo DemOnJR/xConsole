@@ -422,6 +422,8 @@ mod tests {
             reports_to: None,
             created_at: None,
             updated_at: None,
+            allowed_paths: Vec::new(),
+            allowed_tools: Vec::new(),
         }
     }
 

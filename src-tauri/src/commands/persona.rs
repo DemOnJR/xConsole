@@ -196,6 +196,10 @@ pub async fn post_agent_message(
         workspace_id: ws,
         read_at: None,
         created_at: Some(chrono::Utc::now().to_rfc3339()),
+        channel_id: None,
+        parent_id: None,
+        mentions: Vec::new(),
+        resolved_at: None,
     };
     db.insert_agent_message(&msg).map_err(|e| e.to_string())?;
     let _ = app.emit("agent://message", &msg);

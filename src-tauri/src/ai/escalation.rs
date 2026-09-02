@@ -239,6 +239,8 @@ mod tests {
                 enabled: true,
                 reports_to,
                 workspace_id: None,
+                allowed_paths: Vec::new(),
+                allowed_tools: Vec::new(),
             })
             .unwrap()
         };
@@ -281,6 +283,8 @@ mod tests {
                 enabled: true,
                 reports_to: None,
                 workspace_id: None,
+                allowed_paths: Vec::new(),
+                allowed_tools: Vec::new(),
             })
             .unwrap();
         // Two agents answer to the user; picking one would put an arbitrary name on a

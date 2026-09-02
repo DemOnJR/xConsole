@@ -280,6 +280,19 @@ pub struct GoalSession {
     /// question worth asking a week later.
     #[serde(default)]
     pub outcome: Option<String>,
+    /// The chat that asked for this work. Without it, finishing has nobody to tell.
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// When this task's result was passed up the chain, so it is passed up once.
+    #[serde(default)]
+    pub reported_at: Option<String>,
+    /// The pull request this task opened, if any.
+    #[serde(default)]
+    pub pr_number: Option<i64>,
+    /// Where a new-feature proposal has got to: NULL for ordinary improvement work,
+    /// otherwise proposed | ceo_ok | orch_ok | approved | rejected.
+    #[serde(default)]
+    pub approval_state: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
@@ -332,6 +345,14 @@ pub struct Persona {
     /// user actually talks to, above all — which stay unassigned deliberately.
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// Globs this persona may write under, relative to the project root. Empty = the
+    /// whole project root, which is what every persona created before scoping had.
+    #[serde(default)]
+    pub allowed_paths: Vec<String>,
+    /// Tool names this persona may call. Empty = every tool. A reviewer that cannot
+    /// write and an engineer that cannot touch DNS are the same mechanism.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
@@ -367,10 +388,27 @@ pub struct AgentMessage {
     /// an exchange that belongs to no single one.
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// Set when the message was delivered into the recipient's prompt.
+    ///
+    /// Delivery is not handling: a bug report is shown once and then looks dealt with
+    /// whether or not anything was fixed. See `resolved_at`.
     #[serde(default)]
     pub read_at: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
+    /// The room this was said in. `None` on every row written before channels existed;
+    /// those are routed by the client's original derivation so history does not vanish.
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    /// The message or log line this replies to, making it a thread.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// Persona ids named in the body, so a room post can reach someone specific.
+    #[serde(default)]
+    pub mentions: Vec<String>,
+    /// Set only by an explicit, evidenced resolution -- not by delivery.
+    #[serde(default)]
+    pub resolved_at: Option<String>,
 }
 
 /// Fields accepted when creating or updating a persona.
@@ -405,6 +443,14 @@ pub struct PersonaInput {
     /// user actually talks to, above all — which stay unassigned deliberately.
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// Globs this persona may write under, relative to the project root. Empty = the
+    /// whole project root, which is what every persona created before scoping had.
+    #[serde(default)]
+    pub allowed_paths: Vec<String>,
+    /// Tool names this persona may call. Empty = every tool. A reviewer that cannot
+    /// write and an engineer that cannot touch DNS are the same mechanism.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
 }
 
 /// The locked-in definition of "done" for a goal session.
