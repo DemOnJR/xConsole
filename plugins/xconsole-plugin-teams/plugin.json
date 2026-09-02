@@ -1,8 +1,8 @@
 {
   "id": "xconsole-plugin-teams",
   "name": "Teams",
-  "version": "1.1.0",
-  "description": "Slack-style channels per project and reporting team, direct messages, and a live view of what each named agent is doing.",
+  "version": "1.2.0",
+  "description": "A server per project: channels for the team, a live log channel per agent, threads on any message or log line, and direct messages.",
   "author": "xConsole Team",
   "repository": "https://github.com/DemOnJR/xconsole-plugin-teams",
   "icon": "UsersIcon",

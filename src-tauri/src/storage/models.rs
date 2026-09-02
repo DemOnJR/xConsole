@@ -767,3 +767,48 @@ pub struct CloudflareAuditLogInput {
     #[serde(default)]
     pub after_state: Option<String>,
 }
+
+/// One thing an agent actually did, kept durably.
+///
+/// The live `agent://persona-status` event is fire-and-forget with a client-side TTL, so
+/// a per-agent log channel built on it alone is empty after a restart and invisible to
+/// every other agent. These rows are what makes "what has Ada been doing" answerable by
+/// a teammate rather than only by whoever had the window open at the time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentLogEntry {
+    pub id: String,
+    pub persona_id: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub goal_id: Option<String>,
+    /// The agent run this line came from. Empty when it came from outside a run.
+    #[serde(default)]
+    pub session_id: String,
+    /// The phase word the status feed uses: working, thinking, verifying, blocked...
+    pub status: String,
+    /// The tool that produced it, when one did.
+    #[serde(default)]
+    pub tool: Option<String>,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
+/// How much one reader has not yet seen in one room.
+///
+/// `last_read_at` travels with the counts deliberately: the client recomputes against
+/// the cursor as live messages arrive, so a count taken at load does not go stale the
+/// moment somebody says something.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelUnread {
+    pub channel_id: String,
+    /// Messages in the room this reader has not seen. Their own never count.
+    pub unread: i64,
+    /// How many of those name this reader. Always 0 for the user, who is not a persona.
+    pub mentions: i64,
+    /// Where this reader's cursor sits, or None if they have never opened the room.
+    #[serde(default)]
+    pub last_read_at: Option<String>,
+}

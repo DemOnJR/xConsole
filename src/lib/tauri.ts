@@ -506,6 +506,44 @@ export interface AgentMessage {
   workspace_id?: string | null;
   read_at?: string | null;
   created_at?: string | null;
+  /**
+   * The room this was said in. Null on every row written before channels existed;
+   * those are routed by the Teams view's original derivation, so upgrading does not
+   * hide the history that is already there.
+   */
+  channel_id?: string | null;
+  /** The message or log line this answers, which is what makes it a thread. */
+  parent_id?: string | null;
+  /** Persona ids named in the body, so a room post can still reach someone specific. */
+  mentions?: string[];
+  /** Set only by an explicit resolution -- delivery is not handling. */
+  resolved_at?: string | null;
+}
+
+/** One thing an agent did, kept durably so a teammate can read it after a restart. */
+export interface AgentLogEntry {
+  id: string;
+  persona_id: string;
+  workspace_id?: string | null;
+  goal_id?: string | null;
+  /** The run this line came from. Empty when it came from outside one. */
+  session_id: string;
+  /** The phase word: working, thinking, verifying, blocked... */
+  status: string;
+  tool?: string | null;
+  detail: string;
+  created_at?: string | null;
+}
+
+/** How much one reader has not seen in one room. */
+export interface ChannelUnread {
+  channel_id: string;
+  /** Their own messages never count. */
+  unread: number;
+  /** How many of those name this reader. Always 0 for the user. */
+  mentions: number;
+  /** Null when this reader has never opened the room. */
+  last_read_at?: string | null;
 }
 
 /** One agent's record over a window. */
@@ -1382,6 +1420,44 @@ export const api = {
       workspaceId: workspaceId ?? null,
       kind: kind ?? null,
     }),
+  /** One room's messages, oldest last. Replies live in their thread, not in the room. */
+  listChannelMessages: (channelId: string, limit?: number) =>
+    invoke<AgentMessage[]>("list_channel_messages", {
+      channelId,
+      limit: limit ?? null,
+    }),
+  /** Everything hanging off one message or one log line, oldest first. */
+  listChannelThread: (parentId: string) =>
+    invoke<AgentMessage[]>("list_channel_thread", { parentId }),
+  /**
+   * Post into a room, or into a thread on a message or a log line.
+   *
+   * Unlike `postAgentMessage` this wakes whoever the room implies -- everyone named,
+   * the owner of a log channel, a project's own agents -- so a room is not write-only.
+   */
+  postChannelMessage: (
+    channelId: string,
+    body: string,
+    parentId?: string | null,
+    mentions?: string[],
+    kind?: string | null,
+  ) =>
+    invoke<AgentMessage>("post_channel_message", {
+      channelId,
+      body,
+      parentId: parentId ?? null,
+      mentions: mentions ?? null,
+      kind: kind ?? null,
+    }),
+  /** What one agent has been doing, oldest last. */
+  listAgentLog: (personaId: string, limit?: number) =>
+    invoke<AgentLogEntry[]>("list_agent_log", { personaId, limit: limit ?? null }),
+  /** Per-room unread counts and read cursors. `readerId` empty = you. */
+  channelUnread: (readerId?: string | null) =>
+    invoke<ChannelUnread[]>("channel_unread", { readerId: readerId ?? null }),
+  /** Move your cursor in a room to now. */
+  markChannelRead: (channelId: string, readerId?: string | null) =>
+    invoke<void>("mark_channel_read", { channelId, readerId: readerId ?? null }),
 
   saveProvider: (input: AiProviderInput) =>
     invoke<AiProvider>("save_provider", { input }),
@@ -1943,6 +2019,19 @@ export function onAgentMessage(
   cb: (msg: AgentMessage) => void,
 ): Promise<UnlistenFn> {
   return listen<AgentMessage>("agent://message", (e) => cb(e.payload));
+}
+
+/**
+ * Live feed of what the agents are doing, line by line.
+ *
+ * Distinct from `onPersonaStatus`, which carries the current phase and is overwritten:
+ * this is the durable line as it is recorded, so a log channel can append rather than
+ * replace.
+ */
+export function onAgentLog(
+  cb: (entry: AgentLogEntry) => void,
+): Promise<UnlistenFn> {
+  return listen<AgentLogEntry>("agent://log", (e) => cb(e.payload));
 }
 
 /** Subscribe to a session's connection status changes. */

@@ -14,6 +14,7 @@ pub mod remote_file;
 pub mod session;
 pub mod sftp;
 pub mod settings;
+pub mod teams;
 pub mod update;
 pub mod upload;
 pub mod vps;

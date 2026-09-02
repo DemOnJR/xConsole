@@ -1,17 +1,24 @@
 import { describe, expect, it } from "vitest";
 import type { AgentMessage, GoalSession, Persona, Workspace } from "../../../src/lib/tauri";
 import {
+  allGuildChannels,
   avatarColor,
   buildChannels,
+  buildGuilds,
+  channelIdFor,
+  COMPANY,
   dmChannels,
   groupMessages,
   initials,
   membersForProject,
   messageInChannel,
   nameOf,
+  parseChannelId,
+  parseTs,
   reportsTree,
   slugify,
   vpsIdsOfWorkspace,
+  type ChannelRef,
 } from "./channels";
 
 const persona = (partial: Partial<Persona> & Pick<Persona, "id" | "name">): Persona => ({
@@ -196,5 +203,140 @@ describe("initials / nameOf / avatarColor", () => {
   });
   it("is stable for the same id", () => {
     expect(avatarColor("ada")).toBe(avatarColor("ada"));
+  });
+});
+
+describe("channelIdFor / parseChannelId", () => {
+  it("round-trips every room in the grammar", () => {
+    const refs: ChannelRef[] = [
+      { kind: "company" },
+      { kind: "project", workspaceId: "k8s" },
+      { kind: "log", workspaceId: "k8s", personaId: "ada" },
+      { kind: "team", leadId: "ada" },
+      { kind: "dm", personaId: "ada" },
+    ];
+    for (const ref of refs) {
+      expect(parseChannelId(channelIdFor(ref))).toEqual(ref);
+    }
+  });
+
+  it("writes the ids the Rust side parses", () => {
+    expect(channelIdFor({ kind: "company" })).toBe("company");
+    expect(channelIdFor({ kind: "project", workspaceId: "k8s" })).toBe("ws:k8s:general");
+    expect(channelIdFor({ kind: "log", workspaceId: "k8s", personaId: "ada" })).toBe(
+      "ws:k8s:log:ada",
+    );
+    expect(channelIdFor({ kind: "team", leadId: "ada" })).toBe("team:ada");
+    expect(channelIdFor({ kind: "dm", personaId: "ada" })).toBe("dm:ada");
+  });
+
+  it("refuses anything outside the grammar rather than inventing a room", () => {
+    for (const bad of [
+      "",
+      "ws",
+      "ws:",
+      "ws:k8s",
+      "ws::general",
+      "ws:k8s:general:extra",
+      "ws:k8s:log",
+      "ws:k8s:log:",
+      "ws:k8s:logs:ada",
+      "team:",
+      "dm:",
+      "Company",
+      "general",
+    ]) {
+      expect(parseChannelId(bad)).toBeNull();
+    }
+  });
+});
+
+describe("buildGuilds", () => {
+  const ada = persona({ id: "ada", name: "Ada", workspace_id: "k8s" });
+  const bruno = persona({ id: "bruno", name: "Bruno", workspace_id: "k8s", reports_to: "ada" });
+  const zoe = persona({ id: "zoe", name: "Zoe" });
+  const k8s = ws({ id: "k8s", name: "K8S" });
+
+  it("puts a project's general, team and per-agent log channels under that project", () => {
+    const guilds = buildGuilds([ada, bruno, zoe], [k8s], []);
+    const project = guilds.find((g) => g.id === "k8s")!;
+    expect(project.kind).toBe("project");
+    expect(project.channels.map((c) => c.channelId)).toEqual([
+      "ws:k8s:general",
+      "team:ada",
+      "ws:k8s:log:ada",
+      "ws:k8s:log:bruno",
+    ]);
+    expect(project.channels.filter((c) => c.kind === "log").map((c) => c.slug)).toEqual([
+      "log-ada",
+      "log-bruno",
+    ]);
+  });
+
+  it("keeps the company room, and company-wide teams, outside every project", () => {
+    const quill = persona({ id: "quill", name: "Quill", reports_to: "zoe" });
+    const guilds = buildGuilds([ada, bruno, zoe, quill], [k8s], []);
+    expect(guilds.map((g) => g.id)).toEqual([COMPANY, "k8s"]);
+    const company = guilds[0];
+    expect(company.kind).toBe("company");
+    // Zoe leads nobody on a project, so her room stays at company level.
+    expect(company.channels.map((c) => c.channelId)).toEqual(["company", "team:zoe"]);
+  });
+
+  it("leaves direct messages out of the guilds entirely", () => {
+    const guilds = buildGuilds([ada, bruno, zoe], [k8s], []);
+    expect(allGuildChannels(guilds).some((c) => c.kind === "dm")).toBe(false);
+    expect(dmChannels([ada, zoe]).map((c) => c.channelId)).toEqual(["dm:ada", "dm:zoe"]);
+  });
+
+  it("gives a project with nobody on it a general room and no logs", () => {
+    const guilds = buildGuilds([zoe], [ws({ id: "shop", name: "Shop" })], []);
+    const shop = guilds.find((g) => g.id === "shop")!;
+    expect(shop.channels.map((c) => c.kind)).toEqual(["project"]);
+  });
+});
+
+describe("messageInChannel with channel ids", () => {
+  const ada = persona({ id: "ada", name: "Ada", workspace_id: "k8s" });
+  const bruno = persona({ id: "bruno", name: "Bruno", reports_to: "ada", workspace_id: "k8s" });
+  const guilds = buildGuilds([ada, bruno], [ws({ id: "k8s", name: "K8S" })], []);
+  const general = allGuildChannels(guilds).find((c) => c.channelId === "ws:k8s:general")!;
+  const logAda = allGuildChannels(guilds).find((c) => c.channelId === "ws:k8s:log:ada")!;
+  const logBruno = allGuildChannels(guilds).find((c) => c.channelId === "ws:k8s:log:bruno")!;
+  const company = allGuildChannels(guilds).find((c) => c.channelId === "company")!;
+
+  it("routes a stamped message by its channel id and nowhere else", () => {
+    const m = msg({ id: "1", body: "restarting", channel_id: "ws:k8s:log:ada", workspace_id: "k8s" });
+    expect(messageInChannel(m, logAda)).toBe(true);
+    // The pair the old derivation could not tell apart: same project, same people.
+    expect(messageInChannel(m, general)).toBe(false);
+    expect(messageInChannel(m, logBruno)).toBe(false);
+    expect(messageInChannel(m, company)).toBe(false);
+  });
+
+  it("still routes a legacy row with no channel id exactly as it did before", () => {
+    const legacy = msg({ id: "2", body: "deploy", from_id: "ada", workspace_id: "k8s" });
+    expect(messageInChannel(legacy, general)).toBe(true);
+    expect(messageInChannel(legacy, company)).toBe(false);
+    const unscoped = msg({ id: "3", body: "hello", from_id: "ada" });
+    expect(messageInChannel(unscoped, company)).toBe(true);
+    expect(messageInChannel(unscoped, general)).toBe(false);
+  });
+
+  it("never lets a legacy row leak into a log channel it cannot possibly belong to", () => {
+    const legacy = msg({ id: "4", body: "deploy", from_id: "ada", workspace_id: "k8s" });
+    expect(messageInChannel(legacy, logAda)).toBe(false);
+  });
+});
+
+describe("parseTs", () => {
+  it("reads SQLite's zoneless UTC as UTC, not as local time", () => {
+    expect(parseTs("2026-09-01 16:00:00")).toBe(Date.parse("2026-09-01T16:00:00Z"));
+    expect(parseTs("2026-09-01T16:00:00Z")).toBe(Date.parse("2026-09-01T16:00:00Z"));
+  });
+
+  it("is NaN for nothing and for nonsense, so a caller can decide what that means", () => {
+    expect(Number.isNaN(parseTs(null))).toBe(true);
+    expect(Number.isNaN(parseTs("not a date"))).toBe(true);
   });
 });
