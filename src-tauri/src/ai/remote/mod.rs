@@ -44,6 +44,7 @@
 //! rather than by any command syntax, so it reads as ordinary conversation.
 
 pub mod discord;
+pub mod outbox;
 pub mod reaction;
 pub mod telegram;
 pub mod whatsapp;
@@ -663,6 +664,9 @@ struct TurnContext {
     /// The message that started the turn, which is what makes a destructive command
     /// readable as either the job or a mistake.
     ask: String,
+    /// The `remote_request` row this turn is answering. Anything the turn delegates
+    /// inherits it, which is how work that finishes an hour later still knows who asked.
+    request_id: Option<String>,
 }
 
 /// Set while a turn started by a chat message is running.
@@ -684,9 +688,13 @@ static GRANT: tokio::sync::Mutex<Option<(String, std::time::Instant)>> =
 pub struct RemoteTurnGuard;
 
 impl RemoteTurnGuard {
-    pub fn enter(persona_id: Option<String>, ask: &str) -> Self {
+    pub fn enter(persona_id: Option<String>, ask: &str, request_id: Option<String>) -> Self {
         if let Ok(mut ctx) = TURN_CTX.lock() {
-            *ctx = Some(TurnContext { persona_id, ask: ask.to_string() });
+            *ctx = Some(TurnContext {
+                persona_id,
+                ask: ask.to_string(),
+                request_id,
+            });
         }
         RemoteTurnGuard
     }
@@ -706,6 +714,79 @@ fn turn_context() -> Option<TurnContext> {
 
 pub fn turn_in_flight() -> bool {
     turn_context().is_some()
+}
+
+/// The ask a goal started right now belongs to, when there is one.
+///
+/// Two sources, because a delegated task is started in two different places. During a
+/// remote turn it is the turn's own request. While a finished task is being reported up
+/// the chain, it is whatever [`RequestScope`] is holding — otherwise the manager's own
+/// run would be the first link in the chain that has forgotten who asked, and the
+/// answer would stop there.
+pub fn current_request_id() -> Option<String> {
+    turn_context()
+        .and_then(|c| c.request_id)
+        .or_else(|| SCOPED_REQUEST.lock().ok().and_then(|r| r.clone()))
+}
+
+/// The ask being carried while work is handed on outside a remote turn.
+static SCOPED_REQUEST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Carries an ask across a synchronous hand-off — a report that wakes a manager, whose
+/// own task must stay attached to the question that started all of it.
+///
+/// Deliberately never held across an await: it is process-wide, and a second hand-off
+/// interleaving with this one would inherit the wrong ask.
+pub struct RequestScope;
+
+impl RequestScope {
+    pub fn enter(request_id: Option<String>) -> Self {
+        if let Ok(mut r) = SCOPED_REQUEST.lock() {
+            *r = request_id;
+        }
+        RequestScope
+    }
+}
+
+impl Drop for RequestScope {
+    fn drop(&mut self) {
+        if let Ok(mut r) = SCOPED_REQUEST.lock() {
+            *r = None;
+        }
+    }
+}
+
+/// Record who asked, before anything slow happens.
+///
+/// Returns the row id, or `None` when the insert failed — a bridge that cannot write
+/// this still answers the message in front of it; what it loses is the ability to come
+/// back later, which is worth a log line and not a dropped reply.
+pub fn record_request(
+    db: &crate::storage::Db,
+    route: &Route,
+    msg: &IncomingMessage,
+    persona_id: Option<&str>,
+    ask: &str,
+) -> Option<String> {
+    let row = crate::storage::database::RemoteRequest {
+        id: uuid::Uuid::new_v4().to_string(),
+        transport: route.kind.as_str().to_string(),
+        chat_id: route.chat_id.clone(),
+        author_id: msg.author.id.clone(),
+        message_id: Some(msg.id.clone()),
+        persona_id: persona_id.map(str::to_string),
+        ask: ask.to_string(),
+        status: "open".to_string(),
+        created_at: None,
+        closed_at: None,
+    };
+    match db.insert_remote_request(&row) {
+        Ok(()) => Some(row.id),
+        Err(e) => {
+            crate::diag(&format!("remote: could not record who asked: {e}"));
+            None
+        }
+    }
 }
 
 /// What a message did to the question the agent was waiting on.
@@ -818,13 +899,29 @@ pub async fn intercept_approval(
     shown: &str,
     irreversible: bool,
 ) -> Option<Result<(), String>> {
-    let Some(ctx) = turn_context() else {
-        return None;
+    // Who has to answer this, and where they are. Two ways the answer belongs in a
+    // chat rather than in a dialog on the desktop.
+    let asking = match turn_context() {
+        // The user is watching this turn on their phone right now.
+        Some(ctx) if session_id == CONVERSATION_ID => Asking {
+            persona_id: ctx.persona_id,
+            ask: ctx.ask,
+            background: None,
+        },
+        // A task started by a chat message, still running long after the turn returned.
+        // Without this it falls through to the desktop prompt registry, which nothing
+        // is watching, and dies ten minutes later having asked nobody.
+        _ => {
+            let goal_id = session_id.strip_prefix("goal:")?;
+            let goal = db.get_goal(goal_id).ok().flatten()?;
+            let request = db.get_remote_request(goal.request_id.as_deref()?).ok().flatten()?;
+            Asking {
+                persona_id: goal.persona_id.clone(),
+                ask: goal.raw_request.clone(),
+                background: Some((request, goal)),
+            }
+        }
     };
-    if session_id != CONVERSATION_ID {
-        return None;
-    }
-
     let mut grant = GRANT.lock().await;
     match grant.clone() {
         Some((granted, at)) if at.elapsed() <= GRANT_TTL && granted == command => {
@@ -837,16 +934,21 @@ pub async fn intercept_approval(
     drop(grant);
 
     let reviewed = if irreversible {
-        crate::ai::escalation::review(db, ctx.persona_id.as_deref(), shown, &ctx.ask).await
+        crate::ai::escalation::review(db, asking.persona_id.as_deref(), shown, &asking.ask).await
     } else {
         None
     };
 
     if let Some(v) = reviewed.as_ref().filter(|v| !v.ok) {
-        *OUTCOME.lock().await = Some(Outcome::Vetoed {
+        let stopped = Outcome::Vetoed {
             line: v.line(),
             shown: shown.to_string(),
-        });
+        };
+        // A background task has no reply to append this to, so it is sent on its own.
+        if let Some((request, goal)) = asking.background.as_ref() {
+            queue_for_chat(db, request, goal, &approval_footer(&stopped), "veto", command);
+        }
+        *OUTCOME.lock().await = Some(stopped);
         return Some(Err(format!(
             "not run: {} — the agent you answer to reviewed this and refused it. Do not run \
              it, and do not look for another way to do the same thing. Say what you were \
@@ -855,12 +957,32 @@ pub async fn intercept_approval(
         )));
     }
 
-    *OUTCOME.lock().await = Some(Outcome::Waiting(PendingApproval {
+    let waiting = Outcome::Waiting(PendingApproval {
         command: command.to_string(),
         shown: shown.to_string(),
         reviewed: reviewed.map(|v| v.line()),
         asked_at: std::time::Instant::now(),
-    }));
+    });
+    // A remote turn appends this to the reply it is about to send. A background task
+    // has no reply, so the question is queued as its own message — to the chat that
+    // asked for the work, not to wherever anybody last spoke. The answer comes back
+    // through exactly the same `answer_pending` path either way: the poll loop reads
+    // "da", the grant is set, and the next cycle's identical command is let through.
+    if let Some((request, goal)) = asking.background.as_ref() {
+        queue_for_chat(
+            db,
+            request,
+            goal,
+            &format!(
+                "{} is waiting on you.{}",
+                goal.title.trim(),
+                approval_footer(&waiting)
+            ),
+            "approval",
+            command,
+        );
+    }
+    *OUTCOME.lock().await = Some(waiting);
 
     Some(Err(
         "not run: this needs the user's approval, and they are on their phone rather than \
@@ -869,6 +991,54 @@ pub async fn intercept_approval(
          then say in one line what is waiting on their answer and stop."
             .to_string(),
     ))
+}
+
+/// What one approval question knows about who is waiting for it.
+struct Asking {
+    persona_id: Option<String>,
+    ask: String,
+    /// Set when the person is not on the other end of a live turn: the request that
+    /// started the work, and the task now asking.
+    background: Option<(crate::storage::database::RemoteRequest, crate::storage::models::GoalSession)>,
+}
+
+/// Queue one message to the chat an ask came from.
+///
+/// Keyed on the task and the exact command, so a cycle that re-proposes the same thing
+/// asks once. Due immediately — a question the user is expected to answer is the one
+/// thing here that must not be debounced.
+fn queue_for_chat(
+    db: &crate::storage::Db,
+    request: &crate::storage::database::RemoteRequest,
+    goal: &crate::storage::models::GoalSession,
+    body: &str,
+    what: &str,
+    command: &str,
+) {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    command.hash(&mut h);
+    let row = crate::storage::database::OutboxMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        // Deliberately not stamped with the request: a question is not an answer, and
+        // marking the ask settled the moment this goes out would stop the sweep watching
+        // work that is still running.
+        request_id: None,
+        goal_id: Some(goal.id.clone()),
+        transport: request.transport.clone(),
+        chat_id: request.chat_id.clone(),
+        body: body.to_string(),
+        state: "pending".to_string(),
+        attempts: 0,
+        next_attempt_at: None,
+        last_error: None,
+        dedupe_key: format!("{what}:{}:{:x}", goal.id, h.finish()),
+        created_at: None,
+        sent_at: None,
+    };
+    if let Err(e) = db.enqueue_outbox(&row) {
+        crate::diag(&format!("remote: could not queue the {what} question: {e}"));
+    }
 }
 
 /// The lines appended to a reply that left something for the user.
@@ -1107,13 +1277,25 @@ fn drive(app: tauri::AppHandle, mut transport: Box<dyn Transport>) {
                 let here = Route { kind, chat_id: msg.chat_id.clone() };
                 remember_route(&db, &here);
 
+                // Who asked, as a row. `last_route` answers "where was the last thing
+                // said", which is the wrong question an hour later when three agents
+                // have finished and the user has since typed somewhere else. This is
+                // the right one: *this* ask came from *this* chat.
+                let answering = cfg
+                    .persona_id
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|id| crate::ai::persona::resolve(&db, id))
+                    .map(|p| p.id);
+                let request_id = record_request(&db, &here, &msg, answering.as_deref(), &ask);
+
                 // Shown before the lock, so somebody waiting behind another turn still
                 // sees that their message landed. Failures are ignored on purpose: an
                 // indicator is a courtesy, and none of them is worth losing a reply over.
                 let _ = transport.set_typing(&msg, true).await;
                 let (reply, redirect) = {
                     let _turn = TURN_LOCK.lock().await;
-                    run_remote_turn(&app, &cfg, &ask).await
+                    run_remote_turn(&app, &cfg, &ask, request_id.clone()).await
                 };
                 let _ = transport.set_typing(&msg, false).await;
 
@@ -1169,6 +1351,20 @@ fn drive(app: tauri::AppHandle, mut transport: Box<dyn Transport>) {
                         }
                     }
                 }
+
+                // An ask stays open only while somebody is still working on it. A turn
+                // that answered in its own reply and delegated nothing is finished
+                // here — leaving it open would have the sweep announce, an hour later,
+                // that an ordinary question had been abandoned.
+                if let Some(rid) = request_id.as_deref() {
+                    let delegated = db
+                        .goals_for_request(rid)
+                        .map(|g| !g.is_empty())
+                        .unwrap_or(false);
+                    if !delegated {
+                        let _ = db.close_remote_request(rid, "answered");
+                    }
+                }
             }
         }
     });
@@ -1182,6 +1378,7 @@ async fn run_remote_turn(
     app: &tauri::AppHandle,
     cfg: &Config,
     ask: &str,
+    request_id: Option<String>,
 ) -> (String, Option<Kind>) {
     use tauri::Manager;
     let db = app.state::<crate::storage::Db>().inner().clone();
@@ -1206,7 +1403,7 @@ async fn run_remote_turn(
     // Marks the turn as one the user is watching from a phone, for as long as it runs.
     // `safety::authorize` reads this to decide that the desktop is the wrong place to
     // ask, and who reviews anything that cannot be undone. Cleared however the turn ends.
-    let _remote = RemoteTurnGuard::enter(persona.as_ref().map(|p| p.id.clone()), ask);
+    let _remote = RemoteTurnGuard::enter(persona.as_ref().map(|p| p.id.clone()), ask, request_id);
 
     let tc = crate::ai::tools::ToolContext {
         app: app.clone(),
@@ -1402,7 +1599,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_command_is_approved_from_the_phone_and_the_yes_is_spent() {
-        let _turn = RemoteTurnGuard::enter(None, "restarteaza nginx");
+        let _turn = RemoteTurnGuard::enter(None, "restarteaza nginx", None);
         let db = db();
         // Nothing irreversible in this test, so no reviewer is consulted and no model is
         // reached: `false` is the whole of that decision.

@@ -311,6 +311,12 @@ pub fn run() {
             // opens a port, which is the security promise the README makes.
             ai::remote::spawn(app.handle().clone());
 
+            // The other direction. A transport driver only ever writes the reply to the
+            // message it is answering, so work that finishes minutes or hours later had
+            // no way back to the person who asked. This drains the durable queue that
+            // gives it one.
+            ai::remote::outbox::spawn(app.handle().clone());
+
             // The Cursor MCP runs as a SEPARATE process (Cursor spawns it) and can't
             // emit Tauri events, so its canvas tools drop request files in this shared
             // queue dir. Watch it and forward each request to the live canvas.
@@ -630,6 +636,12 @@ pub fn run() {
             commands::lock::note_activity,
             commands::lock::get_auto_lock_minutes,
             commands::lock::set_auto_lock_minutes,
+            commands::teams::list_channel_messages,
+            commands::teams::list_channel_thread,
+            commands::teams::post_channel_message,
+            commands::teams::list_agent_log,
+            commands::teams::channel_unread,
+            commands::teams::mark_channel_read,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

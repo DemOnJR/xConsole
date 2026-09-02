@@ -6,10 +6,10 @@ use uuid::Uuid;
 
 use super::models::{
     AgentApproval, AgentConversation, AgentConversationInput, AgentConversationMeta,
-    AgentPlan, AgentPlanMeta, AiProvider, AiProviderInput, AuthType, CloudAccount,
-    CloudAccountInput, CloudflareAuditLog, CloudflareAuditLogInput, CronJob, CronJobInput,
-    GoalSession, InfraProject, InfraProjectInput, KnownHost, Vps, VpsInput, VpsLoginPatch,
-    Workspace, WorkspaceInput,
+    AgentLogEntry, AgentPlan, AgentPlanMeta, AiProvider, AiProviderInput, AuthType,
+    ChannelUnread, CloudAccount, CloudAccountInput, CloudflareAuditLog,
+    CloudflareAuditLogInput, CronJob, CronJobInput, GoalSession, InfraProject,
+    InfraProjectInput, KnownHost, Vps, VpsInput, VpsLoginPatch, Workspace, WorkspaceInput,
 };
 use crate::artifacts::Artifact;
 use crate::ai::conversations;
@@ -46,6 +46,55 @@ fn workspace_payload_eq(existing: &Workspace, input: &WorkspaceInput) -> bool {
         && existing.icon == input.icon
         && existing.color_mode == input.color_mode
         && existing.project_json == input.project_json
+}
+
+/// One thing a human asked for from a chat app.
+///
+/// The in-memory turn context is cleared the instant the remote turn returns, which is
+/// long before anything it delegated finishes. This row is what outlives that — and a
+/// restart — so a task that ends an hour later still knows whose question it was and
+/// which chat to answer in, rather than the last chat anybody happened to use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteRequest {
+    pub id: String,
+    /// Transport name as `Kind::as_str` writes it.
+    pub transport: String,
+    pub chat_id: String,
+    pub author_id: String,
+    pub message_id: Option<String>,
+    /// The agent that answered, when the bridge names one.
+    pub persona_id: Option<String>,
+    /// What they asked, in their words.
+    pub ask: String,
+    /// open | answered | abandoned
+    pub status: String,
+    pub created_at: Option<String>,
+    pub closed_at: Option<String>,
+}
+
+/// A message the app owes a human, durable until it is delivered or provably cannot be.
+///
+/// Delivery is at-least-once on purpose: a duplicate notification is a small annoyance,
+/// and the failure being fixed is a person who was told "I will get back to you" and
+/// never heard anything again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxMessage {
+    pub id: String,
+    pub request_id: Option<String>,
+    pub goal_id: Option<String>,
+    pub transport: String,
+    pub chat_id: String,
+    pub body: String,
+    /// pending | sending | sent | dead
+    pub state: String,
+    pub attempts: i64,
+    /// When it may next be tried, and — once claimed — when it was claimed.
+    pub next_attempt_at: Option<String>,
+    pub last_error: Option<String>,
+    /// One row per logical event. The uniqueness is the whole debounce.
+    pub dedupe_key: String,
+    pub created_at: Option<String>,
+    pub sent_at: Option<String>,
 }
 
 /// Thread-safe handle to the local SQLite database.
@@ -1809,6 +1858,559 @@ impl Db {
         Ok(())
     }
 
+    // ----- Rooms, threads and the durable agent log -----
+
+    /// One room's messages, oldest last, top-level only.
+    ///
+    /// Replies are excluded rather than interleaved: a thread hangs off the message it
+    /// answers, and a correction written three days later must not reappear at the
+    /// bottom of the room as though it were a fresh remark.
+    pub fn list_channel_messages(
+        &self,
+        channel_id: &str,
+        limit: i64,
+    ) -> Result<Vec<crate::storage::models::AgentMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let limit = limit.clamp(1, 1000);
+        let sql = format!(
+            "SELECT {} FROM agent_message
+             WHERE channel_id = ?1 AND parent_id IS NULL
+             ORDER BY created_at DESC LIMIT ?2",
+            Self::AGENT_MESSAGE_COLS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![channel_id, limit], Self::row_to_agent_message)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        // Newest-first in SQL so LIMIT keeps the recent end; reversed so the caller
+        // reads it as a conversation.
+        Ok(rows.into_iter().rev().collect())
+    }
+
+    /// Every reply hanging off one message or log line, oldest first.
+    ///
+    /// The parent may be an `agent_message` id or an `agent_log` id — a suggestion is
+    /// attached to a specific action just as readily as to a specific sentence, and the
+    /// two id spaces are both uuids, so one column serves both.
+    pub fn list_thread(
+        &self,
+        parent_id: &str,
+    ) -> Result<Vec<crate::storage::models::AgentMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {} FROM agent_message
+             WHERE parent_id = ?1
+             ORDER BY created_at",
+            Self::AGENT_MESSAGE_COLS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![parent_id], Self::row_to_agent_message)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// One message by id, so a caller can check a parent exists before answering it.
+    pub fn get_agent_message(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::storage::models::AgentMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {} FROM agent_message WHERE id = ?1",
+            Self::AGENT_MESSAGE_COLS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query_map(params![id], Self::row_to_agent_message)?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    fn row_to_agent_log(r: &rusqlite::Row) -> rusqlite::Result<AgentLogEntry> {
+        Ok(AgentLogEntry {
+            id: r.get(0)?,
+            persona_id: r.get(1)?,
+            workspace_id: r.get(2)?,
+            goal_id: r.get(3)?,
+            session_id: r.get(4)?,
+            status: r.get(5)?,
+            tool: r.get(6)?,
+            detail: r.get(7)?,
+            created_at: r.get(8)?,
+        })
+    }
+
+    const AGENT_LOG_COLS: &'static str =
+        "id, persona_id, workspace_id, goal_id, session_id, status, tool, detail, created_at";
+
+    /// Record one thing an agent did.
+    ///
+    /// `created_at` is left to the column default so every row in this table and in
+    /// `agent_message` shares one timestamp format — read cursors compare as strings,
+    /// and one caller writing RFC3339 while another writes `datetime('now')` would sort
+    /// every mixed pair wrongly.
+    // The writer lands with the agent-loop hook; the reader and the schema are here
+    // first so a log channel has something to read as soon as it does.
+    #[allow(dead_code)]
+    pub fn insert_agent_log(&self, entry: &AgentLogEntry) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agent_log
+               (id, persona_id, workspace_id, goal_id, session_id, status, tool, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                entry.id,
+                entry.persona_id,
+                entry.workspace_id,
+                entry.goal_id,
+                entry.session_id,
+                entry.status,
+                entry.tool,
+                entry.detail,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// What one agent has been doing, oldest last.
+    pub fn list_agent_log(&self, persona_id: &str, limit: i64) -> Result<Vec<AgentLogEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let limit = limit.clamp(1, 2000);
+        let sql = format!(
+            "SELECT {} FROM agent_log
+             WHERE persona_id = ?1
+             ORDER BY created_at DESC LIMIT ?2",
+            Self::AGENT_LOG_COLS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![persona_id, limit], Self::row_to_agent_log)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows.into_iter().rev().collect())
+    }
+
+    /// Drop log lines older than `keep_days`, returning how many went.
+    ///
+    /// An agent emits a line per tool call, so this table grows faster than anything
+    /// else here and is the one place where forgetting is the correct behaviour.
+    #[allow(dead_code)]
+    pub fn prune_agent_log(&self, keep_days: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = format!("-{} days", keep_days.clamp(1, 3650));
+        let n = conn.execute(
+            "DELETE FROM agent_log WHERE created_at < datetime('now', ?1)",
+            params![cutoff],
+        )?;
+        Ok(n)
+    }
+
+    /// How much each room holds that `reader_id` has not seen. `""` is the user.
+    ///
+    /// Every room with messages comes back, read or not, and each row carries the
+    /// reader's cursor: the client recounts against that cursor as live messages
+    /// arrive, so a count taken at load does not go stale the moment somebody speaks.
+    pub fn channel_unread_counts(&self, reader_id: &str) -> Result<Vec<ChannelUnread>> {
+        let conn = self.conn.lock().unwrap();
+        // The user is `from_id IS NULL`, a persona is `from_id = <id>`; `IS NOT` is
+        // null-safe, so one comparison covers both and nobody's own words count as
+        // unread to them.
+        let author: Option<&str> = if reader_id.is_empty() {
+            None
+        } else {
+            Some(reader_id)
+        };
+        // Mentions are stored as a JSON array of ids, so the id must be matched with
+        // its quotes -- a bare substring would let one id match a longer one.
+        let needle = if reader_id.is_empty() {
+            String::new()
+        } else {
+            format!("\"{reader_id}\"")
+        };
+        let mut stmt = conn.prepare(
+            "SELECT m.channel_id,
+                    SUM(CASE WHEN (r.last_read_at IS NULL OR m.created_at > r.last_read_at)
+                                  AND m.from_id IS NOT ?2
+                             THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN (r.last_read_at IS NULL OR m.created_at > r.last_read_at)
+                                  AND m.from_id IS NOT ?2
+                                  AND ?3 <> ''
+                                  AND m.mentions_json IS NOT NULL
+                                  AND instr(m.mentions_json, ?3) > 0
+                             THEN 1 ELSE 0 END),
+                    r.last_read_at
+             FROM agent_message m
+             LEFT JOIN channel_read r
+                    ON r.channel_id = m.channel_id AND r.reader_id = ?1
+             WHERE m.channel_id IS NOT NULL
+             GROUP BY m.channel_id, r.last_read_at
+             ORDER BY m.channel_id",
+        )?;
+        let rows = stmt.query_map(params![reader_id, author, needle], |r| {
+            Ok(ChannelUnread {
+                channel_id: r.get(0)?,
+                unread: r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                mentions: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                last_read_at: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Move a reader's cursor in a room to now.
+    pub fn mark_channel_read(&self, reader_id: &str, channel_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        Self::upsert_channel_read(&conn, reader_id, channel_id, None)
+    }
+
+    /// Move a reader's cursor to an explicit point.
+    ///
+    /// An agent marks a room read as of the moment it was handed the messages, not the
+    /// moment it finished thinking about them, or everything said while it worked is
+    /// silently swallowed.
+    #[allow(dead_code)]
+    pub fn mark_channel_read_at(&self, reader_id: &str, channel_id: &str, at: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        Self::upsert_channel_read(&conn, reader_id, channel_id, Some(at))
+    }
+
+    fn upsert_channel_read(
+        conn: &Connection,
+        reader_id: &str,
+        channel_id: &str,
+        at: Option<&str>,
+    ) -> Result<()> {
+        // reader_id is '' for the user, never NULL: SQLite permits NULL in a primary
+        // key, so a NULL reader would insert a fresh duplicate cursor row on every
+        // upsert instead of conflicting, and the user's unread count would never clear.
+        conn.execute(
+            "INSERT INTO channel_read (reader_id, channel_id, last_read_at)
+             VALUES (?1, ?2, COALESCE(?3, datetime('now')))
+             ON CONFLICT(reader_id, channel_id)
+             DO UPDATE SET last_read_at = COALESCE(?3, datetime('now'))",
+            params![reader_id, channel_id, at],
+        )?;
+        Ok(())
+    }
+
+    // ----- Remote requests and the outbox -----
+    //
+    // Between a chat message and the work it starts there is a gap the process may not
+    // survive, so both halves are rows rather than memory: who asked (and where they
+    // are reachable), and what we still owe them.
+
+    fn row_to_remote_request(r: &rusqlite::Row) -> rusqlite::Result<RemoteRequest> {
+        Ok(RemoteRequest {
+            id: r.get(0)?,
+            transport: r.get(1)?,
+            chat_id: r.get(2)?,
+            author_id: r.get(3)?,
+            message_id: r.get(4)?,
+            persona_id: r.get(5)?,
+            ask: r.get(6)?,
+            status: r.get(7)?,
+            created_at: r.get(8)?,
+            closed_at: r.get(9)?,
+        })
+    }
+
+    const REMOTE_REQUEST_COLS: &'static str =
+        "id, transport, chat_id, author_id, message_id, persona_id, ask, status, \
+         created_at, closed_at";
+
+    /// Record who asked, before anything slow happens. The id it returns is what a
+    /// finished task carries home.
+    pub fn insert_remote_request(&self, r: &RemoteRequest) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            // `created_at` is normally the default. It is writable so that the sweep's
+            // age rules can be exercised without waiting an hour for them.
+            "INSERT INTO remote_request
+               (id, transport, chat_id, author_id, message_id, persona_id, ask, status,
+                created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, datetime('now')))",
+            params![
+                r.id,
+                r.transport,
+                r.chat_id,
+                r.author_id,
+                r.message_id,
+                r.persona_id,
+                r.ask,
+                r.status,
+                r.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_remote_request(&self, id: &str) -> Result<Option<RemoteRequest>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {} FROM remote_request WHERE id = ?1",
+            Self::REMOTE_REQUEST_COLS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query([id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::row_to_remote_request(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Asks nobody has answered yet, oldest first. What the sweep reads.
+    pub fn list_open_remote_requests(&self) -> Result<Vec<RemoteRequest>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {} FROM remote_request WHERE status = 'open' ORDER BY created_at",
+            Self::REMOTE_REQUEST_COLS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], Self::row_to_remote_request)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Close an ask: `answered` when the reply went out, `abandoned` when it could not.
+    ///
+    /// Only an open request closes, so a late second delivery cannot reopen and re-stamp
+    /// one that was already settled.
+    pub fn close_remote_request(&self, id: &str, status: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE remote_request SET status = ?2, closed_at = datetime('now')
+             WHERE id = ?1 AND status = 'open'",
+            params![id, status],
+        )?;
+        Ok(())
+    }
+
+    /// The tasks started to answer one ask. `None` finds goals nobody is waiting on.
+    pub fn goals_for_request(&self, request_id: &str) -> Result<Vec<GoalSession>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, raw_request, spec_json, status, kanban_json, memory_json,
+                    next_check_at, cycles, created_at, updated_at, finished_at, persona_id,
+                    workspace_id, outcome, request_id, reported_at, pr_number,
+                    approval_state
+             FROM goal_sessions WHERE request_id = ?1 ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([request_id], Self::row_to_goal)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Stamp a goal with the ask it belongs to, once.
+    ///
+    /// Separate from `update_goal` on purpose: the loop rewrites a goal on every cycle
+    /// from a struct it read minutes ago, and an ownership that arrived in between must
+    /// not be written back out of it. `IS NULL` also makes this idempotent, so a task
+    /// adopted by one ask is never re-parented by the next one.
+    pub fn set_goal_request(&self, goal_id: &str, request_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE goal_sessions SET request_id = ?2 WHERE id = ?1 AND request_id IS NULL",
+            params![goal_id, request_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    fn row_to_outbox(r: &rusqlite::Row) -> rusqlite::Result<OutboxMessage> {
+        Ok(OutboxMessage {
+            id: r.get(0)?,
+            request_id: r.get(1)?,
+            goal_id: r.get(2)?,
+            transport: r.get(3)?,
+            chat_id: r.get(4)?,
+            body: r.get(5)?,
+            state: r.get(6)?,
+            attempts: r.get(7)?,
+            next_attempt_at: r.get(8)?,
+            last_error: r.get(9)?,
+            dedupe_key: r.get(10)?,
+            created_at: r.get(11)?,
+            sent_at: r.get(12)?,
+        })
+    }
+
+    const OUTBOX_COLS: &'static str =
+        "id, request_id, goal_id, transport, chat_id, body, state, attempts, \
+         next_attempt_at, last_error, dedupe_key, created_at, sent_at";
+
+    /// Queue one message. `false` means the same logical event was already queued —
+    /// which is the point of the unique key, not a failure.
+    pub fn enqueue_outbox(&self, m: &OutboxMessage) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO remote_outbox
+               (id, request_id, goal_id, transport, chat_id, body, state, attempts,
+                next_attempt_at, dedupe_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                m.id,
+                m.request_id,
+                m.goal_id,
+                m.transport,
+                m.chat_id,
+                m.body,
+                m.state,
+                m.attempts,
+                m.next_attempt_at,
+                m.dedupe_key,
+            ],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Read one queued message back. Used by the tests that prove a message is not sent
+    /// twice and not dropped, which is the only place the worker's own state is visible.
+    #[allow(dead_code)]
+    pub fn get_outbox(&self, id: &str) -> Result<Option<OutboxMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("SELECT {} FROM remote_outbox WHERE id = ?1", Self::OUTBOX_COLS);
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query([id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::row_to_outbox(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Everything queued, newest last. For diagnostics and tests.
+    #[allow(dead_code)]
+    pub fn list_outbox(&self, limit: i64) -> Result<Vec<OutboxMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {} FROM remote_outbox ORDER BY created_at, rowid LIMIT ?1",
+            Self::OUTBOX_COLS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([limit.clamp(1, 1000)], Self::row_to_outbox)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Add to a message that has not gone out yet, so two agents finishing one ask
+    /// arrive as one notification carrying both results rather than as one that has
+    /// silently dropped the other.
+    ///
+    /// A no-op once the row is claimed: appending to a body already on its way to a
+    /// phone would deliver half a sentence.
+    pub fn append_outbox_body(&self, dedupe_key: &str, extra: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE remote_outbox SET body = substr(body || char(10) || char(10) || ?2, 1, 6000)
+             WHERE dedupe_key = ?1 AND state = 'pending'",
+            params![dedupe_key, extra],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Replace a queued body, while it is still queued.
+    pub fn update_outbox_body(&self, id: &str, body: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE remote_outbox SET body = ?2 WHERE id = ?1 AND state = 'pending'",
+            params![id, body],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Take the next due message, atomically.
+    ///
+    /// The claim is the `UPDATE ... WHERE state = 'pending'`: two workers racing on the
+    /// same row means one of them changes no rows and gets nothing, which is what keeps
+    /// a message from being sent twice. `next_attempt_at` is rewritten to now so it
+    /// doubles as the claim time — a worker that dies mid-send leaves a row that
+    /// `requeue_stalled_outbox` can date and return.
+    pub fn claim_outbox(&self) -> Result<Option<OutboxMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let id: Option<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM remote_outbox
+                 WHERE state = 'pending'
+                   AND (next_attempt_at IS NULL
+                        OR next_attempt_at <= strftime('%Y-%m-%d %H:%M:%S','now'))
+                 ORDER BY created_at, rowid LIMIT 1",
+            )?;
+            let mut rows = stmt.query([])?;
+            match rows.next()? {
+                Some(r) => Some(r.get(0)?),
+                None => None,
+            }
+        };
+        let Some(id) = id else { return Ok(None) };
+        let n = conn.execute(
+            "UPDATE remote_outbox
+               SET state = 'sending',
+                   next_attempt_at = strftime('%Y-%m-%d %H:%M:%S','now')
+             WHERE id = ?1 AND state = 'pending'",
+            [&id],
+        )?;
+        if n == 0 {
+            // Somebody else took it between the select and the update.
+            return Ok(None);
+        }
+        let sql = format!("SELECT {} FROM remote_outbox WHERE id = ?1", Self::OUTBOX_COLS);
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query([&id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::row_to_outbox(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn mark_outbox_sent(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE remote_outbox SET state = 'sent', sent_at = datetime('now'),
+                    last_error = NULL
+             WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    /// Record a failed attempt. `retry_at` of `None` gives up on the message.
+    pub fn fail_outbox(&self, id: &str, error: &str, retry_at: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let state = if retry_at.is_some() { "pending" } else { "dead" };
+        conn.execute(
+            "UPDATE remote_outbox
+               SET state = ?2, attempts = attempts + 1, last_error = ?3,
+                   next_attempt_at = ?4
+             WHERE id = ?1",
+            params![id, state, error, retry_at],
+        )?;
+        Ok(())
+    }
+
+    /// Return anything claimed before `cutoff` and never finished.
+    ///
+    /// The crash case: a message marked `sending` by a process that then died is owed to
+    /// somebody and will never move on its own.
+    pub fn requeue_stalled_outbox(&self, cutoff: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE remote_outbox SET state = 'pending', next_attempt_at = NULL
+             WHERE state = 'sending'
+               AND (next_attempt_at IS NULL OR next_attempt_at <= ?1)",
+            [cutoff],
+        )?;
+        Ok(n)
+    }
+
+    /// Is anything already queued or delivered for this ask?
+    ///
+    /// `dead` deliberately does not count: a message that could not be delivered after
+    /// every retry is not an answer, and the sweep should still be able to say so.
+    pub fn outbox_live_for_request(&self, request_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM remote_outbox
+             WHERE request_id = ?1 AND state IN ('pending','sending','sent')",
+            [request_id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     /// Goals that are due to resume (status "waiting" with next_check_at <= now).
     pub fn list_due_goals(&self) -> Result<Vec<GoalSession>> {
         let conn = self.conn.lock().unwrap();
@@ -3081,5 +3683,148 @@ mod known_host_tests {
             d.verify_host_key("h", 22, "rsa-sha2-512", "SHA256:new2").unwrap(),
             HostKeyVerdict::PinnedOnFirstUse
         ));
+    }
+}
+
+#[cfg(test)]
+mod channel_read_tests {
+    use super::*;
+    use crate::storage::models::AgentMessage;
+
+    fn db() -> Db {
+        Db::open(std::path::Path::new(":memory:")).unwrap()
+    }
+
+    fn post(d: &Db, id: &str, from: Option<&str>, channel: &str, mentions: &[&str]) {
+        d.insert_agent_message(&AgentMessage {
+            id: id.into(),
+            from_id: from.map(|s| s.to_string()),
+            to_id: None,
+            kind: "note".into(),
+            body: format!("body {id}"),
+            goal_id: None,
+            workspace_id: None,
+            read_at: None,
+            created_at: None,
+            channel_id: Some(channel.into()),
+            parent_id: None,
+            mentions: mentions.iter().map(|s| s.to_string()).collect(),
+            resolved_at: None,
+        })
+        .unwrap();
+    }
+
+    fn counts(d: &Db, reader: &str, channel: &str) -> (i64, i64) {
+        d.channel_unread_counts(reader)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.channel_id == channel)
+            .map(|c| (c.unread, c.mentions))
+            .unwrap_or((0, 0))
+    }
+
+    /// The whole point of a per-reader cursor: six people in one room each have their
+    /// own position, and `agent_message.read_at` (one flag, set by delivery to the
+    /// addressee) cannot express that at all.
+    #[test]
+    fn unread_counts_move_with_the_reader_cursor() {
+        let d = db();
+        post(&d, "m1", Some("ada"), "company", &[]);
+        post(&d, "m2", Some("bruno"), "company", &["ada"]);
+        post(&d, "m3", None, "company", &[]);
+
+        // Never opened: everything except your own is unread, and one names you.
+        assert_eq!(counts(&d, "ada", "company"), (2, 1));
+        // The user wrote m3, so the user sees two and is never mentioned.
+        assert_eq!(counts(&d, "", "company"), (2, 0));
+
+        // A cursor before everything changes nothing...
+        d.mark_channel_read_at("ada", "company", "1970-01-01 00:00:00")
+            .unwrap();
+        assert_eq!(counts(&d, "ada", "company"), (2, 1));
+        // ...and a cursor after everything clears it, mention badge included.
+        d.mark_channel_read_at("ada", "company", "2999-01-01 00:00:00")
+            .unwrap();
+        assert_eq!(counts(&d, "ada", "company"), (0, 0));
+        // One reader moving does not move another.
+        assert_eq!(counts(&d, "", "company"), (2, 0));
+    }
+
+    /// A mention needle without its quotes would let "ada" match "adamant"; and a room
+    /// the reader is not named in must not raise a mention badge.
+    #[test]
+    fn a_mention_matches_the_whole_id_only() {
+        let d = db();
+        post(&d, "m1", Some("bruno"), "company", &["adamant"]);
+        assert_eq!(counts(&d, "ada", "company"), (1, 0));
+    }
+
+    /// Marking read twice must leave one cursor. With reader_id NULLable this silently
+    /// inserted a second row every time, and the count never cleared.
+    #[test]
+    fn marking_a_channel_read_is_idempotent() {
+        let d = db();
+        post(&d, "m1", Some("ada"), "ws:k8s:general", &[]);
+        d.mark_channel_read("", "ws:k8s:general").unwrap();
+        d.mark_channel_read("", "ws:k8s:general").unwrap();
+        let rows = d.channel_unread_counts("").unwrap();
+        assert_eq!(rows.len(), 1, "one row per channel, not one per mark");
+        assert_eq!(rows[0].unread, 0);
+        assert!(rows[0].last_read_at.is_some());
+    }
+
+    /// Threads live in the same table; a room listing that included them would replay
+    /// every old correction at the bottom of the room.
+    #[test]
+    fn a_room_listing_holds_top_level_messages_and_the_thread_holds_the_rest() {
+        let d = db();
+        post(&d, "root", Some("ada"), "ws:k8s:general", &[]);
+        d.insert_agent_message(&AgentMessage {
+            id: "reply".into(),
+            from_id: None,
+            to_id: None,
+            kind: "note".into(),
+            body: "actually, use 5432".into(),
+            goal_id: None,
+            workspace_id: None,
+            read_at: None,
+            created_at: None,
+            channel_id: Some("ws:k8s:general".into()),
+            parent_id: Some("root".into()),
+            mentions: Vec::new(),
+            resolved_at: None,
+        })
+        .unwrap();
+        let room = d.list_channel_messages("ws:k8s:general", 50).unwrap();
+        assert_eq!(room.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["root"]);
+        let thread = d.list_thread("root").unwrap();
+        assert_eq!(thread.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["reply"]);
+        assert_eq!(thread[0].parent_id.as_deref(), Some("root"));
+    }
+
+    /// A log line is a reply target too, so the id it is stored under has to come back.
+    #[test]
+    fn the_agent_log_round_trips_and_prunes_by_age() {
+        let d = db();
+        d.insert_agent_log(&AgentLogEntry {
+            id: "l1".into(),
+            persona_id: "ada".into(),
+            workspace_id: Some("k8s".into()),
+            goal_id: None,
+            session_id: "goal:g1".into(),
+            status: "working".into(),
+            tool: Some("run_command".into()),
+            detail: "kubectl get pods".into(),
+            created_at: None,
+        })
+        .unwrap();
+        let log = d.list_agent_log("ada", 50).unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].tool.as_deref(), Some("run_command"));
+        assert!(log[0].created_at.is_some());
+        assert!(d.list_agent_log("bruno", 50).unwrap().is_empty());
+        // Written now, so a 7-day window keeps it.
+        assert_eq!(d.prune_agent_log(7).unwrap(), 0);
+        assert_eq!(d.list_agent_log("ada", 50).unwrap().len(), 1);
     }
 }

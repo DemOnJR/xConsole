@@ -1022,10 +1022,10 @@ fn agent_report(ctx: &ToolContext, args: &Value) -> String {
         return format!("error reporting: {e}");
     }
     if to_id.is_none() {
-        let _ = ctx.app.emit(
-            "goal://notify",
-            json!({ "title": format!("{} reported", me.name), "body": body }),
-        );
+        // No manager: this report is for the user. `goal://notify` reached no frontend
+        // file at all, so a top-of-chain agent's report ended here silently. The outbox
+        // is the path that actually delivers it, to the chat that asked.
+        crate::ai::report::report_to_user(&ctx.db, ctx.goal_id.as_deref(), &me.name, body);
     }
     format!("Reported to {to_name}.")
 }

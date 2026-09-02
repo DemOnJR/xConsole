@@ -42,6 +42,7 @@ pub mod vps_snapshot;
 pub mod reflection;
 pub mod registry;
 pub mod remote;
+pub mod report;
 pub mod repo;
 pub mod metrics_tools;
 pub mod remote_tools;

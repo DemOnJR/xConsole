@@ -77,13 +77,42 @@ pub fn set_kanban(goal: &mut GoalSession, tasks: Vec<GoalTask>) {
     goal.kanban_json = serde_json::to_string(&tasks).unwrap_or_else(|_| "[]".to_string());
 }
 
-/// Notify the user via an OS notification (best-effort).
-fn notify_user(app: &AppHandle, title: &str, body: &str) {
-    let _ = app.emit("goal://notify", serde_json::json!({ "title": title, "body": body }));
-}
-
 /// Brief pause between cycles so we do not hammer the provider. Not a user wait.
 const CYCLE_GAP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The statuses a run can be in, named rather than spelled out at each site.
+///
+/// Naming them is what makes "every ending reaches the report hook" a testable claim
+/// instead of a promise about string literals scattered through a 200-line loop.
+pub const ACTIVE: &str = "active";
+pub const WAITING: &str = "waiting";
+pub const DONE: &str = "done";
+pub const BLOCKED: &str = "blocked";
+pub const STOPPED: &str = "stopped";
+
+/// What the loop does next with a status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Run another plan → act → verify cycle.
+    Drive,
+    /// Stop driving, but the run is not over — the ticker or the user resumes it.
+    Wait,
+    /// The run is over. Secure the work, tell whoever is waiting, and stop.
+    Finish,
+}
+
+/// Classify a status.
+///
+/// One function so there is one ending. The two endings the loop decides for itself — a
+/// stall and a cycle limit — set a status and come back round to this, rather than
+/// returning, which is how they used to finish without telling anybody.
+pub fn step_for(status: &str) -> Step {
+    match status {
+        ACTIVE => Step::Drive,
+        DONE | BLOCKED | STOPPED => Step::Finish,
+        _ => Step::Wait,
+    }
+}
 
 /// Run one plan → act → verify cycle for an active goal. Returns the new status
 /// ("active" to continue, "waiting" to sleep, "done"/"blocked"/"stopped" to exit).
@@ -339,24 +368,33 @@ pub async fn run_loop(ctx: &GoalContext, goal_id: &str) {
         if ctx.session_state.is_cancelled(&format!("goal:{goal_id}")) {
             return;
         }
-        if goal.status != "active" {
-            // paused / waiting / blocked / done / stopped — stop driving.
-            // The tick only resumes waiting-with-a-due-time; paused waits for Continue.
-            if goal.status == "waiting" {
-                if let Some(at) = goal.next_check_at.clone() {
-                    let _ = ctx.app.emit(
-                        &goal_event(&goal.id),
-                        StreamEvent::Status(format!("waiting until {at}")),
-                    );
+        match step_for(&goal.status) {
+            Step::Drive => {}
+            Step::Wait => {
+                // The tick only resumes waiting-with-a-due-time; paused waits for
+                // Continue.
+                if goal.status == WAITING {
+                    if let Some(at) = goal.next_check_at.clone() {
+                        let _ = ctx.app.emit(
+                            &goal_event(&goal.id),
+                            StreamEvent::Status(format!("waiting until {at}")),
+                        );
+                    }
                 }
-            } else if matches!(goal.status.as_str(), "done" | "blocked" | "stopped") {
+                return;
+            }
+            Step::Finish => {
                 // The run is over, whichever way it ended. Anything it wrote and did not
                 // commit is about to be forgotten, and "stopped" and "blocked" are the
                 // cases most likely to leave a half-finished tree behind.
                 secure_work(ctx, &mut goal).await;
+                // The one place a run reports. Every ending funnels through here — a
+                // stall and a cycle limit set their status and come back round rather
+                // than returning — so there is no way to finish and tell nobody.
+                crate::ai::report::on_goal_terminal(ctx, &mut goal).await;
                 let _ = save_goal(ctx, &goal);
+                return;
             }
-            return;
         }
 
         match run_cycle(ctx, &goal).await {
@@ -374,7 +412,7 @@ pub async fn run_loop(ctx: &GoalContext, goal_id: &str) {
             return;
         };
         goal = fresh;
-        if goal.status != "active" {
+        if goal.status != ACTIVE {
             continue;
         }
 
@@ -390,7 +428,7 @@ pub async fn run_loop(ctx: &GoalContext, goal_id: &str) {
             last_fingerprint = Some(fingerprint);
         }
         if stalled >= STALL_LIMIT {
-            goal.status = "blocked".to_string();
+            goal.status = BLOCKED.to_string();
             goal.finished_at = Some(Utc::now().to_rfc3339());
             // Says what it did not do, because "reached max cycles" sent the user to
             // raise a number when the number was never the problem — and a higher one
@@ -403,12 +441,10 @@ pub async fn run_loop(ctx: &GoalContext, goal_id: &str) {
                  checked with the tools it has, so it can never conclude."
             ));
             let _ = save_goal(ctx, &goal);
-            notify_user(
-                &ctx.app,
-                "Goal stalled",
-                &format!("{} stopped making progress", goal.title),
-            );
-            return;
+            // Round the loop rather than out of the function: the top of it is where a
+            // finished run is secured and reported, and a `return` here is how a stalled
+            // task used to end without anybody being told.
+            continue;
         }
 
         // An explicit ceiling, only when the user asked for one. There is no default:
@@ -416,15 +452,14 @@ pub async fn run_loop(ctx: &GoalContext, goal_id: &str) {
         let spec = parse_spec(&goal);
         if let Some(max) = spec.as_ref().and_then(|s| s.max_cycles) {
             if cycles >= max {
-                goal.status = "blocked".to_string();
+                goal.status = BLOCKED.to_string();
                 goal.finished_at = Some(Utc::now().to_rfc3339());
                 goal.outcome = Some(format!(
                     "Stopped at the {max}-cycle limit set for this task. It was still making \
                      progress, so raise or remove the limit if the work is worth finishing."
                 ));
                 let _ = save_goal(ctx, &goal);
-                notify_user(&ctx.app, "Goal blocked", &format!("{} reached max cycles", goal.title));
-                return;
+                continue;
             }
         }
         let _ = save_goal(ctx, &goal);
@@ -509,18 +544,13 @@ async fn secure_work(ctx: &GoalContext, goal: &mut GoalSession) {
             // The one case that must not be reported as success: the task claims to be
             // done and its changes exist nowhere but a disk nobody is watching.
             crate::diag(&format!("goal {}: COULD NOT SECURE WORK: {e}", goal.id));
-            goal.status = "blocked".to_string();
+            goal.status = BLOCKED.to_string();
             goal.outcome = Some(format!(
                 "Finished, but the work could not be committed or pushed ({}): {e}. It \
                  exists only where it was done — deal with this before anything else \
                  touches that checkout.",
                 status.summary()
             ));
-            notify_user(
-                &ctx.app,
-                "Work at risk",
-                &format!("{} finished with work that could not be pushed", goal.title),
-            );
         }
     }
 }
@@ -643,6 +673,10 @@ pub fn spawn_from_app(app: &tauri::AppHandle, goal_id: &str) {
         running: app.state::<GoalRunning>().inner().clone(),
         session_state: app.state::<SessionState>().inner().clone(),
     };
+    // Stamped here because this is the one point every delegated task passes through,
+    // and because `ToolContext` cannot carry it: the task outlives the turn that started
+    // it, so the goal row is the only record that survives a restart.
+    crate::ai::report::adopt_request(&ctx.db, goal_id);
     let id = goal_id.to_string();
     tauri::async_runtime::spawn(async move {
         run_loop(&ctx, &id).await;
@@ -661,11 +695,15 @@ pub fn spawn_tick(ctx: GoalContext) {
         resume_orphaned_active(&ctx);
         resume_due_goals(&ctx).await;
         tick_idle_duties(&ctx);
+        crate::ai::report::sweep_unanswered(&ctx.db);
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             resume_orphaned_active(&ctx);
             resume_due_goals(&ctx).await;
             tick_idle_duties(&ctx);
+            // Nothing may end in silence: an ask whose work vanished is told so, and one
+            // that is genuinely taking hours says so hourly.
+            crate::ai::report::sweep_unanswered(&ctx.db);
         }
     });
 }
@@ -673,6 +711,25 @@ pub fn spawn_tick(ctx: GoalContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_way_a_run_can_end_arrives_at_the_same_ending() {
+        // Three endings, one exit. The agent declaring the goal met writes DONE from
+        // goal_check_criteria; the stall detector and an explicit cycle limit both write
+        // BLOCKED and then come back round the loop; a user stop writes STOPPED. Each
+        // has to reach the branch that secures the work and reports it, because the two
+        // that used to `return` instead are exactly how a delegated task finished in
+        // silence.
+        for ending in [DONE, BLOCKED, STOPPED] {
+            assert_eq!(step_for(ending), Step::Finish, "{ending} must reach the report hook");
+        }
+        // And nothing else may: a run that is still going, or waiting on a clock or on
+        // the user, has not ended and must not be reported as though it had.
+        assert_eq!(step_for(ACTIVE), Step::Drive);
+        assert_eq!(step_for(WAITING), Step::Wait);
+        assert_eq!(step_for("paused"), Step::Wait);
+        assert_eq!(step_for("intake"), Step::Wait);
+    }
 
     #[test]
     fn a_stall_is_measured_in_cycles_that_changed_nothing() {
