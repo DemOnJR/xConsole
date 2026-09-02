@@ -2,6 +2,9 @@
 //! head/tail, LLM-summarize the middle when usage crosses a threshold.
 //! System tiers switch to ponytail-minimal when space is tight.
 
+use std::collections::HashSet;
+use std::sync::{LazyLock, RwLock};
+
 use chrono::Local;
 
 use crate::ai::context_usage::{estimate_messages_tokens, estimate_tokens, estimate_tools_tokens};
@@ -20,7 +23,15 @@ const PRUNED_TOOL: &str = "[Old tool output cleared to save context space]";
 const THRESHOLD_PERCENT: f32 = 0.80;
 const MIN_CTX_TRIGGER_RATIO: f32 = 0.85;
 const MINIMUM_CONTEXT_TOKENS: u32 = 32_768;
-const PROTECT_FIRST_N: usize = 3;
+/// How many leading messages compaction never rewrites.
+///
+/// This is the cached head of the conversation: everything before the first
+/// summarised message stays byte-identical, so the provider can still read it
+/// after a compaction. Three messages was barely the opening user turn, so a
+/// compaction invalidated the prefix almost from the start and the next request
+/// re-wrote the lot. Protecting more of the head costs a little context and
+/// saves a full-prefix write on every compaction.
+const PROTECT_FIRST_N: usize = 9;
 const SUMMARY_TARGET_RATIO: f32 = 0.20;
 
 pub struct CompactResult {
@@ -54,8 +65,48 @@ pub fn should_auto_compact(estimated_tokens: u32, context_limit: u32) -> bool {
     estimated_tokens >= compute_threshold(context_limit)
 }
 
-pub fn force_minimal_system_prompt(estimated_tokens: u32, context_limit: u32) -> bool {
+/// Sessions that have already switched to the minimal system prompt.
+///
+/// The switch rewrites the whole system block, which invalidates tools + system
+/// + every message behind them. Usage that oscillates around the threshold — one
+/// large tool result in, one aged out — flipped it back and forth and paid that
+/// rewrite twice per crossing. Once tripped, a session stays minimal.
+static MINIMAL_LATCHED: LazyLock<RwLock<HashSet<String>>> =
+    LazyLock::new(|| RwLock::new(HashSet::new()));
+
+/// The raw threshold test, with no latch. Exposed for tests and benches.
+pub fn minimal_prompt_threshold_tripped(estimated_tokens: u32, context_limit: u32) -> bool {
     estimated_tokens as f32 >= context_limit as f32 * 0.65
+}
+
+/// True when this session should use the ponytail-minimal system prompt.
+///
+/// Latching: once a session crosses the threshold it never goes back, because
+/// going back is another full prefix rewrite for no benefit.
+pub fn force_minimal_system_prompt(
+    session_id: &str,
+    estimated_tokens: u32,
+    context_limit: u32,
+) -> bool {
+    if let Ok(set) = MINIMAL_LATCHED.read() {
+        if set.contains(session_id) {
+            return true;
+        }
+    }
+    if !minimal_prompt_threshold_tripped(estimated_tokens, context_limit) {
+        return false;
+    }
+    if let Ok(mut set) = MINIMAL_LATCHED.write() {
+        set.insert(session_id.to_string());
+    }
+    true
+}
+
+/// Drop a session's minimal-prompt latch (conversation cleared / new session).
+pub fn clear_minimal_latch(session_id: &str) {
+    if let Ok(mut set) = MINIMAL_LATCHED.write() {
+        set.remove(session_id);
+    }
 }
 
 /// Estimate total prompt tokens (system + tools + messages).
@@ -438,15 +489,42 @@ mod tests {
             "recent tool output must stay verbatim, got: {}",
             &recent.content[..recent.content.len().min(40)]
         );
-        let old = out.iter().find(|m| m.tool_call_id.as_deref() == Some("old-1"));
-        if let Some(old) = old {
-            // Head is protected (first 3 messages); old-1 is index 2, so it may
-            // survive. A middle tool must be stubbed.
-            let mid = out.iter().find(|m| m.tool_call_id.as_deref() == Some("mid-0"));
-            if let Some(mid) = mid {
-                assert_eq!(mid.content, PRUNED_TOOL);
-            }
-            let _ = old;
-        }
+        // The protected head is PROTECT_FIRST_N messages and stays verbatim so
+        // the cached prefix survives a compaction: old-1 (index 2) and mid-0
+        // (index 5) are inside it. A tool past the head must be stubbed.
+        let head_tool = out
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("old-1"))
+            .expect("protected head keeps its messages");
+        assert!(head_tool.content.starts_with('O'), "head tool must stay verbatim");
+        let mid = out
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("mid-3"))
+            .expect("mid-3 survives as a stub");
+        assert_eq!(mid.content, PRUNED_TOOL);
+    }
+
+    #[test]
+    fn protected_head_covers_the_opening_exchange_not_just_the_first_message() {
+        // Three messages was barely the opening user turn, so compaction moved
+        // the cache anchor to almost the start of the conversation.
+        assert!(PROTECT_FIRST_N >= 8, "head too small to anchor the cache");
+    }
+
+    #[test]
+    fn minimal_prompt_latches_and_never_flips_back() {
+        let session = "latch-test-session";
+        clear_minimal_latch(session);
+        assert!(!force_minimal_system_prompt(session, 10_000, 1_000_000));
+        // Cross the threshold once.
+        assert!(force_minimal_system_prompt(session, 700_000, 1_000_000));
+        // Usage drops back below it — the switch must NOT flip back, because
+        // rewriting the system block invalidates tools + system + every message.
+        assert!(force_minimal_system_prompt(session, 10, 1_000_000));
+        assert!(!minimal_prompt_threshold_tripped(10, 1_000_000));
+        // The latch is per-session.
+        assert!(!force_minimal_system_prompt("another-session", 10, 1_000_000));
+        clear_minimal_latch(session);
+        assert!(!force_minimal_system_prompt(session, 10, 1_000_000));
     }
 }

@@ -17,7 +17,14 @@ pub struct CachePoint {
     pub prompt: u32,
     pub hit: u32,
     pub miss: u32,
+    /// Tokens written to the provider cache on this request. Billed at 1.25x
+    /// (5m TTL) or 2.0x (1h TTL) of the input rate — neither a hit nor free.
+    pub written: u32,
     pub pct: i32,
+    pub model: String,
+    pub provider: String,
+    /// "5m" or "1h".
+    pub ttl: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -52,7 +59,11 @@ pub struct ResourceSnapshot {
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentAnalytics {
     pub cache: Vec<CachePoint>,
+    /// Token-weighted hit rate: `sum(hit) / sum(hit + miss + written)`.
     pub cache_avg_pct: f32,
+    pub cache_hit_tokens: u64,
+    pub cache_miss_tokens: u64,
+    pub cache_written_tokens: u64,
     pub conversations: Vec<ConversationStat>,
     pub tools_all: Vec<ToolCount>,
     pub resource: ResourceSnapshot,
@@ -71,11 +82,15 @@ pub fn collect(db: &Db) -> AgentAnalytics {
     }
 
     let cache = read_cache_log(400);
-    let cache_avg_pct = if cache.is_empty() {
-        0.0
-    } else {
-        cache.iter().map(|p| p.pct as f32).sum::<f32>() / cache.len() as f32
-    };
+    // Token-weighted, not a mean of per-request percentages. Averaging the
+    // percentages treats a 40-token request and a 400K-token full rewrite as
+    // equals, so one cheap high-hit turn hid the expensive one.
+    let cache_hit_tokens: u64 = cache.iter().map(|p| p.hit as u64).sum();
+    let cache_miss_tokens: u64 = cache.iter().map(|p| p.miss as u64).sum();
+    let cache_written_tokens: u64 = cache.iter().map(|p| p.written as u64).sum();
+    let cache_avg_pct = (crate::ai::cost::weighted_cache_hit_rate(
+        cache.iter().map(|p| (p.hit, p.miss, p.written)),
+    ) * 100.0) as f32;
     let conversations = conversation_stats(db, 12);
     let mut all: BTreeMap<String, u32> = BTreeMap::new();
     for c in &conversations {
@@ -92,6 +107,9 @@ pub fn collect(db: &Db) -> AgentAnalytics {
     let full = AgentAnalytics {
         cache,
         cache_avg_pct,
+        cache_hit_tokens,
+        cache_miss_tokens,
+        cache_written_tokens,
         conversations,
         tools_all,
         resource: resource_snapshot(),
@@ -129,7 +147,11 @@ fn read_cache_log(max: usize) -> Vec<CachePoint> {
                 prompt: v.get("prompt").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
                 hit: v.get("hit").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
                 miss: v.get("miss").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                written: v.get("written").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
                 pct: v.get("pct").and_then(|x| x.as_i64()).unwrap_or(0) as i32,
+                model: v.get("model").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                provider: v.get("provider").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                ttl: v.get("ttl").and_then(|x| x.as_str()).unwrap_or("").to_string(),
             })
         })
         .collect()
@@ -217,5 +239,43 @@ pub fn resource_snapshot() -> ResourceSnapshot {
         gpu_mem_mb: gpu.mem_used_mb,
         gpu_mem_total_mb: gpu.mem_total_mb,
         gpu_name: gpu.name,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn point(hit: u32, miss: u32, written: u32) -> CachePoint {
+        CachePoint {
+            ts: String::new(),
+            session: String::new(),
+            prompt: miss,
+            hit,
+            miss,
+            written,
+            pct: if hit + miss + written == 0 {
+                0
+            } else {
+                ((hit as f64 / (hit + miss + written) as f64) * 100.0).round() as i32
+            },
+            model: String::new(),
+            provider: String::new(),
+            ttl: String::new(),
+        }
+    }
+
+    #[test]
+    fn average_hit_rate_is_token_weighted_and_counts_writes() {
+        // One tiny perfect request and one huge full rewrite. Averaging the
+        // per-request percentages reports 50%; the truth is ~0.1%.
+        let rows = vec![point(100, 0, 0), point(0, 0, 100_000)];
+        let unweighted =
+            rows.iter().map(|p| p.pct as f32).sum::<f32>() / rows.len() as f32;
+        let weighted = crate::ai::cost::weighted_cache_hit_rate(
+            rows.iter().map(|p| (p.hit, p.miss, p.written)),
+        ) * 100.0;
+        assert_eq!(unweighted, 50.0);
+        assert!(weighted < 0.2, "weighted={weighted}");
     }
 }

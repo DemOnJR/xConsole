@@ -154,9 +154,23 @@ pub struct ChatRequest {
     /// User-pressed-Stop flag. Providers poll this in their streaming loop to abort
     /// an in-flight response immediately. `None` means no cancellation wired.
     pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    /// Cache retention: "short" (5 min) or "long" (1h, 2× write price). Passed to
-    /// providers that support explicit cache TTLs; empty = provider default.
+    /// Cache retention: "short" (5 min), "long" (1h, 2x write price), or empty
+    /// for auto. Auto resolves to 1h when [`ChatRequest::autonomous`] is set.
+    ///
+    /// The 5-minute default is the wrong one for an unattended loop. A goal
+    /// cycle spends minutes in tool work, so the ~24K-token tools+system prefix
+    /// expires between cycles and is rewritten at 1.25x every time — over 20
+    /// cycles that costs more than not caching at all. A 1h write is 2.0x once
+    /// and 0.1x reads thereafter.
     pub cache_retention: String,
+    /// True when this request belongs to an unattended multi-minute loop
+    /// (scheduled goal cycles, cron jobs) rather than an interactive chat.
+    ///
+    /// Interactive turns arrive well under 5 minutes apart, so the 5-minute TTL
+    /// is strictly cheaper for them — a cache read refreshes the entry's timer
+    /// for free. Only loops with start-to-start gaps in the 5-60 minute band
+    /// repay the doubled 1-hour write price.
+    pub autonomous: bool,
     /// Stable session id for provider cache routing (OpenAI prompt_cache_key).
     pub session_id: String,
     /// Reasoning effort: "off" | "low" | "medium" | "high". Empty = provider default.
@@ -175,8 +189,23 @@ impl ChatRequest {
             xconsole: None,
             cancel: None,
             cache_retention: String::new(),
+            autonomous: false,
             session_id: String::new(),
             reasoning: String::new(),
+        }
+    }
+
+    /// The cache TTL this request should ask for.
+    ///
+    /// Explicit `cache_retention` always wins; an empty setting means "auto",
+    /// which picks the 1-hour TTL for autonomous loops and the (cheaper for
+    /// continuous traffic) 5-minute TTL for interactive turns.
+    pub fn cache_ttl(&self) -> crate::ai::cost::CacheTtl {
+        match self.cache_retention.trim().to_ascii_lowercase().as_str() {
+            "long" => crate::ai::cost::CacheTtl::OneHour,
+            "short" => crate::ai::cost::CacheTtl::FiveMinutes,
+            _ if self.autonomous => crate::ai::cost::CacheTtl::OneHour,
+            _ => crate::ai::cost::CacheTtl::FiveMinutes,
         }
     }
 
@@ -197,8 +226,14 @@ pub struct ChatResponse {
     pub stop_reason: String,
     /// Prompt tokens for this HTTP request (when the provider reported usage).
     pub prompt_tokens: Option<u32>,
-    /// Cached prompt tokens for this HTTP request.
+    /// Cached prompt tokens for this HTTP request (cache *reads*).
     pub cached_tokens: Option<u32>,
+    /// Prompt tokens **written** to the provider cache on this HTTP request
+    /// (Anthropic `cache_creation_input_tokens`). A write is billed at 1.25x
+    /// (5m TTL) or 2.0x (1h TTL) of the base input rate, so it is neither a hit
+    /// nor free: without it in the response the agent logged a full prefix
+    /// rewrite as "cache 0 hit / 0 miss / 0%".
+    pub cache_creation_tokens: Option<u32>,
     /// Completion tokens when the provider reported usage (used to detect a cap hit).
     pub completion_tokens: Option<u32>,
     /// Provider reasoning continuation content (e.g. DeepSeek R1 / o-series).

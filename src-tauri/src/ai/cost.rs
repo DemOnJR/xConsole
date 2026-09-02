@@ -27,6 +27,52 @@ pub struct ModelPrice {
     pub cache_write: f64,
 }
 
+/// Which cache TTL a request asked the provider for.
+///
+/// Anthropic prices a cache **write** at 1.25x the base input rate for the
+/// 5-minute TTL and 2.0x for the 1-hour TTL; a read is 0.1x either way. The
+/// price table below carries the 5-minute rate, so the 1-hour rate is
+/// `cache_write * 1.6` (= 2.0 / 1.25). Billing a 1h write at the 5m rate
+/// under-reports an autonomous loop's real spend by 60% of its write bill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum CacheTtl {
+    #[default]
+    FiveMinutes,
+    OneHour,
+}
+
+impl CacheTtl {
+    /// Parse the `agent.cache_retention` setting / `ChatRequest::cache_retention`.
+    pub fn from_retention(retention: &str) -> Self {
+        if retention.eq_ignore_ascii_case("long") {
+            CacheTtl::OneHour
+        } else {
+            CacheTtl::FiveMinutes
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CacheTtl::FiveMinutes => "5m",
+            CacheTtl::OneHour => "1h",
+        }
+    }
+}
+
+impl ModelPrice {
+    /// Write price per 1M tokens for a given TTL.
+    ///
+    /// A new field on `ModelPrice` would break every struct literal that builds
+    /// one (including the user-facing price override command), so the 1-hour
+    /// rate is derived from the 5-minute rate instead: 2.0x input / 1.25x input.
+    pub fn cache_write_for(&self, ttl: CacheTtl) -> f64 {
+        match ttl {
+            CacheTtl::FiveMinutes => self.cache_write,
+            CacheTtl::OneHour => self.cache_write * 1.6,
+        }
+    }
+}
+
 /// Dynamic price overrides synced from live endpoints or set by user.
 static DYNAMIC_PRICES: LazyLock<RwLock<HashMap<String, ModelPrice>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
@@ -38,16 +84,23 @@ static DYNAMIC_PRICES: LazyLock<RwLock<HashMap<String, ModelPrice>>> =
 const MODELS: &[(&str, &str, ModelPrice)] = &[
     // (kind, model-substring, price in USD per 1M tokens)
     // --- Anthropic & Claude ---
-    ("anthropic", "claude-opus-5", ModelPrice { input: 15.0, output: 75.0, cache_read: 1.5, cache_write: 18.75 }),
-    ("anthropic", "claude-opus-4-8", ModelPrice { input: 15.0, output: 75.0, cache_read: 1.5, cache_write: 18.75 }),
-    ("anthropic", "claude-opus-4-7", ModelPrice { input: 15.0, output: 75.0, cache_read: 1.5, cache_write: 18.75 }),
-    ("anthropic", "opus", ModelPrice { input: 15.0, output: 75.0, cache_read: 1.5, cache_write: 18.75 }),
-    ("anthropic", "claude-sonnet-5", ModelPrice { input: 3.0, output: 15.0, cache_read: 0.30, cache_write: 3.75 }),
+    // Opus tier is $5 / $25 per MTok, NOT $15 / $75 — the old numbers were a
+    // 3x over-estimate that made every cache decision look cheaper than it was.
+    // `cache_write` here is always the 5-minute rate (1.25x input); the 1-hour
+    // rate is 2.0x input and is derived by `ModelPrice::cache_write_for`.
+    ("anthropic", "claude-fable-5-1", ModelPrice { input: 10.0, output: 50.0, cache_read: 0.25, cache_write: 12.5 }),
+    ("anthropic", "claude-fable-5", ModelPrice { input: 10.0, output: 50.0, cache_read: 1.0, cache_write: 12.5 }),
+    ("anthropic", "claude-opus-5", ModelPrice { input: 5.0, output: 25.0, cache_read: 0.50, cache_write: 6.25 }),
+    ("anthropic", "claude-opus-4-8", ModelPrice { input: 5.0, output: 25.0, cache_read: 0.50, cache_write: 6.25 }),
+    ("anthropic", "claude-opus-4-7", ModelPrice { input: 5.0, output: 25.0, cache_read: 0.50, cache_write: 6.25 }),
+    ("anthropic", "claude-opus-4-6", ModelPrice { input: 5.0, output: 25.0, cache_read: 0.50, cache_write: 6.25 }),
+    ("anthropic", "opus", ModelPrice { input: 5.0, output: 25.0, cache_read: 0.50, cache_write: 6.25 }),
+    ("anthropic", "claude-sonnet-5", ModelPrice { input: 2.0, output: 10.0, cache_read: 0.20, cache_write: 2.50 }),
     ("anthropic", "claude-sonnet-4-6", ModelPrice { input: 3.0, output: 15.0, cache_read: 0.30, cache_write: 3.75 }),
     ("anthropic", "claude-3-7-sonnet", ModelPrice { input: 3.0, output: 15.0, cache_read: 0.30, cache_write: 3.75 }),
     ("anthropic", "claude-3-5-sonnet", ModelPrice { input: 3.0, output: 15.0, cache_read: 0.30, cache_write: 3.75 }),
     ("anthropic", "sonnet", ModelPrice { input: 3.0, output: 15.0, cache_read: 0.30, cache_write: 3.75 }),
-    ("anthropic", "claude-haiku-4-5", ModelPrice { input: 0.80, output: 4.0, cache_read: 0.08, cache_write: 1.0 }),
+    ("anthropic", "claude-haiku-4-5", ModelPrice { input: 1.0, output: 5.0, cache_read: 0.10, cache_write: 1.25 }),
     ("anthropic", "claude-3-5-haiku", ModelPrice { input: 0.80, output: 4.0, cache_read: 0.08, cache_write: 1.0 }),
     ("anthropic", "haiku", ModelPrice { input: 0.80, output: 4.0, cache_read: 0.08, cache_write: 1.0 }),
 
@@ -328,10 +381,20 @@ pub fn expected_prefix_hit_rate(prefix_tokens: u32, tail_tokens: u32) -> f64 {
     }
 }
 
-/// Cache hit rate 0..1 from provider-reported prompt + cached counts.
-pub fn cache_hit_rate(prompt: u32, cached: u32) -> f64 {
-    let split = split_usage(prompt, cached, 0, 0);
-    let denom = split.fresh_input.saturating_add(split.cached);
+/// Cache hit rate 0..1 from provider-reported prompt + cached + written counts.
+///
+/// **Written tokens belong in the denominator.** A request that rewrites the
+/// whole prefix reports `input_tokens: 0`, `cache_read_input_tokens: 0` and a
+/// large `cache_creation_input_tokens` - with writes excluded that scored as
+/// "0 hit · 0 miss · 0%" and was then filtered out by the miss-reason guards,
+/// so the single most expensive failure mode was invisible. A write is a miss
+/// you also paid a premium on; count it as one.
+pub fn cache_hit_rate(prompt: u32, cached: u32, written: u32) -> f64 {
+    let split = split_usage(prompt, cached, written, 0);
+    let denom = split
+        .fresh_input
+        .saturating_add(split.cached)
+        .saturating_add(split.written);
     if denom == 0 {
         0.0
     } else {
@@ -343,28 +406,66 @@ pub fn cache_hit_rate(prompt: u32, cached: u32) -> f64 {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CacheReport {
     pub hit: u32,
+    /// Full-price uncached input.
     pub miss: u32,
+    /// Tokens written to the cache this request (billed at the write premium).
+    pub written: u32,
+    /// `hit / (hit + miss + written)`.
     pub rate: f64,
 }
 
-pub fn cache_report(prompt: u32, cached: u32) -> CacheReport {
-    let split = split_usage(prompt, cached, 0, 0);
-    CacheReport {
-        hit: split.cached,
-        miss: split.fresh_input,
-        rate: cache_hit_rate(prompt, cached),
+impl CacheReport {
+    /// Every prompt token this request was billed for, however it was billed.
+    pub fn total(&self) -> u32 {
+        self.hit
+            .saturating_add(self.miss)
+            .saturating_add(self.written)
     }
 }
 
-/// Compact line for the agent transcript: `cache 1664 hit · 68 miss · 96%`.
-pub fn format_cache_line(prompt: u32, cached: u32) -> String {
-    let r = cache_report(prompt, cached);
+pub fn cache_report(prompt: u32, cached: u32, written: u32) -> CacheReport {
+    let split = split_usage(prompt, cached, written, 0);
+    CacheReport {
+        hit: split.cached,
+        miss: split.fresh_input,
+        written: split.written,
+        rate: cache_hit_rate(prompt, cached, written),
+    }
+}
+
+/// Compact line for the agent transcript:
+/// `cache 1664 hit · 68 miss · 512 written · 96%`.
+pub fn format_cache_line(prompt: u32, cached: u32, written: u32) -> String {
+    let r = cache_report(prompt, cached, written);
     format!(
-        "cache {} hit · {} miss · {:.0}%",
+        "cache {} hit · {} miss · {} written · {:.0}%",
         r.hit,
         r.miss,
+        r.written,
         r.rate * 100.0
     )
+}
+
+/// Token-weighted cache hit rate across many requests.
+///
+/// Averaging per-request percentages treats a 40-token request and a 400K-token
+/// request as equals, so one cheap high-hit turn can hide an expensive full
+/// rewrite. Weight by tokens: `sum(hit) / sum(hit + miss + written)`.
+pub fn weighted_cache_hit_rate<I>(rows: I) -> f64
+where
+    I: IntoIterator<Item = (u32, u32, u32)>,
+{
+    let mut hit: u64 = 0;
+    let mut total: u64 = 0;
+    for (h, m, w) in rows {
+        hit += h as u64;
+        total += h as u64 + m as u64 + w as u64;
+    }
+    if total == 0 {
+        0.0
+    } else {
+        hit as f64 / total as f64
+    }
 }
 
 /// Extra diagnostic when a miss is *not* a cold start or 128-token alignment remainder.
@@ -373,24 +474,40 @@ pub fn format_cache_line(prompt: u32, cached: u32) -> String {
 pub fn cache_miss_reason(
     prompt: u32,
     cached: u32,
+    written: u32,
     classification: &str,
     request_index: u32,
 ) -> Option<String> {
-    let r = cache_report(prompt, cached);
-    if r.hit + r.miss == 0 {
+    let r = cache_report(prompt, cached, written);
+    if r.total() == 0 {
         return None;
     }
     // First call of a brand-new conversation: only warn when it is actually cold.
     // A high hit on first_request is leftover prefix cache (same system/tools) —
-    // not a miss worth logging.
+    // not a miss worth logging. A cold start legitimately writes the whole
+    // prefix, so it is checked before the rewrite alarm below.
     if classification == "first_request" && request_index == 0 {
         if r.rate < 0.5 {
             return Some(format!(
-                "cache cold start — first request writes the prefix ({} miss)",
-                r.miss
+                "cache cold start — first request writes the prefix ({} miss, {} written)",
+                r.miss, r.written
             ));
         }
         return None;
+    }
+    // A prefix rewrite is the expensive failure and must never be filtered out
+    // by the healthy-growth guards below: writing more than we read means the
+    // request paid the 1.25x/2.0x premium on bytes it could have read at 0.1x.
+    // Without writes in the denominator this logged as "0 hit · 0 miss · 0%"
+    // and the guards then dropped it entirely.
+    if r.written > 0 && r.written > r.hit {
+        return Some(format!(
+            "cache REWRITE: {} written vs {} read · {:.0}% hit — the prefix changed \
+             upstream of the breakpoints ({classification})",
+            r.written,
+            r.hit,
+            r.rate * 100.0
+        ));
     }
     // DeepSeek/OpenAI 128-token block remainder is not a real prefix break.
     if r.miss <= 128 && r.rate >= 0.85 {
@@ -416,8 +533,9 @@ pub fn cache_miss_reason(
         other => other,
     };
     Some(format!(
-        "cache miss: {} miss · {:.0}% hit — {why}",
+        "cache miss: {} miss {} written · {:.0}% hit — {why}",
         r.miss,
+        r.written,
         r.rate * 100.0
     ))
 }
@@ -433,7 +551,7 @@ pub struct TurnCost {
     pub usd: f64,
 }
 
-/// Compute the cost of one turn from provider-reported usage.
+/// Compute the cost of one turn from provider-reported usage (5-minute TTL).
 pub fn turn_cost(
     kind: &str,
     model: &str,
@@ -441,6 +559,27 @@ pub fn turn_cost(
     output: u32,
     cache_read: Option<u32>,
     cache_write: Option<u32>,
+) -> TurnCost {
+    turn_cost_ttl(
+        kind,
+        model,
+        input,
+        output,
+        cache_read,
+        cache_write,
+        CacheTtl::FiveMinutes,
+    )
+}
+
+/// Compute the cost of one turn, billing cache writes at the requested TTL.
+pub fn turn_cost_ttl(
+    kind: &str,
+    model: &str,
+    input: Option<u32>,
+    output: u32,
+    cache_read: Option<u32>,
+    cache_write: Option<u32>,
+    ttl: CacheTtl,
 ) -> TurnCost {
     let price = price_for(kind, model);
     let prompt = input.unwrap_or(0);
@@ -450,7 +589,7 @@ pub fn turn_cost(
     let usd = split.fresh_input as f64 / 1_000_000.0 * price.input
         + split.output as f64 / 1_000_000.0 * price.output
         + split.cached as f64 / 1_000_000.0 * price.cache_read
-        + split.written as f64 / 1_000_000.0 * price.cache_write;
+        + split.written as f64 / 1_000_000.0 * price.cache_write_for(ttl);
     TurnCost {
         input_tokens: split.fresh_input,
         output_tokens: output,
@@ -467,7 +606,7 @@ mod tests {
     #[test]
     fn price_for_matches_model_substrings() {
         assert_eq!(price_for("anthropic", "claude-sonnet-4-6").input, 3.0);
-        assert_eq!(price_for("anthropic", "claude-opus-5").input, 15.0);
+        assert_eq!(price_for("anthropic", "claude-opus-5").input, 5.0);
         assert_eq!(price_for("openai", "gpt-5.6-luna").input, 1.25);
         // Unknown model falls back to the conservative default.
         assert_eq!(price_for("anthropic", "weird-model").input, 2.0);
@@ -520,25 +659,84 @@ mod tests {
     #[test]
     fn cache_hit_rate_handles_both_reporting_styles() {
         // Anthropic exclusive: 1k miss + 39k hit.
-        assert!((cache_hit_rate(1_000, 39_000) - 0.975).abs() < 1e-9);
+        assert!((cache_hit_rate(1_000, 39_000, 0) - 0.975).abs() < 1e-9);
         // DeepSeek inclusive: 50k prompt of which 48k cached.
-        assert!((cache_hit_rate(50_000, 48_000) - 0.96).abs() < 1e-9);
-        assert_eq!(cache_hit_rate(0, 0), 0.0);
+        assert!((cache_hit_rate(50_000, 48_000, 0) - 0.96).abs() < 1e-9);
+        assert_eq!(cache_hit_rate(0, 0, 0), 0.0);
+    }
+
+    #[test]
+    fn cache_report_counts_writes() {
+        // The failure this exists to catch: a request that rewrote the entire
+        // 24K prefix. input=0, read=0, written=24_000 used to report
+        // "0 hit · 0 miss · 0%" and was then dropped by the miss-reason guards.
+        let r = cache_report(0, 0, 24_000);
+        assert_eq!(r.written, 24_000);
+        assert_eq!(r.total(), 24_000);
+        assert_eq!(r.rate, 0.0);
+        assert!(format_cache_line(0, 0, 24_000).contains("24000 written"));
+        let why = cache_miss_reason(0, 0, 24_000, "append_only", 3).unwrap();
+        assert!(why.contains("REWRITE"), "{why}");
+
+        // A healthy append-only turn writes only the new tail.
+        let healthy = cache_report(120, 38_000, 900);
+        assert_eq!(healthy.written, 900);
+        assert!((healthy.rate - 38_000.0 / 39_020.0).abs() < 1e-9);
+        assert!(cache_miss_reason(120, 38_000, 900, "append_only", 2).is_none());
+    }
+
+    #[test]
+    fn weighted_average_is_token_weighted_not_per_request() {
+        // Two requests: a tiny 100% one and a huge full rewrite.
+        let rows = vec![(100u32, 0u32, 0u32), (0u32, 0u32, 100_000u32)];
+        let unweighted: f64 = (100.0 + 0.0) / 2.0 / 100.0; // the old analytics maths
+        let weighted = weighted_cache_hit_rate(rows);
+        assert!((unweighted - 0.5).abs() < 1e-9);
+        assert!(weighted < 0.002, "weighted={weighted}");
+        assert_eq!(weighted_cache_hit_rate(Vec::new()), 0.0);
+    }
+
+    #[test]
+    fn one_hour_writes_cost_more_than_five_minute_writes() {
+        let p = price_for("anthropic", "claude-opus-5");
+        // 5m = 1.25x input, 1h = 2.0x input.
+        assert!((p.cache_write - p.input * 1.25).abs() < 1e-9);
+        assert!((p.cache_write_for(CacheTtl::OneHour) - p.input * 2.0).abs() < 1e-9);
+        let short = turn_cost_ttl("anthropic", "claude-opus-5", Some(0), 0, None, Some(1_000_000), CacheTtl::FiveMinutes);
+        let long = turn_cost_ttl("anthropic", "claude-opus-5", Some(0), 0, None, Some(1_000_000), CacheTtl::OneHour);
+        assert!((short.usd - 6.25).abs() < 1e-9, "{short:?}");
+        assert!((long.usd - 10.0).abs() < 1e-9, "{long:?}");
+        assert_eq!(CacheTtl::from_retention("long"), CacheTtl::OneHour);
+        assert_eq!(CacheTtl::from_retention(""), CacheTtl::FiveMinutes);
+    }
+
+    #[test]
+    fn opus_tier_is_five_and_twentyfive_per_mtok() {
+        for m in ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"] {
+            let p = price_for("anthropic", m);
+            assert_eq!((p.input, p.output), (5.0, 25.0), "{m}");
+            assert_eq!(p.cache_read, 0.50, "{m}");
+        }
+        let s5 = price_for("anthropic", "claude-sonnet-5");
+        assert_eq!((s5.input, s5.output), (2.0, 10.0));
     }
 
     #[test]
     fn cache_line_and_miss_reason() {
-        assert_eq!(format_cache_line(50_000, 48_000), "cache 48000 hit · 2000 miss · 96%");
-        assert!(cache_miss_reason(50_000, 48_000, "append_only", 1).is_none());
-        let cold = cache_miss_reason(2000, 0, "first_request", 0).unwrap();
+        assert_eq!(
+            format_cache_line(50_000, 48_000, 0),
+            "cache 48000 hit · 2000 miss · 0 written · 96%"
+        );
+        assert!(cache_miss_reason(50_000, 48_000, 0, "append_only", 1).is_none());
+        let cold = cache_miss_reason(2000, 0, 0, "first_request", 0).unwrap();
         assert!(cold.contains("cold start"));
-        let sys = cache_miss_reason(20_000, 1000, "system", 1).unwrap();
+        let sys = cache_miss_reason(20_000, 1000, 0, "system", 1).unwrap();
         assert!(sys.contains("system prefix changed"));
-        assert!(cache_miss_reason(1732, 1664, "append_only", 2).is_none());
+        assert!(cache_miss_reason(1732, 1664, 0, "append_only", 2).is_none());
         // Installed-app turn 3: 80% / 2372 miss is healthy append-only growth.
-        assert!(cache_miss_reason(11_844, 9_472, "append_only", 0).is_none());
+        assert!(cache_miss_reason(11_844, 9_472, 0, "append_only", 0).is_none());
         // A real fat tail (20% hit) is still logged.
-        let fat = cache_miss_reason(10_000, 2_000, "append_only", 1).unwrap();
+        let fat = cache_miss_reason(10_000, 2_000, 0, "append_only", 1).unwrap();
         assert!(fat.contains("uncached tail"));
     }
 

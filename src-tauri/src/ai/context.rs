@@ -834,8 +834,6 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
             stable.push(MEMORY_GUIDANCE.to_string());
             stable.push(LEARN_GUIDANCE.to_string());
         }
-        // Safety mode is session-stable enough to keep in the prefix (changes rarely).
-        stable.push(safety_guidance(ctx.safety).to_string());
     }
     if ctx.force_minimal_prompt {
         stable.push(PONYTAIL_COMPACT_GUIDANCE.to_string());
@@ -852,23 +850,40 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
             stable.push(part);
         }
     }
+
+    // ---- DYNAMIC (volatile only): live screen, memory body, date. Keep this
+    // tail under ~1.2K tokens so a 20K+ history session stays ≥95% cache hit.
+    // DeepSeek caches in 128-token blocks: hit ≈ floor(P/128)*128 / (P+T).
+    //
+    // ---- PER-AGENT CONTEXT: identical *shape* for every agent, different
+    // *content* per agent. It must NOT sit in the stable tier. The stable tier
+    // is what N agents share; putting safety mode, the workspace block, the
+    // selected-target catalog or the org chart there gives every agent its own
+    // private prefix, so N agents write N copies of ~24K tokens instead of N-1
+    // of them reading one. Down here it rides in the trailing runtime message,
+    // which is itself cached from the second turn on by the message-level
+    // breakpoints — so this is not a per-turn re-bill either.
+    let mut context: Vec<String> = Vec::new();
+    if ctx.has_tools {
+        context.push(safety_guidance(ctx.safety).to_string());
+    }
     if let Some(ws) = ctx.workspace_context.as_ref().filter(|s| !s.trim().is_empty()) {
-        stable.push(ws.clone());
+        context.push(ws.clone());
     }
     if !ctx.target_ids.is_empty() {
         let catalog = crate::ai::tools::format_targets_catalog(ctx.db, ctx.target_ids);
         if !catalog.is_empty() {
-            stable.push(catalog);
+            context.push(catalog);
         }
     }
-    // The team, when there is one. Stable across turns, so it belongs in the cached
-    // prefix; skipped entirely when no agents are defined, so a user who never set
-    // any pays nothing. Without it the agent has to spend a tool call on agent_list
-    // before it can even consider delegating, which it mostly will not bother to do.
+    // The team, when there is one. Skipped entirely when no agents are defined,
+    // so a user who never set any pays nothing. Without it the agent has to spend
+    // a tool call on agent_list before it can even consider delegating, which it
+    // mostly will not bother to do.
     if ctx.has_tools && !minimal {
         let personas = ctx.db.list_personas().unwrap_or_default();
         if personas.iter().any(|p| p.enabled) {
-            stable.push(format!(
+            context.push(format!(
                 "# Your team\n{}\n\
                  Hand long-running or specialist work to them with agent_delegate (omit \
                  `agent` to route by remit) and carry on — do not do their work yourself \
@@ -878,11 +893,6 @@ fn collect_prompt_tiers(ctx: &PromptContext) -> ([Vec<String>; 3], bool) {
             ));
         }
     }
-
-    // ---- DYNAMIC (volatile only): live screen, memory body, date. Keep this
-    // tail under ~1.2K tokens so a 20K+ history session stays ≥95% cache hit.
-    // DeepSeek caches in 128-token blocks: hit ≈ floor(P/128)*128 / (P+T).
-    let mut context: Vec<String> = Vec::new();
     if let Some(canvas) = ctx.canvas_context.as_ref().filter(|s| !s.trim().is_empty()) {
         context.push(truncate_chars(canvas, DYNAMIC_CANVAS_CHARS));
     }
@@ -1032,6 +1042,47 @@ mod tests {
             todo_context: None,
             conversation: false,
         }
+    }
+
+    #[test]
+    fn static_system_is_byte_identical_across_agents_with_different_targets() {
+        // The stable tier is what N agents SHARE. Anything per-agent in it makes
+        // every agent write its own ~24K prefix instead of N-1 of them reading
+        // one — so safety mode, the workspace block, the selected-target catalog
+        // and the org chart all live in the dynamic tier now.
+        let (home, dir) = test_home();
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+
+        let ops_targets = ["vps-alpha".to_string(), "vps-beta".to_string()];
+        let dev_targets = ["vps-gamma".to_string()];
+
+        let mut ops = context(&home, &db);
+        ops.has_tools = true;
+        ops.safety = "auto";
+        ops.target_ids = &ops_targets;
+        ops.target_count = ops_targets.len();
+        ops.workspace_context = Some("# Workspace\nops-workspace".into());
+
+        let mut dev = context(&home, &db);
+        dev.has_tools = true;
+        dev.safety = "readonly";
+        dev.target_ids = &dev_targets;
+        dev.target_count = dev_targets.len();
+        dev.workspace_context = Some("# Workspace\ndev-workspace".into());
+
+        let ops_prompt = assemble_prompt(&ops);
+        let dev_prompt = assemble_prompt(&dev);
+
+        assert_eq!(
+            ops_prompt.static_system, dev_prompt.static_system,
+            "the cached system prefix must not vary per agent"
+        );
+        assert!(!ops_prompt.static_system.is_empty());
+        // The per-agent content is still delivered — just after the breakpoint.
+        assert!(ops_prompt.dynamic_block.contains("ops-workspace"));
+        assert!(dev_prompt.dynamic_block.contains("dev-workspace"));
+        assert_ne!(ops_prompt.dynamic_block, dev_prompt.dynamic_block);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

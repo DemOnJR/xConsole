@@ -1236,23 +1236,45 @@ tmpfs           7.8G     0  7.8G   0% /dev/shm
     ]
 }
 
-/// Truncate/age bulky tool result outputs from historical turns (e.g. > 3 turns ago)
-/// to keep the active context window lean and prevent KV-cache bloat on long conversations.
+/// Marker written into an aged tool result. Its presence makes aging idempotent:
+/// a message that already carries it is never rewritten a second time.
+pub const AGED_MARKER: &str = "[... output aged:";
+
+/// Truncate/age bulky tool result outputs from historical turns to keep the
+/// active context window lean.
+///
+/// Two rules keep this from fighting the prompt cache:
+///
+/// * `frozen_prefix_len` is the number of leading messages already sent to the
+///   provider. Rewriting one of those changes bytes the provider has already
+///   cached, so the whole conversation after that point misses. They are never
+///   touched.
+/// * `cutoff_idx` is an **absolute** index, fixed once per turn by the caller.
+///   The old code recomputed `len - keep_recent_turns` on every loop iteration,
+///   so a different message crossed the boundary and was mutated in place each
+///   time round — a rolling rewrite of already-sent history.
+///
+/// Combined with [`AGED_MARKER`], aging a message is idempotent and happens at
+/// most once, before that message is ever sent.
 pub fn age_historical_tool_results(
     messages: &mut [crate::ai::provider::ChatMessage],
-    keep_recent_turns: usize,
+    frozen_prefix_len: usize,
+    cutoff_idx: usize,
     max_aged_bytes: usize,
 ) -> usize {
-    let len = messages.len();
-    if len <= keep_recent_turns {
+    let start = frozen_prefix_len.min(messages.len());
+    let end = cutoff_idx.min(messages.len());
+    if start >= end {
         return 0;
     }
 
-    let cutoff_idx = len.saturating_sub(keep_recent_turns);
     let mut aged_count = 0;
 
-    for msg in &mut messages[..cutoff_idx] {
-        if msg.role == "tool" && msg.content.len() > max_aged_bytes {
+    for msg in &mut messages[start..end] {
+        if msg.role == "tool"
+            && msg.content.len() > max_aged_bytes
+            && !msg.content.contains(AGED_MARKER)
+        {
             let orig_len = msg.content.len();
             let lines: Vec<&str> = msg.content.lines().collect();
             if lines.len() > 10 {
@@ -1295,17 +1317,57 @@ mod tests {
         assert!(failed.is_empty(), "failed: {failed:?}");
     }
 
-    #[test]
-    fn ages_older_tool_results_while_preserving_recent() {
-        let mut msgs = vec![
+    fn transcript() -> Vec<crate::ai::provider::ChatMessage> {
+        vec![
             crate::ai::provider::ChatMessage::tool_result("call_1", "line\n".repeat(50)),
             crate::ai::provider::ChatMessage::assistant("thought"),
             crate::ai::provider::ChatMessage::tool_result("call_2", "line\n".repeat(50)),
-        ];
-        // Keep the last 1 turn: call_1 is aged, call_2 is preserved untouched
-        let aged = age_historical_tool_results(&mut msgs, 1, 100);
+        ]
+    }
+
+    #[test]
+    fn ages_older_tool_results_while_preserving_recent() {
+        let mut msgs = transcript();
+        // Nothing sent yet; cut off before the last message.
+        let cutoff = msgs.len() - 1;
+        let aged = age_historical_tool_results(&mut msgs, 0, cutoff, 100);
         assert_eq!(aged, 1);
         assert!(msgs[0].content.contains("output aged"));
         assert!(!msgs[2].content.contains("output aged"));
+    }
+
+    #[test]
+    fn aging_is_idempotent() {
+        let mut msgs = transcript();
+        let cutoff = msgs.len() - 1;
+        assert_eq!(age_historical_tool_results(&mut msgs, 0, cutoff, 100), 1);
+        let after_first = msgs[0].content.clone();
+        // A second pass over the same range must be a no-op — the old rolling
+        // `len - keep_recent` boundary re-aged already-aged text every iteration.
+        assert_eq!(age_historical_tool_results(&mut msgs, 0, cutoff, 100), 0);
+        assert_eq!(msgs[0].content, after_first);
+        assert_eq!(age_historical_tool_results(&mut msgs, 0, cutoff, 100), 0);
+        assert_eq!(msgs[0].content, after_first);
+    }
+
+    #[test]
+    fn aging_never_touches_an_already_sent_message() {
+        let mut msgs = transcript();
+        let before = msgs[0].content.clone();
+        // The provider has already seen messages[0..2]; rewriting one of them
+        // would invalidate the cached prefix from that point onward.
+        let end = msgs.len();
+        let aged = age_historical_tool_results(&mut msgs, 2, end, 100);
+        assert_eq!(aged, 1, "only the unsent tail message is eligible");
+        assert_eq!(msgs[0].content, before);
+        assert!(!msgs[0].content.contains(AGED_MARKER));
+        assert!(msgs[2].content.contains(AGED_MARKER));
+
+        // Whole transcript already sent: nothing may be rewritten at all.
+        let mut sent = transcript();
+        let snapshot = sent.clone();
+        let n = sent.len();
+        assert_eq!(age_historical_tool_results(&mut sent, n, n, 100), 0);
+        assert_eq!(sent, snapshot);
     }
 }

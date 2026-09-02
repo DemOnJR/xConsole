@@ -19,6 +19,8 @@
 //!   xconsole-bench cache    [--out results.json]   # tool-result cache smoke test (no model)
 //!   xconsole-bench cost     [--out results.json]   # price-table + hit-rate fixtures (no model)
 //!   xconsole-bench provider-cache [--out results.json]  # live Command Code DeepSeek Flash prefix-cache probe
+//!   xconsole-bench anthropic-cache [--model claude-opus-5] [--retention long] [--out results.json]
+//!                                                  # live Anthropic 10-turn prefix-cache probe
 //!   xconsole-bench selftest                        # pure-logic + live-hook checks (no model)
 //!
 //! These are REGRESSION benchmarks: run them, change a feature, run them again,
@@ -111,6 +113,13 @@ async fn run_async(args: &[String]) -> i32 {
         return bench_provider_cache(out).await;
     }
 
+    // Live Anthropic prefix-cache probe (reads ANTHROPIC_API_KEY; never prints it).
+    if mode == "anthropic-cache" {
+        let model = arg_val(&args, "--model").unwrap_or_else(|| "claude-opus-5".to_string());
+        let retention = arg_val(&args, "--retention").unwrap_or_default();
+        return bench_anthropic_cache(out, &model, &retention).await;
+    }
+
     // Regenerate the history HTML dashboard + OKF bundle from the existing history log
     // (no model needed). Useful after editing the renderer or to rebuild on a new machine.
     if mode == "report" {
@@ -179,7 +188,7 @@ async fn run_async(args: &[String]) -> i32 {
         }
         other => {
             eprintln!(
-                "bench: unknown mode '{other}' (use: agent | hard | recall | learnloop | ablation | learn | llm | cache | cost | provider-cache | all | report | hooks | scanner | selftest)"
+                "bench: unknown mode '{other}' (use: agent | hard | recall | learnloop | ablation | learn | llm | cache | cost | provider-cache | anthropic-cache | all | report | hooks | scanner | selftest)"
             );
             return 1;
         }
@@ -2204,8 +2213,8 @@ fn bench_cost(out: Option<String>) -> i32 {
     );
     let exclusive_ok = exclusive.input_tokens == 1_000 && exclusive.cache_read_tokens == 40_000;
 
-    let hit_inclusive = cost::cache_hit_rate(50_000, 48_000);
-    let hit_exclusive = cost::cache_hit_rate(1_000, 39_000);
+    let hit_inclusive = cost::cache_hit_rate(50_000, 48_000, 0);
+    let hit_exclusive = cost::cache_hit_rate(1_000, 39_000, 0);
     let long_hit = cost::expected_prefix_hit_rate(20_000, 1_000);
     let fat_tail = cost::expected_prefix_hit_rate(40_000, 8_000);
     let hit_ok = (hit_inclusive - 0.96).abs() < 1e-9
@@ -2213,7 +2222,38 @@ fn bench_cost(out: Option<String>) -> i32 {
         && long_hit > 0.95
         && fat_tail < 0.90;
 
-    let checks_ok = flash_ok && inclusive_ok && exclusive_ok && hit_ok;
+    // Writes are billed, so they belong in the denominator. A full prefix
+    // rewrite (input 0, read 0, written 24K) used to score 0 hit / 0 miss / 0%.
+    let rewrite = cost::cache_report(0, 0, 24_000);
+    let rewrite_ok = rewrite.written == 24_000
+        && rewrite.total() == 24_000
+        && cost::cache_miss_reason(0, 0, 24_000, "append_only", 3)
+            .is_some_and(|s| s.contains("REWRITE"));
+
+    // Token-weighted, not a mean of per-request percentages.
+    let weighted = cost::weighted_cache_hit_rate(vec![(100, 0, 0), (0, 0, 100_000)]);
+    let weighted_ok = weighted < 0.002;
+
+    // Opus tier is $5 / $25 per MTok; a 1h write is 2.0x input, a 5m write 1.25x.
+    let opus = cost::price_for("anthropic", "claude-opus-5");
+    let opus_ok = opus.input == 5.0
+        && opus.output == 25.0
+        && opus.cache_read == 0.50
+        && (opus.cache_write - opus.input * 1.25).abs() < 1e-9
+        && (opus.cache_write_for(cost::CacheTtl::OneHour) - opus.input * 2.0).abs() < 1e-9;
+
+    // The 20-cycle autonomous-loop arithmetic that motivates the 1h default:
+    // a 24K prefix per cycle, uncached vs 5m (rewritten every cycle) vs 1h.
+    const CYCLES: f64 = 20.0;
+    const PREFIX: f64 = 24_000.0;
+    let uncached = CYCLES * PREFIX / 1e6 * opus.input;
+    let five_min = CYCLES * PREFIX / 1e6 * opus.cache_write;
+    let one_hour = PREFIX / 1e6 * opus.cache_write_for(cost::CacheTtl::OneHour)
+        + (CYCLES - 1.0) * PREFIX / 1e6 * opus.cache_read;
+    let ttl_ok = five_min > uncached && one_hour < uncached / 3.0;
+
+    let checks_ok =
+        flash_ok && inclusive_ok && exclusive_ok && hit_ok && rewrite_ok && weighted_ok && opus_ok && ttl_ok;
     let report = json!({
         "mode": "cost",
         "flash_input_per_m": flash.input,
@@ -2225,11 +2265,26 @@ fn bench_cost(out: Option<String>) -> i32 {
         "hit_rate_exclusive": hit_exclusive,
         "long_session_20k_1k": long_hit,
         "fat_tail_40k_8k": fat_tail,
+        "rewrite_written_tokens": rewrite.written,
+        "rewrite_rate": rewrite.rate,
+        "weighted_hit_rate": weighted,
+        "opus_input_per_m": opus.input,
+        "opus_cache_write_5m_per_m": opus.cache_write,
+        "opus_cache_write_1h_per_m": opus.cache_write_for(cost::CacheTtl::OneHour),
+        "autonomous_20_cycles_usd": {
+            "uncached": uncached,
+            "ttl_5m": five_min,
+            "ttl_1h": one_hour,
+        },
         "checks": {
             "flash_prices": flash_ok,
             "inclusive_no_double_count": inclusive_ok,
             "exclusive_anthropic": exclusive_ok,
             "hit_rate": hit_ok,
+            "writes_are_counted": rewrite_ok,
+            "average_is_token_weighted": weighted_ok,
+            "opus_tier_prices": opus_ok,
+            "five_minute_ttl_loses_to_uncached_and_1h_wins": ttl_ok,
         },
         "pass": checks_ok,
     });
@@ -2335,7 +2390,7 @@ async fn bench_provider_cache(out: Option<String>) -> i32 {
                 let elapsed_ms = started.elapsed().as_millis() as u64;
                 let p = prompt.unwrap_or(0);
                 let c = cached.unwrap_or(0);
-                let hit = cost::cache_hit_rate(p, c);
+                let hit = cost::cache_hit_rate(p, c, 0);
                 let priced = cost::turn_cost(
                     "deepseek",
                     "deepseek/deepseek-v4-flash",
@@ -2404,6 +2459,178 @@ async fn bench_provider_cache(out: Option<String>) -> i32 {
     }
     if rows.iter().any(|r| r.get("error").map(|e| !e.is_null()).unwrap_or(false)) {
         return 1;
+    }
+    if pass { 0 } else { 1 }
+}
+
+fn anthropic_api_key() -> Option<(String, &'static str)> {
+    for var in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] {
+        if let Ok(k) = std::env::var(var) {
+            if !k.trim().is_empty() {
+                return Some((k.trim().to_string(), if var == "ANTHROPIC_API_KEY" { "env:ANTHROPIC_API_KEY" } else { "env:ANTHROPIC_AUTH_TOKEN" }));
+            }
+        }
+    }
+    None
+}
+
+/// Live Anthropic prefix-cache probe: 10 append-only turns over a large stable
+/// prefix, printing input / cache_read / cache_creation / hit% per turn.
+///
+/// This is the only thing that proves the four breakpoints work. The healthy
+/// signature is: `cache_read` grows turn over turn and covers the whole prior
+/// prefix, while `cache_creation` stays small (roughly the previous assistant
+/// output plus the newly appended input). `cache_creation` near the full
+/// conversation size on every turn means the prefix is being rewritten upstream
+/// of the breakpoints — the exact failure this bench exists to catch.
+async fn bench_anthropic_cache(out: Option<String>, model: &str, retention: &str) -> i32 {
+    use crate::ai::cost::{self, CacheTtl};
+    use crate::ai::providers::anthropic::AnthropicProvider;
+
+    println!("\n=== ANTHROPIC PROMPT CACHE ({model}) ===");
+
+    let Some((api_key, key_source)) = anthropic_api_key() else {
+        eprintln!("bench: no Anthropic key. Set ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN).");
+        return 2;
+    };
+    println!("key source: {key_source} (secret not printed)");
+
+    // A realistic agent prefix. Opus 5 caches from 512 tokens; a 4K system plus
+    // a handful of tool defs is well past every model's minimum, so a zero
+    // cache_read here is a real bug and not a below-minimum silent skip.
+    let pad = "Stable cache prefix line that never changes. ".repeat(400);
+    let system =
+        format!("You are a cache probe. Reply with a single lowercase word and nothing else.\n{pad}");
+    let tools: Vec<ToolDef> = (0..6)
+        .map(|i| ToolDef {
+            name: format!("probe_tool_{i}"),
+            description: format!("Probe tool {i}. {}", "Filler description text. ".repeat(40)),
+            parameters: json!({
+                "type": "object",
+                "properties": { "arg": { "type": "string", "description": "an argument" } },
+                "required": ["arg"],
+            }),
+        })
+        .collect();
+
+    let provider = AnthropicProvider::new(api_key, None);
+    let ttl = CacheTtl::from_retention(retention);
+
+    let words = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+    let mut growing: Vec<ChatMessage> = Vec::new();
+    let mut rows = Vec::new();
+
+    for (i, word) in words.iter().enumerate() {
+        let turn = i + 1;
+        growing.push(ChatMessage::user(format!("Reply with the single word {word}.")));
+
+        let mut req = ChatRequest::new(model);
+        req.system = system.clone();
+        req.tools = tools.clone();
+        req.messages = growing.clone();
+        req.max_tokens = 16;
+        req.cache_retention = retention.to_string();
+        req.session_id = format!("xc-anthropic-bench-{}", std::process::id());
+
+        let started = Instant::now();
+        match provider.chat(&req, None).await {
+            Ok(resp) => {
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                let input = resp.prompt_tokens.unwrap_or(0);
+                let read = resp.cached_tokens.unwrap_or(0);
+                let written = resp.cache_creation_tokens.unwrap_or(0);
+                let completion = resp.completion_tokens.unwrap_or(0);
+                let hit = cost::cache_hit_rate(input, read, written);
+                let priced = cost::turn_cost_ttl(
+                    "anthropic",
+                    model,
+                    resp.prompt_tokens,
+                    completion,
+                    resp.cached_tokens,
+                    resp.cache_creation_tokens,
+                    ttl,
+                );
+                println!(
+                    "turn {turn:>2}: {elapsed_ms:>5} ms  input={input:<6} cache_read={read:<7} \
+                     cache_creation={written:<7} hit={:.1}%  est ${:.6}",
+                    hit * 100.0,
+                    priced.usd
+                );
+                growing.push(ChatMessage::assistant(resp.content.trim().to_string()));
+                rows.push(json!({
+                    "turn": turn,
+                    "elapsed_ms": elapsed_ms,
+                    "input_tokens": input,
+                    "cache_read_tokens": read,
+                    "cache_creation_tokens": written,
+                    "completion_tokens": completion,
+                    "hit_rate": hit,
+                    "usd": priced.usd,
+                }));
+            }
+            Err(e) => {
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                eprintln!("turn {turn}: error {e}");
+                rows.push(json!({ "turn": turn, "elapsed_ms": elapsed_ms, "error": e }));
+                break;
+            }
+        }
+    }
+
+    // Gates. Turn 1 writes; every turn after it must READ the prefix, and the
+    // write must stay small relative to what it read.
+    let after_first: Vec<&Value> = rows.iter().filter(|r| r["turn"].as_u64() != Some(1)).collect();
+    let all_read = !after_first.is_empty()
+        && after_first
+            .iter()
+            .all(|r| r["cache_read_tokens"].as_u64().unwrap_or(0) > 0);
+    let writes_are_small = after_first.iter().all(|r| {
+        let w = r["cache_creation_tokens"].as_u64().unwrap_or(0);
+        let rd = r["cache_read_tokens"].as_u64().unwrap_or(0);
+        w <= rd
+    });
+    let last = rows.last().cloned().unwrap_or(json!({}));
+    let last_hit = last.get("hit_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let no_errors = !rows.iter().any(|r| r.get("error").is_some());
+    let pass = no_errors && all_read && writes_are_small && last_hit >= 0.90;
+
+    let total_usd: f64 = rows.iter().filter_map(|r| r["usd"].as_f64()).sum();
+    let report = json!({
+        "mode": "anthropic-cache",
+        "provider": "anthropic",
+        "model": model,
+        "cache_retention": retention,
+        "ttl": ttl.as_str(),
+        "key_source": key_source,
+        "turns": rows,
+        "total_usd": total_usd,
+        "checks": {
+            "no_errors": no_errors,
+            "every_turn_after_the_first_reads_the_prefix": all_read,
+            "writes_never_exceed_reads": writes_are_small,
+            "last_turn_hit_at_least_90pct": last_hit >= 0.90,
+        },
+        "pass": pass,
+        "note": "10 append-only turns over a ~4K system + 6 tool defs. Breakpoints: last tool def, \
+                 system, previous user turn, last message. A large cache_creation on every turn means \
+                 the prefix is being rewritten upstream of the breakpoints.",
+    });
+
+    println!(
+        "last-turn hit={:.1}%  total ${:.4}  {}",
+        last_hit * 100.0,
+        total_usd,
+        if pass { "PASS" } else { "FAIL" },
+    );
+
+    if let Some(path) = out {
+        match std::fs::write(&path, serde_json::to_string_pretty(&report).unwrap_or_default()) {
+            Ok(()) => println!("Wrote results → {path}"),
+            Err(e) => {
+                eprintln!("bench: could not write {path}: {e}");
+                return 1;
+            }
+        }
     }
     if pass { 0 } else { 1 }
 }
@@ -2716,7 +2943,7 @@ fn selftest() -> i32 {
         reasoning_content: None,
     };
 
-    println!("\n=== SELFTEST: prompt-cache miss hunt (74 unique cases) ===");
+    println!("\n=== SELFTEST: prompt-cache miss hunt (92 unique cases) ===");
     {
         use crate::ai::context::{
             inject_dynamic_into_last_user, is_runtime_message, RUNTIME_MARKER,
@@ -2825,7 +3052,7 @@ fn selftest() -> i32 {
 
         // 8. DeepSeek cache field parse.
         // usage_counts is private — prove accounting from the same numbers DeepSeek reports.
-        let r = cost::cache_report(1732, 1664);
+        let r = cost::cache_report(1732, 1664, 0);
         check("08 inclusive split: 1664 hit / 68 miss / ~96%", r.hit == 1664 && r.miss == 68 && r.rate > 0.95);
 
         // 9. Long session math.
@@ -2843,11 +3070,11 @@ fn selftest() -> i32 {
         // 11. Surprising miss is explained; alignment remainder is not.
         check(
             "11 alignment remainder is not logged as a miss",
-            cost::cache_miss_reason(1732, 1664, "append_only", 2).is_none(),
+            cost::cache_miss_reason(1732, 1664, 0, "append_only", 2).is_none(),
         );
         check(
             "12 system-prefix miss is explained",
-            cost::cache_miss_reason(20_000, 1_000, "system", 1)
+            cost::cache_miss_reason(20_000, 1_000, 0, "system", 1)
                 .is_some_and(|s| s.contains("system prefix changed")),
         );
 
@@ -2907,7 +3134,7 @@ fn selftest() -> i32 {
         );
 
         // 17. Anthropic exclusive usage: input is miss-only, cached is larger.
-        let anthro = cost::cache_report(1_000, 39_000);
+        let anthro = cost::cache_report(1_000, 39_000, 0);
         check(
             "17 Anthropic exclusive split: 39k hit / 1k miss",
             anthro.hit == 39_000 && anthro.miss == 1_000 && (anthro.rate - 0.975).abs() < 1e-9,
@@ -2916,17 +3143,17 @@ fn selftest() -> i32 {
         // 18. Status line format the terminal shows.
         check(
             "18 cache line format",
-            cost::format_cache_line(50_000, 48_000) == "cache 48000 hit · 2000 miss · 96%",
+            cost::format_cache_line(50_000, 48_000, 0) == "cache 48000 hit · 2000 miss · 0 written · 96%",
         );
 
         // 19. DeepSeek is treated as 1M context so we don't compact (and miss) at 64K.
         check(
-            "19 DeepSeek Flash context is 1M",
+            "19 DeepSeek Flash context is 1M (1 MiB of tokens)",
             crate::ai::context_usage::default_context_limit(
                 "openai",
                 "deepseek/deepseek-v4-flash",
                 None,
-            ) == 1_000_000,
+            ) == 1_048_576,
         );
         check(
             "20 40K session does not auto-compact on DeepSeek 1M",
@@ -2967,7 +3194,7 @@ fn selftest() -> i32 {
         // --- third wave: 50 unique tests (23–72), none overlap 01–22 ---
         use crate::ai::context::{assemble_prompt, PromptContext, WORKING_SET_TOKENS};
         use crate::ai::context_compact::{
-            compute_threshold, force_minimal_system_prompt, tail_token_budget,
+            compute_threshold, minimal_prompt_threshold_tripped, tail_token_budget,
         };
         use crate::ai::context_usage::default_context_limit;
         use crate::ai::tool_cache;
@@ -3051,29 +3278,29 @@ fn selftest() -> i32 {
 
         check(
             "31 schema miss reason names tool schema",
-            cost::cache_miss_reason(10_000, 1_000, "schema", 1)
+            cost::cache_miss_reason(10_000, 1_000, 0, "schema", 1)
                 .is_some_and(|s| s.contains("tool schema")),
         );
         check(
             "32 history-rewrite miss reason names compaction",
-            cost::cache_miss_reason(10_000, 1_000, "message_prefix", 1)
+            cost::cache_miss_reason(10_000, 1_000, 0, "message_prefix", 1)
                 .is_some_and(|s| s.contains("compaction")),
         );
         check(
             "33 append_only fat tail miss names canvas/memory",
-            cost::cache_miss_reason(10_000, 2_000, "append_only", 1)
+            cost::cache_miss_reason(10_000, 2_000, 0, "append_only", 1)
                 .is_some_and(|s| s.contains("uncached tail")),
         );
         check(
             "34 first_request after iter 0 with low hit is explained",
-            cost::cache_miss_reason(8_000, 100, "first_request", 1)
+            cost::cache_miss_reason(8_000, 100, 0, "first_request", 1)
                 .is_some_and(|s| s.contains("fresh prefix")),
         );
         check(
             "35 97% hit is not logged as a miss",
-            cost::cache_miss_reason(10_000, 9_700, "append_only", 3).is_none(),
+            cost::cache_miss_reason(10_000, 9_700, 0, "append_only", 3).is_none(),
         );
-        let z = cost::cache_report(0, 0);
+        let z = cost::cache_report(0, 0, 0);
         check("36 zero usage report is 0/0/0", z.hit == 0 && z.miss == 0 && z.rate == 0.0);
         check(
             "37 exact 128-token block + 0 tail is 100% expected",
@@ -3126,21 +3353,24 @@ fn selftest() -> i32 {
             default_context_limit("openai", "gpt-5.6-luna", None) == 128_000,
         );
         check(
-            "46 Anthropic default context is 200K",
-            default_context_limit("anthropic", "claude-sonnet-4-6", None) == 200_000,
+            "46 current Claude models are 1M, Haiku and 3.x are still 200K",
+            default_context_limit("anthropic", "claude-sonnet-4-6", None) == 1_000_000
+                && default_context_limit("anthropic", "claude-opus-5", None) == 1_000_000
+                && default_context_limit("anthropic", "claude-haiku-4-5", None) == 200_000
+                && default_context_limit("anthropic", "claude-3-5-sonnet", None) == 200_000,
         );
         check(
             "47 Ollama uses provider num_ctx",
             default_context_limit("ollama", "qwen3.5:9b", Some(32_768)) == 32_768,
         );
         check(
-            "48 1M DeepSeek compact threshold is 500K",
-            compute_threshold(1_000_000) == 500_000,
+            "48 compaction fires at 80% of the window",
+            compute_threshold(1_000_000) == 800_000,
         );
         check(
             "49 force_minimal trips at 65% of 128K",
-            force_minimal_system_prompt(83_200, 128_000)
-                && !force_minimal_system_prompt(83_199, 128_000),
+            minimal_prompt_threshold_tripped(83_200, 128_000)
+                && !minimal_prompt_threshold_tripped(83_199, 128_000),
         );
 
         let mut local_hist = Vec::new();
@@ -3270,15 +3500,15 @@ fn selftest() -> i32 {
 
         check(
             "64 cache line with 0 cached still prints miss",
-            cost::format_cache_line(500, 0) == "cache 0 hit · 500 miss · 0%",
+            cost::format_cache_line(500, 0, 0) == "cache 0 hit · 500 miss · 0 written · 0%",
         );
         check(
             "65 DeepSeek Pro also gets 1M context",
-            default_context_limit("openai", "deepseek-v4-pro", None) == 1_000_000,
+            default_context_limit("openai", "deepseek-v4-pro", None) == 1_048_576,
         );
         check(
-            "66 128K window autocompacts at 64K",
-            crate::ai::context_compact::should_auto_compact(64_000, 128_000),
+            "66 128K window autocompacts at 80% (102_400)",
+            crate::ai::context_compact::should_auto_compact(102_400, 128_000),
         );
         check(
             "67 128K window does not compact at 63_999",
@@ -3298,11 +3528,11 @@ fn selftest() -> i32 {
         );
         check(
             "71 first_request at 80% hit is not a cold-start warning",
-            cost::cache_miss_reason(10_000, 8_000, "first_request", 0).is_none(),
+            cost::cache_miss_reason(10_000, 8_000, 0, "first_request", 0).is_none(),
         );
         check(
             "72 unknown classification is echoed in the miss line",
-            cost::cache_miss_reason(8_000, 100, "weird_class", 2)
+            cost::cache_miss_reason(8_000, 100, 0, "weird_class", 2)
                 .is_some_and(|s| s.contains("weird_class")),
         );
 
@@ -3374,6 +3604,185 @@ fn selftest() -> i32 {
             )
             .is_none(),
         );
+
+        // ---- Anthropic message-level breakpoints (the fix for the big one) ----
+        {
+            use crate::ai::providers::anthropic::AnthropicProvider;
+
+            fn breakpoints(v: &Value) -> usize {
+                match v {
+                    Value::Object(map) => {
+                        usize::from(map.contains_key("cache_control"))
+                            + map.values().map(breakpoints).sum::<usize>()
+                    }
+                    Value::Array(items) => items.iter().map(breakpoints).sum(),
+                    _ => 0,
+                }
+            }
+
+            let mut req = ChatRequest::new("claude-opus-5");
+            req.system = "stable system".into();
+            req.tools = vec![
+                ToolDef { name: "a".into(), description: "a".into(), parameters: json!({}) },
+                ToolDef { name: "b".into(), description: "b".into(), parameters: json!({}) },
+            ];
+            req.messages = vec![
+                ChatMessage::user("turn one"),
+                ChatMessage::assistant("ok"),
+                ChatMessage::tool_result("c1", "out"),
+                ChatMessage::user("turn two"),
+            ];
+            let body = AnthropicProvider::build_body(&req);
+            check(
+                "78 anthropic history carries cache_control (it never used to)",
+                body["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m["content"]
+                        .as_array()
+                        .is_some_and(|b| b.iter().any(|x| x.get("cache_control").is_some()))),
+            );
+            check(
+                "79 last message block is a read point next turn",
+                body["messages"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap()["content"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap()["cache_control"]["type"]
+                    == "ephemeral",
+            );
+            check(
+                "80 never more than the 4 allowed breakpoints",
+                breakpoints(&body) == 4,
+            );
+
+            let mut long = req.clone();
+            long.cache_retention = "long".into();
+            let long_body = AnthropicProvider::build_body(&long);
+            check(
+                "81 one TTL across every breakpoint in a request",
+                long_body.to_string().matches("\"ttl\":\"1h\"").count()
+                    == breakpoints(&long_body),
+            );
+
+            let mut autonomous = req.clone();
+            autonomous.autonomous = true;
+            check(
+                "82 autonomous loops default to the 1h TTL",
+                AnthropicProvider::build_body(&autonomous).to_string().contains("1h")
+                    && !AnthropicProvider::build_body(&req).to_string().contains("1h"),
+            );
+
+            let mut modern = ChatRequest::new("claude-opus-5");
+            modern.reasoning = "high".into();
+            modern.messages = vec![ChatMessage::user("hi")];
+            let modern_body = AnthropicProvider::build_body(&modern);
+            check(
+                "83 opus-5 gets adaptive thinking + effort, no budget_tokens, no temperature",
+                modern_body["thinking"]["type"] == "adaptive"
+                    && modern_body["output_config"]["effort"] == "high"
+                    && modern_body["thinking"].get("budget_tokens").is_none()
+                    && modern_body.get("temperature").is_none(),
+            );
+
+            let mut batched = ChatRequest::new("claude-opus-5");
+            batched.messages = vec![
+                ChatMessage::user("go"),
+                ChatMessage::assistant("running"),
+                ChatMessage::tool_result("c1", "one"),
+                ChatMessage::tool_result("c2", "two"),
+            ];
+            let batched_body = AnthropicProvider::build_body(&batched);
+            check(
+                "84 parallel tool results ride in one user message",
+                batched_body["messages"].as_array().unwrap().len() == 3
+                    && batched_body["messages"][2]["content"].as_array().unwrap().len() == 2,
+            );
+        }
+
+        // ---- Writes are visible in the accounting ----
+        check(
+            "85 a full prefix rewrite is not scored as 0 hit / 0 miss / 0%",
+            cost::cache_report(0, 0, 24_000).total() == 24_000
+                && cost::cache_miss_reason(0, 0, 24_000, "append_only", 3)
+                    .is_some_and(|s| s.contains("REWRITE")),
+        );
+        check(
+            "86 the 1h write price is distinct from the 5m one",
+            (cost::price_for("anthropic", "claude-opus-5")
+                .cache_write_for(cost::CacheTtl::OneHour)
+                - cost::price_for("anthropic", "claude-opus-5").cache_write * 1.6)
+                .abs()
+                < 1e-9,
+        );
+        check(
+            "87 opus tier is $5/$25 per MTok, not $15/$75",
+            cost::price_for("anthropic", "claude-opus-5").input == 5.0
+                && cost::price_for("anthropic", "claude-opus-5").output == 25.0,
+        );
+        check(
+            "88 the hit rate is token-weighted, not a mean of percentages",
+            cost::weighted_cache_hit_rate(vec![(100, 0, 0), (0, 0, 100_000)]) < 0.002,
+        );
+
+        // ---- Real context windows / latched minimal prompt / aging ----
+        check(
+            "89 current Claude models get their real 1M window",
+            crate::ai::context_usage::default_context_limit("anthropic", "claude-opus-5", None)
+                == 1_000_000
+                && crate::ai::context_usage::default_context_limit(
+                    "anthropic",
+                    "claude-haiku-4-5",
+                    None,
+                ) == 200_000,
+        );
+        {
+            let session = "xc-selftest-latch";
+            crate::ai::context_compact::clear_minimal_latch(session);
+            let tripped = crate::ai::context_compact::force_minimal_system_prompt(
+                session, 700_000, 1_000_000,
+            );
+            let stays = crate::ai::context_compact::force_minimal_system_prompt(
+                session, 10, 1_000_000,
+            );
+            crate::ai::context_compact::clear_minimal_latch(session);
+            check(
+                "90 the minimal system prompt latches and never flips back",
+                tripped && stays,
+            );
+        }
+        {
+            let mut aging = vec![
+                ChatMessage::tool_result("t1", "line\n".repeat(50)),
+                ChatMessage::assistant("x"),
+                ChatMessage::tool_result("t2", "line\n".repeat(50)),
+            ];
+            let cutoff = aging.len();
+            let first =
+                crate::ai::output_compress::age_historical_tool_results(&mut aging, 0, cutoff, 100);
+            let second =
+                crate::ai::output_compress::age_historical_tool_results(&mut aging, 0, cutoff, 100);
+            check("91 aging is idempotent", first == 2 && second == 0);
+
+            let mut sent = vec![
+                ChatMessage::tool_result("t1", "line\n".repeat(50)),
+                ChatMessage::tool_result("t2", "line\n".repeat(50)),
+            ];
+            let before = sent.clone();
+            let n = sent.len();
+            let aged =
+                crate::ai::output_compress::age_historical_tool_results(&mut sent, n, n, 100);
+            check(
+                "92 aging never rewrites a message the provider has already seen",
+                aged == 0 && sent == before,
+            );
+        }
+
         let _ = std::fs::remove_dir_all(dir);
     }
 

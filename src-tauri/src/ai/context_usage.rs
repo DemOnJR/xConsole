@@ -54,6 +54,40 @@ pub fn estimate_messages_tokens(messages: &[ChatMessage]) -> u32 {
     total
 }
 
+/// Context window for a Claude model, or `None` when the name is not a Claude
+/// model we recognise.
+///
+/// Opus 4.6 and later, Sonnet 4.6 and later, and the Fable/Mythos family are all
+/// **1M**; only Haiku and the claude-3.x generation are still 200K. Treating the
+/// whole vendor as 200K flipped the minimal system prompt at 130K and fired
+/// compaction at 160K on models with five times that room — and each of those
+/// rewrites the entire tools + system + messages prefix.
+pub fn claude_context_limit(model: &str) -> Option<u32> {
+    let m = model.to_lowercase();
+    if !(m.contains("claude") || m.contains("opus") || m.contains("sonnet")
+        || m.contains("haiku") || m.contains("fable") || m.contains("mythos"))
+    {
+        return None;
+    }
+    // 200K holdouts first: Haiku (every generation) and the claude-3.x line.
+    if m.contains("haiku") || m.contains("claude-3") {
+        return Some(200_000);
+    }
+    if m.contains("fable")
+        || m.contains("mythos")
+        || m.contains("opus-5")
+        || m.contains("opus-4-8")
+        || m.contains("opus-4-7")
+        || m.contains("opus-4-6")
+        || m.contains("sonnet-5")
+        || m.contains("sonnet-4-6")
+    {
+        return Some(1_000_000);
+    }
+    // Opus 4.5 / Sonnet 4.5 and anything else Claude-shaped we do not know.
+    Some(200_000)
+}
+
 /// Default context window for providers without an explicit setting.
 ///
 /// DeepSeek V4 Flash/Pro advertise 1M. Treating them as 128K made auto-compact
@@ -68,8 +102,14 @@ pub fn default_context_limit(
     if m.contains("deepseek") || m.contains("ox-alpha") || m.contains("0x-alpha") || m.contains("stealth") {
         return 1_048_576;
     }
+    if provider_kind == "ollama" {
+        return ollama_num_ctx.unwrap_or(65_536);
+    }
+    // A Claude model is 1M or 200K by name, whichever adapter is carrying it.
+    if let Some(limit) = claude_context_limit(&m) {
+        return limit;
+    }
     match provider_kind {
-        "ollama" => ollama_num_ctx.unwrap_or(65_536),
         "anthropic" => 200_000,
         "cursor" | "codex_cli" | "opencode_cli" | "antigravity_cli" => 200_000,
         _ => 128_000,
@@ -134,8 +174,26 @@ mod tests {
             default_context_limit("openai", "deepseek/deepseek-v4-flash", None),
             1_048_576
         );
-        assert_eq!(default_context_limit("anthropic", "claude-sonnet-4-6", None), 200_000);
         assert_eq!(default_context_limit("openai", "gpt-5.6", None), 128_000);
+    }
+
+    #[test]
+    fn current_claude_models_are_one_million_not_two_hundred_thousand() {
+        for m in [
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-6",
+            "claude-sonnet-5",
+            "claude-sonnet-4-6",
+            "claude-fable-5-1",
+        ] {
+            assert_eq!(default_context_limit("anthropic", m, None), 1_000_000, "{m}");
+        }
+        // Haiku and the 3.x line really are 200K.
+        assert_eq!(default_context_limit("anthropic", "claude-haiku-4-5", None), 200_000);
+        assert_eq!(default_context_limit("anthropic", "claude-3-5-sonnet", None), 200_000);
+        // The window follows the model name through an openai-compat adapter too.
+        assert_eq!(default_context_limit("openai", "anthropic/claude-opus-5", None), 1_000_000);
     }
 }
 

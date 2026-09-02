@@ -22,18 +22,25 @@ use tauri::{Emitter, Manager};
 /// Release builds set `windows_subsystem = "windows"`, so `eprintln!` is discarded.
 /// The installed app's "hi / how are you" session left no cache lines in the log
 /// for that reason — the numbers only survived on the assistant `tokenStats`.
+#[allow(clippy::too_many_arguments)]
 fn log_prompt_cache(
     session_id: &str,
     iter: u32,
     prompt: u32,
     cached: u32,
+    written: u32,
+    provider: &str,
+    model: &str,
+    ttl: crate::ai::cost::CacheTtl,
     classification: &str,
     reason: Option<&str>,
 ) {
-    let report = crate::ai::cost::cache_report(prompt, cached);
-    let line = crate::ai::cost::format_cache_line(prompt, cached);
+    let report = crate::ai::cost::cache_report(prompt, cached, written);
+    let line = crate::ai::cost::format_cache_line(prompt, cached, written);
     crate::diag(&format!(
-        "cache session={session_id} iter={iter} {line} · prefix={classification}"
+        "cache session={session_id} iter={iter} {line} · prefix={classification} \
+         · {provider}/{model} ttl={}",
+        ttl.as_str()
     ));
     if let Some(why) = reason {
         crate::diag(why);
@@ -45,11 +52,46 @@ fn log_prompt_cache(
         "prompt": prompt,
         "hit": report.hit,
         "miss": report.miss,
+        // A cache *write* is billed at 1.25x (5m) / 2.0x (1h) the input rate.
+        // Without it here, a request that rewrote the whole prefix logged as
+        // "0 hit / 0 miss / 0%" and looked like a no-op.
+        "written": report.written,
+        "total": report.total(),
         "pct": (report.rate * 100.0).round() as i32,
+        "provider": provider,
+        "model": model,
+        "ttl": ttl.as_str(),
         "prefix": classification,
         "reason": reason,
     });
     crate::diag_jsonl("cache.jsonl", &payload.to_string());
+}
+
+/// Rough byte size of the image payloads carried by a transcript.
+fn transcript_image_bytes(messages: &[ChatMessage]) -> usize {
+    messages
+        .iter()
+        .flat_map(|m| m.images.iter())
+        .map(|i| i.data.len())
+        .sum()
+}
+
+/// Cap on retained image bytes in the replay snapshot.
+const PREFIX_IMAGE_BUDGET: usize = 8 * 1024 * 1024;
+
+/// Snapshot of exactly what was sent to the provider, for replay next turn.
+///
+/// It has to keep the images. The turn loop used to store
+/// `vision::without_images(...)`, so the replayed prefix differed from the bytes
+/// the provider actually saw at the image message - and every message after it
+/// missed for the rest of the session. `ChatImage::data` is base64, so the
+/// snapshot is capped: past the cap we fall back to dropping pixels and accept
+/// one broken prefix rather than hold tens of megabytes per session.
+fn prefix_snapshot(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    if transcript_image_bytes(messages) > PREFIX_IMAGE_BUDGET {
+        return crate::ai::vision::without_images(messages);
+    }
+    messages.to_vec()
 }
 
 /// Run one full agent turn, streaming events to `sink`. Returns the final
@@ -249,18 +291,29 @@ pub async fn run_turn(
         .ok()
         .flatten()
         .unwrap_or_default();
-    let vision_native = crate::ai::vision::use_native(
+    // Whether the session model could see pixels *at all* — a property of the
+    // model and settings, not of whether this particular turn has an image.
+    let vision_native_capable = crate::ai::vision::use_native(
         &resolved.kind,
         &resolved.model,
         &session_url,
         &preferred_id,
         &vision_provider_setting,
         &vision_model_setting,
-        !tc.turn_images.is_empty(),
+        true,
     );
-    let vision_via_tool = !tc.turn_images.is_empty() && !vision_native && !cli_mode;
+    let vision_native = vision_native_capable && !tc.turn_images.is_empty();
+    // Register the vision tool on EVERY turn of a session whose model cannot see
+    // pixels, not only on turns that carry an image. Tools render at position 0,
+    // so adding one mid-conversation moves the tools breakpoint and forces a full
+    // ~20K tool-block rewrite — twice: once when the image turn adds it and again
+    // when the next turn drops it. A tool that is always present costs its own
+    // definition once and nothing thereafter.
+    let vision_via_tool = !vision_native_capable && !cli_mode;
     if vision_via_tool {
         tool_defs_for_turn.push(crate::ai::vision::tool_def());
+    }
+    if vision_via_tool && !tc.turn_images.is_empty() {
         emit(
             Some(sink),
             StreamEvent::Status(format!(
@@ -482,7 +535,10 @@ pub async fn run_turn(
     let (mut system, mut dynamic_block, mut snapshot_text) =
         build_system(false, &thread_summary);
 
-    if vision_via_tool {
+    // The hint is volatile-tier text, so it may vary per turn without moving the
+    // tools breakpoint - unlike the tool definition itself, which is now always
+    // registered.
+    if vision_via_tool && !tc.turn_images.is_empty() {
         if !dynamic_block.is_empty() {
             dynamic_block.push_str("\n\n");
         }
@@ -548,6 +604,13 @@ pub async fn run_turn(
                 )),
             );
             thread_summary = Some(compact.summary);
+            // Re-anchor the cache. Compaction rewrote the middle of the history,
+            // so the stored "last request" is no longer a prefix of it; leaving it
+            // in place makes `continue_cached_prefix` try to append onto bytes the
+            // provider will never match and turns one rewrite into a permanent
+            // mismatch. Drop it and let this turn write a fresh anchor.
+            tc.session_state
+                .store_request_messages(&tc.session_id, Vec::new());
             emit(
                 Some(sink),
                 StreamEvent::ConversationCompacted {
@@ -587,7 +650,11 @@ pub async fn run_turn(
         &resolved.kind,
     );
 
-    if context_compact::force_minimal_system_prompt(usage.total_tokens, context_limit) {
+    if context_compact::force_minimal_system_prompt(
+        &tc.session_id,
+        usage.total_tokens,
+        context_limit,
+    ) {
         emit(
             Some(sink),
             StreamEvent::Status(
@@ -777,8 +844,12 @@ pub async fn run_turn(
     // so this turn is a true append. Dropping last turn's `# Runtime context`
     // and putting the new assistant in that slot was the installed-app miss:
     // turn 2 hit only 1536/8277 (system+tools+first user).
+    // How many leading messages the provider has already seen. Anything below
+    // this index is bytes it has cached; rewriting one busts everything after it.
+    let mut frozen_prefix_len = 0usize;
     if let Some(prev) = tc.session_state.last_request_messages(&tc.session_id) {
         if let Some(continued) = context::continue_cached_prefix(&prev, &messages) {
+            frozen_prefix_len = prev.len();
             messages = continued;
         }
     }
@@ -792,6 +863,22 @@ pub async fn run_turn(
     }
     // Repair history from a previous stop/cap so DeepSeek/OpenAI accept this turn.
     crate::ai::provider::close_unanswered_tool_calls(&mut messages);
+
+    // Age bulky historical tool output exactly once, before the first request of
+    // this turn, against an index fixed here and never recomputed. Running this
+    // inside the tool loop (the old call site) moved the boundary every iteration,
+    // so a different already-sent message was rewritten in place each round —
+    // harmless while history was uncached, and the dominant cost once it is not.
+    // Messages the provider has already seen are excluded outright.
+    const AGE_KEEP_RECENT: usize = 4;
+    const AGE_MAX_BYTES: usize = 1500;
+    let age_cutoff = messages.len().saturating_sub(AGE_KEEP_RECENT);
+    crate::ai::output_compress::age_historical_tool_results(
+        &mut messages,
+        frozen_prefix_len,
+        age_cutoff,
+        AGE_MAX_BYTES,
+    );
 
     // Request settings, read once for the whole turn.
     //
@@ -818,6 +905,14 @@ pub async fn run_turn(
         .ok()
         .flatten()
         .unwrap_or_default();
+    // Unattended loops (goal cycles, cron jobs) run minutes of tool work between
+    // model calls, so their ~24K tools+system prefix is always past the 5-minute
+    // window and gets rewritten at 1.25x on every cycle - which costs more than
+    // not caching at all. Interactive turns arrive far closer together than 5
+    // minutes and every read refreshes the entry for free, so they stay on the
+    // cheaper default. An explicit `agent.cache_retention` still wins either way.
+    let autonomous_session =
+        tc.session_id.starts_with("goal:") || tc.session_id.starts_with("cron:");
     // Reasoning effort capability control: off|low|medium|high.
     let turn_reasoning = tc
         .db
@@ -846,13 +941,12 @@ pub async fn run_turn(
             crate::ai::provider::close_unanswered_tool_calls(&mut messages);
             tc.session_state.store_request_messages(
                 &tc.session_id,
-                crate::ai::vision::without_images(&messages),
+                prefix_snapshot(&messages),
             );
             tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
             break;
         }
         iters_used = iter + 1;
-        crate::ai::output_compress::age_historical_tool_results(&mut messages, 4, 1500);
         let mut req = ChatRequest::new(&turn_model);
         req.system = system.clone();
         req.messages = messages.clone();
@@ -860,11 +954,13 @@ pub async fn run_turn(
         req.max_tokens = turn_max_tokens;
         req.xconsole = xconsole_exec.clone();
         req.cache_retention = turn_cache_retention.clone();
+        req.autonomous = autonomous_session;
         // Stable per-session id for provider cache routing (OpenAI prompt_cache_key).
         req.session_id = tc.session_id.clone();
         req.reasoning = turn_reasoning.clone();
         // Let the provider's stream loop abort the moment the user presses Stop.
         req.cancel = Some(tc.session_state.cancel_flag(&tc.session_id));
+        let request_ttl = req.cache_ttl();
 
         let current_prefix = crate::ai::prefix_telemetry::fingerprint_request(&req);
         let classification = crate::ai::prefix_telemetry::classify(
@@ -895,7 +991,7 @@ pub async fn run_turn(
                 crate::ai::provider::close_unanswered_tool_calls(&mut messages);
                 tc.session_state.store_request_messages(
                     &tc.session_id,
-                    crate::ai::vision::without_images(&messages),
+                    prefix_snapshot(&messages),
                 );
                 tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
                 emit(Some(sink), StreamEvent::Error(e.clone()));
@@ -905,13 +1001,16 @@ pub async fn run_turn(
             }
         };
 
-        if let Some(prompt) = resp.prompt_tokens {
+        if resp.prompt_tokens.is_some() || resp.cache_creation_tokens.is_some() {
+            let prompt = resp.prompt_tokens.unwrap_or(0);
             let cached = resp.cached_tokens.unwrap_or(0);
-            let line = crate::ai::cost::format_cache_line(prompt, cached);
+            let written = resp.cache_creation_tokens.unwrap_or(0);
+            let line = crate::ai::cost::format_cache_line(prompt, cached, written);
             emit(Some(sink), StreamEvent::Status(line.clone()));
             let why = crate::ai::cost::cache_miss_reason(
                 prompt,
                 cached,
+                written,
                 classification.as_str(),
                 iter as u32,
             );
@@ -923,6 +1022,10 @@ pub async fn run_turn(
                 iter as u32,
                 prompt,
                 cached,
+                written,
+                &resolved.kind,
+                &turn_model,
+                request_ttl,
                 classification.as_str(),
                 why.as_deref(),
             );
@@ -944,7 +1047,7 @@ pub async fn run_turn(
         // after every tool made a long session a multi-MB/s writer.
         tc.session_state.store_request_messages(
             &tc.session_id,
-            crate::ai::vision::without_images(&messages),
+            prefix_snapshot(&messages),
         );
 
         // No tools to run, or an autonomous CLI that does its own tool use.
@@ -1171,7 +1274,7 @@ pub async fn run_turn(
 
         tc.session_state.store_request_messages(
             &tc.session_id,
-            crate::ai::vision::without_images(&messages),
+            prefix_snapshot(&messages),
         );
 
         iter += 1;
@@ -1179,7 +1282,7 @@ pub async fn run_turn(
     crate::ai::provider::close_unanswered_tool_calls(&mut messages);
     tc.session_state.store_request_messages(
         &tc.session_id,
-        crate::ai::vision::without_images(&messages),
+        prefix_snapshot(&messages),
     );
     tc.session_state.persist_prefix_cache(&data_dir, &tc.session_id);
 
@@ -1495,31 +1598,6 @@ fn unwrap_markdown_path(raw: &str) -> Option<String> {
     }
     None
 }
-
-/// Send a lightweight 1-token probe to pre-warm the prompt cache prefix before a heavy turn
-/// or scheduled task (adaptive eviction-gap warming).
-#[allow(dead_code)]
-pub async fn warm_cache_prefix(tc: &ToolContext, prompt_hint: Option<&str>) -> Result<(), String> {
-    let resolved = match registry::build(
-        &tc.db,
-        &tc.db
-            .get_setting("agent.provider")
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "openai".into()),
-    ) {
-        Ok(r) => r,
-        Err(e) => return Err(e),
-    };
-    let mut req = ChatRequest::new(&resolved.model);
-    req.max_tokens = 1;
-    req.session_id = tc.session_id.clone();
-    req.system = prompt_hint.unwrap_or("System ready.").to_string();
-    req.messages = vec![ChatMessage::user("ping")];
-    let _ = resolved.provider.chat(&req, None).await;
-    Ok(())
-}
-
 
 /// How many calls to run together at each step, in order.
 ///

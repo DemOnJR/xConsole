@@ -29,6 +29,13 @@ export const CacheTelemetryTab = React.memo(function CacheTelemetryTab({ data }:
     () => data.cache.reduce((acc: number, c: CachePoint) => acc + c.miss, 0),
     [data.cache],
   );
+  // Cache *writes* are billed at 1.25x (5m TTL) or 2.0x (1h TTL) of the input
+  // rate, so they are neither hits nor free. Leaving them out of the picture is
+  // what made a request that rewrote the whole prefix read as a no-op.
+  const totalWrittenTokens = useMemo(
+    () => data.cache.reduce((acc: number, c: CachePoint) => acc + (c.written ?? 0), 0),
+    [data.cache],
+  );
 
   // Estimated dollar savings ($0.15 per 1M tokens saved for prompt cache)
   const estimatedSavings = useMemo(() => {
@@ -53,6 +60,8 @@ export const CacheTelemetryTab = React.memo(function CacheTelemetryTab({ data }:
         return (
           item.session.toLowerCase().includes(q) ||
           item.ts.toLowerCase().includes(q) ||
+          (item.model ?? "").toLowerCase().includes(q) ||
+          (item.provider ?? "").toLowerCase().includes(q) ||
           String(item.prompt).includes(q)
         );
       })
@@ -63,7 +72,7 @@ export const CacheTelemetryTab = React.memo(function CacheTelemetryTab({ data }:
   return (
     <div className="flex flex-col gap-6 animate-in fade-in duration-200">
       {/* 1. Cache Header KPIs */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <div className="flex flex-col justify-between rounded-xl border border-cyan-500/20 bg-[var(--surface,#09090b)] p-4">
           <div className="flex items-center justify-between text-cyan-400">
             <span className="text-xs font-semibold uppercase tracking-wider">Average Hit Rate</span>
@@ -73,7 +82,7 @@ export const CacheTelemetryTab = React.memo(function CacheTelemetryTab({ data }:
             {data.cache_avg_pct.toFixed(1)}%
           </div>
           <div className="mt-1 text-xs text-[var(--text-faint,#a1a1aa)]">
-            across {data.cache.length} model queries
+            token-weighted across {data.cache.length} model queries
           </div>
         </div>
 
@@ -100,6 +109,19 @@ export const CacheTelemetryTab = React.memo(function CacheTelemetryTab({ data }:
           </div>
           <div className="mt-1 text-xs text-[var(--text-faint,#a1a1aa)]">
             processed as full misses
+          </div>
+        </div>
+
+        <div className="flex flex-col justify-between rounded-xl border border-rose-500/20 bg-[var(--surface,#09090b)] p-4">
+          <div className="flex items-center justify-between text-rose-400">
+            <span className="text-xs font-semibold uppercase tracking-wider">Written Tokens</span>
+            <AlertTriangleIcon size={18} />
+          </div>
+          <div className="mt-3 font-mono text-3xl font-bold text-rose-300">
+            {totalWrittenTokens.toLocaleString()}
+          </div>
+          <div className="mt-1 text-xs text-[var(--text-faint,#a1a1aa)]">
+            written to cache at the 1.25x / 2x premium
           </div>
         </div>
 
@@ -208,6 +230,9 @@ export const CacheTelemetryTab = React.memo(function CacheTelemetryTab({ data }:
                   <th className="py-2 px-3 text-right">Total Prompt</th>
                   <th className="py-2 px-3 text-right">Hit Tokens</th>
                   <th className="py-2 px-3 text-right">Miss Tokens</th>
+                  <th className="py-2 px-3 text-right">Written</th>
+                  <th className="py-2 px-3">Model</th>
+                  <th className="py-2 px-3">TTL</th>
                   <th className="py-2 px-3 text-right">Efficiency</th>
                 </tr>
               </thead>
@@ -235,6 +260,15 @@ export const CacheTelemetryTab = React.memo(function CacheTelemetryTab({ data }:
                       </td>
                       <td className="py-2 px-3 text-right text-amber-400">
                         {row.miss.toLocaleString()}
+                      </td>
+                      <td className="py-2 px-3 text-right text-rose-400">
+                        {(row.written ?? 0).toLocaleString()}
+                      </td>
+                      <td className="py-2 px-3 text-[var(--text-dim,#a1a1aa)] truncate max-w-[140px]">
+                        {row.model || "—"}
+                      </td>
+                      <td className="py-2 px-3 text-[var(--text-dim,#a1a1aa)]">
+                        {row.ttl || "—"}
                       </td>
                       <td className="py-2 px-3 text-right">
                         <span

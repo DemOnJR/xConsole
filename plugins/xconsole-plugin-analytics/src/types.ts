@@ -16,7 +16,13 @@ export interface CachePoint {
   prompt: number;
   hit: number;
   miss: number;
+  /** Tokens written to the provider cache. Billed at 1.25x (5m) / 2.0x (1h) of input. */
+  written: number;
   pct: number;
+  model: string;
+  provider: string;
+  /** "5m" or "1h". */
+  ttl: string;
 }
 
 export interface ToolCount {
@@ -35,7 +41,11 @@ export interface ConversationStat {
 
 export interface AgentAnalytics {
   cache: CachePoint[];
+  /** Token-weighted: sum(hit) / sum(hit + miss + written). */
   cache_avg_pct: number;
+  cache_hit_tokens: number;
+  cache_miss_tokens: number;
+  cache_written_tokens: number;
   conversations: ConversationStat[];
   tools_all: ToolCount[];
   resource: ResourceSnapshot;
