@@ -1,0 +1,54 @@
+﻿
+
+    Directory: D:\Desktop\xConsole\src-tauri\target\debug
+
+
+Mode                 LastWriteTime         Length Name                                                                 
+----                 -------------         ------ ----                                                                 
+-a----        01.09.2026     20:05      628588536 xconsole-bench.exe                                                   
+
+
+    Directory: D:\Desktop\xConsole\src-tauri\target\debug\deps
+
+
+Mode                 LastWriteTime         Length Name                                                                 
+----                 -------------         ------ ----                                                                 
+-a----        01.09.2026     20:05      628588536 xconsole_bench-9f7a5b76f7db9f05.exe                                  
+
+
+    Directory: D:\Desktop\xConsole\src-tauri\target\debug
+
+
+Mode                 LastWriteTime         Length Name                                                                 
+----                 -------------         ------ ----                                                                 
+-a----        01.09.2026     20:05      628556138 xconsole.exe                                                         
+
+
+    Directory: D:\Desktop\xConsole\src-tauri\target\debug\deps
+
+
+Mode                 LastWriteTime         Length Name                                                                 
+----                 -------------         ------ ----                                                                 
+-a----        01.09.2026     20:05      628556138 xconsole-7196c8102e8dd4d3.exe                                        
+-a----        01.09.2026     20:21      550049250 xconsole_lib-a436f7c73b10b8bc.exe                                    
+-a----        01.09.2026     20:04      550044776 xconsole_lib-ec9c8ae9514e5e5f.exe                                    
+-a----        29.08.2026     03:26      516368332 xconsole_lib-2b9f324e4ec71679.exe                                    
+-a----        01.09.2026     20:21      403276096 libxconsole_lib-44f5c2029d855401.rlib                                
+
+
+    Directory: D:\Desktop\xConsole\src-tauri\target\debug
+
+
+Mode                 LastWriteTime         Length Name                                                                 
+----                 -------------         ------ ----                                                                 
+-a----        01.09.2026     20:05      401756934 libxconsole_lib.rlib                                                 
+
+
+    Directory: D:\Desktop\xConsole\src-tauri\target\debug\deps
+
+
+Mode                 LastWriteTime         Length Name                                                                 
+----                 -------------         ------ ----                                                                 
+-a----        01.09.2026     20:05      401756934 libxconsole_lib-8af0cd2051cc22e3.rlib                                
+
+
