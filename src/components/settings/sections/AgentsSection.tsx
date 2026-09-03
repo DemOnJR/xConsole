@@ -1,14 +1,53 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   api,
   onAgentMessage,
   type AgentMessage,
-  type Persona,
-  type PersonaInput,
+  type Persona as BasePersona,
+  type PersonaInput as BasePersonaInput,
   type AgentActivity,
   type MetricMovement,
   type ProjectHistory,
 } from "../../../lib/tauri";
+
+/**
+ * An agent's scope: the files it may change and the tools it may call.
+ *
+ * Declared here rather than in the shared types because the backend carries these two
+ * columns already and the shared `Persona` has not caught up yet. Both are optional and
+ * both mean "everything" when absent, which is what every agent created before scoping
+ * existed has — so an older backend simply leaves the fields off and nothing here
+ * misreads that as "may touch nothing".
+ */
+type Persona = BasePersona & {
+  allowed_paths?: string[] | null;
+  allowed_tools?: string[] | null;
+};
+type PersonaInput = BasePersonaInput & {
+  allowed_paths?: string[];
+  allowed_tools?: string[];
+};
+
+/** A feature an agent has asked permission to build. */
+interface FeatureProposal {
+  id: string;
+  workspace_id?: string | null;
+  persona_id?: string | null;
+  goal_id?: string | null;
+  title: string;
+  body: string;
+  state: string;
+  decision_note?: string | null;
+  created_at?: string | null;
+}
+
+/** One comma/newline-separated box back into a list, and back again. */
+const parseList = (text: string): string[] =>
+  text
+    .split(/[\n,]/)
+    .map((t) => t.trim())
+    .filter(Boolean);
 import { useVpsStore } from "../../../stores/vpsStore";
 import { useWorkspaceStore } from "../../../stores/workspaceStore";
 import { useSettingsStore } from "../../../stores/settingsStore";
@@ -27,6 +66,8 @@ function blankPersona(): PersonaInput {
     model: null,
     enabled: true,
     reports_to: null,
+    allowed_paths: [],
+    allowed_tools: [],
   };
 }
 
@@ -42,6 +83,8 @@ function toInput(p: Persona): PersonaInput {
     model: p.model ?? null,
     enabled: p.enabled,
     reports_to: p.reports_to ?? null,
+    allowed_paths: p.allowed_paths ?? [],
+    allowed_tools: p.allowed_tools ?? [],
   };
 }
 
@@ -100,6 +143,7 @@ export function AgentsSection() {
   const [project, setProject] = useState<string>(activeWorkspace ?? "");
   const [history, setHistory] = useState<ProjectHistory | null>(null);
   const [metrics, setMetrics] = useState<MetricMovement[]>([]);
+  const [proposals, setProposals] = useState<FeatureProposal[]>([]);
 
   const load = useCallback(async () => {
     const [list, msgs] = await Promise.all([
@@ -110,6 +154,16 @@ export function AgentsSection() {
     ]);
     setPersonas(list);
     setMessages(msgs);
+    // Fails soft on purpose. An older backend does not have this command, and an empty
+    // inbox and a missing one look the same to the user — which is right, because
+    // neither is something they can act on from here.
+    setProposals(
+      await invoke<FeatureProposal[]>("list_feature_proposals", {
+        workspaceId: project || null,
+        state: "proposed",
+        limit: 50,
+      }).catch(() => [] as FeatureProposal[]),
+    );
     setHistory(
       project ? await api.projectHistory(project, 200).catch(() => null) : null,
     );
@@ -222,6 +276,21 @@ export function AgentsSection() {
     await api.deletePersona(p.id).catch((e) => setError(String(e)));
     if (draft?.id === p.id) open(null, "");
     setPersonas((list) => list.filter((x) => x.id !== p.id));
+  };
+
+  /**
+   * Answer a proposal as yourself.
+   *
+   * The last step of the ladder is a person. An agent whose whole chain of command
+   * could not answer — because it is short, or because a model did not reply — is held
+   * here rather than let through: the gate fails closed, so somebody has to open it.
+   */
+  const decide = async (id: string, approve: boolean) => {
+    setProposals((list) => list.filter((p) => p.id !== id));
+    await invoke("decide_feature_proposal", { id, approve, note: null }).catch((e) => {
+      setError(String(e));
+      void load();
+    });
   };
 
   const rows = orgRows(personas);
@@ -377,6 +446,47 @@ export function AgentsSection() {
           )}
         </div>
       </div>
+
+      {proposals.length > 0 && (
+        <div className="space-y-3 border-t border-[var(--border)] pt-5">
+          <div className="flex items-baseline justify-between">
+            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+              Waiting on you
+            </h3>
+            <span className="font-mono text-[10px] text-gray-600">{proposals.length}</span>
+          </div>
+          <p className="text-[11px] text-gray-500">
+            Fixing and finishing what already exists is an agent&apos;s own job. Building
+            something that does not exist yet is a decision about what the product is, so
+            it comes here. Until you answer, whoever asked may write notes and nothing
+            else.
+          </p>
+          <div className="divide-y divide-[var(--border)] border border-[var(--border)]">
+            {proposals.map((p) => (
+              <div key={p.id} className="space-y-2 bg-[var(--surface)] px-3 py-2.5">
+                <div className="flex items-start gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs font-medium text-gray-200">{p.title}</p>
+                    <p className="text-[10px] text-gray-500">
+                      {nameOf(p.persona_id)}
+                      {p.created_at ? ` · ${p.created_at}` : ""}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <Button onClick={() => void decide(p.id, false)}>Refuse</Button>
+                    <Button variant="primary" onClick={() => void decide(p.id, true)}>
+                      Approve
+                    </Button>
+                  </div>
+                </div>
+                <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-gray-400">
+                  {p.body}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Activity & Conversation Section */}
       <div className="space-y-3 border-t border-[var(--border)] pt-5">
@@ -922,6 +1032,30 @@ function PersonaEditor({
           />
         </Field>
       </div>
+
+      <Field
+        label="Repo paths"
+        hint="Globs inside the project this agent may CHANGE, one per line — src-tauri/** for a backend engineer, docs/** for a writer. It can still read the rest of the project. Blank means the whole project. Nothing outside the project is reachable either way."
+      >
+        <TextArea
+          value={(draft.allowed_paths ?? []).join("\n")}
+          rows={3}
+          onChange={(e) => set("allowed_paths", parseList(e.target.value))}
+          placeholder={"src-tauri/**\ndocs/**"}
+        />
+      </Field>
+
+      <Field
+        label="Tools"
+        hint="Tool names this agent may call, one per line. A trailing * takes a family: local_* is every local file tool. Blank means every tool. Reporting and asking are never taken away, however narrow this is."
+      >
+        <TextArea
+          value={(draft.allowed_tools ?? []).join("\n")}
+          rows={3}
+          onChange={(e) => set("allowed_tools", parseList(e.target.value))}
+          placeholder={"local_*\nrepo_*\nweb_search"}
+        />
+      </Field>
 
       </EditorGroup>
 

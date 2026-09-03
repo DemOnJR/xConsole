@@ -24,6 +24,7 @@ const KIND_LABELS: Record<ProviderKind, string> = {
   opencode_cli: "OpenCode CLI",
   antigravity_cli: "Antigravity CLI (agy)",
   claude_code: "Claude Code CLI",
+  grok_cli: "Grok CLI",
 };
 
 const OLLAMA_CTX_PRESETS: { value: number; label: string }[] = [
@@ -70,6 +71,12 @@ const KIND_DEFAULTS: Record<ProviderKind, Partial<AiProviderInput>> = {
     bin_path: "claude",
     model: "claude-opus-5",
     extra_json: JSON.stringify({ vps_id: "", permission_mode: "acceptEdits" }),
+  },
+  // Same story as Claude Code: the CLI uses the machine's own login.
+  grok_cli: {
+    bin_path: "grok",
+    model: "grok-4",
+    extra_json: JSON.stringify({ vps_id: "", permission_mode: "dontAsk" }),
   },
 };
 
@@ -136,13 +143,14 @@ const isCli = (kind: ProviderKind) =>
   kind === "opencode_cli" ||
   kind === "cursor" ||
   kind === "antigravity_cli" ||
-  kind === "claude_code";
+  kind === "claude_code" ||
+  kind === "grok_cli";
 
-type ClaudeCodeExtra = { vps_id: string; permission_mode: string };
+type ClaudeCodeExtra = { vps_id: string; permission_mode: string; run_as_user: string };
 
 /** Blank means this PC, which is the default and the safe reading of a missing value. */
 function parseClaudeCodeExtra(raw?: string | null): ClaudeCodeExtra {
-  const empty: ClaudeCodeExtra = { vps_id: "", permission_mode: "acceptEdits" };
+  const empty: ClaudeCodeExtra = { vps_id: "", permission_mode: "acceptEdits", run_as_user: "" };
   if (!raw?.trim()) return empty;
   try {
     const v = JSON.parse(raw) as Partial<ClaudeCodeExtra>;
@@ -152,6 +160,7 @@ function parseClaudeCodeExtra(raw?: string | null): ClaudeCodeExtra {
         v.permission_mode === "dontAsk" || v.permission_mode === "acceptEdits"
           ? v.permission_mode
           : "acceptEdits",
+      run_as_user: typeof v.run_as_user === "string" ? v.run_as_user : "",
     };
   } catch {
     return empty;
@@ -880,7 +889,7 @@ function ProviderForm({
           </>
         )}
 
-        {form.kind === "claude_code" && (
+        {cli && (
           <>
             <Field
               label="Runs on"
@@ -910,6 +919,20 @@ function ProviderForm({
                   <option value="acceptEdits">Edit files and run commands</option>
                   <option value="dontAsk">Read-only (inspect and report)</option>
                 </Select>
+              </Field>
+            )}
+            {claudeCodeExtra.vps_id && (
+              <Field
+                label="Runs as"
+                hint="The unix account on that server to run the CLI under. Leave blank and nothing runs: these CLIs refuse to work as root, and giving one your root session is not the fix. agent_cli_provision can create the account."
+              >
+                <TextInput
+                  value={claudeCodeExtra.run_as_user}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                    patchClaudeCode({ run_as_user: e.target.value })
+                  }
+                  placeholder="xcagent"
+                />
               </Field>
             )}
           </>

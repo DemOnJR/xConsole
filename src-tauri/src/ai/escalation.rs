@@ -111,13 +111,8 @@ pub async fn review(
     asked: &str,
 ) -> Option<Verdict> {
     let reviewer = reviewer(db, running)?;
-    let provider_id = registry::active_provider_id(db, reviewer.provider_id.as_deref()).ok()?;
-    let resolved = registry::build_with_model(db, &provider_id, reviewer.model.as_deref()).ok()?;
 
-    let mut system = format!("You are {}", reviewer.name);
-    if !reviewer.role.trim().is_empty() {
-        system.push_str(&format!(", {}", reviewer.role.trim()));
-    }
+    let mut system = String::new();
     system.push_str(
         ". One of the agents you are responsible for wants to run a command that cannot be \
          undone, and it does not run until you have looked at it.\n\n\
@@ -132,6 +127,31 @@ pub async fn review(
          OK or NO\n\
          one short sentence, in the language the request was written in, saying why.",
     );
+    let question = format!(
+        "What the user asked for:\n{}\n\nWhat the agent wants to run:\n{}",
+        crate::ai::text::keep_newest(asked.trim(), 2000),
+        crate::ai::text::keep_newest(shown.trim(), 4000),
+    );
+    // A reviewer that could not be reached has not refused anything. The command goes to
+    // the user, which is where it was going before any of this existed. Proposals do the
+    // opposite — see `review_proposal`.
+    ask(db, &reviewer, &system, &question).await
+}
+
+/// Put one question to one reviewing agent and read the verdict out of the answer.
+///
+/// The identity block, the provider lookup, the timeout and the parse were inline in
+/// `review` and had exactly one caller. Feature approval asks the same question of the
+/// same people, several times over as it climbs the chain, so it lives on its own now.
+async fn ask(db: &Db, reviewer: &Persona, task: &str, question: &str) -> Option<Verdict> {
+    let provider_id = registry::active_provider_id(db, reviewer.provider_id.as_deref()).ok()?;
+    let resolved = registry::build_with_model(db, &provider_id, reviewer.model.as_deref()).ok()?;
+
+    let mut system = format!("You are {}", reviewer.name);
+    if !reviewer.role.trim().is_empty() {
+        system.push_str(&format!(", {}", reviewer.role.trim()));
+    }
+    system.push_str(task);
     if !reviewer.instructions.trim().is_empty() {
         system.push_str("\n\nYour standing instructions:\n");
         system.push_str(&crate::ai::text::keep_newest(reviewer.instructions.trim(), 4000));
@@ -139,30 +159,156 @@ pub async fn review(
 
     let mut req = ChatRequest::new(&resolved.model);
     req.system = system;
-    req.messages = vec![ChatMessage::user(format!(
-        "What the user asked for:\n{}\n\nWhat the agent wants to run:\n{}",
-        crate::ai::text::keep_newest(asked.trim(), 2000),
-        crate::ai::text::keep_newest(shown.trim(), 4000),
-    ))];
+    req.messages = vec![ChatMessage::user(question.to_string())];
     req.temperature = 0.2;
     req.max_tokens = MAX_TOKENS;
 
-    let answer = match tokio::time::timeout(REVIEW_TIMEOUT, resolved.provider.chat(&req, None)).await
-    {
-        Ok(Ok(resp)) => resp.content,
-        // A reviewer that could not be reached has not refused anything. The command goes
-        // to the user, which is where it was going before any of this existed.
+    match tokio::time::timeout(REVIEW_TIMEOUT, resolved.provider.chat(&req, None)).await {
+        Ok(Ok(resp)) => parse(&reviewer.name, &resp.content),
         Ok(Err(e)) => {
             crate::diag(&format!("escalation: {} could not review it: {e}", reviewer.name));
-            return None;
+            None
         }
         Err(_) => {
             crate::diag(&format!("escalation: {} did not answer in time", reviewer.name));
-            return None;
+            None
         }
-    };
+    }
+}
 
-    parse(&reviewer.name, &answer)
+/// What the chain of command decided about a proposed piece of new work.
+#[derive(Debug, Clone)]
+pub struct ProposalOutcome {
+    /// True only when every reviewer up to the top said yes, out loud.
+    pub approved: bool,
+    /// Somebody said no. Distinct from "not approved": a proposal nobody could answer
+    /// is still open and worth putting to a person, and a refused one is decided.
+    pub refused: bool,
+    /// The last agent to answer, or the one that failed to.
+    pub decided_by: Option<Persona>,
+    /// What happened, one line per level, for the record and for the proposer to read.
+    pub steps: Vec<String>,
+}
+
+impl ProposalOutcome {
+    pub fn summary(&self) -> String {
+        self.steps.join("\n")
+    }
+}
+
+/// Everyone who has to agree, in the order they are asked.
+///
+/// `to` stops at one named reviewer; `None` walks to the top of the chain of command,
+/// skipping the proposer — an agent approving its own proposal is not an approval.
+pub fn proposal_chain(all: &[Persona], from: &Persona, to: Option<&Persona>) -> Vec<Persona> {
+    match to {
+        Some(one) => vec![one.clone()],
+        None => persona::chain_to_top(all, from)
+            .into_iter()
+            .filter(|p| p.id != from.id)
+            .cloned()
+            .collect(),
+    }
+}
+
+/// Walk a proposal up the chain of command, one manager at a time.
+///
+/// # Why this fails closed and the command path does not
+///
+/// A destructive command that nobody could review still reaches the user, who answers
+/// it: silence there costs a confirmation prompt. A *feature* that nobody reviewed and
+/// that goes ahead anyway is an agent deciding for itself what the product should be,
+/// and by the time anybody reads about it the code exists. So an unreachable reviewer, a
+/// model that timed out and an answer nobody can parse are all the same thing here — not
+/// approved — and the proposal waits for a person instead.
+///
+/// `to` stops the walk at one named reviewer; `None` walks to the top of the chain.
+pub async fn review_proposal(
+    db: &Db,
+    from: &Persona,
+    to: Option<&Persona>,
+    title: &str,
+    body: &str,
+) -> ProposalOutcome {
+    let all: Vec<Persona> = db
+        .list_personas()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| p.enabled)
+        .collect();
+    let chain = proposal_chain(&all, from, to);
+    if chain.is_empty() {
+        // Nobody above them. That is not approval — it is a proposal that only the user
+        // can answer, and it stays open until they do.
+        return ProposalOutcome {
+            approved: false,
+            refused: false,
+            decided_by: None,
+            steps: vec![format!(
+                "{} answers to the user directly, so there is nobody above them to \
+                 approve this. It is waiting for you.",
+                from.name
+            )],
+        };
+    }
+
+    let task = ". One of the agents you are responsible for wants to build something \
+                that does not exist yet, and it does not start until you have agreed.\n\n\
+                Judge one thing: should this be built at all, now, by us? Improving what \
+                already works needs nobody's permission and is not what this is. New \
+                surface area is a commitment somebody has to maintain, so refuse what is \
+                speculative, what duplicates something we already have, and what nobody \
+                asked for.\n\n\
+                Answer in exactly two lines:\n\
+                OK or NO\n\
+                one short sentence, in the language the proposal was written in, saying why.";
+    let question = format!(
+        "Proposed by: {}\nTitle: {}\n\n{}",
+        from.name,
+        title.trim(),
+        crate::ai::text::keep_newest(body.trim(), 6000),
+    );
+
+    let mut steps: Vec<String> = Vec::new();
+    let mut last: Option<Persona> = None;
+    for reviewer in chain {
+        match ask(db, &reviewer, task, &question).await {
+            Some(v) if v.ok => {
+                steps.push(v.line());
+                last = Some(reviewer);
+            }
+            Some(v) => {
+                steps.push(v.line());
+                return ProposalOutcome {
+                    approved: false,
+                    refused: true,
+                    decided_by: Some(reviewer),
+                    steps,
+                };
+            }
+            None => {
+                // Fail closed. Unlike a command, an unanswered proposal is not a
+                // proposal that goes ahead.
+                steps.push(format!(
+                    "{} did not answer, so this is not approved. It is waiting for a \
+                     person to decide with feature_decide.",
+                    reviewer.name
+                ));
+                return ProposalOutcome {
+                    approved: false,
+                    refused: false,
+                    decided_by: Some(reviewer),
+                    steps,
+                };
+            }
+        }
+    }
+    ProposalOutcome {
+        approved: true,
+        refused: false,
+        decided_by: last,
+        steps,
+    }
 }
 
 /// Read a verdict out of the reply.
@@ -247,6 +393,70 @@ mod tests {
         let lead = mk("Adrian", None);
         let engineer = mk("Gabriel", Some(lead.id.clone()));
         (db, lead, engineer)
+    }
+
+    #[test]
+    fn a_proposal_walks_two_levels_of_the_chain() {
+        use crate::storage::models::PersonaInput;
+        let (db, lead, engineer) = team();
+        // A third level, so "walks up" is a claim with something to walk.
+        let junior = db
+            .upsert_persona(&PersonaInput {
+                id: None,
+                name: "Vlad".into(),
+                role: String::new(),
+                instructions: String::new(),
+                targets: vec![],
+                safety_mode: None,
+                provider_id: None,
+                model: None,
+                enabled: true,
+                reports_to: Some(engineer.id.clone()),
+                workspace_id: None,
+                allowed_paths: Vec::new(),
+                allowed_tools: Vec::new(),
+            })
+            .unwrap();
+        let all = db.list_personas().unwrap();
+
+        // Their manager first, then their manager's manager. Both, in that order — a
+        // proposal that only ever reached the top would make the middle of the org
+        // chart decorative, and one that stopped at the first manager would let a lead
+        // commit the company on their own.
+        let chain = proposal_chain(&all, &junior, None);
+        assert_eq!(
+            chain.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["Gabriel", "Adrian"]
+        );
+        // Never the proposer themselves.
+        assert!(!chain.iter().any(|p| p.id == junior.id));
+        // The top of the chain has nobody above it, so its proposal is the user's to
+        // answer rather than something it can wave through.
+        assert!(proposal_chain(&all, &lead, None).is_empty());
+        // A named reviewer short-circuits the walk.
+        assert_eq!(proposal_chain(&all, &junior, Some(&lead)).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_that_does_not_answer_fails_closed_for_a_proposal() {
+        // The difference from the command path, and the reason this file now has two
+        // policies in it: a destructive command nobody could review still reaches the
+        // user, who answers it. A feature nobody reviewed that goes ahead anyway is an
+        // agent deciding for itself what the product is, and by the time anyone reads
+        // about it the code exists. No provider is configured here, so no reviewer can
+        // answer — which must not read as yes.
+        let (db, _lead, engineer) = team();
+        let outcome = review_proposal(&db, &engineer, None, "A new billing page", "why").await;
+        assert!(!outcome.approved, "silence approved a feature");
+        // And not a refusal either: nobody said no, so it is still worth putting to a
+        // person rather than being closed on their behalf.
+        assert!(!outcome.refused);
+        assert!(outcome.summary().contains("did not answer"), "{}", outcome.summary());
+
+        // Nobody above them at all is the other not-approved: it waits for the user.
+        let alone = review_proposal(&db, &_lead, None, "A new billing page", "why").await;
+        assert!(!alone.approved && !alone.refused);
+        assert!(alone.summary().contains("waiting for you"), "{}", alone.summary());
     }
 
     #[test]

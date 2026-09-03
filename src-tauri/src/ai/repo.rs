@@ -541,27 +541,89 @@ pub fn tool_is_mutating(name: &str) -> bool {
 }
 
 /// The project a call is about: named, or the one open.
+///
+/// Naming one used to reach any project in the database, so an agent working on one
+/// repository could commit, branch and merge in another one by passing its name. A turn
+/// that has a project may only talk about that project; a turn that has none — the agent
+/// the user talks to directly — may still name any of them, which is what makes "how is
+/// the other project doing" answerable from a phone.
+pub(crate) fn pick_project<'a>(
+    all: &'a [crate::storage::models::Workspace],
+    named: Option<&str>,
+    open: Option<&str>,
+) -> Result<&'a crate::storage::models::Workspace, String> {
+    let here = open.map(str::trim).filter(|s| !s.is_empty());
+    match named.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => {
+            let ws = all
+                .iter()
+                .find(|w| w.name.eq_ignore_ascii_case(n) || w.id == n)
+                .ok_or_else(|| format!("no project called {n:?}"))?;
+            match here {
+                Some(open_id) if open_id != ws.id => {
+                    let open_name = all
+                        .iter()
+                        .find(|w| w.id == open_id)
+                        .map(|w| w.name.as_str())
+                        .unwrap_or("this project");
+                    Err(format!(
+                        "{} is not the project you are working on ({open_name}). Its \
+                         repository is not yours to read or change — ask its team.",
+                        ws.name
+                    ))
+                }
+                _ => Ok(ws),
+            }
+        }
+        None => {
+            let here = here.ok_or("no project is open, so name one with `project`")?;
+            all.iter().find(|w| w.id == here).ok_or_else(|| "the open project no longer exists".to_string())
+        }
+    }
+}
+
 fn project_of(
     ctx: &crate::ai::tools::ToolContext,
     args: &serde_json::Value,
 ) -> Result<(String, String), String> {
     let all = ctx.db.list_workspaces().unwrap_or_default();
-    let named = args.get("project").and_then(|v| v.as_str()).map(str::trim);
-    let ws = match named.filter(|n| !n.is_empty()) {
-        Some(n) => all
-            .iter()
-            .find(|w| w.name.eq_ignore_ascii_case(n) || w.id == n)
-            .ok_or_else(|| format!("no project called {n:?}"))?,
-        None => {
-            let here = ctx
-                .workspace_id
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .ok_or("no project is open, so name one with `project`")?;
-            all.iter().find(|w| w.id == here).ok_or("the open project no longer exists")?
-        }
-    };
+    let ws = pick_project(
+        &all,
+        args.get("project").and_then(|v| v.as_str()),
+        ctx.workspace_id.as_deref(),
+    )?;
     Ok((ws.id.clone(), ws.name.clone()))
+}
+
+/// Refuse a repository that lives on a server this turn was not given.
+///
+/// `run_there` runs the git scripts on `loc.vps_id` directly, without the check every
+/// other server-side tool makes through `resolve_target`. One check here covers all five
+/// repo tools, because all five come through `dispatch`.
+fn guard_location(
+    ctx: &crate::ai::tools::ToolContext,
+    workspace_id: &str,
+    workspace_name: &str,
+) -> Result<(), String> {
+    let Some(loc) = location(&ctx.db, workspace_id) else {
+        return Ok(());
+    };
+    if loc.kind != "vps" {
+        return Ok(());
+    }
+    let vps = loc.vps_id.as_deref().unwrap_or("");
+    if vps.is_empty() {
+        return Err(format!("{workspace_name} says its code is on a server but names none"));
+    }
+    if !crate::ai::tools::is_target_allowed(&ctx.targets, vps) {
+        return Err(format!(
+            "{workspace_name}'s repository is on a server this task was not given \
+             (allowed: {}). Ask for that server to be selected rather than working \
+             around it.",
+            if ctx.targets.is_empty() { "none".to_string() } else { ctx.targets.join(", ") }
+        ));
+    }
+    Ok(())
 }
 
 pub async fn dispatch(
@@ -573,6 +635,17 @@ pub async fn dispatch(
         Ok(v) => v,
         Err(e) => return format!("error: {e}"),
     };
+    if let Err(e) = guard_location(ctx, &ws_id, &ws_name) {
+        return format!("error: {e}");
+    }
+    // These four commit, branch, merge and delete branches. They were marked mutating
+    // for plan mode and then went through no safety gate at all, so under "ask every
+    // command" every command was asked about except the ones that rewrite history.
+    if tool_is_mutating(name) {
+        if let Err(e) = authorize_repo(ctx, &ws_id, &format!("{name} on {ws_name}")).await {
+            return format!("error: {e}");
+        }
+    }
     match name {
         "repo_status" => {
             let status = match status_of(&ctx.db, &ctx.sessions, &ws_id).await {
@@ -753,6 +826,35 @@ pub async fn dispatch(
         }
         _ => format!("error: unknown repo tool {name}"),
     }
+}
+
+/// Put a repository change through the same safety gate as any other command.
+///
+/// Wherever the repository is: a project on a server is gated by that server's
+/// effective mode, a local one by the session's.
+async fn authorize_repo(
+    ctx: &crate::ai::tools::ToolContext,
+    workspace_id: &str,
+    gate_command: &str,
+) -> Result<(), String> {
+    let vps = location(&ctx.db, workspace_id)
+        .filter(|l| l.kind == "vps")
+        .and_then(|l| l.vps_id);
+    let base = match vps.as_deref() {
+        Some(id) => crate::ai::safety::effective_mode(&ctx.db, &ctx.safety, id),
+        None => ctx.safety.clone(),
+    };
+    let mode = crate::ai::safety::resolve_session_mode(&ctx.session_state, &ctx.session_id, &base);
+    crate::ai::safety::authorize(
+        &ctx.app,
+        &ctx.db,
+        &ctx.approvals,
+        &mode,
+        &ctx.session_id,
+        vps.as_deref(),
+        gate_command,
+    )
+    .await
 }
 
 /// Where a project's code lives, and how to reach it.
@@ -1110,5 +1212,44 @@ mod tests {
     fn no_cli_installed_yields_nothing_rather_than_an_error() {
         assert!(parse_pull_requests("", chrono::Utc::now()).is_empty());
         assert!(parse_pull_requests("gh: command not found", chrono::Utc::now()).is_empty());
+    }
+
+    fn workspace(id: &str, name: &str) -> crate::storage::models::Workspace {
+        crate::storage::models::Workspace {
+            id: id.into(),
+            name: name.into(),
+            viewport_json: None,
+            layout_mode: None,
+            nodes_json: None,
+            color: None,
+            icon: None,
+            color_mode: None,
+            project_json: None,
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn a_repository_on_a_project_this_session_cannot_see_is_refused() {
+        // Every repo tool takes a `project` name, and naming one used to reach any
+        // project in the database — so an agent working on one repository could commit,
+        // branch and merge in another one just by saying its name.
+        let all = vec![workspace("ws-a", "Alpha"), workspace("ws-b", "Beta")];
+        let err = pick_project(&all, Some("Beta"), Some("ws-a")).unwrap_err();
+        assert!(err.contains("Beta"), "{err}");
+        assert!(err.contains("Alpha"), "{err}");
+
+        // Its own project, by name or by id, still works.
+        assert_eq!(pick_project(&all, Some("Alpha"), Some("ws-a")).unwrap().id, "ws-a");
+        assert_eq!(pick_project(&all, Some("ws-a"), Some("ws-a")).unwrap().id, "ws-a");
+        // And with nothing named, the open one.
+        assert_eq!(pick_project(&all, None, Some("ws-b")).unwrap().id, "ws-b");
+
+        // A turn with no project open may still name any of them: that is the agent the
+        // user talks to, and "how is Beta doing" has to be answerable from a phone.
+        assert_eq!(pick_project(&all, Some("Beta"), None).unwrap().id, "ws-b");
+        // But it must name one — there is nothing to default to.
+        assert!(pick_project(&all, None, None).is_err());
+        assert!(pick_project(&all, Some("Gamma"), None).is_err());
     }
 }

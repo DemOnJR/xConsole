@@ -23,7 +23,13 @@ pub fn definitions() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "project_create".into(),
-            description: "Create a new Terraform project (local files + DB record). Load skill infra/terraform-vps and meta/ponytail before designing HCL. Templates: blank, vps-web, aws-minimal, gcp-minimal. Set backend=tfc with config_json for remote state.".into(),
+            description: "Create a Terraform project: a directory of HCL files on this \
+machine plus the record that binds it to a server or a cloud account. Nothing is deployed \
+— this is where the code lives until terraform_plan and terraform_apply.\n\
+Load the infra/terraform-vps and meta/ponytail skills before designing the HCL rather \
+than writing it from memory. Templates: blank, vps-web, aws-minimal, gcp-minimal. Set \
+backend=tfc with config_json (tfc_org, tfc_workspace from tfc_list_workspaces) to keep \
+state in Terraform Cloud instead of locally.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -41,12 +47,19 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "cloud_account_list".into(),
-            description: "List configured cloud accounts (AWS, GCP, Terraform Cloud). No secrets returned.".into(),
+            description: "List the cloud accounts connected to xConsole — AWS, GCP, \
+Terraform Cloud, Cloudflare — with the id every other tool here takes as \
+cloud_account_id. Call it before guessing an id. Read-only, and it never returns keys or \
+tokens: credentials stay in the OS keychain and are never readable through a tool.".into(),
             parameters: json!({"type": "object", "properties": {}}),
         },
         ToolDef {
             name: "cloud_list_resources".into(),
-            description: "Read-only cloud inventory before planning. AWS: s3_buckets, ec2_instances, all. GCP: gcs_buckets, all.".into(),
+            description: "What already exists in a cloud account, read straight from the \
+provider's API rather than from Terraform state. Use it before writing HCL, so a resource \
+you are about to create is not one that is already there under another name — Terraform \
+will happily build a second one. AWS: s3_buckets, ec2_instances, all. GCP: gcs_buckets, \
+all. Read-only; it never changes anything.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -58,7 +71,10 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "tfc_list_workspaces".into(),
-            description: "List Terraform Cloud workspaces for a TFC cloud account.".into(),
+            description: "List the Terraform Cloud workspaces on a TFC account, with the \
+names project_create expects in config_json (tfc_org, tfc_workspace). Use it to bind a \
+project to the right workspace instead of guessing the name — a wrong workspace name \
+fails at plan time, after the HCL has already been written. Read-only.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -69,19 +85,29 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "tfc_run_status".into(),
-            description: "Poll status of a Terraform Cloud run by run_id.".into(),
+            description: "Where a Terraform Cloud run has got to: queued, planning, \
+needs confirmation, applying, finished or errored. TFC runs are asynchronous — \
+terraform_plan and terraform_apply queue one and return a run_id immediately, and this is \
+the only way to find out what happened.\n\
+Do not poll it in a tight loop. A plan takes tens of seconds and an apply takes minutes: \
+check once, and if it is still running do something else and check again later rather than \
+calling this five times in a row. If it comes back needing confirmation, that is a person's \
+decision, not yours to auto-approve — say so and stop.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "cloud_account_id": {"type": "string"},
-                    "run_id": {"type": "string"}
+                    "cloud_account_id": {"type": "string", "description": "TFC account id from cloud_account_list."},
+                    "run_id": {"type": "string", "description": "The run id terraform_plan or terraform_apply returned."}
                 },
                 "required": ["cloud_account_id", "run_id"]
             }),
         },
         ToolDef {
             name: "cloudflare_list_zones".into(),
-            description: "List all domains / DNS zones in the connected Cloudflare account (Zone IDs, names, status).".into(),
+            description: "List the domains in the connected Cloudflare account with their \
+zone ids and status. Every other Cloudflare tool takes zone_id, so this is the first call \
+— a zone id guessed from a domain name is a call that fails, and a domain that is not in \
+this list is not managed by Cloudflare at all. Read-only.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -91,7 +117,10 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "cloudflare_get_zone_analytics".into(),
-            description: "Get real-time web traffic analytics, HTTP requests, bandwidth, cache ratios, and security threats for a Cloudflare zone/domain.".into(),
+            description: "Traffic figures for a Cloudflare domain over a time window: \
+requests, bandwidth, cache hit ratio and blocked threats. Use it to answer whether a \
+problem is traffic-shaped — a spike, a cache that stopped working, an attack — before \
+going to look at the origin server. Read-only.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -104,7 +133,10 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "cloudflare_list_tunnels".into(),
-            description: "List all Cloudflare Zero Trust / Argo tunnels for a Cloudflare cloud account.".into(),
+            description: "List the Cloudflare tunnels on an account: name, id, and whether \
+each is currently connected. Use it when a site behind a tunnel is unreachable — a tunnel \
+showing as down explains it, and no amount of reading the origin's config will. \
+Read-only.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -114,7 +146,10 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "cloudflare_list_dns".into(),
-            description: "List DNS records for a given Cloudflare zone (domain).".into(),
+            description: "List the DNS records on one Cloudflare zone: type, name, content, \
+proxy state and the record_id that cloudflare_upsert_dns needs in order to CHANGE a record \
+rather than add a second one for the same name. Always read this before editing DNS. \
+Read-only.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -126,24 +161,39 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "cloudflare_upsert_dns".into(),
-            description: "Create or update a DNS record in Cloudflare.".into(),
+            description: "Create or change a DNS record on a live domain. This takes effect \
+publicly within seconds — it is not a draft, and there is no confirmation step after it.\n\
+Before calling it: run cloudflare_list_dns and read what is there now. Pointing an \
+existing name at a new address is done by passing that record's record_id; without one \
+this creates a SECOND record for the same name, and the domain then resolves to both \
+hosts at random. Getting the name wrong takes a production site down, and \
+\"app.example.com\" versus \"app\" is the mistake that does it — Cloudflare treats a \
+bare label as a subdomain of the zone.\n\
+proxied=true hides the origin IP behind Cloudflare and terminates TLS there; that is \
+usually right for a website and wrong for anything that needs a direct connection (SSH, \
+mail, a database). If you change something and it turns out wrong, cloudflare_get_history \
+then cloudflare_revert_action undoes it.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "zone_id": {"type": "string"},
-                    "cloud_account_id": {"type": "string", "description": "Optional: Cloudflare account ID"},
-                    "record_id": {"type": "string", "description": "Optional: specify to update existing record"},
+                    "zone_id": {"type": "string", "description": "Zone id or domain name, from cloudflare_list_zones."},
+                    "cloud_account_id": {"type": "string", "description": "Optional: Cloudflare account id. Defaults to the connected account."},
+                    "record_id": {"type": "string", "description": "The record to CHANGE, from cloudflare_list_dns. Omitting it creates a new record — so leaving it out when a record for this name already exists gives the name two answers."},
                     "type": {"type": "string", "enum": ["A", "AAAA", "CNAME", "TXT", "MX"]},
-                    "name": {"type": "string", "description": "Subdomain or domain (e.g. app.example.com)"},
-                    "content": {"type": "string", "description": "Target IP or hostname"},
-                    "proxied": {"type": "boolean", "description": "Enable Cloudflare proxy (orange cloud)"}
+                    "name": {"type": "string", "description": "Full name, e.g. app.example.com. A bare label is treated as a subdomain of the zone."},
+                    "content": {"type": "string", "description": "Target: an IPv4 for A, IPv6 for AAAA, hostname for CNAME, the text for TXT."},
+                    "proxied": {"type": "boolean", "description": "Route through Cloudflare (orange cloud): hides the origin IP and terminates TLS there. Right for a website; wrong for SSH, mail or a database, which need a direct connection."}
                 },
                 "required": ["zone_id", "type", "name", "content"]
             }),
         },
         ToolDef {
             name: "cloudflare_set_security_level".into(),
-            description: "Set Cloudflare security level for a zone ('essentially_off', 'low', 'medium', 'high', 'under_attack').".into(),
+            description: "Change how aggressively Cloudflare challenges visitors to a zone. \
+This affects real traffic immediately: under_attack shows an interstitial to every \
+visitor, which stops an attack and also breaks APIs, webhooks and anything non-browser \
+hitting that domain. Use it for an active attack and put it back afterwards; do not raise \
+it as a precaution. Levels: essentially_off, low, medium, high, under_attack.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -156,7 +206,10 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "cloudflare_get_history".into(),
-            description: "Get recent Cloudflare configuration edits and actions made to DNS, tunnels, or security levels.".into(),
+            description: "Recent changes made to a Cloudflare account through xConsole — DNS \
+edits, tunnel changes, security level changes — each with the action id that \
+cloudflare_revert_action takes. This is how you answer \"what did we just change?\" after \
+a site breaks, and the only way to get the id needed to undo it. Read-only.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -166,7 +219,11 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "cloudflare_revert_action".into(),
-            description: "Automatically revert / roll back a previous Cloudflare modification using its history action ID.".into(),
+            description: "Undo one Cloudflare change recorded by cloudflare_get_history, \
+putting the record or setting back to what it was before. It takes effect publicly as \
+soon as it runs, exactly like the change it reverses. Get the action_id from \
+cloudflare_get_history — and check that the state it is reverting to is the one you \
+actually want, because a revert of a revert is another live change.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -178,57 +235,98 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "project_list".into(),
-            description: "List all Terraform projects.".into(),
+            description: "List the Terraform projects xConsole knows about: slug, template, \
+backend (vps or tfc) and which server or cloud account each is bound to. Start here — \
+every other project tool is addressed by slug, and guessing a slug fails the call. \
+Read-only and cheap.".into(),
             parameters: json!({"type": "object", "properties": {}}),
         },
         ToolDef {
             name: "project_read".into(),
-            description: "Read a file from a project (e.g. main.tf). Omit path to list files.".into(),
+            description: "Read one file out of a Terraform project — main.tf, variables.tf, \
+terraform.tfvars — or, with path omitted, list what files the project has. Read before \
+you write: project_write overwrites whole files, so editing something you have not read \
+this session means throwing away whatever is in it. Read-only.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "slug": {"type": "string"},
-                    "path": {"type": "string"}
+                    "slug": {"type": "string", "description": "Project slug from project_list."},
+                    "path": {"type": "string", "description": "File within the project, e.g. main.tf. Omit to list the project's files."}
                 },
                 "required": ["slug"]
             }),
         },
         ToolDef {
             name: "project_write".into(),
-            description: "Write or overwrite a file in a project.".into(),
+            description: "Write a file into a Terraform project, replacing it completely if \
+it already exists — there is no partial edit here, so send the whole intended contents and \
+call project_read first if you have not already seen the file this session.\n\
+Writing HCL changes nothing on its own; nothing happens until terraform_plan and \
+terraform_apply. That makes this the safe place to iterate — but it also means a file \
+that looks right has not been checked. Always follow a change with terraform_plan and \
+read the diff before applying.\n\
+Load the infra/terraform-vps skill before designing resources rather than inventing HCL \
+from memory.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "slug": {"type": "string"},
-                    "path": {"type": "string"},
-                    "content": {"type": "string"}
+                    "slug": {"type": "string", "description": "Project slug from project_list."},
+                    "path": {"type": "string", "description": "File within the project, e.g. main.tf."},
+                    "content": {"type": "string", "description": "The complete file. This replaces whatever is there — it is not appended or merged."}
                 },
                 "required": ["slug", "path", "content"]
             }),
         },
         ToolDef {
             name: "terraform_init".into(),
-            description: "Run terraform init. Uses local runner when no VPS is selected; TFC backend projects queue remote runs for plan/apply. Optional runner: local|vps|tfc.".into(),
+            description: "Download providers and set up a project's backend. Run it once \
+after project_create, and again whenever a provider or backend block changes — a plan \
+that fails with \"provider not installed\" or \"backend changed\" is asking for this. \
+Safe: it touches the working directory, never infrastructure. Runs locally when no VPS is \
+selected; runner (local|vps|tfc) overrides that.".into(),
             parameters: terraform_params(false),
         },
         ToolDef {
             name: "terraform_plan".into(),
-            description: "Run terraform plan. backend=tfc projects queue a TFC plan run (no VPS). Otherwise local or VPS runner.".into(),
+            description: "Work out what terraform_apply would change, without changing \
+anything. Run this after every edit to a project's HCL and read the summary line — \
+\"N to add, N to change, N to destroy\" — before deciding whether to apply. A plan that \
+destroys or replaces something you did not expect is the signal to stop and ask, not to \
+apply and find out.\n\
+backend=tfc projects queue a run in Terraform Cloud and return a run_id, so follow with \
+tfc_run_status. Changes nothing either way.".into(),
             parameters: terraform_params(false),
         },
         ToolDef {
             name: "terraform_apply".into(),
-            description: "Run terraform apply. backend=tfc projects queue a TFC apply run. Requires approval unless safety=full.".into(),
+            description: "Apply a Terraform plan: this creates, changes and DESTROYS real \
+infrastructure. It is the most consequential tool here, and several of the things it can \
+do — dropping a database instance, releasing an address, replacing a volume — cannot be \
+undone by running it again.\n\
+ALWAYS run terraform_plan first and read what it says. \"Plan: 2 to add, 0 to change, 1 to \
+destroy\" is the line that matters: if anything is being destroyed or replaced, say what \
+and why, and get the user to agree before applying. A plan that surprises you is a reason \
+to stop, not to apply and see.\n\
+backend=tfc projects queue a run in Terraform Cloud and return a run_id — the apply has \
+not happened yet, so follow with tfc_run_status rather than reporting it as done. Needs \
+approval unless safety is set to full.".into(),
             parameters: terraform_params(true),
         },
         ToolDef {
             name: "plugin_list".into(),
-            description: "List all installed and active xConsole plugins, their status, and available agent tools.".into(),
+            description: "List the xConsole plugins installed on this machine, whether each \
+is enabled, and which agent tools each one contributes. Call it before plugin_toggle so \
+you disable the plugin you meant to, and to find out why a tool you expected is not \
+available. Read-only.".into(),
             parameters: json!({"type": "object", "properties": {}}),
         },
         ToolDef {
             name: "plugin_install".into(),
-            description: "Install an xConsole plugin from GitHub (e.g. 'xconsole-plugins/xconsole-plugin-cloudflare' or URL) or local path.".into(),
+            description: "Install an xConsole plugin from a GitHub repository \
+('owner/repo' or a URL) or a local directory. A plugin runs code inside xConsole and can \
+add agent tools, so install one because the user asked for that specific plugin — never \
+speculatively, and never from a source they did not name. Follow with plugin_list to \
+confirm what it added.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -239,12 +337,18 @@ pub fn definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "plugin_toggle".into(),
-            description: "Enable or disable an installed plugin dynamically at runtime.".into(),
+            description: "Turn an installed xConsole plugin on or off, immediately and \
+without a restart. Disabling one removes its canvas nodes and its agent tools from the \
+running session — including, potentially, tools you are part-way through using — so check \
+plugin_list first and do not disable something because it looked unused.\n\
+Use it to switch off a plugin that is misbehaving, or to enable one the user has just \
+installed. It does not uninstall anything: the plugin stays on disk and keeps its \
+settings.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "plugin_id": { "type": "string" },
-                    "enabled": { "type": "boolean" }
+                    "plugin_id": { "type": "string", "description": "Exact id from plugin_list." },
+                    "enabled": { "type": "boolean", "description": "true enables it now; false disables it now." }
                 },
                 "required": ["plugin_id", "enabled"]
             }),
@@ -254,7 +358,9 @@ pub fn definitions() -> Vec<ToolDef> {
 
 fn terraform_params(apply: bool) -> Value {
     let extra_desc = if apply {
-        "Pass -auto-approve only when the user explicitly asked."
+        "Extra terraform apply flags. Pass -auto-approve only when the user has explicitly \
+agreed to this apply after seeing the plan; on its own it removes the last chance to stop \
+a destroy."
     } else {
         "Extra terraform plan/init flags."
     };
@@ -1222,3 +1328,64 @@ async fn agent_plugin_toggle(args: &Value) -> String {
     }
 }
 
+
+#[cfg(test)]
+mod description_tests {
+    use super::*;
+
+    fn desc(name: &str) -> String {
+        definitions()
+            .into_iter()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("{name} is gone"))
+            .description
+    }
+
+    #[test]
+    fn the_most_destructive_tool_here_says_to_plan_first() {
+        // terraform_apply used to be 102 characters that never mentioned a plan. It is
+        // the one tool in this file that can delete a database, and "requires approval"
+        // is not the same as telling the agent what to look at before asking for one.
+        let d = desc("terraform_apply");
+        assert!(d.contains("terraform_plan"), "{d}");
+        assert!(d.to_lowercase().contains("destroy"), "{d}");
+        assert!(d.contains("tfc_run_status"), "a queued TFC apply is not a finished one");
+    }
+
+    #[test]
+    fn changing_public_dns_says_what_goes_wrong_and_how_to_undo_it() {
+        let d = desc("cloudflare_upsert_dns");
+        assert!(d.contains("cloudflare_list_dns"), "read what is there first: {d}");
+        assert!(d.contains("record_id"), "the create-vs-update trap: {d}");
+        assert!(d.contains("cloudflare_revert_action"), "{d}");
+    }
+
+    #[test]
+    fn a_whole_file_overwrite_says_it_is_a_whole_file_overwrite() {
+        // project_write was 39 characters, and a model that reads "write a file in a
+        // project" has no reason to read the file first.
+        let d = desc("project_write");
+        assert!(d.contains("project_read"), "{d}");
+        assert!(d.contains("terraform_plan"), "writing HCL changes nothing on its own: {d}");
+    }
+
+    #[test]
+    fn an_asynchronous_run_status_tool_says_not_to_poll_it() {
+        let d = desc("tfc_run_status");
+        assert!(d.to_lowercase().contains("do not poll"), "{d}");
+    }
+
+    #[test]
+    fn every_tool_in_this_file_says_more_than_its_own_name() {
+        // The floor: a description that is only a restatement of the tool name tells a
+        // model nothing it did not already have from the name.
+        for def in definitions() {
+            assert!(
+                def.description.len() >= 90,
+                "{} is described in {} characters",
+                def.name,
+                def.description.len()
+            );
+        }
+    }
+}

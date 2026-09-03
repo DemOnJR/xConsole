@@ -18,7 +18,12 @@ use crate::storage::Db;
 ///
 /// Generous enough for a real brief, bounded so one verbose persona cannot crowd out
 /// the memory, skills and host context that share the window.
-const INSTRUCTIONS_MAX_CHARS: usize = 2_000;
+///
+/// Two thousand was set when a persona was a sentence about tone. It is now the only
+/// per-agent soul there is — there is one global SOUL.md for everybody — so a real brief
+/// for a real role (what this project is, how it is built, what this agent must never
+/// do) did not fit and was silently truncated from the top.
+const INSTRUCTIONS_MAX_CHARS: usize = 6_000;
 
 /// Look a persona up by id, or — failing that — by name.
 ///
@@ -52,6 +57,7 @@ pub fn prompt_block(persona: &Persona) -> String {
          Only stop to ask the user something if you genuinely cannot proceed without \
          their decision — not to confirm routine steps, and not because something is slow.",
     );
+    out.push_str(&scope_block(persona));
     let instructions = persona.instructions.trim();
     if !instructions.is_empty() {
         out.push_str("\n\nYour standing instructions:\n");
@@ -60,6 +66,45 @@ pub fn prompt_block(persona: &Persona) -> String {
             INSTRUCTIONS_MAX_CHARS,
         ));
     }
+    out
+}
+
+/// What this agent may touch, and the one thing it must ask before doing.
+///
+/// Both halves are enforced in the tool dispatcher whether or not they are said here —
+/// see [`crate::ai::scope`]. They are said anyway because an agent that discovers its
+/// boundary by being refused wastes a cycle on it, and because an agent that knows it
+/// only owns part of the tree asks a colleague instead of quietly working around it.
+pub fn scope_block(persona: &Persona) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "\n\nWhere you work: you are on one project, and only its files. Paths outside \
+         it are refused — that is deliberate, not a bug to work around, and another \
+         project's code is not yours to read or change even when it would be convenient. \
+         Local paths resolve against the project root, so relative paths are the ones to \
+         use.",
+    );
+    if !persona.allowed_paths.is_empty() {
+        out.push_str(&format!(
+            " You may change: {}. You can read the rest of the project — say what needs \
+             doing elsewhere rather than doing it.",
+            persona.allowed_paths.join(", ")
+        ));
+    }
+    if !persona.allowed_tools.is_empty() {
+        out.push_str(&format!(
+            " Your tools: {}. Anything else is somebody else's job.",
+            persona.allowed_tools.join(", ")
+        ));
+    }
+    out.push_str(
+        "\n\nBefore you build something NEW: fixing, finishing and improving what \
+         already exists is your job and needs nobody's permission. Building something \
+         that does not exist yet — a new page, command, integration or table — is a \
+         decision about what the product is, so call feature_propose and wait. It goes to \
+         your manager, then theirs. While it is undecided you may write documentation and \
+         nothing else.",
+    );
     out
 }
 

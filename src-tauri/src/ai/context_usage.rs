@@ -111,7 +111,11 @@ pub fn default_context_limit(
     }
     match provider_kind {
         "anthropic" => 200_000,
-        "cursor" | "codex_cli" | "opencode_cli" | "antigravity_cli" => 200_000,
+        // Every CLI harness, not just the four that happened to exist when this was
+        // written -- a missing kind here silently falls to the 128K default and
+        // compacts a 1M-context CLI eight times too early.
+        "cursor" | "codex_cli" | "opencode_cli" | "antigravity_cli" | "claude_code"
+        | "grok_cli" => 200_000,
         _ => 128_000,
     }
 }

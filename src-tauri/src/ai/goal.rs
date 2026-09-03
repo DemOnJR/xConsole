@@ -263,6 +263,9 @@ async fn run_cycle(ctx: &GoalContext, goal: &GoalSession) -> Result<String, Stri
          - If nothing is waiting, keep going: next check, next card.\n\
          - goal_check_criteria(met) is refused unless the board, the edit journal or a command transcript records what you did. A paragraph is not evidence.\n\
          - Editing a git repo: repo_status first, then repo_start, then work only in that worktree. agent_send the team the branch and the files. repo_finish when the card is done so the branch does not rot.\n\
+         - You are on ONE project. Paths outside it are refused, and relative paths resolve against its root. Another project's files are not yours even when it would be quicker.\n\
+         - New surface area (a page, command, integration or table that does not exist yet) goes through feature_propose first and waits for the answer. Fixing and finishing what is already there does not.\n\
+         - Off the rails is recoverable: if the same step has failed twice, say so with agent_report rather than trying it a third way.\n\
          This cycle: pick the next unfinished card (or add one), execute it with tools, update the board, then goal_check_criteria (verdict not_yet unless truly done).",
         persona_block = persona_block,
         epoch_hash = epoch_hash,

@@ -43,6 +43,25 @@ pub struct McpBridge {
     pub token: String,
 }
 
+/// What a command builder is handed once the reverse forward is up.
+///
+/// `config_path` is a *shell expression*, not a path: the config is written to a
+/// mode-600 temporary file on the far side and this names the variable holding it, so it
+/// can be dropped into a `--mcp-config` flag as-is. The bearer token used to be
+/// interpolated into argv, where `ps` shows it to every account on the box — which
+/// stopped being theoretical the moment the agent got its own unprivileged user to run
+/// as, since the whole point of that user is that root is not the only one there.
+pub struct McpHandle<'a> {
+    /// Loopback URL on the *remote* side, already forwarded back to this machine.
+    pub url: &'a str,
+    /// Shell expression naming the config file, quoted and ready to pass to a flag.
+    pub config_path: &'a str,
+}
+
+/// The variable the config file path lands in, and the expression that reads it.
+const MCP_CONFIG_VAR: &str = "$XC_MCP_CONFIG";
+const MCP_CONFIG_EXPR: &str = "\"$XC_MCP_CONFIG\"";
+
 /// PATH additions for a non-interactive SSH command.
 ///
 /// `channel.exec` runs the command in a non-interactive, non-login shell, and every
@@ -73,9 +92,10 @@ pub fn is_command_not_found(stderr: &str) -> bool {
 pub async fn run_agent(
     db: &Db,
     vps_id: &str,
+    as_user: Option<&str>,
     bridge: Option<&McpBridge>,
     stdin_data: &str,
-    command_with_mcp: impl FnOnce(Option<&str>) -> String,
+    command_with_mcp: impl FnOnce(Option<&McpHandle>) -> String,
     cancel: Option<Arc<AtomicBool>>,
     mut on_line: impl FnMut(String),
 ) -> Result<AgentRun, String> {
@@ -111,7 +131,19 @@ pub async fn run_agent(
         None => None,
     };
 
-    let command = format!("{PATH_PRELUDE}{}", command_with_mcp(mcp_url.as_deref()));
+    let handle = mcp_url.as_deref().map(|url| McpHandle {
+        url,
+        config_path: MCP_CONFIG_EXPR,
+    });
+    let inner = format!(
+        "{PATH_PRELUDE}{}{}",
+        match (&handle, bridge) {
+            (Some(h), Some(b)) => mcp_config_file_prelude(&mcp_config_json(h.url, &b.token)),
+            _ => String::new(),
+        },
+        command_with_mcp(handle.as_ref()),
+    );
+    let command = wrap_for_user(as_user, &inner);
 
     let mut channel = connected
         .handle
@@ -187,13 +219,36 @@ pub async fn run_agent(
     })
 }
 
-/// The `--mcp-config` value pointing an agent at the tunnelled bridge.
+/// The exact string handed to `channel.exec`, once the run-as-user decision is made.
 ///
-/// Built with `serde_json` and shell-quoted, never by string interpolation: the token is
-/// about to be pasted into a remote shell command line, and one stray quote in it would
-/// either break the run or end the argument early.
-pub fn mcp_config_arg(url: &str, token: &str) -> String {
-    let cfg = serde_json::json!({
+/// `sudo -n` so a box whose sudoers still wants a password fails immediately with a
+/// message instead of hanging on a prompt nobody is at. `-H` sets HOME, which is what
+/// makes the PATH prelude and the CLI's own credential lookup find the agent user's
+/// files rather than root's — and it is why the prelude is wrapped *inside* this shell
+/// rather than prepended outside it. Expanded outside, every `$HOME` in the prelude is
+/// still root's, so a `sudo -u agent` run would search root's `~/.local/bin` and report
+/// the agent's own CLI as not installed.
+///
+/// No user named runs it as whoever the VPS row logs in as, unchanged — which for these
+/// hosts is root, and is the behaviour every existing provider row already has.
+pub(crate) fn wrap_for_user(as_user: Option<&str>, inner: &str) -> String {
+    match as_user.map(str::trim).filter(|u| !u.is_empty()) {
+        Some(user) => format!(
+            "sudo -n -u {} -H bash -lc {}",
+            shell_quote(user),
+            shell_quote(inner)
+        ),
+        None => inner.to_string(),
+    }
+}
+
+/// The MCP client config pointing an agent at the tunnelled bridge.
+///
+/// Built with `serde_json`, never by string interpolation: this ends up inside a remote
+/// shell command line, and one stray quote in the token would either break the run or
+/// end the argument early.
+pub fn mcp_config_json(url: &str, token: &str) -> String {
+    serde_json::json!({
         "mcpServers": {
             "xconsole": {
                 "type": "http",
@@ -201,8 +256,41 @@ pub fn mcp_config_arg(url: &str, token: &str) -> String {
                 "headers": { "Authorization": format!("Bearer {token}") }
             }
         }
-    });
-    shell_quote(&cfg.to_string())
+    })
+    .to_string()
+}
+
+/// Shell that writes the config to a private temporary file and deletes it afterwards.
+///
+/// The config carries this run's bearer token. Passed as an argument it is visible in
+/// `ps` to every account on the machine, which is not an acceptable place for a
+/// credential that can drive SSH to the user's *other* servers. A file created with a
+/// 077 umask is readable only by the account running the agent, and the trap removes it
+/// however the run ends — including a kill, which is how a cancelled turn ends.
+///
+/// `mktemp` is given a template rather than a fixed name so two concurrent runs on the
+/// same box cannot overwrite each other's token.
+pub fn mcp_config_file_prelude(config_json: &str) -> String {
+    format!(
+        "umask 077; {var}=$(mktemp \"${{TMPDIR:-/tmp}}/.xconsole-mcp.XXXXXX\") || exit 1; \
+         trap 'rm -f {expr}' EXIT INT TERM HUP; \
+         printf '%s' {json} > {expr}; ",
+        var = MCP_CONFIG_VAR.trim_start_matches('$'),
+        expr = MCP_CONFIG_EXPR,
+        json = shell_quote(config_json),
+    )
+}
+
+/// Whether a failure is `sudo` refusing to switch user without a password.
+///
+/// Its own failure mode, because the fix is one line in sudoers on the server and every
+/// other reading of "exit 1, no output" sends the user looking at the agent CLI instead.
+pub fn is_sudo_denied(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("a password is required")
+        || s.contains("a terminal is required")
+        || s.contains("sudo: no tty")
+        || (s.contains("sudo") && s.contains("not allowed to execute"))
 }
 
 #[cfg(test)]
@@ -210,11 +298,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_mcp_config_is_quoted_as_one_shell_argument() {
-        let arg = mcp_config_arg("http://127.0.0.1:40001/mcp", "tok-1");
-        assert!(arg.starts_with('\'') && arg.ends_with('\''));
-        assert!(arg.contains("\"type\":\"http\""));
-        assert!(arg.contains("Bearer tok-1"));
+    fn the_mcp_config_names_the_bridge_and_carries_the_run_token() {
+        let cfg = mcp_config_json("http://127.0.0.1:40001/mcp", "tok-1");
+        assert!(cfg.contains("\"type\":\"http\""));
+        assert!(cfg.contains("Bearer tok-1"));
+        assert!(cfg.contains("127.0.0.1:40001"));
+    }
+
+    #[test]
+    fn the_token_reaches_the_agent_in_a_private_file_and_never_in_argv() {
+        // `ps` is readable by every account on the box, and this token can drive SSH to
+        // the user's other servers. Once the agent has its own unprivileged user, root
+        // is no longer the only account there, so argv stopped being a defensible place
+        // to put it.
+        let prelude = mcp_config_file_prelude(&mcp_config_json("http://127.0.0.1:1/mcp", "tok-1"));
+        assert!(prelude.contains("umask 077"), "{prelude}");
+        assert!(prelude.contains("mktemp"), "{prelude}");
+        // Removed however the run ends, a kill included — which is how a cancelled turn
+        // ends.
+        assert!(prelude.contains("trap 'rm -f"), "{prelude}");
+        assert!(prelude.contains("EXIT INT TERM HUP"), "{prelude}");
+        assert!(prelude.trim_end().ends_with(';') || prelude.ends_with(' '), "{prelude}");
     }
 
     #[test]
@@ -222,10 +326,40 @@ mod tests {
         // The token is generated, not user input — but a value that reaches a remote
         // shell command line gets checked anyway, because the day it stops being
         // generated is the day this matters.
-        let arg = mcp_config_arg("http://127.0.0.1:1/mcp", "a'b");
-        assert!(arg.contains("'\\''"), "single quote must be escaped: {arg}");
-        // Exactly one opening and one closing quote survive as delimiters.
-        assert!(arg.starts_with('\'') && arg.ends_with('\''));
+        let prelude = mcp_config_file_prelude(&mcp_config_json("http://127.0.0.1:1/mcp", "a'b"));
+        assert!(prelude.contains("'\\''"), "single quote must be escaped: {prelude}");
+    }
+
+    #[test]
+    fn running_as_another_user_keeps_the_path_prelude_inside_that_users_shell() {
+        // The bug this guards: `$HOME` expanded in the outer (root) shell put root's
+        // ~/.local/bin on the agent user's PATH and left the agent's own install
+        // invisible, which reads as "claude is not installed" on a box where it is.
+        let inner = format!("{PATH_PRELUDE}claude -p");
+        let wrapped = wrap_for_user(Some("xconsole-agent"), &inner);
+        assert!(wrapped.starts_with("sudo -n -u 'xconsole-agent' -H bash -lc "), "{wrapped}");
+        // The whole prelude is one quoted argument to the inner shell, so nothing in it
+        // is expanded before sudo switches user.
+        assert!(!wrapped[..40].contains("$HOME"), "{wrapped}");
+        assert!(wrapped.contains("$HOME"), "the prelude must survive into the inner shell");
+    }
+
+    #[test]
+    fn no_run_as_user_leaves_the_command_exactly_as_it_was() {
+        // Every provider row that exists today has no agent user configured, and their
+        // behaviour must not change.
+        assert_eq!(wrap_for_user(None, "claude -p"), "claude -p");
+        assert_eq!(wrap_for_user(Some("  "), "claude -p"), "claude -p");
+    }
+
+    #[test]
+    fn sudo_refusing_to_switch_user_is_told_apart_from_the_agent_failing() {
+        // One is fixed in sudoers on the server; the other is fixed in the agent. The
+        // raw exit code cannot tell them apart, and guessing sends the user to the
+        // wrong file.
+        assert!(is_sudo_denied("sudo: a password is required"));
+        assert!(is_sudo_denied("sudo: no tty present and no askpass program specified"));
+        assert!(!is_sudo_denied("claude: invalid API key"));
     }
 
     #[test]

@@ -1,7 +1,13 @@
 ﻿import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useAgentStore, type AgentActivityItem } from "../../../src/stores/agentStore";
 import { segmentsFromMessage } from "../../../src/stores/turnSegments";
-import { isCommandItem, isFileEditItem, isSearchItem, isFileReadItem } from "./AgentActivity";
+import {
+  formatDuration,
+  isCommandItem,
+  isFileEditItem,
+  isFileReadItem,
+  isSearchItem,
+} from "./AgentActivity";
 import { useMaskHost } from "../../../src/lib/privacy";
 import { ChevronDownIcon, ChevronRightIcon, ClockIcon, CloseIcon, ICON, ToolsIcon } from "../../../src/components/icons";
 
@@ -119,6 +125,19 @@ export const TrajectoryModal = memo(function TrajectoryModal({
               else if (isSearch) title = `Grep / Search: ${item.label}`;
               else if (isRead) title = `File Read: ${item.label}`;
 
+              // The outcome belongs in the replay. Without it a tool that failed and a
+              // tool that succeeded are the same row, and a trajectory read back to work
+              // out what went wrong shows every step as if it had worked.
+              const outcome: string[] = [];
+              if (item.state === "error") outcome.push("failed");
+              else if (item.state === "awaiting_approval") outcome.push("waited for approval");
+              if (item.exitCode !== undefined && item.exitCode !== 0) {
+                outcome.push(`exit ${item.exitCode}`);
+              }
+              if (item.truncated) outcome.push("output truncated");
+              const duration = formatDuration(item.durationMs);
+              if (duration) outcome.push(duration);
+
               list.push({
                 id: `act-${item.id}-${eventIdx}`,
                 index: eventIdx++,
@@ -126,7 +145,9 @@ export const TrajectoryModal = memo(function TrajectoryModal({
                 role: "assistant",
                 kind: "tool_call",
                 title,
-                subtitle: item.tool ? `tool: ${item.tool}` : undefined,
+                subtitle: [item.tool ? `tool: ${item.tool}` : "", outcome.join(" · ")]
+                  .filter(Boolean)
+                  .join("  ·  ") || undefined,
                 content: item.output || item.detail,
                 activityItem: item,
               });
@@ -340,14 +361,18 @@ export const TrajectoryModal = memo(function TrajectoryModal({
                       </span>
                       <span
                         className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
-                          isUser
-                            ? "bg-blue-500/20 text-blue-300 border border-blue-500/30"
-                            : isTool
-                              ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
-                              : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                          // A failed step is the thing a replay is usually opened to
+                          // find, so it is coloured before anything else.
+                          ev.activityItem?.state === "error"
+                            ? "bg-red-500/20 text-red-300 border border-red-500/30"
+                            : isUser
+                              ? "bg-blue-500/20 text-blue-300 border border-blue-500/30"
+                              : isTool
+                                ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                                : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
                         }`}
                       >
-                        {ev.kind.replace("_", " ")}
+                        {ev.activityItem?.state === "error" ? "failed" : ev.kind.replace("_", " ")}
                       </span>
                       <span className="truncate font-medium text-gray-200">
                         {ev.title}

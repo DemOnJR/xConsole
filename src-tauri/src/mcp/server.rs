@@ -37,8 +37,167 @@ fn truncate_output(s: &str) -> String {
     let omitted_bytes = s.len() - boundary;
     let omitted_lines = s[boundary..].lines().count();
     format!(
-        "{slice}\n\n[Output truncated: {omitted_lines} lines ({omitted_bytes} bytes) omitted. Use read_file_range or grep_search to inspect specific sections]"
+        "{slice}\n\n[Output truncated: {omitted_lines} lines ({omitted_bytes} bytes) omitted. Narrow it: read_file with offset/limit for a window of a file, grep_search to find the line first]"
     )
+}
+
+/// One tool this bridge serves.
+///
+/// The schema and the prose come from [`crate::ai::tools::definitions`]; this only says
+/// which tools exist here and how this transport differs from the in-app one.
+struct BridgedTool {
+    /// The name in `tools::definitions()`, and the name the handler below answers to.
+    name: &'static str,
+    /// Argument keys this transport's handler actually reads. Anything else in the
+    /// shared schema is dropped, because advertising a parameter that is silently
+    /// ignored is how a model concludes a tool is broken.
+    props: &'static [&'static str],
+    /// Overrides the shared `required` list when this transport needs a different one.
+    /// Empty means "keep whatever the shared schema requires, minus dropped keys".
+    required: &'static [&'static str],
+    /// Appended to the shared description. Only ever a real behavioural difference —
+    /// never a restatement of what the tool does.
+    note: &'static str,
+}
+
+const fn tool(
+    name: &'static str,
+    props: &'static [&'static str],
+    required: &'static [&'static str],
+    note: &'static str,
+) -> BridgedTool {
+    BridgedTool {
+        name,
+        props,
+        required,
+        note,
+    }
+}
+
+/// Every tool `tool_call` below implements, in the order a session tends to need them.
+///
+/// Shorter than the in-app set on purpose: this transport has no job runner, no
+/// interactive prompt to ask the user a question through, and no plan gate. A tool that
+/// cannot work here is left out rather than advertised and refused at call time.
+const BRIDGED: &[BridgedTool] = &[
+    tool(
+        "run_command",
+        &["command", "vps_id"],
+        &["command"],
+        "Over this bridge there is no background mode and no job tools: `background` and \
+`timeout_secs` are not accepted, and a command is cut off after about two minutes. For \
+anything slower, start it detached yourself (`nohup … >/tmp/x.log 2>&1 &` or \
+`systemd-run --unit=…`) and read the log back on a later call.",
+    ),
+    tool(
+        "read_file",
+        &["path", "offset", "limit", "vps_id"],
+        // The shared schema declares no `required` at all, which reads as "every
+        // argument is optional" — and a read_file with no path is not a call, it is a
+        // parse failure waiting to happen.
+        &["path"],
+        "One file per call over this bridge — `paths` (the batch form) is not accepted \
+here.",
+    ),
+    tool(
+        "write_file",
+        &["path", "content", "vps_id"],
+        &["path", "content"],
+        "Always a full overwrite over this bridge: `mode: append` is not accepted, so a \
+file too large for one call has to be assembled with edit_file or shell redirection.",
+    ),
+    tool(
+        "edit_file",
+        &["path", "old_string", "new_string", "replace_all", "vps_id"],
+        &["path", "old_string", "new_string"],
+        "One replacement per call over this bridge — the `edits` batch form is not \
+accepted here.",
+    ),
+    tool("list_dir", &["path", "all", "head_limit", "vps_id"], &[], ""),
+    tool(
+        "grep_search",
+        &["pattern", "path", "case_insensitive", "head_limit", "vps_id"],
+        &["pattern"],
+        "This bridge runs plain `grep -rn`: `glob`, `context_lines`, `output_mode`, \
+`multiline` and `offset` are not accepted. Narrow with `path` instead, then read_file \
+with offset/limit around a hit.",
+    ),
+    tool(
+        "find_files",
+        &["pattern", "path", "type", "head_limit", "vps_id"],
+        &["pattern"],
+        "",
+    ),
+    tool("list_vps_targets", &[], &[], ""),
+    tool("skills_list", &[], &[], ""),
+    tool("skill_view", &["category", "name"], &["category", "name"], ""),
+    tool(
+        // No `category`: everything saved over this bridge lands in `unverified/`
+        // regardless, so advertising a category the handler ignores would be a lie.
+        "skill_save",
+        &["name", "content"],
+        &["name", "content"],
+        "Saved unverified over this bridge, and only when xConsole's safety mode is Full: \
+a skill written from a server is a standing instruction to every later agent, so it is \
+quarantined until a person promotes it.",
+    ),
+    tool("memory_save", &["entry"], &["entry"], ""),
+    tool("set_project_brief", &["content"], &["content"], ""),
+    tool("host_memory_get", &["vps_id"], &["vps_id"], ""),
+    tool(
+        "host_memory_update",
+        &["vps_id", "kind", "content"],
+        &["vps_id", "kind", "content"],
+        "",
+    ),
+    tool("canvas_open_terminal", &["vps_id"], &[], ""),
+    tool("canvas_open_sftp", &["vps_id"], &[], ""),
+    tool("canvas_tile", &[], &[], ""),
+    tool("canvas_close", &["node_id", "vps_id"], &[], ""),
+    tool("canvas_refresh", &["node_id", "vps_id"], &[], ""),
+];
+
+/// The shared description, plus this transport's difference where there is one.
+fn bridged_description(shared: &str, note: &str) -> String {
+    if note.is_empty() {
+        shared.to_string()
+    } else {
+        format!("{shared}\n\nOn this connection: {note}")
+    }
+}
+
+/// The shared schema, narrowed to the arguments this transport reads.
+fn bridged_schema(shared: &Value, b: &BridgedTool) -> Value {
+    let empty = serde_json::Map::new();
+    let props = shared
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .unwrap_or(&empty);
+    let mut kept = serde_json::Map::new();
+    for key in b.props {
+        if let Some(v) = props.get(*key) {
+            kept.insert((*key).to_string(), v.clone());
+        }
+    }
+    let required: Vec<Value> = if b.required.is_empty() {
+        shared
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|r| {
+                r.iter()
+                    .filter(|v| v.as_str().map(|s| b.props.contains(&s)).unwrap_or(false))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        b.required.iter().map(|s| json!(s)).collect()
+    };
+    json!({
+        "type": "object",
+        "properties": Value::Object(kept),
+        "required": required,
+    })
 }
 
 pub(crate) struct McpSession {
@@ -164,236 +323,37 @@ impl McpSession {
         }
     }
 
+    /// The tools this bridge serves, described the way the in-app agent sees them.
+    ///
+    /// These used to be hand-declared here, a second and much worse copy of schemas that
+    /// already exist in [`crate::ai::tools::definitions`]. That copy is the one a Claude
+    /// Code agent on the VPS actually reads, so every sentence written for the in-app
+    /// agent — when a tool is the wrong choice, what the alternative is, what a
+    /// parameter is bounded to — stopped at the app's edge and the remote agent got
+    /// "Run a shell command directly on the user's remote Linux VPS over SSH." Worse, the
+    /// two drifted: this copy advertised a `read_file` with no bound at all next to a
+    /// separate `read_file_range`, so the obvious call was the one that could return a
+    /// 200 MB log.
+    ///
+    /// Now there is one source. [`BRIDGED`] says which tools this transport implements
+    /// and which arguments its handlers really read; everything a model reads comes from
+    /// the shared definition, plus a note wherever this transport genuinely behaves
+    /// differently from the in-app one. A description that promises a parameter this
+    /// bridge ignores is worse than a terse one.
     fn tool_list(&self) -> Value {
-        json!({
-            "tools": [
-                {
-                    "name": "run_command",
-                    "description": "Run a shell command directly on the user's remote Linux VPS over SSH.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "command": { "type": "string", "description": "The bash/shell command string to execute." },
-                            "vps_id": { "type": "string", "description": "Target VPS id; required when multiple targets are selected." }
-                        },
-                        "required": ["command"]
-                    }
-                },
-                {
-                    "name": "read_file",
-                    "description": "Read the entire content of a text file from a VPS.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "path": { "type": "string", "description": "Absolute remote file path." },
-                            "vps_id": { "type": "string", "description": "Target VPS id." }
-                        },
-                        "required": ["path"]
-                    }
-                },
-                {
-                    "name": "read_file_range",
-                    "description": "Read a specific line window of a remote file with line numbers (e.g. for inspecting large logs or source files).",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "path": { "type": "string", "description": "Absolute remote file path." },
-                            "offset": { "type": "integer", "description": "Start line (1-indexed). Defaults to 1." },
-                            "limit": { "type": "integer", "description": "Number of lines to read. Defaults to 250." },
-                            "vps_id": { "type": "string", "description": "Target VPS id." }
-                        },
-                        "required": ["path"]
-                    }
-                },
-                {
-                    "name": "edit_file",
-                    "description": "Targeted diff search-and-replace edit on a remote file. Replaces unique old_string with new_string. Always prefer this over rewriting entire files.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "path": { "type": "string", "description": "Absolute remote file path." },
-                            "old_string": { "type": "string", "description": "Unique exact snippet of current code to replace." },
-                            "new_string": { "type": "string", "description": "New replacement code." },
-                            "replace_all": { "type": "boolean", "description": "Replace all occurrences if multiple matches exist. Defaults to false." },
-                            "vps_id": { "type": "string", "description": "Target VPS id." }
-                        },
-                        "required": ["path", "old_string", "new_string"]
-                    }
-                },
-                {
-                    "name": "write_file",
-                    "description": "Create a new file or overwrite an existing file on a VPS. For editing existing code prefer edit_file.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "path": { "type": "string", "description": "Absolute remote file path." },
-                            "content": { "type": "string", "description": "Full file content." },
-                            "vps_id": { "type": "string", "description": "Target VPS id." }
-                        },
-                        "required": ["path", "content"]
-                    }
-                },
-                {
-                    "name": "list_directory",
-                    "description": "List files and subdirectories in a remote directory with file sizes, permissions, and modification times.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "path": { "type": "string", "description": "Remote directory path (defaults to current dir)." },
-                            "vps_id": { "type": "string", "description": "Target VPS id." }
-                        },
-                        "required": []
-                    }
-                },
-                {
-                    "name": "grep_search",
-                    "description": "Fast regex/text pattern search across files in a remote directory.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "pattern": { "type": "string", "description": "Search pattern or regular expression." },
-                            "path": { "type": "string", "description": "Directory or file to search in (defaults to .)." },
-                            "case_sensitive": { "type": "boolean", "description": "Case sensitive match. Defaults to true." },
-                            "max_results": { "type": "integer", "description": "Max match lines. Defaults to 50." },
-                            "vps_id": { "type": "string", "description": "Target VPS id." }
-                        },
-                        "required": ["pattern"]
-                    }
-                },
-                {
-                    "name": "file_search",
-                    "description": "Search for files and directories matching a glob pattern.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "pattern": { "type": "string", "description": "File name pattern (e.g. '*.conf', 'Dockerfile', 'index.*')." },
-                            "path": { "type": "string", "description": "Root path to search from. Defaults to .." },
-                            "max_depth": { "type": "integer", "description": "Max directory search depth. Defaults to 5." },
-                            "vps_id": { "type": "string", "description": "Target VPS id." }
-                        },
-                        "required": ["pattern"]
-                    }
-                },
-                {
-                    "name": "list_vps_targets",
-                    "description": "List VPS targets available in this session (id, name, host, user, port).",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "skills_list",
-                    "description": "List available agent skills and operational playbooks.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "skill_view",
-                    "description": "Read a skill SKILL.md playbook before using it.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "category": { "type": "string" },
-                            "name": { "type": "string" }
-                        },
-                        "required": ["category", "name"]
-                    }
-                },
-                {
-                    "name": "skill_save",
-                    "description": "Create or update a skill playbook.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "category": { "type": "string" },
-                            "name": { "type": "string" },
-                            "content": { "type": "string" }
-                        },
-                        "required": ["category", "name", "content"]
-                    }
-                },
-                {
-                    "name": "memory_save",
-                    "description": "Save a durable fact to persistent agent memory.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "entry": { "type": "string" }
-                        },
-                        "required": ["entry"]
-                    }
-                },
-                {
-                    "name": "set_project_brief",
-                    "description": "Write or update the active workspace project brief (CONTEXT.md).",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": { "content": { "type": "string" } },
-                        "required": ["content"]
-                    }
-                },
-                {
-                    "name": "host_memory_get",
-                    "description": "Read the institutional PROFILE.md and MEMORY.md dossier for a target VPS.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": { "vps_id": { "type": "string", "description": "Selected VPS id." } },
-                        "required": ["vps_id"]
-                    }
-                },
-                {
-                    "name": "host_memory_update",
-                    "description": "Update target VPS dossier (kind=profile replaces PROFILE.md; kind=memory appends facts).",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "vps_id": { "type": "string" },
-                            "kind": { "type": "string", "enum": ["profile", "memory"] },
-                            "content": { "type": "string" }
-                        },
-                        "required": ["vps_id", "kind", "content"]
-                    }
-                },
-                {
-                    "name": "canvas_open_terminal",
-                    "description": "Open a live terminal for a server on the xConsole canvas so the user watches in real time.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": { "vps_id": { "type": "string" } },
-                        "required": []
-                    }
-                },
-                {
-                    "name": "canvas_open_sftp",
-                    "description": "Open an SFTP file-browser panel for a server on the xConsole canvas.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": { "vps_id": { "type": "string" } },
-                        "required": []
-                    }
-                },
-                {
-                    "name": "canvas_tile",
-                    "description": "Arrange open canvas panels into a clean tiled grid layout.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "canvas_close",
-                    "description": "Close a canvas panel. Pass node_id or vps_id.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": { "node_id": { "type": "string" }, "vps_id": { "type": "string" } },
-                        "required": []
-                    }
-                },
-                {
-                    "name": "canvas_refresh",
-                    "description": "Reconnect a terminal node on the canvas.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": { "node_id": { "type": "string" }, "vps_id": { "type": "string" } },
-                        "required": []
-                    }
-                }
-            ]
-        })
+        let defs = crate::ai::tools::definitions(&self.home);
+        let tools: Vec<Value> = BRIDGED
+            .iter()
+            .filter_map(|b| {
+                let def = defs.iter().find(|d| d.name == b.name)?;
+                Some(json!({
+                    "name": b.name,
+                    "description": bridged_description(&def.description, b.note),
+                    "inputSchema": bridged_schema(&def.parameters, b),
+                }))
+            })
+            .collect();
+        json!({ "tools": tools })
     }
 
     fn resource_list(&self) -> Value {
@@ -756,38 +716,19 @@ impl McpSession {
                     Err(e) => (format!("error: {e}"), true),
                 }
             }
-            "read_file" => {
-                let path = match args.get("path").and_then(|v| v.as_str()) {
-                    Some(p) if !p.is_empty() => p,
-                    _ => return ("error: missing path".into(), true),
-                };
-                let vps_id = match self.resolve_vps(args) {
-                    Ok(id) => id,
-                    Err(e) => return (format!("error: {e}"), true),
-                };
-                let cmd = format!("cat -- {}", shell_quote(path));
-                if let Err(e) = self.allow_read(Some(&vps_id), path) {
-                    return (format!("error: {e}"), true);
-                }
-                match run_vps_command(&self.db, &vps_id, &cmd).await {
-                    Ok(out) => {
-                        let text = if out.stdout.is_empty() {
-                            format!("exit_code: {}\nstderr:\n{}", out.exit_code, out.stderr)
-                        } else {
-                            out.stdout
-                        };
-                        (truncate_output(&text), out.exit_code != 0)
-                    }
-                    Err(e) => (format!("error: {e}"), true),
-                }
-            }
-            "read_file_range" => {
+            // `read_file_range` was a second tool that did what `read_file` should always
+            // have done. Two entries meant the unbounded one was the obvious call and the
+            // bounded one was the exception, so a 200 MB log was one plausible tool call
+            // away. Now there is one tool with an optional window, and the old name is
+            // still answered for any agent mid-session that learned it.
+            "read_file" | "read_file_range" => {
                 let path = match args.get("path").and_then(|v| v.as_str()) {
                     Some(p) if !p.is_empty() => p,
                     _ => return ("error: missing path".into(), true),
                 };
                 let offset = args.get("offset").and_then(|v| v.as_i64());
                 let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let windowed = offset.is_some() || limit.is_some();
                 let vps_id = match self.resolve_vps(args) {
                     Ok(id) => id,
                     Err(e) => return (format!("error: {e}"), true),
@@ -798,10 +739,20 @@ impl McpSession {
                 let cmd = format!("cat -- {}", shell_quote(path));
                 match run_vps_command(&self.db, &vps_id, &cmd).await {
                     Ok(out) if out.exit_code == 0 => {
-                        let formatted = crate::ai::file_ops::format_read(&out.stdout, offset, limit);
-                        (truncate_output(&formatted), false)
+                        // Line numbers whenever a window was asked for, because the next
+                        // call is usually "now read around line N" and an unnumbered
+                        // window cannot answer it.
+                        let text = if windowed {
+                            crate::ai::file_ops::format_read(&out.stdout, offset, limit)
+                        } else {
+                            out.stdout
+                        };
+                        (truncate_output(&text), false)
                     }
-                    Ok(out) => (format!("exit_code: {}\nstderr:\n{}", out.exit_code, out.stderr), true),
+                    Ok(out) => (
+                        format!("exit_code: {}\nstderr:\n{}", out.exit_code, out.stderr),
+                        true,
+                    ),
                     Err(e) => (format!("error: {e}"), true),
                 }
             }
@@ -882,8 +833,18 @@ impl McpSession {
                     Err(e) => (format!("error: {e}"), true),
                 }
             }
-            "list_directory" => {
+            // `list_directory` was this transport's own name for the tool the rest of
+            // the app calls `list_dir`. One name now, the old one still answered.
+            "list_dir" | "list_directory" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                // Default true, because a hidden file is usually exactly what is being
+                // looked for — the same default the in-app tool documents.
+                let all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(true);
+                let head_limit = args
+                    .get("head_limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(100)
+                    .clamp(1, 2000);
                 let vps_id = match self.resolve_vps(args) {
                     Ok(id) => id,
                     Err(e) => return (format!("error: {e}"), true),
@@ -891,7 +852,11 @@ impl McpSession {
                 if let Err(e) = self.allow_read(Some(&vps_id), path) {
                     return (format!("error: {e}"), true);
                 }
-                let cmd = format!("ls -la --time-style=iso -- {}", shell_quote(path));
+                let flags = if all { "-la" } else { "-l" };
+                let cmd = format!(
+                    "ls {flags} --time-style=iso -- {} | head -n {head_limit}",
+                    shell_quote(path)
+                );
                 match run_vps_command(&self.db, &vps_id, &cmd).await {
                     Ok(out) if out.exit_code == 0 => (truncate_output(&out.stdout), false),
                     Ok(out) => (format!("exit_code: {}\nstderr:\n{}", out.exit_code, out.stderr), true),
@@ -904,8 +869,20 @@ impl McpSession {
                     _ => return ("error: missing pattern".into(), true),
                 };
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-                let case_sensitive = args.get("case_sensitive").and_then(|v| v.as_bool()).unwrap_or(true);
-                let max_results = args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(50).min(200);
+                // The in-app schema spells this `case_insensitive` and bounds results
+                // with `head_limit`. Both are read here so the advertised names work,
+                // and the two names this transport used to advertise on its own still
+                // do, for an agent mid-session that learned them.
+                let case_sensitive = match args.get("case_insensitive").and_then(|v| v.as_bool()) {
+                    Some(insensitive) => !insensitive,
+                    None => args.get("case_sensitive").and_then(|v| v.as_bool()).unwrap_or(true),
+                };
+                let max_results = args
+                    .get("head_limit")
+                    .or_else(|| args.get("max_results"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(50)
+                    .clamp(1, 250);
                 let vps_id = match self.resolve_vps(args) {
                     Ok(id) => id,
                     Err(e) => return (format!("error: {e}"), true),
@@ -931,13 +908,24 @@ impl McpSession {
                     Err(e) => (format!("error: {e}"), true),
                 }
             }
-            "file_search" => {
+            // `file_search` was this transport's own name for `find_files`.
+            "find_files" | "file_search" => {
                 let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
                     Some(p) if !p.is_empty() => p,
                     _ => return ("error: missing pattern".into(), true),
                 };
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-                let max_depth = args.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(5);
+                let max_depth = args.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(8);
+                let head_limit = args
+                    .get("head_limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(200)
+                    .clamp(1, 2000);
+                let kind_flag = match args.get("type").and_then(|v| v.as_str()).unwrap_or("file") {
+                    "dir" => "-type d ",
+                    "any" => "",
+                    _ => "-type f ",
+                };
                 let vps_id = match self.resolve_vps(args) {
                     Ok(id) => id,
                     Err(e) => return (format!("error: {e}"), true),
@@ -946,7 +934,7 @@ impl McpSession {
                     return (format!("error: {e}"), true);
                 }
                 let cmd = format!(
-                    "find {} -maxdepth {max_depth} -name {} ! -path '*/.git/*' ! -path '*/node_modules/*' ! -path '*/target/*' 2>/dev/null | head -n 100",
+                    "find {} -maxdepth {max_depth} {kind_flag}-name {} ! -path '*/.git/*' ! -path '*/node_modules/*' ! -path '*/target/*' 2>/dev/null | head -n {head_limit}",
                     shell_quote(path),
                     shell_quote(pattern)
                 );
@@ -1312,4 +1300,106 @@ fn json_response(id: Value, result: Option<Value>, error: Option<Value>) -> Stri
         obj["error"] = e;
     }
     obj.to_string()
+}
+
+#[cfg(test)]
+mod bridged_tool_tests {
+    use super::*;
+
+    fn shared() -> Vec<crate::ai::provider::ToolDef> {
+        // `definitions` ignores the home it is handed; it only needs one to exist.
+        crate::ai::tools::definitions(&crate::ai::AgentHome::new(std::env::temp_dir()))
+    }
+
+    #[test]
+    fn every_bridged_tool_takes_its_description_from_the_shared_definition() {
+        // The bug this replaces: a second, hand-written copy of these schemas lived
+        // here, and it was the copy a Claude Code agent on the VPS actually read. A
+        // name that no longer resolves means the bridge has silently gone back to
+        // advertising nothing for that tool.
+        let defs = shared();
+        for b in BRIDGED {
+            assert!(
+                defs.iter().any(|d| d.name == b.name),
+                "{} is bridged but no longer exists in tools::definitions()",
+                b.name
+            );
+        }
+    }
+
+    #[test]
+    fn no_tool_advertises_an_argument_this_transport_ignores() {
+        // Advertising a parameter that is silently dropped is how a model concludes a
+        // tool is broken and stops using it.
+        let defs = shared();
+        for b in BRIDGED {
+            let def = defs.iter().find(|d| d.name == b.name).unwrap();
+            let schema = bridged_schema(&def.parameters, b);
+            let props = schema["properties"].as_object().unwrap();
+            for key in props.keys() {
+                assert!(
+                    b.props.contains(&key.as_str()),
+                    "{} advertises {key}, which its handler never reads",
+                    b.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_tool_that_cannot_work_without_an_argument_declares_it_required() {
+        // `read_file` is the one that matters: the shared schema declares no `required`
+        // at all, which reads as "every argument is optional", and a read_file with no
+        // path is a parse failure waiting to happen.
+        let defs = shared();
+        let must = [
+            ("run_command", "command"),
+            ("read_file", "path"),
+            ("write_file", "content"),
+            ("edit_file", "old_string"),
+            ("grep_search", "pattern"),
+            ("find_files", "pattern"),
+        ];
+        for (name, key) in must {
+            let b = BRIDGED.iter().find(|b| b.name == name).unwrap();
+            let def = defs.iter().find(|d| d.name == name).unwrap();
+            let schema = bridged_schema(&def.parameters, b);
+            let required = schema["required"].as_array().unwrap();
+            assert!(
+                required.iter().any(|v| v == key),
+                "{name} does not require {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn reading_a_file_is_one_tool_with_an_optional_window() {
+        // Two entries meant the unbounded one was the obvious call and the bounded one
+        // was the exception, so a 200 MB log was one plausible tool call away.
+        assert!(
+            !BRIDGED.iter().any(|b| b.name == "read_file_range"),
+            "read_file_range must not be advertised as a separate tool"
+        );
+        let b = BRIDGED.iter().find(|b| b.name == "read_file").unwrap();
+        assert!(b.props.contains(&"offset"));
+        assert!(b.props.contains(&"limit"));
+    }
+
+    #[test]
+    fn a_note_is_added_only_where_this_transport_really_differs() {
+        // run_command has no job runner here, and a description that promised one would
+        // send the agent looking for job_status on a connection that has none.
+        let defs = shared();
+        let b = BRIDGED.iter().find(|b| b.name == "run_command").unwrap();
+        let def = defs.iter().find(|d| d.name == "run_command").unwrap();
+        let text = bridged_description(&def.description, b.note);
+        assert!(text.contains("fresh shell"), "the shared prose must survive: {text}");
+        assert!(text.contains("On this connection:"), "{text}");
+        assert!(text.contains("nohup"), "it must say what to do instead: {text}");
+
+        // And nothing is appended where there is no difference.
+        let b = BRIDGED.iter().find(|b| b.name == "list_dir").unwrap();
+        let def = defs.iter().find(|d| d.name == "list_dir").unwrap();
+        assert!(!bridged_description(&def.description, b.note).contains("On this connection:"));
+    }
 }

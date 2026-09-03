@@ -6,7 +6,33 @@ import { useVpsStore } from "../../../src/stores/vpsStore";
 import { useCanvasStore } from "../../../src/stores/canvasStore";
 import { redactExportText } from "../../../src/lib/agentExport";
 import { HashSpinner } from "./HashSpinner";
+import {
+  BookIcon,
+  CloseIcon,
+  LockIcon,
+  PlanIcon,
+  SearchIcon,
+  TerminalIcon,
+  ZapIcon,
+} from "../../../src/components/icons";
 import { useMaskHost } from "../../../src/lib/privacy";
+
+/**
+ * How long a tool took, or nothing at all.
+ *
+ * Sub-100ms is noise on a row that is mostly about what ran, so it is left off rather
+ * than shown as "0.0s". Measured in the UI from the call to its result: the backend does
+ * not send a duration, and a wall-clock figure that includes the SSH round trip is the
+ * one a person is actually waiting through.
+ */
+export function formatDuration(ms: number | undefined): string {
+  if (ms === undefined || ms < 100) return "";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const mins = Math.floor(ms / 60_000);
+  const secs = Math.round((ms % 60_000) / 1000);
+  return `${mins}m ${secs}s`;
+}
 
 function truncate(s: string, max: number): string {
   const flat = s.replace(/\s+/g, " ").trim();
@@ -277,6 +303,7 @@ function ActivityItemRow({
 }) {
   const maskHost = useMaskHost();
   const running = item.state === "running";
+  const awaiting = item.state === "awaiting_approval";
   const failed = item.state === "error";
   const hostLabel = hostFromCommandLabel(item.label);
   const isCmd = isCommandItem(item);
@@ -323,7 +350,11 @@ function ActivityItemRow({
     if (cmd) void navigator.clipboard.writeText(cmd);
   };
 
-  // Icon badge based on tool category
+  // Icon badge based on tool category.
+  //
+  // SVG throughout, per AGENTS.md: these were emoji (a page, a magnifier, a lightning
+  // bolt), which render at a different size and weight on every platform and sit beside
+  // the SVG icons used everywhere else in the app.
   const renderBadge = () => {
     if (running) {
       return (
@@ -333,44 +364,74 @@ function ActivityItemRow({
         />
       );
     }
+    // Waiting on a person is not the same as working, and it used to look identical.
+    if (awaiting) {
+      return (
+        <span
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-amber-500/40 bg-amber-950/50 text-amber-300"
+          aria-label="Waiting for your approval"
+          title="Waiting for your approval"
+        >
+          <LockIcon size={10} />
+        </span>
+      );
+    }
     if (failed) {
       return (
-        <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-red-950/60 font-mono text-[10px] font-bold text-red-400 border border-red-500/30">
-          ✕
+        <span
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-red-500/30 bg-red-950/60 text-red-400"
+          aria-label="Failed"
+        >
+          <CloseIcon size={10} />
         </span>
       );
     }
     if (isCmd) {
       return (
-        <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-emerald-950/60 font-mono text-[10px] font-bold text-emerald-400 border border-emerald-500/30">
-          $
+        <span
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-emerald-500/30 bg-emerald-950/60 text-emerald-400"
+          aria-label="Command"
+        >
+          <TerminalIcon size={10} />
         </span>
       );
     }
     if (isEdit) {
       return (
-        <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-sky-950/60 font-mono text-[10px] font-bold text-sky-400 border border-sky-500/30">
-          ✎
+        <span
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-sky-500/30 bg-sky-950/60 text-sky-400"
+          aria-label="File edit"
+        >
+          <PlanIcon size={10} />
         </span>
       );
     }
     if (isRead) {
       return (
-        <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-slate-800/60 text-[10px] text-slate-300 border border-slate-600/30">
-          📄
+        <span
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-slate-600/30 bg-slate-800/60 text-slate-300"
+          aria-label="File read"
+        >
+          <BookIcon size={10} />
         </span>
       );
     }
     if (isSearch) {
       return (
-        <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-cyan-950/60 text-[10px] text-cyan-300 border border-cyan-500/30">
-          🔍
+        <span
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-cyan-500/30 bg-cyan-950/60 text-cyan-300"
+          aria-label="Search"
+        >
+          <SearchIcon size={10} />
         </span>
       );
     }
     return (
-      <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-purple-950/60 text-[10px] text-purple-300 border border-purple-500/30">
-        ⚡
+      <span
+        className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-purple-500/30 bg-purple-950/60 text-purple-300"
+        aria-label="Tool call"
+      >
+        <ZapIcon size={10} />
       </span>
     );
   };
@@ -402,9 +463,11 @@ function ActivityItemRow({
             className={`min-w-0 flex-1 truncate font-mono text-[11px] ${
               failed
                 ? "text-red-300 font-medium"
-                : running
-                  ? "text-cyan-200 font-medium"
-                  : "text-gray-300 group-hover:text-white"
+                : awaiting
+                  ? "text-amber-200 font-medium"
+                  : running
+                    ? "text-cyan-200 font-medium"
+                    : "text-gray-300 group-hover:text-white"
             }`}
           >
             {maskHost(labelText())}
@@ -418,6 +481,33 @@ function ActivityItemRow({
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
+          {/* What actually happened. Without these a failed call and a successful one
+              looked the same until the row was expanded, and a truncated result read as
+              a complete one. */}
+          {awaiting && (
+            <span className="shrink-0 rounded border border-amber-500/40 bg-amber-950/40 px-1.5 py-0.2 font-mono text-[9px] text-amber-300">
+              needs you
+            </span>
+          )}
+          {item.exitCode !== undefined && item.exitCode !== 0 && (
+            <span className="shrink-0 rounded border border-red-500/40 bg-red-950/40 px-1.5 py-0.2 font-mono text-[9px] text-red-300">
+              exit {item.exitCode}
+            </span>
+          )}
+          {item.truncated && (
+            <span
+              className="shrink-0 rounded border border-amber-600/40 bg-amber-950/30 px-1.5 py-0.2 font-mono text-[9px] text-amber-300/90"
+              title="The output was cut off — the agent did not see all of it either"
+            >
+              truncated
+            </span>
+          )}
+          {formatDuration(item.durationMs) && (
+            <span className="shrink-0 font-mono text-[9px] text-gray-500">
+              {formatDuration(item.durationMs)}
+            </span>
+          )}
+
           {/* Diff stats pills */}
           {isEdit && (added > 0 || removed > 0) && (
             <span className="flex items-center gap-1 font-mono text-[10px]">

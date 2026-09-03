@@ -35,6 +35,39 @@ export function classifyChat(text: string): ChatIntent {
   return { kind: "other" };
 }
 
+/**
+ * Whether a typed message may stand in for pressing the button on an approval card.
+ *
+ * For an ordinary command, yes: "ok" while a card is up is unambiguous, and making
+ * someone reach for the mouse to confirm `systemctl restart nginx` trains them to stop
+ * reading the cards at all.
+ *
+ * For a command the backend classified as irreversible, no. The vocabulary is identical
+ * — "k", "go", "sure" are how a person approves a plan, agrees with a sentence, or
+ * answers a question that arrived a moment earlier — so the classifier cannot tell
+ * consent to delete /srv/app from ordinary agreement, and the cost of being wrong is not
+ * symmetric. The card is also the only place the blast radius and the preview are in
+ * front of them; a "yes" typed into the chat box was very possibly answering something
+ * else on screen.
+ */
+export function chatCanApproveCommand(text: string, irreversible: boolean): boolean {
+  if (irreversible) return false;
+  const intent = classifyChat(text);
+  return intent.kind === "approve" || intent.kind === "continue";
+}
+
+/**
+ * Whether a typed message refuses a pending approval.
+ *
+ * Not the mirror of the rule above: "no" is always allowed to stop something, whatever
+ * it was going to do. Refusing to act on a refusal because the command was dangerous
+ * would be exactly backwards.
+ */
+export function chatRejectsCommand(text: string): boolean {
+  const intent = classifyChat(text);
+  return intent.kind === "reject" || intent.kind === "cancel";
+}
+
 export function chatApprovesPlan(text: string, previousAssistant: string): boolean {
   const intent = classifyChat(text);
   if (intent.kind === "approve") return true;

@@ -77,7 +77,9 @@ import { ToolCallsModule } from "./harness/ToolCallsModule";
 import { ContextMemoryModule } from "./harness/ContextMemoryModule";
 import { TerminalLogsModule } from "./harness/TerminalLogsModule";
 
+import { parseApproval } from "../../../src/lib/tauri";
 import type { AgentApproval, AgentQuestion } from "../../../src/lib/tauri";
+import { AlertIcon } from "./icons";
 
 function formatSessionDate(s?: string | null): string {
   if (!s) return "";
@@ -128,6 +130,20 @@ export function toggleAgentFillPane(id: string) {
 
 // ---- Interactive popups ----------------------------------------------------
 
+/**
+ * The last thing between an agent and a command that cannot be taken back.
+ *
+ * It used to render `rm -rf /srv/app` and `ls -la` identically: one amber box, one
+ * `max-h-24` scroller, the same three buttons. The backend already does the hard part —
+ * it classifies the command, works out what it would destroy, and previews what is
+ * actually on disk — and all of that arrived concatenated onto the end of the command
+ * string, where it was clipped out of sight by the box's own height.
+ *
+ * So: a destructive command gets its own treatment, the warning and the preview each get
+ * their own place to be read, and nothing is clipped. "Don't ask again" is withheld for
+ * an irreversible command — a standing grant to skip this card is not something to hand
+ * over on the strength of one look at one path.
+ */
 function ApprovalCard({
   approval,
   onResolve,
@@ -135,33 +151,79 @@ function ApprovalCard({
   approval: AgentApproval;
   onResolve: (id: string, approved: boolean, remember?: boolean) => void;
 }) {
+  const parsed = parseApproval(approval);
+  const danger = parsed.irreversible;
+
   return (
-    <div className="mb-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 last:mb-0">
-      <div className="mb-1 text-[11px] font-medium text-amber-200">
-        Run this command?
+    <div
+      className={`mb-2 rounded-md border p-2 last:mb-0 ${
+        danger
+          ? "border-red-500/60 bg-red-950/30"
+          : "border-amber-500/40 bg-amber-500/10"
+      }`}
+    >
+      <div
+        className={`mb-1 flex items-center gap-1.5 text-[11px] font-medium ${
+          danger ? "text-red-200" : "text-amber-200"
+        }`}
+      >
+        {danger ? <AlertIcon size={12} className="shrink-0" /> : null}
+        {danger ? "This cannot be undone. Run it?" : "Run this command?"}
       </div>
-      <pre className="mb-2 max-h-24 overflow-auto whitespace-pre-wrap rounded bg-[var(--bg)] px-2 py-1 font-mono text-[11px] text-gray-300">
-        {approval.command}
+
+      {/* No max-height. A command long enough to scroll is a command worth reading in
+          full, and the clipped version is how a path with a typo in it gets approved. */}
+      <pre className="mb-2 overflow-x-auto whitespace-pre-wrap break-words rounded bg-[var(--bg)] px-2 py-1 font-mono text-[11px] text-gray-200">
+        {parsed.command}
       </pre>
+
+      {danger && parsed.why && (
+        <div className="mb-2 whitespace-pre-wrap rounded border border-red-500/30 bg-red-950/40 px-2 py-1 text-[11px] leading-relaxed text-red-200">
+          {parsed.why}
+        </div>
+      )}
+
+      {danger && parsed.preview && (
+        <div className="mb-2">
+          <div className="mb-0.5 text-[10px] uppercase tracking-wider text-red-300/80">
+            What is there right now
+          </div>
+          <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-[var(--bg)] px-2 py-1 font-mono text-[10px] text-gray-300">
+            {parsed.preview}
+          </pre>
+        </div>
+      )}
+
       <div className="flex flex-col gap-1.5">
         <button
           onClick={() => onResolve(approval.id, true, false)}
-          className="rounded-md bg-blue-600 px-2.5 py-1 text-[11px] text-white hover:bg-blue-500"
+          className={`rounded-md px-2.5 py-1 text-[11px] text-white ${
+            danger ? "bg-red-600 hover:bg-red-500" : "bg-blue-600 hover:bg-blue-500"
+          }`}
         >
-          Yes, run it
+          {danger ? "Yes, destroy it" : "Yes, run it"}
         </button>
-        <button
-          onClick={() => onResolve(approval.id, true, true)}
-          className="rounded-md border border-blue-500/40 bg-blue-500/10 px-2.5 py-1 text-[11px] text-blue-200 hover:bg-blue-500/20"
-        >
-          Yes, and don't ask again this chat
-        </button>
+        {/* Withheld for an irreversible command: "don't ask again" is a standing grant
+            to skip this card, and nothing seen here justifies giving one. */}
+        {!danger && (
+          <button
+            onClick={() => onResolve(approval.id, true, true)}
+            className="rounded-md border border-blue-500/40 bg-blue-500/10 px-2.5 py-1 text-[11px] text-blue-200 hover:bg-blue-500/20"
+          >
+            Yes, and don't ask again this chat
+          </button>
+        )}
         <button
           onClick={() => onResolve(approval.id, false)}
           className="rounded-md border border-[var(--border)] px-2.5 py-1 text-[11px] text-gray-300 hover:bg-[var(--border)]"
         >
           No, don't run it
         </button>
+        {danger && (
+          <div className="text-[10px] leading-snug text-red-300/70">
+            Typing "ok" in the chat will not approve this one — it has to be this button.
+          </div>
+        )}
       </div>
     </div>
   );
@@ -890,31 +952,31 @@ export const AgentNodeView = memo(function AgentNodeView({ id, selected }: NodeP
     const list: CLIPickerOption[] = [
       {
         id: "auto",
-        label: "🤖 Auto (Smart Detection)",
+        label: "Auto (Smart Detection)",
         detail: "Auto-detects plan vs code vs minimal based on user prompt",
         selected: active === "auto",
       },
       {
         id: "plan",
-        label: "📋 Plan",
+        label: "Plan",
         detail: "Safe read-only investigation, requires plan approval before mutations",
         selected: active === "plan",
       },
       {
         id: "code",
-        label: "⚡ Code",
+        label: "Code",
         detail: "Focused coding, test writing, refactoring & file implementation",
         selected: active === "code",
       },
       {
         id: "standard",
-        label: "🌐 Standard (Std)",
+        label: "Standard (Std)",
         detail: "Full capabilities, DevOps tools & general copilot guidance",
         selected: active === "standard",
       },
       {
         id: "minimal",
-        label: "🛡️ Minimal",
+        label: "Minimal",
         detail: "Compact token-efficient prompt with lightweight context",
         selected: active === "minimal",
       },

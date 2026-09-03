@@ -1,6 +1,7 @@
 ﻿import { describe, expect, it } from "vitest";
 import {
   activitySummary,
+  formatDuration,
   isCommandItem,
   liveGerund,
   liveStatusFromActivity,
@@ -111,3 +112,15 @@ describe("activitySummary", () => {
   });
 });
 
+
+describe("tool durations", () => {
+  it("shows a duration only when it is worth reading", () => {
+    // Sub-100ms is noise on a row that is mostly about what ran; "0.0s" is worse than
+    // nothing.
+    expect(formatDuration(undefined)).toBe("");
+    expect(formatDuration(40)).toBe("");
+    expect(formatDuration(450)).toBe("450ms");
+    expect(formatDuration(2_400)).toBe("2.4s");
+    expect(formatDuration(95_000)).toBe("1m 35s");
+  });
+});

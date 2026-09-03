@@ -215,3 +215,83 @@ pub async fn post_agent_message(
 pub async fn delete_persona(db: State<'_, Db>, id: String) -> Result<(), String> {
     db.delete_persona(&id).map_err(|e| e.to_string())
 }
+
+/// Features the agents have asked permission to build.
+///
+/// The settings panel needs the same rows the agents' `feature_list` reads, because the
+/// person is the last step of the ladder: a proposal nobody above the proposer could
+/// answer waits here rather than being decided by silence.
+#[tauri::command]
+pub async fn list_feature_proposals(
+    db: State<'_, Db>,
+    workspace_id: Option<String>,
+    state: Option<String>,
+    limit: Option<i64>,
+) -> Result<Vec<crate::storage::models::FeatureProposal>, String> {
+    db.list_feature_proposals(
+        workspace_id.as_deref().filter(|s| !s.is_empty()),
+        state.as_deref().filter(|s| !s.is_empty()),
+        limit.unwrap_or(50),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Approve or refuse a proposal as the user, and release the agent that is waiting.
+///
+/// The goal row is what actually holds the agent, not the proposal row, so this writes
+/// both — a decision that left `approval_state` alone would show as decided and keep the
+/// agent blocked.
+#[tauri::command]
+pub async fn decide_feature_proposal(
+    app: AppHandle,
+    db: State<'_, Db>,
+    id: String,
+    approve: bool,
+    note: Option<String>,
+) -> Result<(), String> {
+    let state = if approve { "approved" } else { "rejected" };
+    let proposal = db
+        .get_feature_proposal(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or("no such proposal")?;
+    let note = note.filter(|n| !n.trim().is_empty());
+    if !db
+        .decide_feature_proposal(&id, state, None, note.as_deref())
+        .map_err(|e| e.to_string())?
+    {
+        return Err("no such proposal".into());
+    }
+    if let Some(goal_id) = proposal.goal_id.as_deref() {
+        if let Ok(Some(mut goal)) = db.get_goal(goal_id) {
+            goal.approval_state = Some(state.to_string());
+            db.update_goal(&goal).map_err(|e| e.to_string())?;
+        }
+    }
+    // Told, not left to notice: the agent is waiting on this answer, and a message is
+    // what wakes it back up.
+    if let Some(to) = proposal.persona_id.clone() {
+        let msg = AgentMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            from_id: None,
+            to_id: Some(to.clone()),
+            kind: "report".into(),
+            body: format!(
+                "Your proposal \"{}\" was {state}.{}",
+                proposal.title,
+                note.map(|n| format!(" {n}")).unwrap_or_default()
+            ),
+            goal_id: proposal.goal_id.clone(),
+            workspace_id: proposal.workspace_id.clone(),
+            read_at: None,
+            created_at: Some(chrono::Utc::now().to_rfc3339()),
+            channel_id: None,
+            parent_id: None,
+            mentions: Vec::new(),
+            resolved_at: None,
+        };
+        db.insert_agent_message(&msg).map_err(|e| e.to_string())?;
+        let _ = app.emit("agent://message", &msg);
+        crate::ai::persona_tools::wake_persona(&app, &db, &to);
+    }
+    Ok(())
+}

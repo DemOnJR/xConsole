@@ -135,18 +135,23 @@ pub fn build_with_model(
             p.model.clone(),
             secret,
         )),
-        "codex_cli" | "opencode_cli" | "antigravity_cli" | "claude_code" => Box::new(
-            CliProvider::new(
-                p.kind.clone(),
-                p.bin_path
-                    .clone()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| CliProvider::default_bin(&p.kind)),
-                p.model.clone(),
-                secret,
+        "codex_cli" | "opencode_cli" | "antigravity_cli" | "claude_code" | "grok_cli" => {
+            let remote = remote_target(db, &p);
+            // Which machine's filesystem is worth probing depends on which machine it
+            // will run on. `default_bin` looks under *this* desktop's home, and that
+            // answer is worse than useless on a server.
+            let bin = p.bin_path.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| {
+                if remote.is_some() {
+                    crate::ai::providers::cli::remote_default_bin(&p.kind).to_string()
+                } else {
+                    CliProvider::default_bin(&p.kind)
+                }
+            });
+            Box::new(
+                CliProvider::new(p.kind.clone(), bin, p.model.clone(), secret)
+                    .with_remote(remote),
             )
-            .with_remote(remote_target(db, &p)),
-        ),
+        }
         other => return Err(format!("unknown provider kind: {other}")),
     };
 
@@ -165,7 +170,7 @@ pub fn build_with_model(
 /// this machine, which is the default and stays the default — moving an agent onto a
 /// server is a decision the user makes explicitly, per provider.
 fn remote_target(db: &Db, p: &crate::storage::models::AiProvider) -> Option<RemoteTarget> {
-    if p.kind != "claude_code" {
+    if !crate::ai::providers::cli::is_cli_kind(&p.kind) {
         return None;
     }
     let extra: serde_json::Value = serde_json::from_str(p.extra_json.as_deref()?).ok()?;
@@ -181,6 +186,16 @@ fn remote_target(db: &Db, p: &crate::storage::models::AiProvider) -> Option<Remo
             .and_then(|m| m.as_str())
             .unwrap_or("acceptEdits")
             .to_string(),
+        // Absent means "log in as the VPS row says", which is what every existing row
+        // does today. Never defaulted to a name: inventing an account that does not
+        // exist turns every run into `sudo: unknown user`, and the account is created by
+        // `agent_cli_provision`, not by reading a config field.
+        run_as_user: extra
+            .get("run_as_user")
+            .and_then(|m| m.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -219,11 +234,42 @@ mod remote_target_tests {
     }
 
     #[test]
-    fn only_claude_code_runs_remotely_for_now() {
+    fn any_agent_cli_can_be_pointed_at_a_server_but_an_api_provider_cannot() {
         let d = db();
         let cfg = Some(r#"{"vps_id":"web-1"}"#);
-        assert!(remote_target(&d, &provider("codex_cli", cfg)).is_none());
         assert!(remote_target(&d, &provider("claude_code", cfg)).is_some());
+        assert!(remote_target(&d, &provider("grok_cli", cfg)).is_some());
+        assert!(remote_target(&d, &provider("codex_cli", cfg)).is_some());
+        // An HTTP API has no binary to run over SSH, so a vps_id on one is meaningless.
+        assert!(remote_target(&d, &provider("anthropic", cfg)).is_none());
+        assert!(remote_target(&d, &provider("openai", cfg)).is_none());
+    }
+
+    #[test]
+    fn the_agent_user_is_read_from_the_row_and_never_invented() {
+        let d = db();
+        // Absent means "log in as the VPS row says" — the behaviour every existing
+        // provider already has. A default name here would be an account that does not
+        // exist, and every run would end in `sudo: unknown user`.
+        let t = remote_target(&d, &provider("claude_code", Some(r#"{"vps_id":"web-1"}"#))).unwrap();
+        assert_eq!(t.run_as_user, None);
+
+        let t = remote_target(
+            &d,
+            &provider(
+                "claude_code",
+                Some(r#"{"vps_id":"web-1","run_as_user":" xconsole-agent "}"#),
+            ),
+        )
+        .unwrap();
+        assert_eq!(t.run_as_user.as_deref(), Some("xconsole-agent"));
+
+        let t = remote_target(
+            &d,
+            &provider("claude_code", Some(r#"{"vps_id":"web-1","run_as_user":"   "}"#)),
+        )
+        .unwrap();
+        assert_eq!(t.run_as_user, None);
     }
 
     #[test]

@@ -39,6 +39,81 @@ pub fn emit_live_status(ctx: &ToolContext, status: &str, detail: &str) {
             "detail": detail,
         }),
     );
+    record_agent_log(ctx, status, detail);
+}
+
+/// How many log lines one agent keeps.
+///
+/// The call site fires once per tool call, and the database file is re-encrypted whole
+/// when the app locks, so an unbounded table is a growing cost paid on every lock. Five
+/// hundred is several days of a busy agent and still opens instantly.
+const AGENT_LOG_KEEP: i64 = 500;
+
+/// How long a line survives for an agent that has stopped working entirely.
+const AGENT_LOG_KEEP_DAYS: i64 = 30;
+
+/// Write the live status line down, so a per-agent log survives the window being closed.
+///
+/// `agent://persona-status` is fire-and-forget with a client-side TTL: whoever was not
+/// looking never saw it, and after a restart there is nothing at all. The teams view has
+/// a log channel per agent built and waiting for exactly these rows.
+///
+/// Three things are deliberately not logged: a turn with no persona (the main agent has
+/// its transcript), an idle line (the absence of work is not work), and a line identical
+/// to the one before it (a tool called five times in a row is one thing happening).
+fn record_agent_log(ctx: &ToolContext, status: &str, detail: &str) {
+    let Some(persona_id) = ctx.persona_id.clone().or_else(|| {
+        crate::ai::persona_tools::current_persona(ctx).map(|p| p.id)
+    }) else {
+        return;
+    };
+    if status == "idle" || status.is_empty() {
+        return;
+    }
+    // Deduped against what this agent last wrote rather than against a per-session
+    // memo: a goal loop makes a fresh session id per cycle, and the repetition worth
+    // collapsing is exactly the one that spans them.
+    if let Ok(recent) = ctx.db.list_agent_log(&persona_id, 1) {
+        if let Some(last) = recent.last() {
+            if last.status == status && last.detail == detail {
+                return;
+            }
+        }
+    }
+    let entry = crate::storage::models::AgentLogEntry {
+        id: uuid::Uuid::new_v4().to_string(),
+        persona_id: persona_id.clone(),
+        workspace_id: ctx.workspace_id.clone(),
+        goal_id: ctx.goal_id.clone().or_else(|| {
+            ctx.session_id.strip_prefix("goal:").map(str::to_string)
+        }),
+        session_id: ctx.session_id.clone(),
+        status: status.to_string(),
+        tool: None,
+        detail: detail.to_string(),
+        // Left to the column default on purpose: every row in this table and in
+        // `agent_message` then shares one timestamp format, which is what the read
+        // cursors compare as strings.
+        created_at: None,
+    };
+    if let Err(e) = ctx.db.insert_agent_log(&entry) {
+        crate::diag(&format!("agent log: could not record a line: {e}"));
+        return;
+    }
+    if let Err(e) = ctx.db.trim_agent_log(&persona_id, AGENT_LOG_KEEP) {
+        crate::diag(&format!("agent log: could not trim: {e}"));
+    }
+    // Age is the other half, and it belongs to agents that have stopped running: a
+    // count-based trim never touches somebody who has not written a line since March.
+    // Once per process, on the first line anybody logs, is often enough for a table
+    // whose whole problem is slow accumulation.
+    static PRUNED_OLD_LINES: std::sync::Once = std::sync::Once::new();
+    PRUNED_OLD_LINES.call_once(|| {
+        if let Err(e) = ctx.db.prune_agent_log(AGENT_LOG_KEEP_DAYS) {
+            crate::diag(&format!("agent log: could not prune old lines: {e}"));
+        }
+    });
+    let _ = ctx.app.emit("agent://log", &entry);
 }
 
 /// Everything a tool needs to run. Holds owned clones (all cheap to clone).
@@ -195,11 +270,11 @@ offset:-200 is the tail of a log.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "One file. Use `paths` for several."},
+                    "path": {"type": "string", "description": "One file. Required unless you pass `paths` — a call with neither is a parse failure, not an empty read."},
                     "paths": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Several files in one round trip (max 20). offset/limit do not apply here — read the batch to see what is there, then re-read one file with a window."
+                        "description": "Several files in one round trip (max 20), instead of `path`. offset/limit do not apply here — read the batch to see what is there, then re-read one file with a window."
                     },
                     "offset": {"type": "integer", "description": "1-based start line. Negative counts back from the end, so offset:-100 reads the last 100 lines of a log — cheaper and safer than shelling out to `tail`, and it keeps the file's freshness stamp. Single file only."},
                     "limit": {"type": "integer", "description": "Max lines to return. Single file only."},
@@ -620,11 +695,11 @@ several at once. Use offset/limit on a single large file.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "One file. Use `paths` for several."},
+                    "path": {"type": "string", "description": "One file. Required unless you pass `paths` — a call with neither is a parse failure, not an empty read."},
                     "paths": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Several files at once (max 20). offset/limit do not apply."
+                        "description": "Several files at once (max 20), instead of `path`. offset/limit do not apply."
                     },
                     "offset": {"type": "integer", "description": "1-based start line. Negative counts back from the end, so offset:-100 reads the last 100 lines — use it to tail a log instead of shelling out to `tail`. Single file only."},
                     "limit": {"type": "integer", "description": "Max lines. Single file only."}
@@ -720,11 +795,15 @@ of grepping the whole disk for a filename."
         },
         ToolDef {
             name: "local_list_dir".into(),
-            description: "List the contents of a directory on the user's local machine (this PC)."
-                .into(),
+            description: "List one directory on this PC. Names only — to find a file by name \
+anywhere under a directory use local_find_files, and to search inside files use \
+local_grep_search; listing a tree level by level costs a call per level.".into(),
             parameters: json!({
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {"type": "string", "description": "Directory to list."},
+                    "head_limit": {"type": "integer", "description": "Max entries to return (default 100). A directory with thousands of files would otherwise fill the reply with names."}
+                },
                 "required": ["path"]
             }),
         },
@@ -1033,6 +1112,7 @@ the xConsole canvas flow. Use this to demonstrate web components, designs, dashb
     defs.extend(crate::ai::metrics_tools::definitions());
     defs.extend(crate::ai::repo::definitions());
     defs.extend(crate::ai::transcript::definitions());
+    defs.extend(crate::ai::cli_agent::definitions());
     defs
 }
 
@@ -1204,6 +1284,31 @@ pub async fn dispatch_with_telemetry(
     emit_skill_activity(ctx, call, sink);
 
     let args = &call.arguments;
+
+    // One open pull request per agent, enforced rather than requested. The rule is
+    // already written into the persona prompt, the goal brief and the gitops skill, and
+    // prose is advice: nothing stopped an agent opening a fourth branch while three sat
+    // waiting for review. `gh pr create` typed into a shell tool is the only way a PR is
+    // opened here, so this is the only place it can be caught. Ahead of the cache, so a
+    // refusal is never served from one.
+    if let Some(persona) = ctx.persona_id.as_deref() {
+        if crate::ai::pr_guard::tool_can_open_pr(&call.name) {
+            let open = ctx.db.open_prs_for_persona(persona).unwrap_or_default();
+            if let Some(refusal) =
+                crate::ai::pr_guard::blocks(&open, persona, &call.name, args)
+            {
+                emit(
+                    Some(sink),
+                    StreamEvent::Activity(ActivityEvent::ToolEnd {
+                        id: call.id.clone(),
+                        ok: false,
+                    }),
+                );
+                return refusal;
+            }
+        }
+    }
+
     let scope = crate::ai::tool_cache::CacheScope::new(
         &ctx.session_id,
         ctx.workspace_id.as_deref(),
@@ -1282,7 +1387,20 @@ pub async fn dispatch_with_telemetry(
     let plan_blocked = ctx.plan_mode
         && !ctx.session_state.plan_approved(&ctx.session_id)
         && tool_is_mutating(&call.name, args);
-    let result = if ctx.read_only && tool_is_mutating(&call.name, args) {
+    // What this agent was hired to do. A persona with an `allowed_tools` list may call
+    // those and nothing else — the same idea as the path scope, one level up: a reviewer
+    // that cannot write and an engineer that cannot touch DNS are one mechanism. An
+    // empty list, which is every persona created before this existed, means every tool.
+    let denied_tool = crate::ai::persona_tools::current_persona(ctx)
+        .filter(|p| !crate::ai::scope::tool_allowed(p, &call.name));
+    // Work proposed but not yet agreed to. Until somebody says yes it may write down
+    // what it wants to build and nothing else — see `feature_propose`.
+    let unapproved = proposal_block(ctx, &call.name, args);
+    let result = if let Some(p) = denied_tool {
+        crate::ai::scope::tool_scope_error(&p, &call.name)
+    } else if let Some(refusal) = unapproved {
+        refusal
+    } else if ctx.read_only && tool_is_mutating(&call.name, args) {
         format!(
             "error: '{}' changes something, and you were asked a question. Report what you \
              found and let the agent that asked decide what to do about it.",
@@ -1390,6 +1508,9 @@ pub async fn dispatch_with_telemetry(
         n if crate::ai::metrics_tools::is_metric_tool(n) => {
             crate::ai::metrics_tools::dispatch(ctx, n, args).await
         }
+        n if crate::ai::cli_agent::is_cli_agent_tool(n) => {
+            crate::ai::cli_agent::dispatch(ctx, n, args, sink).await
+        }
         n if crate::ai::repo::is_repo_tool(n) => crate::ai::repo::dispatch(ctx, n, args).await,
         n if crate::ai::transcript::is_transcript_tool(n) => {
             crate::ai::transcript::dispatch(ctx, n, args).await
@@ -1397,6 +1518,30 @@ pub async fn dispatch_with_telemetry(
         other => format!("error: unknown tool '{other}'"),
         }
     };
+
+    // Keep the open-PR ledger honest. The guard above reads this ledger, so without
+    // the write half it would have nothing to refuse on and the rule would look
+    // enforced while never firing. `gh pr create` prints the PR URL on success and
+    // nothing on failure, which is the whole test for whether one was opened.
+    if let Some(persona) = ctx.persona_id.as_deref() {
+        let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        if crate::ai::pr_guard::is_pr_create(command) {
+            if let Some((branch, number, url)) = crate::ai::pr_guard::opened_pr(command, &result) {
+                let _ = ctx.db.record_open_pr(
+                    persona,
+                    ctx.workspace_id.as_deref().unwrap_or(""),
+                    &branch,
+                    number,
+                    Some(&url),
+                );
+            }
+        } else if let Some(number) = crate::ai::pr_guard::closed_pr(command, &result) {
+            // Merged or closed by the agent itself. A PR that someone lands in the
+            // GitHub UI instead is reconciled by `secure_work`, or the agent would be
+            // wedged behind a PR that no longer exists.
+            let _ = ctx.db.close_open_pr(persona, Some(number), None);
+        }
+    }
 
     // PostToolUse hooks: a user-configured command sees the tool result and can feed
     // a note back to the model (a `decision:block` reason) or inject extra context.
@@ -1801,6 +1946,9 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
         n if crate::ai::metrics_tools::is_metric_tool(n) => {
             crate::ai::metrics_tools::tool_is_mutating(n)
         }
+        n if crate::ai::cli_agent::is_cli_agent_tool(n) => {
+            crate::ai::cli_agent::tool_is_mutating(n)
+        }
         n if crate::ai::repo::is_repo_tool(n) => crate::ai::repo::tool_is_mutating(n),
         n if crate::ai::transcript::is_transcript_tool(n) => {
             crate::ai::transcript::tool_is_mutating(n)
@@ -1833,6 +1981,87 @@ pub fn tool_is_mutating(name: &str, args: &Value) -> bool {
     }
 }
 
+/// The path a tool is about to write to, when it is about to write to one.
+///
+/// Only tools that put bytes on disk. A command that could do anything is not in here:
+/// blocking `run_command` while a proposal is undecided would stop the agent verifying
+/// the very thing it is proposing.
+fn file_write_target<'a>(name: &str, args: &'a Value) -> Option<&'a str> {
+    let key = match name {
+        "write_file" | "edit_file" | "local_write_file" | "local_edit_file" => "path",
+        "upload_file" => "remote_path",
+        "download_file" => "local_path",
+        _ => return None,
+    };
+    args.get(key).and_then(|v| v.as_str())
+}
+
+/// Whether a path is documentation, which a proposal may write while it waits.
+///
+/// Writing the proposal down is part of proposing it. Writing the feature is not.
+fn is_documentation(path: &str) -> bool {
+    let p = path.to_lowercase().replace('\\', "/");
+    p.ends_with(".md")
+        || p.ends_with(".mdx")
+        || p.ends_with(".txt")
+        || p.ends_with(".rst")
+        || p.ends_with(".adoc")
+        || p.contains("/docs/")
+        || p.starts_with("docs/")
+}
+
+/// Refuse to build a feature that has been proposed and not yet agreed to.
+///
+/// The goal row carries `approval_state`. While it says `proposed`, this agent has asked
+/// to build something new and nobody has answered yet, so it may write down what it
+/// intends and nothing else. `feature_decide` is what clears it.
+fn proposal_block(ctx: &ToolContext, name: &str, args: &Value) -> Option<String> {
+    let path = file_write_target(name, args)?;
+    if is_documentation(path) {
+        return None;
+    }
+    let goal_id = ctx
+        .goal_id
+        .clone()
+        .or_else(|| ctx.session_id.strip_prefix("goal:").map(str::to_string))?;
+    let goal = ctx.db.get_goal(&goal_id).ok().flatten()?;
+    if goal.approval_state.as_deref() != Some("proposed") {
+        return None;
+    }
+    Some(format!(
+        "error: you proposed this as new work and nobody has decided yet, so '{name}' is \
+         held. Write up what you intend in a .md file, or say what you have found — and \
+         wait for the decision. If it turns out this is a fix to something that already \
+         exists rather than something new, say so: that needs nobody's approval."
+    ))
+}
+
+/// Where a local command should run.
+///
+/// The project's root when this turn has one, `None` when it does not — and `None` is
+/// the old behaviour, which is to say xConsole's own working directory. See
+/// [`crate::ai::scope`] for why an unscoped turn stays unscoped.
+fn project_cwd(ctx: &ToolContext) -> Option<std::path::PathBuf> {
+    crate::ai::scope::scope_for(ctx).map(|s| s.root)
+}
+
+/// Resolve a path a local tool was handed, refusing anything outside the project.
+///
+/// The local twin of [`resolve_target`]: the same shape, the same refusal, applied to a
+/// path instead of a server id.
+fn resolve_local_path(ctx: &ToolContext, path: &str) -> Result<String, String> {
+    crate::ai::scope::resolve_path(ctx, path).map(|p| p.to_string_lossy().into_owned())
+}
+
+/// The same, for a path about to be written.
+///
+/// Separate because the persona's own `allowed_paths` binds writes and not reads: an
+/// engineer that may only change `src-tauri/**` still has to be able to read the
+/// frontend it is changing things for.
+fn resolve_local_write(ctx: &ToolContext, path: &str) -> Result<String, String> {
+    crate::ai::scope::resolve_write_path(ctx, path).map(|p| p.to_string_lossy().into_owned())
+}
+
 /// Whether `vps_id` is within the user-selected target set for this turn.
 pub fn is_target_allowed(allowed: &[String], vps_id: &str) -> bool {
     !allowed.is_empty() && allowed.iter().any(|t| t == vps_id)
@@ -1848,28 +2077,32 @@ fn target_scope_error(vps_id: &str, allowed: &[String]) -> String {
 /// Resolve which VPS a tool should target. Explicit `vps_id` values must fall
 /// within `ctx.targets`; at least one target must be selected.
 pub fn resolve_target(ctx: &ToolContext, args: &Value) -> Result<String, String> {
-    if ctx.targets.is_empty() {
+    choose_target(
+        &ctx.targets,
+        args.get("vps_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()),
+    )
+}
+
+/// The decision itself, without the context around it.
+pub fn choose_target(targets: &[String], requested: Option<&str>) -> Result<String, String> {
+    if targets.is_empty() {
         return Err("no VPS targets selected; ask the user to select a target or pass vps_id".into());
     }
-    if let Some(id) = args.get("vps_id").and_then(|v| v.as_str()) {
-        if !id.is_empty() {
-            if !is_target_allowed(&ctx.targets, id) {
-                // Allow 0-based index when the model passes "0" or "1" instead of UUID.
-                if let Ok(idx) = id.parse::<usize>() {
-                    if idx < ctx.targets.len() {
-                        return Ok(ctx.targets[idx].clone());
-                    }
-                }
-                return Err(target_scope_error(id, &ctx.targets));
-            }
-            return Ok(id.to_string());
+    if let Some(id) = requested {
+        if !is_target_allowed(targets, id) {
+            // A rejected id used to be re-read as a 0-based index, so "1" quietly became
+            // the second selected server. That turned a refusal into a different server
+            // than the one asked for — the one failure mode a scope check must not have.
+            // Name the targets and refuse instead.
+            return Err(target_scope_error(id, targets));
         }
+        return Ok(id.to_string());
     }
-    match ctx.targets.len() {
-        1 => Ok(ctx.targets[0].clone()),
+    match targets.len() {
+        1 => Ok(targets[0].clone()),
         _ => Err(format!(
             "multiple targets selected; pass vps_id (one of: {})",
-            ctx.targets.join(", ")
+            targets.join(", ")
         )),
     }
 }
@@ -2256,14 +2489,17 @@ async fn start_background_job(ctx: &ToolContext, vps_id: &str, command: &str) ->
 ///
 /// The authorisation is the same as running it in the foreground: backgrounding changes
 /// how long it takes, not what it may do.
-async fn start_local_background_job(command: &str) -> String {
+async fn start_local_background_job(command: &str, cwd: Option<&std::path::Path>) -> String {
     let job_id = jobs::new_job_id();
     let script = if cfg!(windows) {
         jobs::start_script_windows(&job_id, command)
     } else {
         jobs::start_script(&job_id, command)
     };
-    match crate::local::run_local_command(&script).await {
+    // The detached process inherits this shell's directory, so the project cwd survives
+    // backgrounding — a long build is exactly the case where running in the wrong tree
+    // costs the most.
+    match crate::local::run_local_command_in(&script, crate::local::LOCAL_COMMAND_TIMEOUT, cwd).await {
         Ok(out) if out.stdout.contains("started") => format!(
             "Started background job {job_id} on this PC.\n\
              It keeps running after this turn ends. If the next step needs it, call \
@@ -4008,10 +4244,13 @@ async fn local_run_command(ctx: &ToolContext, args: &Value) -> String {
     if let Err(e) = authorize_local(ctx, command).await {
         return format!("error: {e}");
     }
+    // A local command used to inherit xConsole's own working directory, so `npm ci` on
+    // a project ran wherever the desktop app was launched. It runs in the project now.
+    let cwd = project_cwd(ctx);
     if args.get("background").and_then(|v| v.as_bool()).unwrap_or(false) {
-        return start_local_background_job(command).await;
+        return start_local_background_job(command, cwd.as_deref()).await;
     }
-    match crate::local::run_local_command_for(command, command_timeout(args)).await {
+    match crate::local::run_local_command_in(command, command_timeout(args), cwd.as_deref()).await {
         Ok(out) => format_local_output(&out),
         Err(e) => format!("error running command: {e}"),
     }
@@ -4037,7 +4276,13 @@ async fn local_read_file(ctx: &ToolContext, args: &Value) -> String {
         }
         return format!("{} file(s):{out}", paths.len().min(20));
     }
-    let path = paths[0].as_str();
+    // Scoped before anything else touches it: an agent on one project has no business
+    // reading another project's .env, and this is the point that says so.
+    let path = match resolve_local_path(ctx, paths[0].as_str()) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let path = path.as_str();
     // Gate as a read (allowlisted, so it auto-runs under allowlist mode).
     if let Err(e) = authorize_local(ctx, &format!("cat -- {}", shell_quote(path))).await {
         return format!("error: {e}");
@@ -4078,6 +4323,11 @@ async fn local_edit_file(ctx: &ToolContext, args: &Value) -> String {
         Some(p) if !p.is_empty() => p,
         _ => return "error: missing 'path'".into(),
     };
+    let path = match resolve_local_write(ctx, path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let path = path.as_str();
 
     if let Err(e) = authorize_local(ctx, &format!("edit local file {path}")).await {
         return format!("error: {e}");
@@ -4140,11 +4390,18 @@ async fn local_grep_search(ctx: &ToolContext, args: &Value) -> String {
         Some(p) if !p.is_empty() => p,
         _ => return "error: missing 'pattern'".into(),
     };
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(".");
+    // "." means the project, not whatever directory xConsole was started in.
+    let path = match resolve_local_path(
+        ctx,
+        args.get("path")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("."),
+    ) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let path = path.as_str();
     let glob = args.get("glob").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
     let ci = args.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false);
     let head = args
@@ -4188,6 +4445,11 @@ async fn local_write_file(ctx: &ToolContext, args: &Value) -> String {
         Some(p) if !p.is_empty() => p,
         _ => return "error: missing 'path'".into(),
     };
+    let path = match resolve_local_write(ctx, path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let path = path.as_str();
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
     let mode = WriteMode::parse(args);
     if let Err(e) = authorize_local(ctx, &format!("write local file {path}")).await {
@@ -4266,12 +4528,18 @@ async fn local_find_files(ctx: &ToolContext, args: &Value) -> String {
         Some(p) if !p.trim().is_empty() => p.trim(),
         _ => return "error: missing 'pattern'".into(),
     };
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(".");
+    let path = match resolve_local_path(
+        ctx,
+        args.get("path")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("."),
+    ) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let path = path.as_str();
     let kind = match args.get("type").and_then(|v| v.as_str()).unwrap_or("file") {
         "dir" => "-type d",
         "any" => "",
@@ -4312,11 +4580,36 @@ async fn local_list_dir(ctx: &ToolContext, args: &Value) -> String {
         Some(p) if !p.is_empty() => p,
         _ => return "error: missing 'path'".into(),
     };
+    let path = match resolve_local_path(ctx, path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let path = path.as_str();
     if let Err(e) = authorize_local(ctx, &format!("ls -- {}", shell_quote(path))).await {
         return format!("error: {e}");
     }
     match crate::local::list_local_dir(path) {
-        Ok(s) => s,
+        // Bounded like its remote twin `list_dir`, which has defaulted to 100 all
+        // along. Unbounded, one `local_list_dir` on a node_modules or a mail spool
+        // spends the whole tool-result budget on file names.
+        Ok(s) => {
+            let limit = args
+                .get("head_limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(100)
+                .clamp(1, 2000) as usize;
+            let lines: Vec<&str> = s.lines().collect();
+            if lines.len() <= limit {
+                s
+            } else {
+                format!(
+                    "{}\n... {} more entries (head_limit {})",
+                    lines[..limit].join("\n"),
+                    lines.len() - limit,
+                    limit
+                )
+            }
+        }
         Err(e) => format!("error: {e}"),
     }
 }
@@ -6198,7 +6491,7 @@ mod ollama_tool_list_tests {
 
 #[cfg(test)]
 mod mutating_classification_tests {
-    use super::tool_is_mutating;
+    use super::{choose_target, file_write_target, is_documentation, tool_is_mutating};
     use serde_json::json;
 
     /// `cloudflare_` does not start with `cloud_` — the underscore does not line up —
@@ -6251,5 +6544,45 @@ mod mutating_classification_tests {
     #[test]
     fn installing_a_skill_is_mutating() {
         assert!(tool_is_mutating("skill_install", &json!({})));
+    }
+
+    #[test]
+    fn a_rejected_target_id_is_refused_rather_than_read_as_an_index() {
+        // "0" and "1" used to be re-read as positions in the selected list, so a model
+        // that passed the wrong id got a working command against a different server —
+        // silently. A scope check that quietly substitutes a different target is worse
+        // than no scope check, because nothing in the output says which machine ran it.
+        let targets = vec!["uuid-a".to_string(), "uuid-b".to_string()];
+        let err = choose_target(&targets, Some("1")).unwrap_err();
+        assert!(err.contains("not in the selected targets"), "{err}");
+        assert!(err.contains("uuid-a"), "{err}");
+        assert!(choose_target(&targets, Some("0")).is_err());
+
+        assert_eq!(choose_target(&targets, Some("uuid-b")).unwrap(), "uuid-b");
+        // Nothing named with several selected is still an ask, not a guess.
+        assert!(choose_target(&targets, None).is_err());
+        assert_eq!(choose_target(&targets[..1], None).unwrap(), "uuid-a");
+        assert!(choose_target(&[], Some("uuid-a")).is_err());
+    }
+
+    #[test]
+    fn a_pending_proposal_may_write_notes_and_nothing_else() {
+        // The half of the approval gate that is testable without a running goal: which
+        // tool calls put bytes on disk, and which of those are only documentation.
+        assert_eq!(
+            file_write_target("local_write_file", &json!({"path": "src/x.rs"})),
+            Some("src/x.rs")
+        );
+        assert_eq!(file_write_target("upload_file", &json!({"remote_path": "/srv/x"})), Some("/srv/x"));
+        // A command is not a write: blocking it would stop the agent verifying the very
+        // thing it is proposing.
+        assert!(file_write_target("run_command", &json!({"command": "ls"})).is_none());
+        assert!(file_write_target("local_read_file", &json!({"path": "a"})).is_none());
+
+        assert!(is_documentation("docs/plan.md"));
+        assert!(is_documentation("PROPOSAL.MD"));
+        assert!(is_documentation("src/docs/notes.txt"));
+        assert!(!is_documentation("src/main.rs"));
+        assert!(!is_documentation("src/markdown.rs"));
     }
 }

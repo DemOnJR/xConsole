@@ -108,7 +108,7 @@ pub fn model_has_native_vision(kind: &str, model: &str, base_url: &str) -> bool 
     // CLI harnesses own their own tools — we never send raw image blocks there.
     if matches!(
         k.as_str(),
-        "cursor" | "codex_cli" | "opencode_cli" | "antigravity_cli"
+        "cursor" | "codex_cli" | "opencode_cli" | "antigravity_cli" | "claude_code" | "grok_cli"
     ) {
         return false;
     }

@@ -8,7 +8,7 @@ use super::models::{
     AgentApproval, AgentConversation, AgentConversationInput, AgentConversationMeta,
     AgentLogEntry, AgentPlan, AgentPlanMeta, AiProvider, AiProviderInput, AuthType,
     ChannelUnread, CloudAccount, CloudAccountInput, CloudflareAuditLog,
-    CloudflareAuditLogInput, CronJob, CronJobInput, GoalSession, InfraProject,
+    CloudflareAuditLogInput, CronJob, CronJobInput, FeatureProposal, GoalSession, InfraProject,
     InfraProjectInput, KnownHost, Vps, VpsInput, VpsLoginPatch, Workspace, WorkspaceInput,
 };
 use crate::artifacts::Artifact;
@@ -1949,9 +1949,6 @@ impl Db {
     /// `agent_message` shares one timestamp format — read cursors compare as strings,
     /// and one caller writing RFC3339 while another writes `datetime('now')` would sort
     /// every mixed pair wrongly.
-    // The writer lands with the agent-loop hook; the reader and the schema are here
-    // first so a log channel has something to read as soon as it does.
-    #[allow(dead_code)]
     pub fn insert_agent_log(&self, entry: &AgentLogEntry) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -1993,13 +1990,34 @@ impl Db {
     ///
     /// An agent emits a line per tool call, so this table grows faster than anything
     /// else here and is the one place where forgetting is the correct behaviour.
-    #[allow(dead_code)]
     pub fn prune_agent_log(&self, keep_days: i64) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
         let cutoff = format!("-{} days", keep_days.clamp(1, 3650));
         let n = conn.execute(
             "DELETE FROM agent_log WHERE created_at < datetime('now', ?1)",
             params![cutoff],
+        )?;
+        Ok(n)
+    }
+
+    /// Keep only the newest `keep` lines for one agent, dropping the rest.
+    ///
+    /// Age is the wrong measure for the write path: an agent that ran hard for an hour
+    /// writes thousands of rows that are all minutes old, and the file is re-encrypted
+    /// whole on lock. A count per agent bounds it where it actually grows, and
+    /// `prune_agent_log` still handles the tail of agents nobody uses any more.
+    pub fn trim_agent_log(&self, persona_id: &str, keep: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "DELETE FROM agent_log
+              WHERE persona_id = ?1
+                AND rowid NOT IN (
+                    SELECT rowid FROM agent_log
+                     WHERE persona_id = ?1
+                     ORDER BY created_at DESC, rowid DESC
+                     LIMIT ?2
+                )",
+            params![persona_id, keep.clamp(1, 10_000)],
         )?;
         Ok(n)
     }
@@ -3491,6 +3509,204 @@ impl Db {
         )?;
         Ok(())
     }
+
+    // ---- Open pull requests (see `crate::ai::pr_guard`) --------------------------
+
+    /// The pull requests `persona_id` has open, oldest first.
+    ///
+    /// Only rows that are still open: a closed row is history, and history must not
+    /// block work. Oldest first because the oldest one is the one that has been idle
+    /// longest, and that is the one the agent is being sent back to finish.
+    pub fn open_prs_for_persona(&self, persona_id: &str) -> Result<Vec<crate::ai::pr_guard::OpenPr>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT persona_id, workspace_id, branch, pr_number, url, opened_at
+             FROM agent_open_pr
+             WHERE persona_id = ?1 AND closed_at IS NULL
+             ORDER BY opened_at ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![persona_id], Self::row_to_open_pr)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Every open pull request across all agents — for a dashboard, or for a sweep that
+    /// asks GitHub which of these are actually still open.
+    #[allow(dead_code)]
+    pub fn all_open_prs(&self) -> Result<Vec<crate::ai::pr_guard::OpenPr>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT persona_id, workspace_id, branch, pr_number, url, opened_at
+             FROM agent_open_pr
+             WHERE closed_at IS NULL
+             ORDER BY opened_at ASC",
+        )?;
+        let rows = stmt
+            .query_map([], Self::row_to_open_pr)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Record that an agent opened a pull request from `branch`.
+    ///
+    /// Upsert on (persona, workspace, branch), because the same branch being pushed
+    /// again is the same pull request. Re-opening a branch that was closed clears
+    /// `closed_at` rather than leaving a dead row to shadow the live one.
+    pub fn record_open_pr(
+        &self,
+        persona_id: &str,
+        workspace_id: &str,
+        branch: &str,
+        pr_number: Option<i64>,
+        url: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agent_open_pr (persona_id, workspace_id, branch, pr_number, url)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(persona_id, workspace_id, branch) DO UPDATE SET
+                pr_number = COALESCE(excluded.pr_number, agent_open_pr.pr_number),
+                url       = COALESCE(excluded.url, agent_open_pr.url),
+                opened_at = datetime('now'),
+                closed_at = NULL",
+            params![persona_id, workspace_id, branch, pr_number, url],
+        )?;
+        Ok(())
+    }
+
+    /// Mark an agent's pull request closed, by number or by branch.
+    ///
+    /// Returns how many rows it cleared, so a caller can tell "closed it" from "there
+    /// was nothing open" instead of reporting success either way.
+    pub fn close_open_pr(
+        &self,
+        persona_id: &str,
+        pr_number: Option<i64>,
+        branch: Option<&str>,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n = match (pr_number, branch) {
+            (Some(n), _) => conn.execute(
+                "UPDATE agent_open_pr SET closed_at = datetime('now')
+                 WHERE persona_id = ?1 AND pr_number = ?2 AND closed_at IS NULL",
+                params![persona_id, n],
+            )?,
+            (None, Some(b)) => conn.execute(
+                "UPDATE agent_open_pr SET closed_at = datetime('now')
+                 WHERE persona_id = ?1 AND branch = ?2 AND closed_at IS NULL",
+                params![persona_id, b],
+            )?,
+            // Neither given would close everything, which is never what a caller meant.
+            (None, None) => 0,
+        };
+        Ok(n)
+    }
+
+    fn row_to_open_pr(r: &rusqlite::Row) -> rusqlite::Result<crate::ai::pr_guard::OpenPr> {
+        Ok(crate::ai::pr_guard::OpenPr {
+            persona_id: r.get(0)?,
+            workspace_id: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            branch: r.get(2)?,
+            pr_number: r.get(3)?,
+            url: r.get(4)?,
+            opened_at: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+        })
+    }
+
+    // ---- Feature proposals (the approval ladder) --------------------------------
+
+    fn row_to_proposal(r: &rusqlite::Row) -> rusqlite::Result<FeatureProposal> {
+        Ok(FeatureProposal {
+            id: r.get(0)?,
+            workspace_id: r.get(1)?,
+            persona_id: r.get(2)?,
+            goal_id: r.get(3)?,
+            title: r.get(4)?,
+            body: r.get(5)?,
+            state: r.get(6)?,
+            decided_by: r.get(7)?,
+            decision_note: r.get(8)?,
+            created_at: r.get(9)?,
+            updated_at: r.get(10)?,
+        })
+    }
+
+    /// Append-only: `row_to_proposal` reads by position.
+    const PROPOSAL_COLS: &'static str =
+        "id, workspace_id, persona_id, goal_id, title, body, state, decided_by,
+         decision_note, created_at, updated_at";
+
+    pub fn insert_feature_proposal(&self, p: &FeatureProposal) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO feature_proposal
+               (id, workspace_id, persona_id, goal_id, title, body, state, decided_by, decision_note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                p.id,
+                p.workspace_id,
+                p.persona_id,
+                p.goal_id,
+                p.title,
+                p.body,
+                p.state,
+                p.decided_by,
+                p.decision_note,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_feature_proposal(&self, id: &str) -> Result<Option<FeatureProposal>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("SELECT {} FROM feature_proposal WHERE id = ?1", Self::PROPOSAL_COLS);
+        match conn.query_row(&sql, [id], Self::row_to_proposal) {
+            Ok(p) => Ok(Some(p)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Proposals, newest first. `workspace` and `state` narrow it; either may be None.
+    pub fn list_feature_proposals(
+        &self,
+        workspace: Option<&str>,
+        state: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<FeatureProposal>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {} FROM feature_proposal
+             WHERE (?1 IS NULL OR workspace_id = ?1)
+               AND (?2 IS NULL OR state = ?2)
+             ORDER BY created_at DESC, rowid DESC LIMIT ?3",
+            Self::PROPOSAL_COLS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![workspace, state, limit.clamp(1, 500)], Self::row_to_proposal)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Record a decision. Returns false when there is no such proposal.
+    pub fn decide_feature_proposal(
+        &self,
+        id: &str,
+        state: &str,
+        decided_by: Option<&str>,
+        note: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE feature_proposal
+                SET state = ?2, decided_by = ?3, decision_note = ?4, updated_at = datetime('now')
+              WHERE id = ?1",
+            params![id, state, decided_by, note],
+        )?;
+        Ok(n > 0)
+    }
 }
 
 #[cfg(test)]
@@ -3826,5 +4042,146 @@ mod channel_read_tests {
         // Written now, so a 7-day window keeps it.
         assert_eq!(d.prune_agent_log(7).unwrap(), 0);
         assert_eq!(d.list_agent_log("ada", 50).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_agent_log_is_trimmed_by_count_per_agent() {
+        // Age is the wrong measure on the write path: an agent that ran hard for an
+        // hour writes thousands of rows that are all minutes old, and the file is
+        // re-encrypted whole when the app locks. A count per agent bounds it where it
+        // actually grows — and must not touch anybody else's lines.
+        let d = db();
+        let line = |persona: &str, n: usize| crate::storage::models::AgentLogEntry {
+            id: format!("{persona}-{n}"),
+            persona_id: persona.into(),
+            workspace_id: None,
+            goal_id: None,
+            session_id: String::new(),
+            status: "working".into(),
+            tool: None,
+            detail: format!("step {n}"),
+            created_at: None,
+        };
+        for n in 0..10 {
+            d.insert_agent_log(&line("ada", n)).unwrap();
+        }
+        d.insert_agent_log(&line("bruno", 0)).unwrap();
+
+        assert_eq!(d.trim_agent_log("ada", 4).unwrap(), 6);
+        let kept = d.list_agent_log("ada", 50).unwrap();
+        assert_eq!(kept.len(), 4);
+        // The newest survive, and they come back oldest last the way the reader expects.
+        assert_eq!(kept.last().unwrap().detail, "step 9");
+        assert_eq!(d.list_agent_log("bruno", 50).unwrap().len(), 1);
+        // Idempotent: nothing left to drop.
+        assert_eq!(d.trim_agent_log("ada", 4).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_feature_proposal_round_trips_and_records_its_decision() {
+        let d = db();
+        let p = crate::storage::models::FeatureProposal {
+            id: "fp1".into(),
+            workspace_id: Some("ws-a".into()),
+            persona_id: Some("ada".into()),
+            goal_id: Some("g1".into()),
+            title: "A billing page".into(),
+            body: "why, and what it would cost to keep".into(),
+            state: "proposed".into(),
+            decided_by: None,
+            decision_note: None,
+            created_at: None,
+            updated_at: None,
+        };
+        d.insert_feature_proposal(&p).unwrap();
+
+        // Open proposals for one project is the query the settings inbox and the agents'
+        // own feature_list both make.
+        let open = d.list_feature_proposals(Some("ws-a"), Some("proposed"), 20).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].title, "A billing page");
+        assert!(d.list_feature_proposals(Some("ws-b"), None, 20).unwrap().is_empty());
+
+        assert!(d
+            .decide_feature_proposal("fp1", "approved", Some("boss"), Some("go on then"))
+            .unwrap());
+        let after = d.get_feature_proposal("fp1").unwrap().unwrap();
+        assert_eq!(after.state, "approved");
+        assert_eq!(after.decided_by.as_deref(), Some("boss"));
+        assert_eq!(after.decision_note.as_deref(), Some("go on then"));
+        // Decided is no longer open, which is what stops the inbox re-asking.
+        assert!(d.list_feature_proposals(None, Some("proposed"), 20).unwrap().is_empty());
+        // A decision on something that is not there is a false, not a panic.
+        assert!(!d.decide_feature_proposal("nope", "approved", None, None).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod open_pr_tests {
+    use super::*;
+
+    fn db() -> Db {
+        Db::open(std::path::Path::new(":memory:")).unwrap()
+    }
+
+    #[test]
+    fn an_open_pull_request_round_trips_and_is_scoped_to_its_agent() {
+        let d = db();
+        d.record_open_pr("ada", "k8s", "wip/ada/fix-login", Some(12), Some("https://x/12"))
+            .unwrap();
+        let rows = d.open_prs_for_persona("ada").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].branch, "wip/ada/fix-login");
+        assert_eq!(rows[0].pr_number, Some(12));
+        assert!(!rows[0].opened_at.is_empty(), "opened_at is what the refusal quotes");
+        // Another agent's PR is not this agent's problem.
+        assert!(d.open_prs_for_persona("bruno").unwrap().is_empty());
+    }
+
+    #[test]
+    fn pushing_the_same_branch_again_updates_the_row_rather_than_adding_one() {
+        // Otherwise the second push looks like a second open PR and the agent blocks
+        // itself on work it has not finished pushing.
+        let d = db();
+        d.record_open_pr("ada", "", "wip/ada/dns", None, None).unwrap();
+        d.record_open_pr("ada", "", "wip/ada/dns", Some(7), Some("https://x/7"))
+            .unwrap();
+        let rows = d.open_prs_for_persona("ada").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pr_number, Some(7));
+        assert_eq!(rows[0].url.as_deref(), Some("https://x/7"));
+    }
+
+    #[test]
+    fn closing_a_pull_request_unblocks_the_agent() {
+        let d = db();
+        d.record_open_pr("ada", "", "wip/ada/dns", Some(7), None).unwrap();
+        assert_eq!(d.close_open_pr("ada", Some(7), None).unwrap(), 1);
+        assert!(d.open_prs_for_persona("ada").unwrap().is_empty());
+        // Closing it twice is not an error, but it is also not a second success.
+        assert_eq!(d.close_open_pr("ada", Some(7), None).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_pull_request_can_be_closed_by_branch_when_its_number_was_never_recorded() {
+        let d = db();
+        d.record_open_pr("ada", "", "wip/ada/dns", None, None).unwrap();
+        assert_eq!(d.close_open_pr("ada", None, Some("wip/ada/dns")).unwrap(), 1);
+        // Neither a number nor a branch would mean "close everything", which no caller
+        // ever means.
+        d.record_open_pr("ada", "", "wip/ada/tls", None, None).unwrap();
+        assert_eq!(d.close_open_pr("ada", None, None).unwrap(), 0);
+        assert_eq!(d.open_prs_for_persona("ada").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn every_agents_open_pull_requests_can_be_listed_at_once() {
+        let d = db();
+        d.record_open_pr("ada", "", "wip/ada/a", Some(1), None).unwrap();
+        d.record_open_pr("bruno", "", "wip/bruno/b", Some(2), None).unwrap();
+        d.close_open_pr("ada", Some(1), None).unwrap();
+        let all = d.all_open_prs().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].persona_id, "bruno");
     }
 }

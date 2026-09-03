@@ -13,11 +13,6 @@ use crate::ai::provider::{
 use crate::mcp::prepare_agent_workspace;
 use crate::ssh::remote_ops::shell_quote;
 
-/// The bridge's token, or empty when no bridge is in play.
-fn bridge_token(bridge: &Option<crate::ssh::agent_exec::McpBridge>) -> String {
-    bridge.as_ref().map(|b| b.token.clone()).unwrap_or_default()
-}
-
 /// xConsole session id -> the CLI's own conversation/session id.
 ///
 /// Both Antigravity (`--conversation`) and Claude Code (`--resume`) can continue a
@@ -66,7 +61,18 @@ pub struct RemoteTarget {
     pub db: crate::storage::Db,
     /// What the agent may do on that box without asking. Nobody is at a prompt, so this
     /// is decided here rather than deferred to one that would never be answered.
+    ///
+    /// One of Claude Code's own `--permission-mode` values, verified against
+    /// `claude --help`: acceptEdits, auto, bypassPermissions, manual, dontAsk, plan.
     pub permission_mode: String,
+    /// The unprivileged account on that box the CLI runs as, when one is configured.
+    ///
+    /// `None` means it runs as whoever the VPS row logs in as — which for most of these
+    /// hosts is root. An agent CLI with a filesystem tool and no supervision does not
+    /// need to be root to do its job, and being root is the difference between a bad
+    /// edit and an unrecoverable one. Provisioned by `agent_cli_provision`; the row is
+    /// only read here, never invented.
+    pub run_as_user: Option<String>,
 }
 
 pub struct CliProvider {
@@ -167,7 +173,7 @@ impl CliProvider {
             token: b.token.clone(),
         });
 
-        let bin = shell_quote(&self.bin);
+        let bin = shell_quote(&self.remote_bin());
         let flags = self.run_flags(req.xconsole.as_ref(), None, existing.as_deref(), &req.reasoning);
         let model_flags: Vec<String> = flags.iter().map(|f| shell_quote(f)).collect();
 
@@ -180,18 +186,20 @@ impl CliProvider {
         let run = crate::ssh::agent_exec::run_agent(
             &remote.db,
             &remote.vps_id,
+            remote.run_as_user.as_deref(),
             bridge.as_ref(),
             &prompt,
-            |mcp_url| {
+            |mcp| {
                 let mut cmd = format!("{bin} {}", model_flags.join(" "));
-                // Logged before the MCP argument is appended: that one carries this
-                // run's bearer token, and the log is a file on disk. The flags are what
-                // matter anyway — "what did it actually run" was unanswerable without
-                // reproducing the whole path by hand.
+                // Logged before the MCP argument is appended. The config now lives in a
+                // mode-600 file on the far side rather than in argv, so there is no
+                // token in this line either way — but "what did it actually run" was
+                // unanswerable without reproducing the whole path by hand, and the
+                // flags are the part that matters.
                 crate::diag(&format!("cli(remote): {cmd}"));
-                if let Some(url) = mcp_url {
+                if let Some(h) = mcp {
                     cmd.push_str(" --mcp-config ");
-                    cmd.push_str(&crate::ssh::agent_exec::mcp_config_arg(url, &bridge_token(&bridge)));
+                    cmd.push_str(h.config_path);
                 }
                 cmd
             },
@@ -338,6 +346,22 @@ impl CliProvider {
         self
     }
 
+    /// The command to run on the *far* side of an SSH session.
+    ///
+    /// [`Self::default_bin`] probes this desktop's filesystem, because on a desktop that
+    /// is the only way to find an installer that puts the binary under the user's home
+    /// and a GUI app that never sourced the shell's PATH. Shell-quoting the resulting
+    /// absolute local path into a remote command is nonsense: `/home/me/.local/bin/claude`
+    /// does not exist on the server, and the failure reads as "not installed" on a box
+    /// where `which claude` answers fine. So a path that belongs to *this* machine's home
+    /// is dropped back to the bare name, and the PATH prelude finds the real one there.
+    fn remote_bin(&self) -> String {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok();
+        remote_bin_for(&self.kind, &self.bin, home.as_deref())
+    }
+
     pub fn default_bin(kind: &str) -> String {
         match kind {
             "opencode_cli" => "opencode".into(),
@@ -368,6 +392,32 @@ impl CliProvider {
                     }
                 }
                 "agent".into()
+            }
+            "grok_cli" => {
+                // Same shape as Claude Code: its installer drops the binary under the
+                // user's home, and a GUI app never sourced the profile that puts it on
+                // PATH. This probe is for *this* desktop only — a remote run starts from
+                // `remote_default_bin`, because nothing about this disk describes the
+                // server's.
+                #[cfg(windows)]
+                {
+                    if let Ok(profile) = std::env::var("USERPROFILE") {
+                        let native = format!(r"{profile}\.grok\bin\grok.exe");
+                        if Path::new(&native).exists() {
+                            return native;
+                        }
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    if let Some(home) = std::env::var_os("HOME") {
+                        let native = PathBuf::from(home).join(".grok/bin/grok");
+                        if native.exists() {
+                            return native.to_string_lossy().into_owned();
+                        }
+                    }
+                }
+                "grok".into()
             }
             "claude_code" => {
                 // The native installer puts it under the user's home rather than on a
@@ -468,6 +518,36 @@ impl CliProvider {
                 }
                 if let Some(ws) = workspace {
                     a.push("--add-dir".into());
+                    a.push(ws.to_string_lossy().into_owned());
+                }
+                a
+            }
+            "grok_cli" => {
+                // Every flag verified against `grok --help` (v1.0.13). The prompt is NOT
+                // here: grok's `-p/--single` takes the prompt as its value rather than
+                // reading stdin, so it is appended at spawn time next to the text — see
+                // `spawn_with_stdin`.
+                let mut a = vec!["--output-format".to_string(), "plain".into()];
+                // Nobody is at a prompt, so a mode is always passed rather than left at
+                // the default that asks and then denies. One of grok's own values:
+                // default, acceptEdits, auto, dontAsk, bypassPermissions, plan.
+                a.push("--permission-mode".into());
+                a.push("dontAsk".into());
+                if let Some(conv_id) = agy_conv {
+                    a.push("--resume".into());
+                    a.push(conv_id.to_string());
+                }
+                if let Some(m) = &self.model {
+                    a.push("--model".into());
+                    a.push(m.clone());
+                }
+                // Spelled `--reasoning-effort`, with `--effort` as an alias.
+                if matches!(reasoning, "low" | "medium" | "high") {
+                    a.push("--reasoning-effort".into());
+                    a.push(reasoning.to_string());
+                }
+                if let Some(ws) = workspace {
+                    a.push("--cwd".into());
                     a.push(ws.to_string_lossy().into_owned());
                 }
                 a
@@ -679,8 +759,16 @@ async fn spawn_with_stdin(
         cmd.current_dir(ws);
     }
 
-    cmd.args(flags)
-        .stdin(std::process::Stdio::piped())
+    cmd.args(flags);
+    // Grok is the odd one out: `-p/--single <PROMPT>` takes the prompt as the flag's
+    // value, where every other CLI here reads it from stdin. Piping to it would hang
+    // waiting for input that is never asked for, so the text goes in argv and stdin is
+    // closed immediately. Placed last because clap accepts flags in any order.
+    let prompt_in_argv = kind == "grok_cli";
+    if prompt_in_argv {
+        cmd.arg("-p").arg(prompt);
+    }
+    cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -709,10 +797,14 @@ async fn spawn_with_stdin(
     })?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(prompt.as_bytes())
-            .await
-            .map_err(|e| format!("failed to write prompt to CLI stdin: {e}"))?;
+        if !prompt_in_argv {
+            stdin
+                .write_all(prompt.as_bytes())
+                .await
+                .map_err(|e| format!("failed to write prompt to CLI stdin: {e}"))?;
+        }
+        // Dropped either way: the CLI reads until stdin closes, and one that was given
+        // its prompt in argv still waits for the close.
         drop(stdin);
     }
 
@@ -1230,7 +1322,7 @@ fn parse_cursor_stream_line(line: &str, out: &mut ChatResponse, sink: Option<&Ev
 /// answer and wrong here. Claude Code emits a separate assistant message per model
 /// response, so a turn that stops to call a tool and then keeps talking arrives as two —
 /// replacing would silently drop everything it said before the first tool call.
-fn parse_claude_code_stream_line(
+pub(crate) fn parse_claude_code_stream_line(
     line: &str,
     session_id: &str,
     out: &mut ChatResponse,
@@ -2024,14 +2116,50 @@ fn login_args(kind: &str) -> Vec<String> {
         // `claude login` is terminal-only and unavailable under -p. `setup-token` is the
         // documented way to authorise a non-interactive caller from a subscription.
         "claude_code" => vec!["setup-token".into()],
+        // `grok login` alone opens a browser, which a spawned child with no terminal
+        // cannot drive. `--device-auth` is documented as the headless/remote path: it
+        // prints a code for the user to enter elsewhere, and that code can be streamed
+        // back to them. (Verified against `grok login --help`, v1.0.13.)
+        "grok_cli" => vec!["login".into(), "--device-auth".into()],
         _ => vec!["login".into()],
     }
+}
+
+/// The bare command name an agent CLI installs as, with no filesystem probing.
+///
+/// This is what a remote run starts from: nothing about this machine's disk says
+/// anything about the server's.
+pub fn remote_default_bin(kind: &str) -> &'static str {
+    match kind {
+        "opencode_cli" => "opencode",
+        "antigravity_cli" => "agy",
+        "cursor" => "agent",
+        "claude_code" => "claude",
+        "grok_cli" => "grok",
+        _ => "codex",
+    }
+}
+
+/// Pure half of [`CliProvider::remote_bin`], with this machine's home passed in so it
+/// can be tested without touching the environment.
+pub fn remote_bin_for(kind: &str, bin: &str, local_home: Option<&str>) -> String {
+    let bin = bin.trim();
+    if bin.is_empty() {
+        return remote_default_bin(kind).to_string();
+    }
+    let looks_local = local_home
+        .map(|h| !h.is_empty() && bin.starts_with(h))
+        .unwrap_or(false);
+    if looks_local {
+        return remote_default_bin(kind).to_string();
+    }
+    bin.to_string()
 }
 
 pub fn is_cli_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "codex_cli" | "opencode_cli" | "cursor" | "antigravity_cli" | "claude_code"
+        "codex_cli" | "opencode_cli" | "cursor" | "antigravity_cli" | "claude_code" | "grok_cli"
     )
 }
 

@@ -1,3 +1,4 @@
+import { BrainIcon, ZapIcon } from "../../../../src/components/icons";
 import { useHarnessStore } from "../../../../src/stores/harnessStore";
 import { useAgentStore } from "../../../../src/stores/agentStore";
 import { useSettingsStore } from "../../../../src/stores/settingsStore";
@@ -24,7 +25,7 @@ export function ContextMemoryModule() {
     <div className="border-b border-[var(--border)] bg-[var(--surface)]/60 text-xs font-mono px-3 py-1.5 flex items-center justify-between gap-4 select-none">
       <div className="flex items-center gap-3 min-w-0 flex-wrap">
         <div className="flex items-center gap-1 text-[var(--text-dim)]">
-          <span className="text-violet-400 font-semibold">🧠</span>
+          <BrainIcon size={12} className="text-violet-400 shrink-0" />
           <span className="text-[10px] uppercase tracking-wider font-semibold">CONTEXT:</span>
         </div>
 
@@ -39,7 +40,8 @@ export function ContextMemoryModule() {
 
         {cacheFormatted && (
           <div className="flex items-center gap-1 rounded bg-violet-500/10 text-violet-300 border border-violet-500/30 px-1.5 py-0.2 text-[10px]">
-            <span>⚡ {cacheFormatted}</span>
+            <ZapIcon size={10} className="shrink-0" />
+            <span>{cacheFormatted}</span>
           </div>
         )}
       </div>

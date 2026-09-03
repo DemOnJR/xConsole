@@ -389,7 +389,8 @@ export type ProviderKind =
   | "codex_cli"
   | "opencode_cli"
   | "antigravity_cli"
-  | "claude_code";
+  | "claude_code"
+  | "grok_cli";
 
 
 
@@ -475,6 +476,10 @@ export interface Persona {
   reports_to?: string | null;
   /** The project this agent works on. Null = company-wide, answers on any project. */
   workspace_id?: string | null;
+  /** Globs this agent may write under, relative to the project root. Empty = the root. */
+  allowed_paths?: string[] | null;
+  /** Tools this agent may call. Empty = every tool. */
+  allowed_tools?: string[] | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -492,6 +497,8 @@ export interface PersonaInput {
   reports_to?: string | null;
   /** The project this agent works on. Null = company-wide, answers on any project. */
   workspace_id?: string | null;
+  allowed_paths?: string[];
+  allowed_tools?: string[];
 }
 
 /** One message between agents. `from_id`/`to_id` null means the user. */
@@ -634,6 +641,45 @@ export interface AgentApproval {
   command: string;
   status: string;
   created_at?: string | null;
+}
+
+/**
+ * An approval split into the parts a person has to read separately.
+ *
+ * The backend measures blast radius before asking — what the command destroys, why, and
+ * what is there right now (`safety::authorize`) — and then concatenates all of it onto
+ * the end of `command`. So `rm -rf /srv/app` and `ls -la` arrive as the same shape and
+ * render identically in a small scrolling box, which is exactly the pair a person must
+ * not confuse. Until the backend carries these as fields (see the patch note in the
+ * agent-approval work), they are recovered here.
+ */
+export interface ParsedApproval {
+  /** The command itself, without the appended warning. */
+  command: string;
+  /** True when the backend classified this as something that cannot be undone. */
+  irreversible: boolean;
+  /** "it would delete /srv/app" plus the reason, when there is one. */
+  why: string;
+  /** What is on disk right now, as the backend previewed it. */
+  preview: string;
+}
+
+/** The exact sentence `safety::authorize` prefixes an irreversible warning with. */
+const IRREVERSIBLE_MARKER = "THIS CANNOT BE UNDONE";
+const PREVIEW_MARKER = "What is there right now:";
+
+export function parseApproval(approval: AgentApproval): ParsedApproval {
+  const raw = approval.command ?? "";
+  const at = raw.indexOf(IRREVERSIBLE_MARKER);
+  if (at < 0) {
+    return { command: raw.trim(), irreversible: false, why: "", preview: "" };
+  }
+  const command = raw.slice(0, at).trim();
+  const rest = raw.slice(at);
+  const previewAt = rest.indexOf(PREVIEW_MARKER);
+  const why = (previewAt < 0 ? rest : rest.slice(0, previewAt)).trim();
+  const preview = previewAt < 0 ? "" : rest.slice(previewAt + PREVIEW_MARKER.length).trim();
+  return { command, irreversible: true, why, preview };
 }
 
 /** A clarifying question the agent asks via the ask_user tool. */
@@ -968,7 +1014,12 @@ export interface AgentActivityItem {
   label: string;
   detail?: string;
   output?: string;
-  state: "running" | "done" | "error";
+  /**
+   * `awaiting_approval` is a real third state, not a flavour of running: a tool blocked
+   * on a person saying yes is doing nothing at all, and showing it with the same spinner
+   * as one that is working turns a stuck turn into an invisible one.
+   */
+  state: "running" | "awaiting_approval" | "done" | "error";
   category?: string;
   name?: string;
   tool?: string;
@@ -976,6 +1027,20 @@ export interface AgentActivityItem {
   linesAdded?: number;
   linesRemoved?: number;
   hunks?: DiffLine[];
+  /**
+   * What the model actually asked for. The backend sends the whole call
+   * (`StreamEvent::ToolCall`) and the UI used to keep only the name, so a running tool
+   * read "read file" with no indication of which file, on which server.
+   */
+  arguments?: unknown;
+  /** Wall-clock milliseconds, measured in the UI from the call to its result. */
+  startedAt?: number;
+  endedAt?: number;
+  durationMs?: number;
+  /** Exit code, when the tool's output reported one. */
+  exitCode?: number;
+  /** Whether the output was cut off by an output cap. */
+  truncated?: boolean;
 }
 
 /** Mirrors the Rust `ActivityEvent` enum (serde tag="type", content="data"). */

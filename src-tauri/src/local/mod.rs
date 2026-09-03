@@ -19,22 +19,30 @@ pub const LOCAL_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 /// Returns the same [`CommandOutput`] shape as the SSH path so the tool layer can
 /// format both identically.
 pub async fn run_local_command(command: &str) -> Result<CommandOutput, String> {
-    run_local_command_for(command, LOCAL_COMMAND_TIMEOUT).await
+    run_local_command_in(command, LOCAL_COMMAND_TIMEOUT, None).await
 }
 
 /// Longest a caller may wait for one local command. See `MAX_COMMAND_TIMEOUT`.
 pub const MAX_LOCAL_COMMAND_TIMEOUT: Duration = Duration::from_secs(3600);
 
-/// Run one local command with a caller-chosen deadline.
+/// Run one local command in a chosen directory, with a caller-chosen deadline.
 ///
-/// The same reason as the server side: two minutes is a sensible default and a poor
-/// ceiling, and a build that needed three was reported as a failure.
-pub async fn run_local_command_for(
+/// The deadline is here for the same reason as on the server side: two minutes is a
+/// sensible default and a poor ceiling, and a build that needed three was reported as a
+/// failure.
+///
+/// Every local command used to inherit xConsole's own working directory — whatever
+/// folder the app happened to be launched from. An agent working on a project therefore
+/// ran `cargo test` wherever the desktop app was started, and `ls` told it about
+/// somebody else's files. `cwd` is the project root when the turn has one, so a command
+/// lands in the same place the agent's file tools do.
+pub async fn run_local_command_in(
     command: &str,
     timeout: Duration,
+    cwd: Option<&std::path::Path>,
 ) -> Result<CommandOutput, String> {
     let timeout = timeout.min(MAX_LOCAL_COMMAND_TIMEOUT);
-    match tokio::time::timeout(timeout, run_local_command_inner(command)).await {
+    match tokio::time::timeout(timeout, run_local_command_inner(command, cwd)).await {
         Ok(r) => r,
         Err(_) => Err(format!(
             "command timed out after {}s. It may still be running. Raise timeout_secs, or \
@@ -44,7 +52,10 @@ pub async fn run_local_command_for(
     }
 }
 
-async fn run_local_command_inner(command: &str) -> Result<CommandOutput, String> {
+async fn run_local_command_inner(
+    command: &str,
+    cwd: Option<&std::path::Path>,
+) -> Result<CommandOutput, String> {
     use tokio::process::Command;
 
     // Run through the platform's default shell so pipes/globs/builtins work the
@@ -62,6 +73,20 @@ async fn run_local_command_inner(command: &str) -> Result<CommandOutput, String>
         c.arg("-c").arg(command);
         c
     };
+
+    // A directory that has gone missing is not a reason to run the command somewhere
+    // else: silently falling back to the app's own cwd is how a build ran against the
+    // wrong tree in the first place.
+    if let Some(dir) = cwd {
+        if !dir.is_dir() {
+            return Err(format!(
+                "the project directory {} does not exist, so there is nowhere to run this. \
+                 Check the project's path in its settings.",
+                dir.display()
+            ));
+        }
+        cmd.current_dir(dir);
+    }
 
     crate::proc::hide_console(&mut cmd);
     let output = cmd
@@ -231,6 +256,35 @@ mod tests {
         let out = run_local_command("echo hello").await.expect("command ran");
         assert!(out.stdout.contains("hello"), "stdout was: {:?}", out.stdout);
         assert_eq!(out.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn a_command_runs_in_the_directory_it_was_given() {
+        // The whole point of the project cwd: `pwd` has to answer with the project,
+        // not with wherever the desktop app was started from.
+        let dir = std::env::temp_dir().join("xconsole_local_cwd_test");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let out = run_local_command_in("pwd", LOCAL_COMMAND_TIMEOUT, Some(&dir))
+            .await
+            .expect("command ran");
+        let want = dir.canonicalize().unwrap_or(dir.clone());
+        assert!(
+            out.stdout.trim().ends_with(
+                want.file_name().and_then(|n| n.to_str()).unwrap_or("xconsole_local_cwd_test")
+            ),
+            "stdout was: {:?}",
+            out.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_project_directory_is_an_error_not_a_fallback() {
+        let missing = std::env::temp_dir().join("xconsole_local_cwd_does_not_exist");
+        let _ = std::fs::remove_dir_all(&missing);
+        let err = run_local_command_in("pwd", LOCAL_COMMAND_TIMEOUT, Some(&missing))
+            .await
+            .expect_err("refused");
+        assert!(err.contains("does not exist"), "{err}");
     }
 
     #[test]

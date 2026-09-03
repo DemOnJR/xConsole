@@ -558,6 +558,8 @@ pub fn run() {
             commands::persona::unread_user_messages,
             commands::persona::mark_agent_messages_read,
             commands::persona::post_agent_message,
+            commands::persona::list_feature_proposals,
+            commands::persona::decide_feature_proposal,
             commands::goal::start_goal,
             commands::goal::confirm_goal,
             commands::goal::pause_goal,

@@ -125,6 +125,12 @@ export function applyStreamEvent(
           id: ev.data.id,
           kind: "tool",
           label: ev.data.name.replace(/_/g, " "),
+          tool: ev.data.name,
+          // The whole call, not just its name. "read file" tells a reader nothing about
+          // which file on which server; the backend has always sent the arguments and
+          // this is where they used to be dropped.
+          arguments: ev.data.arguments,
+          startedAt: now(),
           state: "running",
         },
       ];
@@ -134,11 +140,7 @@ export function applyStreamEvent(
       let next = activity;
       if (idx >= 0) {
         next = [...activity];
-        next[idx] = {
-          ...next[idx],
-          output: ev.data.output,
-          state: (ev.data.output.startsWith("error") ? "error" : "done") as "error" | "done",
-        };
+        next[idx] = { ...next[idx], ...outcomeOf(next[idx], ev.data.output) };
       }
       const stillRunning = next.some(
         (a) => a.state === "running" && a.id !== "parallel-batch" && a.kind !== "status",
@@ -190,7 +192,7 @@ export function applyStreamEvent(
           const afterEnd: AgentActivityItem[] = activity.map((a) => {
             if (a.id !== d.data.id && !a.id.startsWith(`${d.data.id}-`)) return a;
             if (a.kind === "file_edit") {
-              return { ...a, state: endState };
+              return { ...a, state: endState, ...stamp(a) };
             }
             if (
               a.kind === "tool" &&
@@ -216,7 +218,9 @@ export function applyStreamEvent(
               };
             }
             if (a.kind === "tool" || a.kind === "skill_read" || a.kind === "command") {
-              return { ...a, state: endState };
+              // `ok` is the backend's own verdict. It outranks anything guessed from the
+              // shape of the output text, so it is applied last and never overwritten.
+              return { ...a, state: endState, ...stamp(a) };
             }
             return a;
           });
@@ -286,4 +290,117 @@ export function applyStreamEvent(
     default:
       return activity;
   }
+}
+
+/** Injectable clock: tests need a duration that does not depend on how fast they run. */
+let clock: () => number = () => Date.now();
+
+/** Freeze time for a test. Returns the previous clock so it can be put back. */
+export function setActivityClock(fn: () => number): () => number {
+  const previous = clock;
+  clock = fn;
+  return previous;
+}
+
+function now(): number {
+  return clock();
+}
+
+/** The end stamp and the duration it implies, for an item that was started. */
+function stamp(item: AgentActivityItem): Partial<AgentActivityItem> {
+  const endedAt = now();
+  if (item.endedAt) return {};
+  return {
+    endedAt,
+    durationMs: item.startedAt ? Math.max(0, endedAt - item.startedAt) : undefined,
+  };
+}
+
+/**
+ * `exit_code: 3` on the first line of a command result.
+ *
+ * The backend already formats it; the UI used to throw it away and show only whether the
+ * text happened to start with the word "error", so a command that failed with a real
+ * exit code looked exactly like one that succeeded.
+ */
+const EXIT_CODE = /^exit_code:\s*(-?\d+)/m;
+
+/** What `truncate_output` appends when it cuts a result short. */
+const TRUNCATED = /\[Output truncated/;
+
+/**
+ * A tool result read as a result, rather than as a string that might begin with "error".
+ *
+ * `startsWith("error")` was the old test, and it is wrong in both directions: a command
+ * whose own output begins with the word "error" was reported as a failed tool call, and
+ * a command that exited 1 with a normal-looking message was reported as a success. Where
+ * the event carries a real verdict — an exit code, or the `ok` flag on ToolEnd — that is
+ * what decides; the prefix is only a last resort for tools that return neither.
+ */
+function outcomeOf(item: AgentActivityItem, output: string): Partial<AgentActivityItem> {
+  const exit = EXIT_CODE.exec(output);
+  const exitCode = exit ? Number(exit[1]) : undefined;
+  const failed =
+    exitCode !== undefined
+      ? exitCode !== 0
+      : // No exit code to go on. Anchored and punctuated, so a log line that merely
+        // mentions an error is not mistaken for the tool having failed.
+        /^error[:\s]/i.test(output);
+  return {
+    output,
+    exitCode,
+    truncated: TRUNCATED.test(output),
+    state: failed ? "error" : "done",
+    ...stamp(item),
+  };
+}
+
+/**
+ * Mark the tool that is blocked on this command as waiting for a person.
+ *
+ * A command held at the safety gate emits nothing further: no result, no end event. It
+ * kept the same spinner as a tool that was working, so a turn waiting on an approval
+ * card looked identical to one making progress, and the only way to find out was to
+ * notice the card. Matched on the command text because that is what the approval
+ * carries.
+ */
+export function markAwaitingApproval(
+  segments: TurnSegment[],
+  command: string,
+): TurnSegment[] {
+  const needle = command.trim();
+  if (!needle) return segments;
+  let changed = false;
+  const next = segments.map((seg) => {
+    if (seg.type !== "activity") return seg;
+    const items = seg.items.map((item) => {
+      if (item.state !== "running") return item;
+      if (!matchesCommand(item, needle)) return item;
+      changed = true;
+      return { ...item, state: "awaiting_approval" as const };
+    });
+    return changed ? { type: "activity" as const, items } : seg;
+  });
+  return changed ? next : segments;
+}
+
+/** Put an item that was waiting back to running, once the person has answered. */
+export function clearAwaitingApproval(segments: TurnSegment[]): TurnSegment[] {
+  let changed = false;
+  const next = segments.map((seg) => {
+    if (seg.type !== "activity") return seg;
+    const items = seg.items.map((item) => {
+      if (item.state !== "awaiting_approval") return item;
+      changed = true;
+      return { ...item, state: "running" as const };
+    });
+    return changed ? { type: "activity" as const, items } : seg;
+  });
+  return changed ? next : segments;
+}
+
+function matchesCommand(item: AgentActivityItem, command: string): boolean {
+  if (item.detail && item.detail.trim() === command) return true;
+  const args = item.arguments as { command?: unknown } | undefined;
+  return typeof args?.command === "string" && args.command.trim() === command;
 }

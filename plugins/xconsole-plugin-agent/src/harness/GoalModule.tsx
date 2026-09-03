@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { ZapIcon } from "../../../../src/components/icons";
 import { useHarnessStore } from "../../../../src/stores/harnessStore";
 import { useAgentStore } from "../../../../src/stores/agentStore";
 
@@ -218,7 +219,7 @@ export function GoalModule() {
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                className="hover:text-[var(--text)] underline"
+                className="inline-flex items-center gap-1 hover:text-[var(--text)] underline"
                 onClick={() => {
                   if (goalStatus === "running") setGoalStatus("paused");
                   else if (goalStatus === "paused") setGoalStatus("running");
@@ -235,7 +236,8 @@ export function GoalModule() {
                   void sendAgentMessage(`Focus on completing our current goal: ${activeGoal}`);
                 }}
               >
-                ⚡ Prompt agent on goal
+                <ZapIcon size={10} className="shrink-0" />
+                Prompt agent on goal
               </button>
             </div>
             <button

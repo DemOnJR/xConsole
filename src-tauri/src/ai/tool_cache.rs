@@ -128,6 +128,9 @@ pub fn is_cacheable(tool: &str) -> bool {
             | "skill_view"
             | "list_official_skills"
             | "host_memory_get"
+            // What is installed on a server does not change between two calls in one
+            // turn, and the check is a round trip plus a `--version` per CLI.
+            | "agent_cli_status"
     )
 }
 

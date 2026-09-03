@@ -1500,6 +1500,14 @@ pub fn repair_tool_call(call: &mut crate::ai::provider::ToolCall) -> Option<Stri
         "max_tokens",
         "width",
         "height",
+        // Every other bounded integer the tools document. Their absence was silent:
+        // a string "300" left in place is not the integer the handler reads, so the
+        // documented default applied instead of what the model asked for.
+        "timeout_secs",
+        "wait_secs",
+        "max_chars",
+        "context_lines",
+        "tail_lines",
     ];
     for key in &int_keys {
         if let Some(val) = call.arguments.get_mut(*key) {
@@ -1520,6 +1528,14 @@ pub fn repair_tool_call(call: &mut crate::ai::provider::ToolCall) -> Option<Stri
         "multi",
         "save_backup",
         "plan_mode",
+        // `"background": "true"` was read as false, so the call ran in the foreground
+        // and hit the 120s timeout instead of returning a job id -- the exact failure
+        // the background flag exists to avoid.
+        "background",
+        "local",
+        "all",
+        "proxied",
+        "resume",
     ];
     for key in &bool_keys {
         if let Some(val) = call.arguments.get_mut(*key) {

@@ -812,3 +812,38 @@ pub struct ChannelUnread {
     #[serde(default)]
     pub last_read_at: Option<String>,
 }
+
+/// A new feature an agent wants to build, and how far up the chain it has got.
+///
+/// Improving what exists is what an agent is for and needs nobody's permission.
+/// Building something *new* is a decision about what the product is, and that belongs
+/// to whoever is accountable for it. The difference lives here, in a row, rather than
+/// in a sentence in a prompt that a model may or may not honour: while a proposal is
+/// undecided its goal is marked `proposed`, and the tool dispatcher will not let that
+/// goal write anything but documentation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureProposal {
+    pub id: String,
+    /// The project it is for. None for a company-wide proposal.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// Who proposed it. None when the main agent did.
+    #[serde(default)]
+    pub persona_id: Option<String>,
+    /// The task it came out of, if it came out of one.
+    #[serde(default)]
+    pub goal_id: Option<String>,
+    pub title: String,
+    pub body: String,
+    /// proposed | at_ceo | at_orchestrator | approved | rejected
+    pub state: String,
+    /// Persona id, or None when the user decided it themselves.
+    #[serde(default)]
+    pub decided_by: Option<String>,
+    #[serde(default)]
+    pub decision_note: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}

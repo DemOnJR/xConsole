@@ -5,6 +5,7 @@ import {
   onAgentPlan,
   onAgentQuestion,
   onAiChatOutput,
+  parseApproval,
   type AgentApproval,
   type AgentConversationMeta,
   type AgentPlan,
@@ -16,7 +17,7 @@ import {
 import { appendImageMarkers } from "../lib/vision";
 import { notify } from "../lib/notify";
 import { exportConversationMarkdown as renderConversationMarkdown } from "../lib/agentExport";
-import { classifyChat } from "../lib/consent";
+import { chatCanApproveCommand, chatRejectsCommand, classifyChat } from "../lib/consent";
 import { useWorkspaceStore } from "./workspaceStore";
 import { useCanvasStore } from "./canvasStore";
 import { useSessionStore } from "./sessionStore";
@@ -26,6 +27,8 @@ import { contextUsageFromMessages, type PrefixTelemetry, type TurnTelemetry } fr
 import {
   appendTextDelta,
   applyActivityEvent,
+  clearAwaitingApproval,
+  markAwaitingApproval,
   flattenActivity,
   textFromSegments,
   type TurnSegment,
@@ -162,7 +165,12 @@ export interface AgentActivityItem {
   label: string;
   detail?: string;
   output?: string;
-  state: "running" | "done" | "error";
+  /**
+   * `awaiting_approval` is a real third state, not a flavour of running: a tool blocked
+   * on a person saying yes is doing nothing at all, and showing it with the same spinner
+   * as one that is working turns a stuck turn into an invisible one.
+   */
+  state: "running" | "awaiting_approval" | "done" | "error";
   category?: string;
   name?: string;
   tool?: string;
@@ -170,6 +178,20 @@ export interface AgentActivityItem {
   linesAdded?: number;
   linesRemoved?: number;
   hunks?: { kind: string; text: string }[];
+  /**
+   * What the model actually asked for. The backend sends the whole call and the UI used
+   * to keep only the name, so a running tool read "read file" with no indication of
+   * which file, on which server.
+   */
+  arguments?: unknown;
+  /** Wall-clock milliseconds, measured in the UI from the call to its result. */
+  startedAt?: number;
+  endedAt?: number;
+  durationMs?: number;
+  /** Exit code, when the tool's output reported one. */
+  exitCode?: number;
+  /** Whether the output was cut off by an output cap. */
+  truncated?: boolean;
 }
 
 /** Token throughput for a completed or streaming assistant message. */
@@ -487,12 +509,23 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   // Returns one combined unlisten. (Name kept for the existing App.tsx wiring.)
   subscribeApprovals: async () => {
     const unApproval = await onAgentApproval((approval) => {
+      const parsed = parseApproval(approval);
       set((s) =>
         s.pendingApprovals.some((a) => a.id === approval.id)
           ? s
-          : { pendingApprovals: [...s.pendingApprovals, approval] },
+          : {
+              pendingApprovals: [...s.pendingApprovals, approval],
+              // A command held at the safety gate emits nothing further — no result, no
+              // end event — so its row kept the same spinner as a tool that was
+              // working. A turn waiting on a person looked identical to a turn making
+              // progress, and the only clue was noticing the card.
+              streamingSegments: markAwaitingApproval(s.streamingSegments, parsed.command),
+            },
       );
-      void notify("xConsole agent — approval needed", approval.command);
+      // The notification shows the command, not the blast-radius warning appended to it:
+      // an OS toast truncates, and the command is the part that identifies which
+      // approval this is.
+      void notify("xConsole agent — approval needed", parsed.command);
     });
     const unQuestion = await onAgentQuestion((question) => {
       set((s) =>
@@ -529,6 +562,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     const denied = get().pendingApprovals.find((a) => a.id === id);
     set((s) => ({
       pendingApprovals: s.pendingApprovals.filter((a) => a.id !== id),
+      // Answered: the tool is either about to run or about to be refused, and either way
+      // it is no longer waiting on a person.
+      streamingSegments: clearAwaitingApproval(s.streamingSegments),
     }));
     await api.agentResolveApproval(id, approved, remember, sessionId);
     // Taste learning: user denied a command → remember not to auto-run that class of action.
@@ -824,12 +860,15 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
 
     if (s.pendingApprovals.length > 0) {
-      if (intent.kind === "approve" || intent.kind === "continue") {
-        void get().resolveApproval(s.pendingApprovals[0].id, true);
+      const next = s.pendingApprovals[0];
+      // A refusal is always honoured; only consent is gated. See consent.ts for why an
+      // irreversible command needs the button on the card instead of a typed "ok".
+      if (chatRejectsCommand(trimmed)) {
+        void get().resolveApproval(next.id, false);
         return true;
       }
-      if (intent.kind === "reject" || intent.kind === "cancel") {
-        void get().resolveApproval(s.pendingApprovals[0].id, false);
+      if (chatCanApproveCommand(trimmed, parseApproval(next).irreversible)) {
+        void get().resolveApproval(next.id, true);
         return true;
       }
     }
@@ -873,13 +912,19 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     if (get().streaming) {
       void api.agentCancel(get().sessionId).catch(() => {});
     }
-    // Clear any pending interactive state so the modal/cards don't linger.
-    // Immediately clear streaming on frontend so the Stop button instantly responds.
+    // Clear the interactive state that belongs to the turn being stopped, and
+    // immediately clear streaming so the Stop button responds at once.
+    //
+    // Approvals are deliberately NOT cleared. Stop used to be all-or-nothing: it wiped
+    // every pending approval card, which is not "stop", it is "silently deny" — the
+    // backend is still blocked waiting for an answer that can no longer be given, and
+    // the card that would have given it is gone. The person who pressed Stop wanted the
+    // agent to quit generating; the command sitting at the gate is a separate question
+    // and still theirs to answer or refuse.
     set({
       streaming: false,
       pendingPlan: null,
       pendingQuestions: [],
-      pendingApprovals: [],
       planDraft: "",
       holdQueue: true,
     });

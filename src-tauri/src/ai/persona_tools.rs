@@ -156,9 +156,30 @@ staging box\"). Naming an existing agent updates it instead of creating a second
                     "reports_to": {"type": "string", "description": "The agent this one escalates to, by name. Omit for one that answers to the user directly."},
                     "vps_ids": {"type": "array", "items": {"type": "string"}, "description": "Servers it works on by default."},
                     "safety_mode": {"type": "string", "enum": ["approve", "allowlist", "full"], "description": "How much it may do unattended. Omit to use the global setting."},
-                    "enabled": {"type": "boolean", "description": "Whether it may be given work. Default true."}
+                    "enabled": {"type": "boolean", "description": "Whether it may be given work. Default true."},
+                    "project": {"type": "string", "description": "The project it works on, by name. An agent on a project is only reachable while that project is open, and its files and tasks are filed there. Pass \"company-wide\" for the few that answer about everything. Say this when you are not working inside a project, or the agent ends up company-wide by accident."},
+                    "rename_to": {"type": "string", "description": "New name for the agent named in 'name'. Names are how everyone addresses each other, so renaming changes who answers to what."},
+                    "provider_id": {"type": "string", "description": "Which provider account it runs through, by name or id. Omit to use the active one."},
+                    "model": {"type": "string", "description": "Model for this agent, e.g. a cheaper one for routine work. Omit to use the provider's."},
+                    "allowed_paths": {"type": "array", "items": {"type": "string"}, "description": "Globs inside the project it may read and write: [\"src-tauri/**\"] for a backend engineer, [\"docs/**\"] for a writer. Empty means the whole project. This is the difference between a reviewer and an engineer, so set it."},
+                    "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names it may call, e.g. [\"local_*\", \"repo_*\"]. Empty means every tool. Reporting and asking are never taken away."}
                 },
                 "required": ["name"]
+            }),
+        },
+        ToolDef {
+            name: "agent_inspect".into(),
+            description: "Show one agent's whole configuration: role, project, who it reports to, \
+its servers, trust, provider and model, which paths and tools it is limited to, and what it is \
+working on now. Read this before changing an agent — agent_hire overwrites what you pass and \
+leaves the rest, so knowing what is there is how you avoid widening something by accident."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string", "description": "Name or id of the agent."}
+                },
+                "required": ["agent"]
             }),
         },
         ToolDef {
@@ -179,6 +200,115 @@ already exist are left alone."
                         "description": "Roles to create, e.g. [\"lead\", \"engineer\", \"reviewer\", \"ops\"]. Defaults to lead, engineer and reviewer. The first one is the lead and answers to the user."
                     },
                     "about": {"type": "string", "description": "One line on what the project is, put into every member's instructions so they know what they are working on."}
+                }
+            }),
+        },
+        ToolDef {
+            name: "task_stop".into(),
+            description: "Stop a running task for good. This is how you intervene when one of \
+your agents has gone off the rails — the wrong file, the wrong server, the same failing step \
+five cycles running. Stopping is not a punishment: the work done so far is kept, and you can \
+delegate a corrected version afterwards. Use agent_check or teams_overview to get the task_id."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "The task to stop."},
+                    "reason": {"type": "string", "description": "Why, in one line. It goes into your report, so the user can see what you stopped and why."}
+                },
+                "required": ["task_id"]
+            }),
+        },
+        ToolDef {
+            name: "task_pause".into(),
+            description: "Halt a running task where it stands, keeping everything it has done. \
+Use it when you need to look before deciding — a task you might resume. task_resume restarts \
+it from where it stopped; task_stop ends it."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "The task to pause."},
+                    "reason": {"type": "string", "description": "Why you are pausing it."}
+                },
+                "required": ["task_id"]
+            }),
+        },
+        ToolDef {
+            name: "task_resume".into(),
+            description: "Start a paused, waiting or blocked task running again, from where it \
+left off. Say what changed first — the agent picks up its own board, not your reasoning."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "The task to continue."},
+                    "note": {"type": "string", "description": "What changed, sent to the agent so it knows why it is running again."}
+                },
+                "required": ["task_id"]
+            }),
+        },
+        ToolDef {
+            name: "task_reassign".into(),
+            description: "Hand a task to a different agent, keeping its board and everything \
+already done. Use it when the work turned out to be somebody else's — a deployment problem \
+that is really a database problem — instead of stopping it and starting again from nothing. \
+Only agents on the same project can take it."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "The task to hand over."},
+                    "to": {"type": "string", "description": "The agent taking it, by name."},
+                    "note": {"type": "string", "description": "What the new owner needs to know: what has been tried, and why it is theirs now."}
+                },
+                "required": ["task_id", "to"]
+            }),
+        },
+        ToolDef {
+            name: "feature_propose".into(),
+            description: "Ask permission to build something that does not exist yet. Fixing, \
+improving and finishing what is already there is your job and needs nobody's agreement — this \
+is only for new surface area: a new page, a new command, a new integration, a new table. Your \
+manager reads it, then theirs, up to whoever answers to the user. While it is undecided you may \
+write documentation and nothing else, so say what you intend rather than building it first."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "The feature in one line."},
+                    "body": {"type": "string", "description": "What it is, why now, what it would cost to keep, and what you would NOT do. Write it for somebody deciding on a phone."}
+                },
+                "required": ["title", "body"]
+            }),
+        },
+        ToolDef {
+            name: "feature_decide".into(),
+            description: "Approve or refuse a proposed feature. Use it when the user has told \
+you what they want to happen, or when the decision is genuinely yours. Approving unblocks the \
+agent that asked; refusing closes it with your reason, which they read."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "proposal_id": {"type": "string", "description": "From feature_list."},
+                    "decision": {"type": "string", "enum": ["approve", "reject"], "description": "What happens to it."},
+                    "note": {"type": "string", "description": "Why. The proposer reads this, so make it usable."}
+                },
+                "required": ["proposal_id", "decision"]
+            }),
+        },
+        ToolDef {
+            name: "feature_list".into(),
+            description: "Proposed features and what became of them. Call it when asked what \
+the team wants to build, or before deciding, so you are not answering the same proposal twice."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "state": {"type": "string", "enum": ["proposed", "approved", "rejected"], "description": "Only these. Default: everything still open."},
+                    "project": {"type": "string", "description": "Project name. Defaults to the one you are working on."},
+                    "limit": {"type": "integer", "description": "Max rows (default 20)."}
                 }
             }),
         },
@@ -311,9 +441,17 @@ pub fn is_persona_tool(name: &str) -> bool {
             | "agent_inbox"
             | "agent_thread"
             | "agent_hire"
+            | "agent_inspect"
             | "team_create"
             | "agent_dismiss"
             | "agent_org"
+            | "task_stop"
+            | "task_pause"
+            | "task_resume"
+            | "task_reassign"
+            | "feature_propose"
+            | "feature_decide"
+            | "feature_list"
             | "teams_overview"
             | "agent_activity"
             | "task_audit"
@@ -337,6 +475,12 @@ pub fn tool_is_mutating(name: &str) -> bool {
             | "team_create"
             | "agent_dismiss"
             | "review_schedule"
+            | "task_stop"
+            | "task_pause"
+            | "task_resume"
+            | "task_reassign"
+            | "feature_propose"
+            | "feature_decide"
     )
 }
 
@@ -350,9 +494,17 @@ pub async fn dispatch(ctx: &ToolContext, name: &str, args: &Value) -> String {
         "agent_inbox" => agent_inbox(ctx),
         "agent_thread" => agent_thread(ctx, args),
         "agent_hire" => agent_hire(ctx, args).await,
+        "agent_inspect" => agent_inspect(ctx, args),
         "team_create" => team_create(ctx, args).await,
         "agent_dismiss" => agent_dismiss(ctx, args).await,
         "agent_org" => agent_org(ctx),
+        "task_stop" => task_stop(ctx, args),
+        "task_pause" => task_pause(ctx, args),
+        "task_resume" => task_resume(ctx, args),
+        "task_reassign" => task_reassign(ctx, args),
+        "feature_propose" => feature_propose(ctx, args).await,
+        "feature_decide" => feature_decide(ctx, args),
+        "feature_list" => feature_list(ctx, args),
         "teams_overview" => teams_overview(ctx),
         "agent_activity" => agent_activity(ctx, args),
         "task_audit" => task_audit(ctx, args).await,
@@ -361,6 +513,53 @@ pub async fn dispatch(ctx: &ToolContext, name: &str, args: &Value) -> String {
         "project_history" => project_history(ctx, args).await,
         _ => format!("error: unknown persona tool {name}"),
     }
+}
+
+/// Look one named agent up among the ones this call may address.
+///
+/// `crate::ai::persona::resolve` searches the whole database, which is right for the
+/// settings screen and wrong here: it let an agent on one project hand work to another
+/// project's engineer by typing their name, straight past the team list built one line
+/// above the call. `known` is that list, and this is what makes it mean something.
+///
+/// `scoped` is false only for a turn with no project at all — the agent the user talks
+/// to over chat, which is the one that has to be able to reach anybody. When it does,
+/// the answer carries that agent's own project so the work is still filed correctly.
+pub(crate) fn find_addressable(
+    known: &[Persona],
+    all: &[Persona],
+    requested: &str,
+    scoped: bool,
+) -> Result<Persona, String> {
+    let needle = requested.trim();
+    let matches = |p: &Persona| p.id == needle || p.name.eq_ignore_ascii_case(needle);
+    if let Some(p) = known.iter().find(|p| matches(p)) {
+        return Ok(p.clone());
+    }
+    if !scoped {
+        if let Some(p) = all.iter().find(|p| matches(p)) {
+            return Ok(p.clone());
+        }
+        return Err(format!(
+            "error: no agent named {requested:?}.\n{}",
+            crate::ai::persona::format_catalog(known)
+        ));
+    }
+    // They exist, but not here. Saying so is the whole value of the refusal: the caller
+    // learns to ask their manager rather than retrying the name.
+    if let Some(elsewhere) = all.iter().find(|p| matches(p)) {
+        return Err(format!(
+            "error: {} works on another project, not this one. Work does not cross \
+             projects by name — ask their manager, or name the project on the call if it \
+             genuinely belongs there.\n{}",
+            elsewhere.name,
+            crate::ai::persona::format_catalog(known)
+        ));
+    }
+    Err(format!(
+        "error: no agent named {requested:?}.\n{}",
+        crate::ai::persona::format_catalog(known)
+    ))
 }
 
 /// Everyone addressable right now: this project's team plus the company-wide agents.
@@ -442,19 +641,22 @@ fn agent_delegate(ctx: &ToolContext, args: &Value) -> String {
             }
         }
     } else {
-        match crate::ai::persona::resolve(&ctx.db, requested) {
-            Some(p) => (p, false),
-            None => {
-                return format!(
-                    "error: no agent named {requested:?}.\n{}",
-                    crate::ai::persona::format_catalog(&known)
-                )
-            }
+        // Only somebody on this project's team, or a company-wide agent. Naming an
+        // agent used to search the whole database, so one project's lead could hand
+        // work to another project's engineer and nothing said a word.
+        let scoped = project.is_some();
+        match find_addressable(&known, &all, requested, scoped) {
+            Ok(p) => (p, false),
+            Err(e) => return e,
         }
     };
     if !persona.enabled {
         return format!("error: agent {} is disabled; enable it in Settings → Agents first", persona.name);
     }
+    // An unscoped call (the agent the user talks to, with no project open) that names
+    // somebody files the work under *their* project rather than nowhere. Otherwise a
+    // task handed out over chat lands in a global pool and its own team never sees it.
+    let project = project.or_else(|| persona.workspace_id.clone());
 
     let requested_targets: Vec<String> = args
         .get("vps_ids")
@@ -974,12 +1176,15 @@ fn agent_send(ctx: &ToolContext, args: &Value) -> String {
     if to.is_empty() || body.is_empty() {
         return "error: agent_send needs both 'to' and 'body'".into();
     }
-    let Some(recipient) = crate::ai::persona::resolve(&ctx.db, to) else {
-        let known = team(ctx);
-        return format!(
-            "error: no agent named {to:?}.\n{}",
-            crate::ai::persona::format_catalog(&known)
-        );
+    // Same rule as delegation: you may write to your own project's team and to the
+    // company-wide agents. A message is work, so reaching another project by name was
+    // the same hole in a different tool.
+    let all = ctx.db.list_personas().unwrap_or_default();
+    let known = team(ctx);
+    let scoped = ctx.workspace_id.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+    let recipient = match find_addressable(&known, &all, to, scoped) {
+        Ok(p) => p,
+        Err(e) => return e,
     };
     let me = current_persona(ctx);
     let from_name = me.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "the main agent".into());
@@ -996,6 +1201,385 @@ fn agent_send(ctx: &ToolContext, args: &Value) -> String {
         "Message sent from {from_name} to {}. They are being woken to read it — \
          do not wait for a reply, carry on and check agent_inbox later.",
         recipient.name
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The approval ladder
+// ---------------------------------------------------------------------------
+
+/// Mark the goal this turn belongs to as waiting on a decision, or released from one.
+///
+/// The tool dispatcher reads this field, not the proposal table: a guard that has to
+/// join two tables on every tool call is a guard somebody turns off.
+fn set_approval_state(ctx: &ToolContext, state: Option<&str>) {
+    let Some(goal_id) = ctx
+        .goal_id
+        .clone()
+        .or_else(|| ctx.session_id.strip_prefix("goal:").map(str::to_string))
+    else {
+        return;
+    };
+    if let Ok(Some(mut goal)) = ctx.db.get_goal(&goal_id) {
+        goal.approval_state = state.map(str::to_string);
+        if let Err(e) = ctx.db.update_goal(&goal) {
+            crate::diag(&format!("proposal: could not mark goal {goal_id}: {e}"));
+        }
+    }
+}
+
+async fn feature_propose(ctx: &ToolContext, args: &Value) -> String {
+    let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if title.is_empty() || body.is_empty() {
+        return "error: feature_propose needs both 'title' and 'body'".into();
+    }
+    let Some(me) = current_persona(ctx) else {
+        // The main agent is already talking to the user. Asking them is one sentence,
+        // and routing it through a table would only delay the answer.
+        return "You are talking to the user directly — ask them whether to build it \
+                rather than filing a proposal."
+            .into();
+    };
+    let goal_id = ctx
+        .goal_id
+        .clone()
+        .or_else(|| ctx.session_id.strip_prefix("goal:").map(str::to_string));
+    let proposal = crate::storage::models::FeatureProposal {
+        id: uuid::Uuid::new_v4().to_string(),
+        workspace_id: ctx.workspace_id.clone().filter(|s| !s.is_empty()),
+        persona_id: Some(me.id.clone()),
+        goal_id,
+        title: title.to_string(),
+        body: body.to_string(),
+        state: "proposed".into(),
+        decided_by: None,
+        decision_note: None,
+        created_at: None,
+        updated_at: None,
+    };
+    if let Err(e) = ctx.db.insert_feature_proposal(&proposal) {
+        return format!("error filing the proposal: {e}");
+    }
+    // Held from here, so an agent cannot start building while its own proposal is
+    // still climbing the chain.
+    set_approval_state(ctx, Some("proposed"));
+
+    let outcome = crate::ai::escalation::review_proposal(&ctx.db, &me, None, title, body).await;
+    let decided_by = outcome.decided_by.as_ref().map(|p| p.id.clone());
+    if outcome.approved {
+        let _ = ctx.db.decide_feature_proposal(
+            &proposal.id,
+            "approved",
+            decided_by.as_deref(),
+            Some(&outcome.summary()),
+        );
+        set_approval_state(ctx, Some("approved"));
+        return format!(
+            "Approved.\n{}\n\nBuild it. Keep it to what you proposed — anything beyond \
+             that is a new proposal.",
+            outcome.summary()
+        );
+    }
+    if outcome.refused {
+        let _ = ctx.db.decide_feature_proposal(
+            &proposal.id,
+            "rejected",
+            decided_by.as_deref(),
+            Some(&outcome.summary()),
+        );
+        set_approval_state(ctx, Some("rejected"));
+        return format!(
+            "Not approved.\n{}\n\nDo not build it. Carry on with the work you already \
+             have, or report back if that was all of it.",
+            outcome.summary()
+        );
+    }
+    // Nobody answered. It stays open and a person decides — which is why it is also
+    // reported upward rather than left in a table nobody opens.
+    let all = ctx.db.list_personas().unwrap_or_default();
+    let to = crate::ai::persona::manager_of(&all, &me).map(|m| m.id.clone());
+    let note = format!("Proposal ({}): {title}\n\n{body}", proposal.id);
+    if to.is_none() {
+        crate::ai::report::report_to_user(&ctx.db, ctx.goal_id.as_deref(), &me.name, &note);
+    }
+    let _ = record_message(ctx, Some(me.id.clone()), to, "report", &note);
+    format!(
+        "Filed as proposal {} and not approved yet.\n{}\n\nDo not build it while it is \
+         open. Work on something already agreed, and check back with feature_list.",
+        proposal.id,
+        outcome.summary()
+    )
+}
+
+fn feature_decide(ctx: &ToolContext, args: &Value) -> String {
+    let id = args.get("proposal_id").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let decision = args
+        .get("decision")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    let note = args.get("note").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if id.is_empty() {
+        return "error: feature_decide needs a 'proposal_id' — feature_list has them".into();
+    }
+    let state = match decision.as_str() {
+        "approve" | "approved" | "yes" => "approved",
+        "reject" | "rejected" | "no" => "rejected",
+        _ => return "error: decision must be \"approve\" or \"reject\"".into(),
+    };
+    let proposal = match ctx.db.get_feature_proposal(id) {
+        Ok(Some(p)) => p,
+        Ok(None) => return format!("error: no proposal {id}"),
+        Err(e) => return format!("error reading the proposal: {e}"),
+    };
+    if !task_visible(proposal.workspace_id.as_deref(), ctx.workspace_id.as_deref()) {
+        return "error: that proposal belongs to another project. Its own chain of \
+                command decides it."
+            .into();
+    }
+    let me = current_persona(ctx);
+    let by = me.as_ref().map(|p| p.id.clone());
+    match ctx
+        .db
+        .decide_feature_proposal(id, state, by.as_deref(), (!note.is_empty()).then_some(note))
+    {
+        Ok(false) => return format!("error: no proposal {id}"),
+        Err(e) => return format!("error recording the decision: {e}"),
+        Ok(true) => {}
+    }
+    // The agent that asked is held by its goal row, not by the proposal, so releasing
+    // it is a separate write — and the one that actually lets work resume.
+    if let Some(goal_id) = proposal.goal_id.as_deref() {
+        if let Ok(Some(mut goal)) = ctx.db.get_goal(goal_id) {
+            goal.approval_state = Some(state.to_string());
+            let _ = ctx.db.update_goal(&goal);
+        }
+    }
+    if let Some(to) = proposal.persona_id.clone() {
+        let body = format!(
+            "Your proposal \"{}\" was {state}.{}",
+            proposal.title,
+            if note.is_empty() { String::new() } else { format!(" {note}") }
+        );
+        let _ = record_message(ctx, by, Some(to), "report", &body);
+    }
+    format!(
+        "\"{}\" is {state}. {} has been told.",
+        proposal.title,
+        display_name(ctx, proposal.persona_id.as_deref())
+    )
+}
+
+fn feature_list(ctx: &ToolContext, args: &Value) -> String {
+    let state = args
+        .get("state")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(20);
+    let project = match args.get("project").and_then(|v| v.as_str()).map(str::trim) {
+        Some(n) if !n.is_empty() => {
+            let all = ctx.db.list_workspaces().unwrap_or_default();
+            match all.iter().find(|w| w.name.eq_ignore_ascii_case(n) || w.id == n) {
+                Some(w) => Some(w.id.clone()),
+                None => return format!("error: no project called {n:?}"),
+            }
+        }
+        _ => ctx.workspace_id.clone().filter(|s| !s.is_empty()),
+    };
+    let rows = match ctx
+        .db
+        .list_feature_proposals(project.as_deref(), state.or(Some("proposed")), limit)
+    {
+        Ok(r) => r,
+        Err(e) => return format!("error reading proposals: {e}"),
+    };
+    if rows.is_empty() {
+        return "Nothing proposed.".into();
+    }
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|p| {
+            format!(
+                "- [{}] {} — {} ({})\n  {}",
+                p.state,
+                p.title,
+                display_name(ctx, p.persona_id.as_deref()),
+                p.id,
+                p.body.lines().next().unwrap_or("").chars().take(160).collect::<String>()
+            )
+        })
+        .collect();
+    format!("Proposals:\n{}", lines.join("\n"))
+}
+
+// ---------------------------------------------------------------------------
+// Task control
+// ---------------------------------------------------------------------------
+
+/// Whether a task on `goal_ws` may be controlled from a turn working on `here`.
+///
+/// A task belongs to a project, and so does the authority to stop it. A turn with no
+/// project — the agent the user talks to — sees all of them, which is the whole reason
+/// intervening from a phone works at all.
+pub(crate) fn task_visible(goal_ws: Option<&str>, here: Option<&str>) -> bool {
+    match here.map(str::trim).filter(|s| !s.is_empty()) {
+        None => true,
+        Some(here) => goal_ws.map(str::trim).filter(|s| !s.is_empty()) == Some(here),
+    }
+}
+
+/// The task a control tool is about, refused when it is not this turn's to touch.
+fn task_in_scope(ctx: &ToolContext, args: &Value) -> Result<GoalSession, String> {
+    let id = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or("needs a 'task_id' — get one from agent_check or teams_overview")?;
+    let goal = ctx
+        .db
+        .get_goal(id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no task {id}"))?;
+    if !task_visible(goal.workspace_id.as_deref(), ctx.workspace_id.as_deref()) {
+        let whose = goal
+            .workspace_id
+            .as_deref()
+            .and_then(|w| ctx.db.get_workspace(w).ok().flatten())
+            .map(|w| w.name)
+            .unwrap_or_else(|| "another project".into());
+        return Err(format!(
+            "that task belongs to {whose}, not to the project you are working on. Its own \
+             team runs it — tell them, or open that project."
+        ));
+    }
+    Ok(goal)
+}
+
+/// Who is running a task, for the line the caller reads back.
+fn owner_of(ctx: &ToolContext, goal: &GoalSession) -> String {
+    goal.persona_id
+        .as_deref()
+        .map(|id| display_name(ctx, Some(id)))
+        .unwrap_or_else(|| "the main agent".into())
+}
+
+fn task_stop(ctx: &ToolContext, args: &Value) -> String {
+    let goal = match task_in_scope(ctx, args) {
+        Ok(g) => g,
+        Err(e) => return format!("error: {e}"),
+    };
+    let who = owner_of(ctx, &goal);
+    let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("").trim();
+    match crate::commands::goal::stop_goal_inner(&ctx.app, &ctx.db, &ctx.session_state, &goal.id) {
+        Ok(_) => format!(
+            "Stopped \"{}\" ({}). {who} is no longer working on it and the board is kept.{}",
+            goal.title,
+            goal.id,
+            if reason.is_empty() { String::new() } else { format!(" Reason: {reason}") }
+        ),
+        Err(e) => format!("error stopping the task: {e}"),
+    }
+}
+
+fn task_pause(ctx: &ToolContext, args: &Value) -> String {
+    let goal = match task_in_scope(ctx, args) {
+        Ok(g) => g,
+        Err(e) => return format!("error: {e}"),
+    };
+    let who = owner_of(ctx, &goal);
+    let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("").trim();
+    match crate::commands::goal::pause_goal_inner(&ctx.app, &ctx.db, &ctx.session_state, &goal.id) {
+        Ok(_) => format!(
+            "Paused \"{}\" ({}). {who} stops where it is; task_resume picks it back up.{}",
+            goal.title,
+            goal.id,
+            if reason.is_empty() { String::new() } else { format!(" Reason: {reason}") }
+        ),
+        Err(e) => format!("error pausing the task: {e}"),
+    }
+}
+
+fn task_resume(ctx: &ToolContext, args: &Value) -> String {
+    let goal = match task_in_scope(ctx, args) {
+        Ok(g) => g,
+        Err(e) => return format!("error: {e}"),
+    };
+    let who = owner_of(ctx, &goal);
+    let note = args.get("note").and_then(|v| v.as_str()).unwrap_or("").trim();
+    // Said before it starts, so the agent reads it on its first cycle rather than
+    // discovering later that somebody restarted it for a reason.
+    if !note.is_empty() {
+        if let Some(to) = goal.persona_id.clone() {
+            let me = current_persona(ctx).map(|p| p.id);
+            let _ = record_message(ctx, me, Some(to), "note", note);
+        }
+    }
+    match crate::commands::goal::resume_goal_inner(&ctx.app, &ctx.db, &ctx.session_state, &goal.id) {
+        Ok(_) => format!(
+            "Resumed \"{}\" ({}). {who} is working on it again — do not wait for it.",
+            goal.title, goal.id
+        ),
+        Err(e) => format!("error resuming the task: {e}"),
+    }
+}
+
+fn task_reassign(ctx: &ToolContext, args: &Value) -> String {
+    let mut goal = match task_in_scope(ctx, args) {
+        Ok(g) => g,
+        Err(e) => return format!("error: {e}"),
+    };
+    let to = args.get("to").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if to.is_empty() {
+        return "error: task_reassign needs 'to' — the agent taking it over".into();
+    }
+    let all = ctx.db.list_personas().unwrap_or_default();
+    // The task's project decides who may take it, not the turn's: a task filed under a
+    // project stays with that project's team even when an unscoped turn is moving it.
+    let known: Vec<Persona> =
+        crate::ai::persona::team_for(&all, goal.workspace_id.as_deref().filter(|s| !s.is_empty()))
+            .into_iter()
+            .cloned()
+            .collect();
+    let scoped = goal.workspace_id.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+    let next = match find_addressable(&known, &all, to, scoped) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if !next.enabled {
+        return format!("error: {} is disabled, so it cannot take work", next.name);
+    }
+    let previous = owner_of(ctx, &goal);
+    if goal.persona_id.as_deref() == Some(next.id.as_str()) {
+        return format!("{} already owns that task.", next.name);
+    }
+
+    let note = args.get("note").and_then(|v| v.as_str()).unwrap_or("").trim();
+    goal.persona_id = Some(next.id.clone());
+    if let Err(e) = ctx.db.update_goal(&goal) {
+        return format!("error reassigning the task: {e}");
+    }
+    // The handover note reaches the new owner as a message, which also wakes them —
+    // otherwise a reassigned task sits still until something else happens to run.
+    let handover = if note.is_empty() {
+        format!("You now own \"{}\" (task {}), taken over from {previous}.", goal.title, goal.id)
+    } else {
+        format!(
+            "You now own \"{}\" (task {}), taken over from {previous}. {note}",
+            goal.title, goal.id
+        )
+    };
+    let me = current_persona(ctx).map(|p| p.id);
+    if let Err(e) = record_message(ctx, me, Some(next.id.clone()), "request", &handover) {
+        return format!("reassigned, but the handover note did not send: {e}");
+    }
+    format!(
+        "\"{}\" ({}) is now {}'s, taken from {previous}. They have the handover note and \
+         are being woken to pick it up.",
+        goal.title, goal.id, next.name
     )
 }
 
@@ -1146,6 +1730,69 @@ async fn agent_hire(ctx: &ToolContext, args: &Value) -> String {
     // database returned first.
     let existing = crate::ai::persona::resolve(&ctx.db, name);
     let str_arg = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::trim);
+    let list_arg = |k: &str| {
+        args.get(k).and_then(|v| v.as_array()).map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<String>>()
+        })
+    };
+
+    // Renaming is a hire against the old name. Refusing to invent an agent under the new
+    // one matters: a typo would otherwise quietly create a second agent and leave the
+    // first where it was.
+    let rename_to = str_arg("rename_to").filter(|s| !s.is_empty());
+    if rename_to.is_some() && existing.is_none() {
+        return format!("error: there is no agent named {name:?} to rename.");
+    }
+    let final_name = rename_to.unwrap_or(name);
+
+    // Which project this agent belongs to. Over chat there is no project open, so every
+    // hire used to land company-wide — an agent addressable from every project and
+    // filed under none of them, which is the opposite of what "add a backend engineer
+    // to CSB" means.
+    let workspace_id = match str_arg("project") {
+        Some(p) if matches!(p.to_lowercase().as_str(), "company-wide" | "companywide" | "none" | "all" | "any") => None,
+        Some(p) if !p.is_empty() => {
+            let all = ctx.db.list_workspaces().unwrap_or_default();
+            match all.iter().find(|w| w.name.eq_ignore_ascii_case(p) || w.id == p) {
+                Some(w) => Some(w.id.clone()),
+                None => {
+                    return format!(
+                        "error: no project called {p:?}. Known projects: {}",
+                        all.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")
+                    )
+                }
+            }
+        }
+        // Unstated: keep what it has, else the project being worked on. Company-wide is
+        // now something you ask for rather than something you fall into.
+        _ => existing
+            .as_ref()
+            .and_then(|p| p.workspace_id.clone())
+            .or_else(|| ctx.workspace_id.clone().filter(|s| !s.is_empty())),
+    };
+
+    let provider_id = match str_arg("provider_id").filter(|s| !s.is_empty()) {
+        Some(want) => {
+            let providers = ctx.db.list_providers().unwrap_or_default();
+            match providers
+                .iter()
+                .find(|p| p.id == want || p.name.eq_ignore_ascii_case(want))
+            {
+                Some(p) => Some(p.id.clone()),
+                None => {
+                    return format!(
+                        "error: no provider called {want:?}. Configured: {}",
+                        providers.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+                    )
+                }
+            }
+        }
+        None => existing.as_ref().and_then(|p| p.provider_id.clone()),
+    };
 
     let reports_to = match str_arg("reports_to").filter(|s| !s.is_empty()) {
         Some(mgr) => match crate::ai::persona::resolve(&ctx.db, mgr) {
@@ -1166,7 +1813,7 @@ async fn agent_hire(ctx: &ToolContext, args: &Value) -> String {
 
     let input = crate::storage::models::PersonaInput {
         id: existing.as_ref().map(|p| p.id.clone()),
-        name: name.to_string(),
+        name: final_name.to_string(),
         role: str_arg("role")
             .map(str::to_string)
             .or_else(|| existing.as_ref().map(|p| p.role.clone()))
@@ -1184,22 +1831,23 @@ async fn agent_hire(ctx: &ToolContext, args: &Value) -> String {
         safety_mode: str_arg("safety_mode")
             .map(str::to_string)
             .or_else(|| existing.as_ref().and_then(|p| p.safety_mode.clone())),
-        provider_id: existing.as_ref().and_then(|p| p.provider_id.clone()),
-        model: existing.as_ref().and_then(|p| p.model.clone()),
+        provider_id,
+        model: str_arg("model")
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| existing.as_ref().and_then(|p| p.model.clone())),
         enabled: args
             .get("enabled")
             .and_then(|v| v.as_bool())
             .unwrap_or_else(|| existing.as_ref().map(|p| p.enabled).unwrap_or(true)),
         reports_to,
-        // A new agent joins the team for the project being worked on. Company-wide is
-        // the exception — the agent the user talks to — and is set deliberately, not by
-        // hiring someone with no project open.
-        workspace_id: existing
-            .as_ref()
-            .and_then(|p| p.workspace_id.clone())
-            .or_else(|| ctx.workspace_id.clone().filter(|s| !s.is_empty())),
-        allowed_paths: Vec::new(),
-        allowed_tools: Vec::new(),
+        workspace_id,
+        allowed_paths: list_arg("allowed_paths")
+            .or_else(|| existing.as_ref().map(|p| p.allowed_paths.clone()))
+            .unwrap_or_default(),
+        allowed_tools: list_arg("allowed_tools")
+            .or_else(|| existing.as_ref().map(|p| p.allowed_tools.clone()))
+            .unwrap_or_default(),
     };
 
     let manager_name = input
@@ -1207,18 +1855,49 @@ async fn agent_hire(ctx: &ToolContext, args: &Value) -> String {
         .as_deref()
         .map(|id| display_name(ctx, Some(id)))
         .unwrap_or_else(|| "the user".into());
+    let project_name = match input.workspace_id.as_deref() {
+        Some(id) => ctx
+            .db
+            .get_workspace(id)
+            .ok()
+            .flatten()
+            .map(|w| w.name)
+            .unwrap_or_else(|| "(deleted project)".into()),
+        None => "company-wide — reachable from every project".into(),
+    };
+    let renamed = existing
+        .as_ref()
+        .filter(|p| p.name != input.name)
+        .map(|p| format!(" (renamed from \"{}\")", p.name))
+        .unwrap_or_default();
     let summary = format!(
-        "{} the agent \"{}\".\n\
+        "{} the agent \"{}\"{renamed}.\n\
          Role: {}\n\
+         Project: {}\n\
          Reports to: {}\n\
-         Servers: [{}]   Trust: {}   {}",
+         Servers: [{}]   Trust: {}   {}\n\
+         Model: {}\n\
+         Files: {}\n\
+         Tools: {}",
         if existing.is_some() { "Update" } else { "Create" },
         input.name,
         if input.role.is_empty() { "(none given)" } else { &input.role },
+        project_name,
         manager_name,
         input.targets.join(", "),
         input.safety_mode.clone().unwrap_or_else(|| "global default".into()),
         if input.enabled { "May be given work." } else { "Disabled." },
+        input.model.clone().unwrap_or_else(|| "provider default".into()),
+        if input.allowed_paths.is_empty() {
+            "the whole project".to_string()
+        } else {
+            input.allowed_paths.join(", ")
+        },
+        if input.allowed_tools.is_empty() {
+            "every tool".to_string()
+        } else {
+            input.allowed_tools.join(", ")
+        },
     );
     if let Err(e) = confirm(ctx, &summary).await {
         return format!("not changed: {e}");
@@ -1237,53 +1916,223 @@ async fn agent_hire(ctx: &ToolContext, args: &Value) -> String {
     }
 }
 
-/// What each default role is for, and how much it is trusted.
+/// One agent's whole configuration, so a change is made with what is there in view.
+fn agent_inspect(ctx: &ToolContext, args: &Value) -> String {
+    let want = args.get("agent").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if want.is_empty() {
+        return "error: agent_inspect needs an 'agent'".into();
+    }
+    let all = ctx.db.list_personas().unwrap_or_default();
+    let known = team(ctx);
+    let scoped = ctx.workspace_id.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+    let p = match find_addressable(&known, &all, want, scoped) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let project = match p.workspace_id.as_deref() {
+        Some(id) => ctx
+            .db
+            .get_workspace(id)
+            .ok()
+            .flatten()
+            .map(|w| w.name)
+            .unwrap_or_else(|| "(deleted project)".into()),
+        None => "company-wide".into(),
+    };
+    let manager = crate::ai::persona::manager_of(&all, &p)
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| "the user".into());
+    let provider = p
+        .provider_id
+        .as_deref()
+        .and_then(|id| ctx.db.get_provider(id).ok().flatten())
+        .map(|pr| pr.name)
+        .unwrap_or_else(|| "the active provider".into());
+    let running: Vec<String> = ctx
+        .db
+        .list_goals()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|g| {
+            g.persona_id.as_deref() == Some(p.id.as_str())
+                && matches!(g.status.as_str(), "active" | "waiting" | "paused" | "blocked")
+        })
+        .map(|g| format!("  - [{}] {} ({})", g.status, g.title, g.id))
+        .collect();
+
+    format!(
+        "{name} ({id})\n\
+         Role: {role}\n\
+         Project: {project}\n\
+         Reports to: {manager}\n\
+         Servers: {targets}\n\
+         Trust: {trust}\n\
+         Provider: {provider}   Model: {model}\n\
+         Files it may touch: {paths}\n\
+         Tools it may call: {tools}\n\
+         {state}\n\
+         Open tasks:\n{running}\n\
+         Standing instructions:\n{instructions}",
+        name = p.name,
+        id = p.id,
+        role = if p.role.trim().is_empty() { "(none set)" } else { p.role.trim() },
+        project = project,
+        manager = manager,
+        targets = if p.targets.is_empty() { "none".to_string() } else { p.targets.join(", ") },
+        trust = p.safety_mode.clone().unwrap_or_else(|| "the global default".into()),
+        provider = provider,
+        model = p.model.clone().unwrap_or_else(|| "the provider default".into()),
+        paths = if p.allowed_paths.is_empty() {
+            "the whole project".to_string()
+        } else {
+            p.allowed_paths.join(", ")
+        },
+        tools = if p.allowed_tools.is_empty() {
+            "every tool".to_string()
+        } else {
+            p.allowed_tools.join(", ")
+        },
+        state = if p.enabled { "Active — may be given work." } else { "Disabled." },
+        running = if running.is_empty() { "  (none)".to_string() } else { running.join("\n") },
+        instructions = if p.instructions.trim().is_empty() {
+            "  (none)".to_string()
+        } else {
+            p.instructions.trim().to_string()
+        },
+    )
+}
+
+/// What one default role is for, how far it is trusted, and what it may touch.
+///
+/// A struct rather than a tuple because it grew a fourth and fifth field and a
+/// five-tuple is unreadable at the call site.
+pub struct RoleDefaults {
+    /// The one-line remit. Work is routed by matching against this, so it describes the
+    /// work rather than the personality.
+    pub blurb: &'static str,
+    pub instructions: &'static str,
+    /// Safety mode. `None` uses the global default.
+    pub trust: Option<&'static str>,
+    /// Globs inside the project this role may change. Empty = the whole project.
+    pub paths: &'static [&'static str],
+    /// Tools it may call. Empty = every tool.
+    pub tools: &'static [&'static str],
+}
+
+/// What each default role is for, how much it is trusted, and what it may touch.
 ///
 /// Trust is the part worth getting right up front. A reviewer that can change things is
 /// not a reviewer, and an engineer that can do anything unattended is a much bigger
 /// decision than "add an engineer" sounds like — so the defaults are narrow and the
 /// user widens them deliberately.
-pub fn role_defaults(role: &str) -> (&'static str, &'static str, Option<&'static str>) {
+///
+/// The paths and tools are the same idea, one level down, and they are what make these
+/// roles different from each other in fact rather than in prose: a lead that delegates
+/// is a lead that cannot write files, and a researcher that reads is a researcher with
+/// no write tool at all. Every list here is a default a person can widen in Settings →
+/// Agents; none of them is a security boundary against the user.
+pub fn role_defaults(role: &str) -> RoleDefaults {
     match role.trim().to_lowercase().as_str() {
-        "lead" | "ceo" | "manager" => (
-            "leads this project and answers to the user",
-            "You lead this project. Route work to your team rather than doing it all \
-             yourself, keep an eye on the project's numbers, and report upward: what \
-             changed, what you decided, what you need. Nothing your team does may end \
-             with uncommitted work, a leftover wip/ branch, or a pull request left to \
-             rot — check repo_status. Be brief: it is often read on a phone.",
-            None,
-        ),
-        "engineer" | "dev" | "developer" => (
-            "implements changes on this project",
-            "You implement changes on this project. Read before you write, make the \
-             smallest change that does the job, and verify it worked before saying it is \
-             done. Reuse what already exists rather than writing a second copy of it. \
-             Commit and push before you stop — never leave work in a working tree. \
-             Report what you actually changed, not what you intended to.",
-            Some("allowlist"),
-        ),
-        "reviewer" | "qa" => (
-            "reviews and verifies, read-only",
-            "You verify. You do not change anything — you check that what was claimed \
-             actually happened, and say plainly when it did not. Cite what you looked at. \
+        "lead" | "ceo" | "manager" => RoleDefaults {
+            blurb: "leads this project and answers to the user",
+            instructions: "You lead this project. Route work to your team rather than \
+             doing it all yourself, keep an eye on the project's numbers, and report \
+             upward: what changed, what you decided, what you need. You do not edit \
+             files — that is what your team is for, and doing their work yourself is how \
+             two people end up in the same file. Nothing your team does may end with \
+             uncommitted work, a leftover wip/ branch, or a pull request left to rot — \
+             check repo_status. If somebody proposes something new, decide it: \
+             feature_decide, with a reason they can use. Be brief: it is often read on a \
+             phone.",
+            trust: None,
+            // Nothing. A lead that writes files is an engineer with a title.
+            paths: &[],
+            tools: &[
+                "agent_*", "task_*", "team_*", "feature_*", "repo_status", "project_*",
+                "read_file", "local_read_file", "local_grep_search", "local_find_files",
+                "local_list_dir", "list_dir", "grep_search", "explore", "web_search",
+            ],
+        },
+        "architect" | "principal" | "staff" => RoleDefaults {
+            blurb: "decides how this project is built and reviews the shape of changes",
+            instructions: "You decide how this project is built. Read widely before you \
+             say anything: the shape of a change matters more than its diff. You write \
+             documentation and decisions, not implementations — hand those to whoever \
+             owns that part of the tree. Say plainly when a proposal duplicates something \
+             we already have, and prefer the change that removes a concept to the one \
+             that adds one.",
+            trust: Some("approve"),
+            paths: &["docs/**", "*.md", "**/*.md"],
+            tools: &[],
+        },
+        "backend" | "engineer" | "dev" | "developer" => RoleDefaults {
+            blurb: "implements changes to this project's backend",
+            instructions: "You implement changes on this project. Read before you write, \
+             make the smallest change that does the job, and verify it worked before \
+             saying it is done. Reuse what already exists rather than writing a second \
+             copy of it. Commit and push before you stop — never leave work in a working \
+             tree. If what you are about to build does not exist yet at all, that is a \
+             feature_propose, not a commit. Report what you actually changed, not what \
+             you intended to.",
+            trust: Some("allowlist"),
+            paths: &["src-tauri/**"],
+            tools: &[],
+        },
+        "frontend" | "ui" | "web" => RoleDefaults {
+            blurb: "implements this project's user interface",
+            instructions: "You build the interface. No emojis anywhere in it, icons are \
+             SVG components, and the styling stays muted and dark — match what is already \
+             there rather than introducing a second look. Read the component next to the \
+             one you are changing before you change it. Verify it compiles and the checks \
+             pass before saying it is done.",
+            trust: Some("allowlist"),
+            paths: &["src/**"],
+            tools: &[],
+        },
+        "reviewer" | "qa" | "test" | "deploy" => RoleDefaults {
+            blurb: "reviews, tests and verifies this project",
+            instructions: "You verify. You read everything and change almost nothing — \
+             you check that what was claimed actually happened, and say plainly when it \
+             did not. Cite what you looked at. The one thing you do write is tests: a \
+             test that would have caught it is worth more than a paragraph about it. \
              Look for the things nobody notices one at a time: logic duplicated instead \
              of reused, code nothing calls any more, a function doing three jobs, and \
              pull requests left open long enough to go stale.",
-            Some("approve"),
-        ),
-        "ops" | "sysadmin" | "sre" => (
-            "keeps this project's servers healthy",
-            "You keep this project's servers healthy: disk, memory, services, backups, \
-             certificates. Diagnose before acting, and never restart something without \
-             saying why it needed it.",
-            Some("allowlist"),
-        ),
-        _ => (
-            "works on this project",
-            "You work on this project. Say what you did and what came of it.",
-            Some("approve"),
-        ),
+            trust: Some("approve"),
+            // Reads the whole project (the root check still applies); writes tests only.
+            paths: &["**/tests/**", "**/*.test.*", "**/*.spec.*", "**/*_test.*", "**/test_*"],
+            tools: &[],
+        },
+        "researcher" | "analyst" | "research" => RoleDefaults {
+            blurb: "finds things out for this project without changing anything",
+            instructions: "You find things out. You change nothing at all — no files, no \
+             servers — and the answer is the whole job. Say where each thing came from, \
+             and say when you could not find it rather than filling the gap in. Short \
+             beats complete: what was asked, answered.",
+            trust: Some("approve"),
+            paths: &[],
+            tools: &[
+                "web_search", "web_fetch", "read_file", "local_read_file",
+                "local_grep_search", "local_find_files", "local_list_dir", "list_dir",
+                "grep_search", "find_files", "explore", "agent_*", "project_history",
+            ],
+        },
+        "ops" | "sysadmin" | "sre" => RoleDefaults {
+            blurb: "keeps this project's servers healthy",
+            instructions: "You keep this project's servers healthy: disk, memory, \
+             services, backups, certificates. Diagnose before acting, and never restart \
+             something without saying why it needed it.",
+            trust: Some("allowlist"),
+            paths: &[],
+            tools: &[],
+        },
+        _ => RoleDefaults {
+            blurb: "works on this project",
+            instructions: "You work on this project. Say what you did and what came of it.",
+            trust: Some("approve"),
+            paths: &[],
+            tools: &[],
+        },
     }
 }
 
@@ -1300,7 +2149,12 @@ pub fn team_member_name(project: &str, role: &str) -> String {
 }
 
 /// The roles a team gets when nobody says otherwise.
-pub const DEFAULT_ROLES: [&str; 3] = ["lead", "engineer", "reviewer"];
+///
+/// A startup, not a pair: somebody who decides, somebody who decides how, one engineer
+/// per side of the tree, and somebody whose job is to disbelieve them. Three was the
+/// smallest team that could be said to exist; this is the smallest one that can finish
+/// a feature without the user standing in for a missing role.
+pub const DEFAULT_ROLES: [&str; 5] = ["lead", "architect", "backend", "frontend", "qa"];
 
 /// One agent a team would gain, before anything is written.
 pub struct PlannedMember {
@@ -1308,6 +2162,9 @@ pub struct PlannedMember {
     pub blurb: &'static str,
     pub instructions: String,
     pub trust: Option<&'static str>,
+    /// What it may change, and what it may call. See [`RoleDefaults`].
+    pub paths: Vec<String>,
+    pub tools: Vec<String>,
     /// An agent by this name is already there, so it is left alone.
     pub exists: bool,
 }
@@ -1324,17 +2181,19 @@ pub fn plan_team(
         .iter()
         .map(|role| {
             let name = team_member_name(project_name, role);
-            let (blurb, instr, trust) = role_defaults(role);
-            let mut instructions = instr.to_string();
+            let defaults = role_defaults(role);
+            let mut instructions = defaults.instructions.to_string();
             if let Some(a) = about.map(str::trim).filter(|a| !a.is_empty()) {
                 instructions.push_str(&format!("\n\nThe project: {a}"));
             }
             PlannedMember {
                 exists: existing.iter().any(|p| p.name.eq_ignore_ascii_case(&name)),
                 name,
-                blurb,
+                blurb: defaults.blurb,
                 instructions,
-                trust,
+                trust: defaults.trust,
+                paths: defaults.paths.iter().map(|s| s.to_string()).collect(),
+                tools: defaults.tools.iter().map(|s| s.to_string()).collect(),
             }
         })
         .collect()
@@ -1376,8 +2235,8 @@ pub fn create_team(
             enabled: true,
             reports_to: if is_lead { None } else { lead_id.clone() },
             workspace_id: Some(workspace_id.to_string()),
-            allowed_paths: Vec::new(),
-            allowed_tools: Vec::new(),
+            allowed_paths: m.paths.clone(),
+            allowed_tools: m.tools.clone(),
         };
         match crate::commands::persona::save_persona_checked(db, input) {
             Ok(p) => {
@@ -1445,7 +2304,19 @@ async fn team_create(ctx: &ToolContext, args: &Value) -> String {
         ws.name,
         to_make
             .iter()
-            .map(|m| format!("  - {} — {} [{}]", m.name, m.blurb, m.trust.unwrap_or("global default")))
+            .map(|m| format!(
+                "  - {} — {} [{}] · {}",
+                m.name,
+                m.blurb,
+                m.trust.unwrap_or("global default"),
+                if !m.tools.is_empty() {
+                    "delegates and reads; no write tools".to_string()
+                } else if m.paths.is_empty() {
+                    "may change anything in the project".to_string()
+                } else {
+                    format!("changes {}", m.paths.join(", "))
+                }
+            ))
             .collect::<Vec<_>>()
             .join("\n"),
         ws.name
@@ -2211,14 +3082,37 @@ mod tests {
         // A reviewer that can change things is not a reviewer, and an engineer that can
         // do anything unattended is a much bigger decision than "add an engineer"
         // sounds like. Defaults start narrow; the user widens them deliberately.
-        assert_eq!(role_defaults("reviewer").2, Some("approve"));
-        assert_eq!(role_defaults("qa").2, Some("approve"));
-        assert_eq!(role_defaults("engineer").2, Some("allowlist"));
+        assert_eq!(role_defaults("reviewer").trust, Some("approve"));
+        assert_eq!(role_defaults("qa").trust, Some("approve"));
+        assert_eq!(role_defaults("engineer").trust, Some("allowlist"));
         // An unrecognised role is the most cautious of all — nobody said what it does.
-        assert_eq!(role_defaults("wizard").2, Some("approve"));
+        assert_eq!(role_defaults("wizard").trust, Some("approve"));
         // The lead inherits the global setting rather than being pinned narrow: it is
         // the one the user actually converses with.
-        assert_eq!(role_defaults("lead").2, None);
+        assert_eq!(role_defaults("lead").trust, None);
+    }
+
+    #[test]
+    fn each_role_is_confined_to_the_part_of_the_tree_it_owns() {
+        // The roster is only a roster if the roles differ in what they can do. Two
+        // engineers that may both rewrite the whole repository are one engineer twice.
+        assert_eq!(role_defaults("backend").paths, ["src-tauri/**"]);
+        assert_eq!(role_defaults("frontend").paths, ["src/**"]);
+        assert!(role_defaults("qa").paths.iter().any(|p| p.contains("test")));
+        assert!(role_defaults("architect").paths.iter().any(|p| p.contains("md")));
+        // The lead and the researcher are held by their tools, not their paths: neither
+        // list contains anything that writes.
+        for role in ["lead", "researcher"] {
+            let d = role_defaults(role);
+            assert!(!d.tools.is_empty(), "{role} needs a tool list");
+            assert!(
+                !d.tools.iter().any(|t| t.contains("write") || t.contains("edit")),
+                "{role} was given a write tool"
+            );
+        }
+        // And the default team is a team: one of each, not three of one.
+        assert_eq!(DEFAULT_ROLES.len(), 5);
+        assert!(DEFAULT_ROLES.contains(&"frontend"));
     }
 
     #[test]
@@ -2284,6 +3178,70 @@ mod tests {
             allowed_paths: Vec::new(),
             allowed_tools: Vec::new(),
         }
+    }
+
+    /// Two projects, each with an engineer, plus one company-wide agent.
+    fn two_projects() -> (Vec<Persona>, Vec<Persona>) {
+        let mut a = persona("A Engineer", "pa");
+        a.workspace_id = Some("ws-a".into());
+        let mut b = persona("B Engineer", "pb");
+        b.workspace_id = Some("ws-b".into());
+        let orchestrator = persona("Orchestrator", "po");
+        let all = vec![a.clone(), b.clone(), orchestrator.clone()];
+        // What an agent working on project A can address: its own team plus the
+        // company-wide agents, exactly as `team()` builds it at the call sites.
+        let known = crate::ai::persona::team_for(&all, Some("ws-a"))
+            .into_iter()
+            .cloned()
+            .collect();
+        (all, known)
+    }
+
+    #[test]
+    fn delegating_to_a_named_agent_on_another_project_is_refused() {
+        // The hole this closes: the team list was built and then ignored, because
+        // naming an agent went to `resolve`, which searches the whole database. One
+        // project's lead could hand work to another project's engineer by typing their
+        // name, and nothing anywhere said a word about it.
+        let (all, known) = two_projects();
+        let err = find_addressable(&known, &all, "B Engineer", true).unwrap_err();
+        assert!(err.contains("another project"), "{err}");
+        // Their own team and the company-wide agents still resolve.
+        assert_eq!(find_addressable(&known, &all, "A Engineer", true).unwrap().id, "pa");
+        assert_eq!(find_addressable(&known, &all, "Orchestrator", true).unwrap().id, "po");
+        // A name nobody has is a different refusal, and says so.
+        assert!(find_addressable(&known, &all, "Nobody", true)
+            .unwrap_err()
+            .contains("no agent named"));
+    }
+
+    #[test]
+    fn agent_send_cannot_reach_another_project_either() {
+        // Same helper, same refusal: a message is work, so reaching across by name was
+        // the identical hole in a second tool. The unscoped turn — the agent the user
+        // talks to over chat, with no project open — is the one exception, and it is
+        // what makes "tell the CSB engineer to stop" work from a phone.
+        let (all, known) = two_projects();
+        assert!(find_addressable(&known, &all, "B Engineer", true).is_err());
+        assert_eq!(
+            find_addressable(&known, &all, "B Engineer", false).unwrap().id,
+            "pb"
+        );
+    }
+
+    #[test]
+    fn stopping_a_task_on_another_project_is_refused() {
+        // Task control is authority, and authority is scoped the same way work is.
+        assert!(!task_visible(Some("ws-b"), Some("ws-a")));
+        assert!(task_visible(Some("ws-a"), Some("ws-a")));
+        // A turn with no project sees every task — that is the orchestrator, and being
+        // able to stop anything from a phone is the whole point of these tools.
+        assert!(task_visible(Some("ws-b"), None));
+        assert!(task_visible(None, None));
+        // A task filed under nothing is not visible from inside a project: it belongs
+        // to whoever started it, not to whichever project happens to be open.
+        assert!(!task_visible(None, Some("ws-a")));
+        assert!(!task_visible(Some(""), Some("ws-a")));
     }
 
     fn goal(pid: &str, status: &str, when: &str) -> GoalSession {
