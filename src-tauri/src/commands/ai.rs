@@ -430,7 +430,7 @@ pub fn get_agent_conversation(
 pub fn save_agent_conversation(
     db: State<'_, Db>,
     input: AgentConversationInput,
-) -> Result<AgentConversation, String> {
+) -> Result<AgentConversationMeta, String> {
     let conv = db.upsert_agent_conversation(&input).map_err(|e| e.to_string())?;
     let _ = db.set_setting("agent.last_conversation", &input.id);
     Ok(conv)

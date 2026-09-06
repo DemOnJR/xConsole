@@ -200,6 +200,20 @@ pub fn run() {
                 });
             }
 
+            // Give back the space that retention freed. Deletes leave free pages behind,
+            // and the file size is what the at-rest snapshot pays for on every persist, so
+            // a hollow database keeps costing after the rows are gone. Off the startup path
+            // because it can take seconds on a large file, and rare because
+            // `compact_if_hollow` does nothing unless the waste is substantial.
+            {
+                let db_for_compact = db.clone();
+                std::thread::spawn(move || match db_for_compact.compact_if_hollow() {
+                    Ok(0) => {}
+                    Ok(freed) => diag(&format!("compacted the database, reclaimed {freed} bytes")),
+                    Err(e) => diag(&format!("database compaction failed: {e}")),
+                });
+            }
+
             let handle = app.handle().clone();
             let sessions = SessionManager::new(handle, db.clone());
             let sftp = SftpManager::new(db.clone());

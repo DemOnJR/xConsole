@@ -1679,7 +1679,9 @@ export const api = {
     targets: string[];
     messagesJson: string;
   }) =>
-    invoke<AgentConversation>("save_agent_conversation", {
+    // Returns metadata only: the stored row carries the whole conversation as one blob
+    // (megabytes for a long session) and nothing here needs it back.
+    invoke<AgentConversationMeta>("save_agent_conversation", {
       input: {
         id: args.id,
         title: args.title ?? null,

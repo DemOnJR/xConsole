@@ -23,6 +23,15 @@ use crate::storage::Db;
 /// Cap stored content per side so a runaway write can't balloon memory.
 const MAX_CONTENT: usize = 256 * 1024;
 
+/// Newest edits kept per session. One long run rewriting the same handful of files can
+/// record hundreds of them, and each carries the file's full text on both sides — enough
+/// to add tens of megabytes to the database in an afternoon. Revert only ever reaches for
+/// recent edits, so the older ones cost storage and buy nothing.
+const EDITS_KEEP_PER_SESSION: i64 = 200;
+
+/// Days of diff history kept across all sessions, for sessions nobody touches any more.
+const EDITS_KEEP_DAYS: i64 = 30;
+
 #[derive(Clone, Serialize)]
 pub struct EditRecord {
     pub id: String,
@@ -100,7 +109,21 @@ impl EditJournal {
                 .push(rec.clone());
         }
         if let Some(db) = &self.db {
-            let _ = db.insert_file_change(&rec);
+            if let Err(e) = db.insert_file_change(&rec) {
+                crate::diag(&format!("edit journal: could not record a change: {e}"));
+            }
+            if let Err(e) = db.trim_file_changes(session_id, EDITS_KEEP_PER_SESSION) {
+                crate::diag(&format!("edit journal: could not trim: {e}"));
+            }
+            // Age is the other half, and it belongs to sessions that have stopped: a
+            // count-based trim never touches a session that has not edited anything since
+            // last month. Once per process is often enough for slow accumulation.
+            static PRUNED_OLD_EDITS: std::sync::Once = std::sync::Once::new();
+            PRUNED_OLD_EDITS.call_once(|| {
+                if let Err(e) = db.prune_file_changes(EDITS_KEEP_DAYS) {
+                    crate::diag(&format!("edit journal: could not prune old changes: {e}"));
+                }
+            });
         }
         let _ = app.emit("agent://file-change", &rec);
     }

@@ -155,16 +155,9 @@ impl Db {
         // A half-written blob from a kill mid-persist — discard it.
         let _ = std::fs::remove_file(enc.with_extension("enc.tmp"));
 
-        // Lazy plaintext cleanup: a clean exit leaves a `.clean` marker but can't delete the
-        // still-open working file on Windows. So at the NEXT launch (file now closeable) we
-        // delete that stale plaintext and decrypt fresh from `.enc`. No marker => the previous
-        // run crashed, so a valid working file is the most-recent truth and is kept.
-        let clean_marker = enc.with_extension("clean");
-        let had_clean_exit = clean_marker.exists();
-        let _ = std::fs::remove_file(&clean_marker);
-        if had_clean_exit && work.exists() {
-            encrypt::cleanup_work_files(work);
-        }
+        // Lazy plaintext cleanup: Windows can't delete the still-open working file at exit,
+        // so the next launch does it — but only once the blob is shown to be current.
+        encrypt::discard_plaintext_if_blob_is_current(enc, work);
 
         let have_valid_work = work.exists() && encrypt::integrity_ok(work);
         if !have_valid_work {
@@ -199,7 +192,6 @@ impl Db {
             key: *key,
             dirty,
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            last_data_version: Mutex::new(None),
         });
         let db = Db {
             conn: conn.clone(),
@@ -229,12 +221,7 @@ impl Db {
             std::fs::create_dir_all(parent).ok();
         }
         let _ = std::fs::remove_file(enc.with_extension("enc.tmp"));
-        let clean_marker = enc.with_extension("clean");
-        let had_clean_exit = clean_marker.exists();
-        let _ = std::fs::remove_file(&clean_marker);
-        if had_clean_exit && work.exists() {
-            encrypt::cleanup_work_files(work);
-        }
+        encrypt::discard_plaintext_if_blob_is_current(enc, work);
         let have_valid_work = work.exists() && encrypt::integrity_ok(work);
         if !have_valid_work {
             if work.exists() {
@@ -267,7 +254,6 @@ impl Db {
             key: *key,
             dirty,
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            last_data_version: Mutex::new(None),
         });
         self.migrate()?; // run on the now-real connection
         if !enc.exists() {
@@ -323,7 +309,6 @@ impl Db {
             key: *key,
             dirty,
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            last_data_version: Mutex::new(None),
         });
         *self.persist.lock().unwrap() = Some(ctx.clone());
         encrypt::spawn_persister(self.conn.clone(), ctx);
@@ -403,8 +388,19 @@ impl Db {
     pub fn finalize_on_exit(&self) {
         let ctx = self.persist.lock().unwrap().clone();
         if let Some(ctx) = ctx {
-            let _ = super::encrypt::persist_now(&self.conn, &ctx);
-            let _ = std::fs::write(ctx.enc.with_extension("clean"), b"1");
+            match super::encrypt::persist_now(&self.conn, &ctx) {
+                Ok(()) => {
+                    let _ = std::fs::write(ctx.enc.with_extension("clean"), b"1");
+                }
+                // The marker tells the next launch "the blob is current, throw the plaintext
+                // away". Writing it after a FAILED persist is how a stale `.enc` becomes
+                // silent data loss: the only good copy gets deleted and the app comes back
+                // on whatever old snapshot the blob still held. No marker means the working
+                // file is kept and used, which is always the safe side of this choice.
+                Err(e) => crate::diag(&format!(
+                    "final persist FAILED ({e}) — keeping the plaintext working file so the                      next launch recovers from it instead of a stale encrypted blob"
+                )),
+            }
         }
     }
 
@@ -3002,10 +2998,16 @@ impl Db {
         }
     }
 
+    /// Write a conversation and return only its metadata.
+    ///
+    /// Deliberately NOT the stored row: `messages_json` holds the whole conversation as one
+    /// blob, and the largest here is measured in megabytes. Reading it straight back so it
+    /// could be serialised across the IPC boundary tripled the cost of appending a single
+    /// message, and every caller throws the result away.
     pub fn upsert_agent_conversation(
         &self,
         input: &AgentConversationInput,
-    ) -> Result<AgentConversation> {
+    ) -> Result<AgentConversationMeta> {
         let parsed: Vec<ChatMessage> = serde_json::from_str(&input.messages_json).unwrap_or_default();
         let title = input
             .title
@@ -3042,10 +3044,19 @@ impl Db {
                 input.messages_json,
             ],
         )?;
-        drop(conn);
-        Ok(self
-            .get_agent_conversation(&input.id)?
-            .expect("conversation just upserted"))
+        let updated_at: Option<String> = conn
+            .query_row(
+                "SELECT updated_at FROM agent_conversation WHERE id = ?1",
+                params![input.id],
+                |r| r.get(0),
+            )
+            .ok();
+        Ok(AgentConversationMeta {
+            id: input.id.clone(),
+            title,
+            summary: summary_opt,
+            updated_at,
+        })
     }
 
     pub fn delete_agent_conversation(&self, id: &str) -> Result<()> {
@@ -3184,6 +3195,73 @@ impl Db {
     }
 
     // ----- Agent file changes (diff history) -----
+
+    /// Reclaim free pages if the database has gone significantly hollow, returning the
+    /// bytes given back (0 when nothing was worth doing).
+    ///
+    /// Deleting rows does not shrink a SQLite file, it just marks pages free — and the file
+    /// size is what everything else here costs money on: the at-rest snapshot copies and
+    /// encrypts the WHOLE file every time it runs, so 30 MB of dead pages is 30 MB moved on
+    /// every persist, forever. VACUUM is expensive and takes the write lock, so it is worth
+    /// doing only when the waste is real; the thresholds are set so an ordinary database
+    /// never triggers it.
+    pub fn compact_if_hollow(&self) -> Result<u64> {
+        const MIN_WASTE_BYTES: u64 = 16 * 1024 * 1024;
+        const MIN_WASTE_FRACTION: f64 = 0.20;
+
+        let conn = self.conn.lock().unwrap();
+        let page_size: u64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        let page_count: u64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let free: u64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        let waste = free * page_size;
+        let total = page_count * page_size;
+        if total == 0 || waste < MIN_WASTE_BYTES || (waste as f64) < (total as f64) * MIN_WASTE_FRACTION
+        {
+            return Ok(0);
+        }
+        conn.execute_batch("VACUUM;")?;
+        let after: u64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        Ok(total.saturating_sub(after * page_size))
+    }
+
+    /// Drop file-change records older than `keep_days`, returning how many went.
+    ///
+    /// Each row stores the FULL before and after text of an edited file, so this table
+    /// costs roughly a copy of everything the agents have ever touched — it was the single
+    /// largest thing in the database here, and nothing had ever deleted from it by age.
+    /// What it buys is the ability to revert an edit, and an edit from last month is not
+    /// something anyone reverts; the diff history older than that is dead weight.
+    pub fn prune_file_changes(&self, keep_days: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff_ms = (chrono::Utc::now() - chrono::Duration::days(keep_days.clamp(1, 3650)))
+            .timestamp_millis();
+        let n = conn.execute(
+            "DELETE FROM agent_file_change WHERE ts < ?1",
+            params![cutoff_ms],
+        )?;
+        Ok(n)
+    }
+
+    /// Keep only the newest `keep` file-change records for one session.
+    ///
+    /// Age alone does not bound this: one long agent run rewriting the same files edits
+    /// hundreds of times in an afternoon, and every one of those rows is today's. The
+    /// count-based bound is what stops a single session from adding tens of megabytes.
+    pub fn trim_file_changes(&self, session_id: &str, keep: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "DELETE FROM agent_file_change
+              WHERE session_id = ?1
+                AND rowid NOT IN (
+                    SELECT rowid FROM agent_file_change
+                     WHERE session_id = ?1
+                     ORDER BY ts DESC, rowid DESC
+                     LIMIT ?2
+                )",
+            params![session_id, keep.clamp(1, 10_000)],
+        )?;
+        Ok(n)
+    }
 
     /// Insert or replace a file-change record (same id = replace, for revert updates).
     pub fn insert_file_change(&self, rec: &EditRecord) -> Result<()> {
