@@ -1397,7 +1397,12 @@ pub async fn dispatch_with_telemetry(
     // what it wants to build and nothing else — see `feature_propose`.
     let unapproved = proposal_block(ctx, &call.name, args);
     let result = if let Some(p) = denied_tool {
-        crate::ai::scope::tool_scope_error(&p, &call.name)
+        // Written down, not just returned: a coordinator reading the agent's log can see
+        // "needed X and did not have it" without the agent having to describe it well,
+        // which is the whole difference between a blocker somebody fixes and one that
+        // turns into a message to the user.
+        emit_live_status(ctx, "blocked", &format!("needs the {} tool", call.name));
+        crate::ai::scope::tool_scope_error(&ctx.db, &p, &call.name)
     } else if let Some(refusal) = unapproved {
         refusal
     } else if ctx.read_only && tool_is_mutating(&call.name, args) {

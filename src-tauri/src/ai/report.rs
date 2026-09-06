@@ -87,6 +87,20 @@ pub fn plan(db: &Db, goal: &GoalSession) -> Report {
         };
     }
 
+    // A run that gave up is work, not news. Handing "Ada is stuck on X" to a phone asks
+    // the user to do the coordinating they delegated in the first place, so a blocker
+    // goes to somebody who can act on it before it ever reaches them. The ask travels
+    // with the hand-off (see `hand_up`), so a person waiting on an answer still gets
+    // one — from an agent that tried to solve the problem rather than forward it.
+    if goal.status == "blocked" {
+        if let Some(c) = coordinator_for(db, &personas, me) {
+            return Report::ToManager {
+                id: c.id.clone(),
+                name: c.name.clone(),
+            };
+        }
+    }
+
     // The ask this work belongs to, if a human started it from a phone.
     if let Some(req) = goal
         .request_id
@@ -101,9 +115,9 @@ pub fn plan(db: &Db, goal: &GoalSession) -> Report {
     }
 
     // Nobody asked for this over chat — a standing duty, or a desktop /goal. A clean
-    // finish is already on the board and needs no notification; a run that gave up is
-    // the case the old `goal://notify` was reaching for and never delivered, so it goes
-    // wherever the user last spoke, if anywhere.
+    // finish is already on the board and needs no notification. A blocker only reaches
+    // here once the branch above found nobody left to escalate to, which is exactly the
+    // case where the user is the only one who can unblock it.
     if goal.status == "blocked" {
         if let Some(route) = crate::ai::remote::last_route(db) {
             return Report::ToChat {
@@ -114,6 +128,42 @@ pub fn plan(db: &Db, goal: &GoalSession) -> Report {
         }
     }
     Report::Nothing
+}
+
+/// Who should be handed a run that could not finish, when the agent has no manager.
+///
+/// `remote.persona_id` is the agent the user already nominated to answer for the others,
+/// which makes it the right place for a blocker to land. Falling back to the top of the
+/// org chart only works when there is exactly one candidate — picking between several
+/// would be routing by accident, and the safe answer there is to let the existing rules
+/// take it to the user.
+///
+/// Returns `None` when the only candidate is the blocked agent itself, which is what
+/// stops a coordinator's own blocker from being handed back to the coordinator forever.
+fn coordinator_for<'a>(
+    db: &Db,
+    personas: &'a [Persona],
+    me: Option<&Persona>,
+) -> Option<&'a Persona> {
+    let is_me = |p: &Persona| me.is_some_and(|m| m.id == p.id);
+
+    let named = db
+        .get_setting(crate::ai::remote::SETTING_PERSONA)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let named = named.trim();
+    if !named.is_empty() {
+        return personas
+            .iter()
+            .find(|p| p.id == named && p.enabled && !is_me(p));
+    }
+
+    let mut tops = personas
+        .iter()
+        .filter(|p| p.enabled && crate::ai::persona::is_top_level(p) && !is_me(p));
+    let first = tops.next()?;
+    tops.next().is_none().then_some(first)
 }
 
 /// What a finished run has to say, in words that do not need a model to produce.
@@ -703,6 +753,56 @@ mod tests {
 
         // A clean desktop finish is on the board already and needs no phone message.
         assert_eq!(plan(&d, &goal("g3", "done")), Report::Nothing);
+    }
+
+    #[test]
+    fn a_blocker_goes_to_the_coordinator_before_it_goes_to_a_phone() {
+        // The complaint this encodes: "agent X is blocked" arriving on WhatsApp asks the
+        // user to do the coordinating they delegated. Somebody who can act on it should
+        // get it first, even when the user is the one who asked.
+        let d = db();
+        let boss = persona(&d, "boss", "Nadia", None);
+        let worker = persona(&d, "w1", "Ada", None); // also top-level: no manager to use
+        let req = asked(&d, "req-c1");
+        let mut g = goal("g1", "blocked");
+        g.persona_id = Some(worker.id.clone());
+        g.request_id = Some(req.id.clone());
+        d.insert_goal(&g).unwrap();
+
+        // Two top-level candidates and none nominated: routing would be a guess, so the
+        // existing rules take it to the person who asked rather than pick one.
+        assert!(matches!(plan(&d, &g), Report::ToChat { .. }));
+
+        // Nominate one, and the blocker goes to them instead.
+        d.set_setting(crate::ai::remote::SETTING_PERSONA, &boss.id).unwrap();
+        assert_eq!(
+            plan(&d, &g),
+            Report::ToManager { id: boss.id.clone(), name: "Nadia".into() },
+        );
+
+        // The coordinator's own blocker must not be handed back to the coordinator, or it
+        // would circle there forever instead of reaching the one person who can unblock it.
+        let mut theirs = goal("g2", "blocked");
+        theirs.persona_id = Some(boss.id.clone());
+        theirs.request_id = Some(req.id.clone());
+        d.insert_goal(&theirs).unwrap();
+        assert!(matches!(plan(&d, &theirs), Report::ToChat { .. }));
+    }
+
+    #[test]
+    fn a_finished_run_still_reaches_the_user_directly() {
+        // The blocker rerouting must not swallow results — those are the whole point of
+        // the notification, and they go to the person who asked.
+        let d = db();
+        let boss = persona(&d, "boss", "Nadia", None);
+        d.set_setting(crate::ai::remote::SETTING_PERSONA, &boss.id).unwrap();
+        let worker = persona(&d, "w1", "Ada", None);
+        let req = asked(&d, "req-c2");
+        let mut g = goal("g1", "done");
+        g.persona_id = Some(worker.id.clone());
+        g.request_id = Some(req.id.clone());
+        d.insert_goal(&g).unwrap();
+        assert!(matches!(plan(&d, &g), Report::ToChat { .. }));
     }
 
     #[test]

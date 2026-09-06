@@ -156,11 +156,146 @@ pub fn tool_allowed(persona: &Persona, tool: &str) -> bool {
     })
 }
 
+/// What changing an agent's tool list should do.
+#[derive(Debug, PartialEq, Eq)]
+pub enum GrantOutcome {
+    /// The change must not happen. The string is what the calling agent reads.
+    Refused(String),
+    /// Nothing to do; the string explains why so the agent stops trying.
+    NoChange(String),
+    /// Apply `next` as the new list. `changed` is what actually moved.
+    Apply { next: Vec<String>, changed: Vec<String> },
+}
+
+/// Decide whether `granter` may add (or remove) `asked` on `target`, and what the list
+/// becomes. Pure, because these are the rules that decide whether the tool scope means
+/// anything, and they are the half most worth testing without an app around them.
+///
+/// `granter` of `None` is the unnamed main agent, which acts with the user's own
+/// authority and is not restricted here.
+pub fn plan_grant(
+    all: &[Persona],
+    granter: Option<&Persona>,
+    target: &Persona,
+    asked: &[String],
+    revoke: bool,
+) -> GrantOutcome {
+    if let Some(g) = granter {
+        // An agent that can widen its own remit has no remit.
+        if g.id == target.id {
+            return GrantOutcome::Refused(
+                "an agent cannot change its own tool list. Report what you need to whoever \
+                 manages you and let them grant it."
+                    .into(),
+            );
+        }
+        // Only over your own reports — otherwise an agent could reach across the org chart
+        // to edit a peer, or strip a coordinator that outranks it.
+        let mine = crate::ai::persona::chain_to_top(all, target)
+            .iter()
+            .any(|p| p.id == g.id);
+        if !mine {
+            return GrantOutcome::Refused(format!(
+                "{} does not report to you, so its tools are not yours to change. Ask \
+                 whoever manages it.",
+                target.name
+            ));
+        }
+        // You cannot give away what you were not given. Without this an agent denied a
+        // tool could ask a peer for it, and the scope would be one polite request away
+        // from meaningless. An empty granter list is no restriction, so it may grant.
+        if !revoke && !g.allowed_tools.is_empty() {
+            let beyond: Vec<&str> = asked
+                .iter()
+                .filter(|t| !tool_allowed(g, t))
+                .map(String::as_str)
+                .collect();
+            if !beyond.is_empty() {
+                let them = if beyond.len() == 1 { "it" } else { "them" };
+                return GrantOutcome::Refused(format!(
+                    "you cannot grant {} — you were not given {them} yourself. Ask whoever \
+                     manages you to grant it to you first, or hand the step to somebody who \
+                     already has it.",
+                    beyond.join(", ")
+                ));
+            }
+        }
+    }
+
+    // An empty list means "every tool", so it is both the widest state and the one that
+    // looks like nothing is set. Treating it as a base to add to would REMOVE everything
+    // not named in this call — the exact accident this whole path exists to prevent.
+    if target.allowed_tools.is_empty() {
+        return GrantOutcome::NoChange(if revoke {
+            format!(
+                "{} has no tool restrictions at all (an empty list means every tool), so \
+                 there is nothing to remove. Give it an explicit list with agent_hire first.",
+                target.name
+            )
+        } else {
+            format!(
+                "{} can already call every tool — its list is empty, which means no \
+                 restriction. Nothing to grant.",
+                target.name
+            )
+        });
+    }
+
+    let mut next = target.allowed_tools.clone();
+    let mut changed: Vec<String> = Vec::new();
+    if revoke {
+        next.retain(|have| {
+            let hit = asked.iter().any(|t| t.eq_ignore_ascii_case(have));
+            if hit {
+                changed.push(have.clone());
+            }
+            !hit
+        });
+        // Revoking the last entry would leave an empty list, which means EVERY tool — the
+        // exact opposite of what was asked for.
+        if next.is_empty() {
+            return GrantOutcome::Refused(format!(
+                "removing those would leave {} with an empty list, and an empty list means \
+                 every tool — the opposite of revoking. Leave at least one, or turn the \
+                 agent off with agent_hire.",
+                target.name
+            ));
+        }
+    } else {
+        for t in asked {
+            if next.iter().any(|have| have.eq_ignore_ascii_case(t)) {
+                continue;
+            }
+            next.push(t.clone());
+            changed.push(t.clone());
+        }
+    }
+    if changed.is_empty() {
+        return GrantOutcome::NoChange(format!(
+            "{} already {} {}.",
+            target.name,
+            if revoke { "lacked" } else { "had" },
+            asked.join(", ")
+        ));
+    }
+    GrantOutcome::Apply { next, changed }
+}
+
 /// The refusal an agent reads when it calls a tool it was not given.
-pub fn tool_scope_error(persona: &Persona, tool: &str) -> String {
+///
+/// It names the manager and the exact tool that would fix it, because "ask whoever manages
+/// you to widen it" left a small model to invent both the recipient and the mechanism — and
+/// what it usually invented instead was a message to the user saying it was blocked.
+pub fn tool_scope_error(db: &Db, persona: &Persona, tool: &str) -> String {
+    let all = db.list_personas().unwrap_or_default();
+    let manager = crate::ai::persona::manager_of(&all, persona)
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| "whoever manages you".into());
     format!(
-        "error: '{tool}' is not one of the tools {} was given (allowed: {}). Ask whoever \
-         manages you to widen it, or hand the step to somebody who has it.",
+        "error: '{tool}' is not one of the tools {} was given (allowed: {}). If the work \
+         genuinely needs it, use agent_report to tell {manager} which tool you need and why \
+         — they can add it with agent_grant_tools. Otherwise hand the step to somebody who \
+         already has it. Do not report this to the user as a blocker.",
         persona.name,
         persona.allowed_tools.join(", ")
     )
@@ -452,6 +587,139 @@ mod tests {
             created_at: None,
             updated_at: None,
         }
+    }
+
+    fn named(id: &str, tools: &[&str], reports_to: Option<&str>) -> Persona {
+        Persona {
+            id: id.into(),
+            name: id.into(),
+            reports_to: reports_to.map(str::to_string),
+            allowed_tools: tools.iter().map(|s| s.to_string()).collect(),
+            ..persona_with(&[])
+        }
+    }
+
+    fn apply(o: GrantOutcome) -> (Vec<String>, Vec<String>) {
+        match o {
+            GrantOutcome::Apply { next, changed } => (next, changed),
+            other => panic!("expected a change, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_manager_can_add_one_tool_without_disturbing_the_rest() {
+        let boss = named("boss", &[], None);
+        let ada = named("ada", &["local_read_file", "repo_*"], Some("boss"));
+        let all = vec![boss.clone(), ada.clone()];
+        let (next, changed) = apply(plan_grant(
+            &all,
+            Some(&boss),
+            &ada,
+            &["local_write_file".to_string()],
+            false,
+        ));
+        // The point of the whole tool: what was already there survives.
+        assert_eq!(next, vec!["local_read_file", "repo_*", "local_write_file"]);
+        assert_eq!(changed, vec!["local_write_file"]);
+    }
+
+    #[test]
+    fn nobody_grants_themselves_anything() {
+        let ada = named("ada", &["local_read_file"], Some("boss"));
+        let all = vec![named("boss", &[], None), ada.clone()];
+        assert!(matches!(
+            plan_grant(&all, Some(&ada), &ada, &["remote_exec".into()], false),
+            GrantOutcome::Refused(_)
+        ));
+    }
+
+    #[test]
+    fn nobody_hands_out_a_tool_they_were_not_given() {
+        // The escalation this exists to stop: a restricted agent laundering a tool it
+        // cannot call through somebody who reports to it.
+        let lead = named("lead", &["local_*"], None);
+        let junior = named("junior", &["local_read_file"], Some("lead"));
+        let all = vec![lead.clone(), junior.clone()];
+        assert!(matches!(
+            plan_grant(&all, Some(&lead), &junior, &["cloudflare_dns_create".into()], false),
+            GrantOutcome::Refused(_)
+        ));
+        // What the lead does have, it may pass on.
+        let (next, _) = apply(plan_grant(
+            &all,
+            Some(&lead),
+            &junior,
+            &["local_write_file".into()],
+            false,
+        ));
+        assert!(next.contains(&"local_write_file".to_string()));
+    }
+
+    #[test]
+    fn tools_are_only_yours_to_change_for_your_own_reports() {
+        let lead = named("lead", &[], None);
+        let other = named("other", &["local_read_file"], None); // answers to the user
+        let all = vec![lead.clone(), other.clone()];
+        assert!(matches!(
+            plan_grant(&all, Some(&lead), &other, &["local_write_file".into()], false),
+            GrantOutcome::Refused(_)
+        ));
+    }
+
+    #[test]
+    fn granting_to_an_unrestricted_agent_never_narrows_it() {
+        // An empty list means EVERY tool. Naively treating it as a base to add to would
+        // leave the agent with only what this call named — a catastrophic silent
+        // narrowing dressed up as a grant.
+        let boss = named("boss", &[], None);
+        let free = named("free", &[], Some("boss"));
+        let all = vec![boss.clone(), free.clone()];
+        assert!(matches!(
+            plan_grant(&all, Some(&boss), &free, &["local_read_file".into()], false),
+            GrantOutcome::NoChange(_)
+        ));
+    }
+
+    #[test]
+    fn revoking_the_last_tool_is_refused_because_empty_means_everything() {
+        let boss = named("boss", &[], None);
+        let ada = named("ada", &["local_read_file"], Some("boss"));
+        let all = vec![boss.clone(), ada.clone()];
+        assert!(matches!(
+            plan_grant(&all, Some(&boss), &ada, &["local_read_file".into()], true),
+            GrantOutcome::Refused(_)
+        ));
+        // Revoking one of several is fine.
+        let ada2 = named("ada", &["local_read_file", "local_write_file"], Some("boss"));
+        let all2 = vec![boss.clone(), ada2.clone()];
+        let (next, changed) = apply(plan_grant(
+            &all2,
+            Some(&boss),
+            &ada2,
+            &["local_write_file".into()],
+            true,
+        ));
+        assert_eq!(next, vec!["local_read_file"]);
+        assert_eq!(changed, vec!["local_write_file"]);
+    }
+
+    #[test]
+    fn granting_something_it_already_has_changes_nothing() {
+        let boss = named("boss", &[], None);
+        let ada = named("ada", &["local_read_file"], Some("boss"));
+        let all = vec![boss.clone(), ada.clone()];
+        assert!(matches!(
+            plan_grant(&all, Some(&boss), &ada, &["LOCAL_READ_FILE".into()], false),
+            GrantOutcome::NoChange(_)
+        ));
+    }
+
+    #[test]
+    fn the_unnamed_main_agent_grants_with_the_users_authority() {
+        let ada = named("ada", &["local_read_file"], None);
+        let all = vec![ada.clone()];
+        let (next, _) = apply(plan_grant(&all, None, &ada, &["remote_exec".into()], false));
+        assert!(next.contains(&"remote_exec".to_string()));
     }
 
     #[test]

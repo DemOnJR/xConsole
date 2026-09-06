@@ -183,6 +183,21 @@ leaves the rest, so knowing what is there is how you avoid widening something by
             }),
         },
         ToolDef {
+            name: "agent_grant_tools".into(),
+            description: "Give an agent a tool it was refused, or take one back. Use this the moment somebody you manage reports that a tool it needs is not on its list — that is a decision for you, not something to pass to the user. Adds to what the agent already has rather than replacing it, so one call cannot quietly strip the rest (which is the risk with agent_hire). You can only hand out tools you can call yourself."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string", "description": "Name or id of the agent to change. Must be somebody who reports to you."},
+                    "tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names to add, e.g. [\"local_write_file\"] or a family like [\"repo_*\"]. Grant the narrowest thing that unblocks the work."},
+                    "revoke": {"type": "boolean", "description": "Remove these instead of adding them. Default false."},
+                    "reason": {"type": "string", "description": "Why it needs them, in one line. This is what the user sees if the change is put to them."}
+                },
+                "required": ["agent", "tools"]
+            }),
+        },
+        ToolDef {
             name: "team_create".into(),
             description: "Set up a whole team for a project in one go, with the reporting line \
 already right: a lead that answers to the user, and the rest answering to the lead. Use it when \
@@ -442,6 +457,7 @@ pub fn is_persona_tool(name: &str) -> bool {
             | "agent_thread"
             | "agent_hire"
             | "agent_inspect"
+            | "agent_grant_tools"
             | "team_create"
             | "agent_dismiss"
             | "agent_org"
@@ -472,6 +488,7 @@ pub fn tool_is_mutating(name: &str) -> bool {
             | "agent_send"
             | "agent_report"
             | "agent_hire"
+            | "agent_grant_tools"
             | "team_create"
             | "agent_dismiss"
             | "review_schedule"
@@ -495,6 +512,7 @@ pub async fn dispatch(ctx: &ToolContext, name: &str, args: &Value) -> String {
         "agent_thread" => agent_thread(ctx, args),
         "agent_hire" => agent_hire(ctx, args).await,
         "agent_inspect" => agent_inspect(ctx, args),
+        "agent_grant_tools" => agent_grant_tools(ctx, args).await,
         "team_create" => team_create(ctx, args).await,
         "agent_dismiss" => agent_dismiss(ctx, args).await,
         "agent_org" => agent_org(ctx),
@@ -1718,6 +1736,114 @@ async fn confirm(ctx: &ToolContext, summary: &str) -> Result<(), String> {
         summary,
     )
     .await
+}
+
+/// Widen (or narrow) one agent's tool list, additively.
+///
+/// This exists because the only way to add a tool used to be `agent_hire`, which REPLACES
+/// the list with whatever is passed. Adding one tool therefore meant re-sending every tool
+/// the agent already had, and forgetting one silently took it away — so the safe-looking
+/// move was to hand over every tool, which is how a scope system stops meaning anything.
+///
+/// The rules live in [`crate::ai::scope::plan_grant`], which is pure and tested; this is
+/// the plumbing around it — resolve the names, ask for approval, save.
+async fn agent_grant_tools(ctx: &ToolContext, args: &Value) -> String {
+    let who = args.get("agent").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if who.is_empty() {
+        return "error: agent_grant_tools needs an 'agent'".into();
+    }
+    let asked: Vec<String> = args
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if asked.is_empty() {
+        return "error: agent_grant_tools needs a non-empty 'tools' list".into();
+    }
+    let revoke = args.get("revoke").and_then(|v| v.as_bool()).unwrap_or(false);
+    let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("").trim();
+
+    let Some(target) = crate::ai::persona::resolve(&ctx.db, who) else {
+        return format!("error: there is no agent named {who:?}.");
+    };
+    let granter = current_persona(ctx);
+    let all = ctx.db.list_personas().unwrap_or_default();
+
+    let (next, changed) = match crate::ai::scope::plan_grant(
+        &all,
+        granter.as_ref(),
+        &target,
+        &asked,
+        revoke,
+    ) {
+        crate::ai::scope::GrantOutcome::Refused(why) => return format!("error: {why}"),
+        crate::ai::scope::GrantOutcome::NoChange(why) => return format!("No change: {why}"),
+        crate::ai::scope::GrantOutcome::Apply { next, changed } => (next, changed),
+    };
+
+    let why = if reason.is_empty() {
+        String::new()
+    } else {
+        format!("\nWhy: {reason}")
+    };
+    let summary = format!(
+        "{} {} {}.\n\nIts tools become: {}{why}",
+        if revoke { "Take away from" } else { "Give" },
+        target.name,
+        changed.join(", "),
+        next.join(", ")
+    );
+    // Under the user's own safety mode, not a hardcoded prompt. A grant cannot introduce
+    // authority the granter did not already hold, so this is a redistribution inside an
+    // envelope the user already approved — gating it harder than everything else would
+    // just mean the coordinator stalls waiting for a person who is not there.
+    let mode =
+        crate::ai::safety::resolve_session_mode(&ctx.session_state, &ctx.session_id, &ctx.safety);
+    if let Err(e) = crate::ai::safety::authorize(
+        &ctx.app,
+        &ctx.db,
+        &ctx.approvals,
+        &mode,
+        &ctx.session_id,
+        None,
+        &summary,
+    )
+    .await
+    {
+        return format!("not changed: {e}");
+    }
+
+    let input = crate::storage::models::PersonaInput {
+        id: Some(target.id.clone()),
+        name: target.name.clone(),
+        role: target.role.clone(),
+        instructions: target.instructions.clone(),
+        targets: target.targets.clone(),
+        safety_mode: target.safety_mode.clone(),
+        provider_id: target.provider_id.clone(),
+        model: target.model.clone(),
+        enabled: target.enabled,
+        reports_to: target.reports_to.clone(),
+        workspace_id: target.workspace_id.clone(),
+        allowed_paths: target.allowed_paths.clone(),
+        allowed_tools: next.clone(),
+    };
+    match crate::commands::persona::save_persona_checked(&ctx.db, input) {
+        Ok(p) => format!(
+            "{} {} for {}. It can now call: {}",
+            if revoke { "Removed" } else { "Granted" },
+            changed.join(", "),
+            p.name,
+            next.join(", ")
+        ),
+        Err(e) => format!("error: {e}"),
+    }
 }
 
 async fn agent_hire(ctx: &ToolContext, args: &Value) -> String {
